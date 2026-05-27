@@ -48,11 +48,13 @@ fn script_buttons(frame: usize, script: &str) -> Buttons {
                 Buttons(0)
             }
         }
-        // Start early, then hold Right.
+        // Start, wait out the "WORLD 1-1" intermediate screen
+        // (ScreenTimer is an interval timer, ~150 frames to expire), then
+        // hold Right once GameCoreRoutine is actually running.
         "start_right" => {
             if (40..45).contains(&frame) {
                 Buttons(Buttons::START)
-            } else if frame >= 80 {
+            } else if frame >= 210 {
                 Buttons(Buttons::RIGHT)
             } else {
                 Buttons(0)
@@ -60,6 +62,16 @@ fn script_buttons(frame: usize, script: &str) -> Buttons {
         }
         // Hold Start every frame (debugging controller delivery).
         "start_hold" => Buttons(Buttons::START),
+        // Start, wait out the intermediate screen, then hold A (jump).
+        "start_jump" => {
+            if (40..45).contains(&frame) {
+                Buttons(Buttons::START)
+            } else if frame >= 210 {
+                Buttons(Buttons::A)
+            } else {
+                Buttons(0)
+            }
+        }
         // Press Start within the matched window (frames 15-17), then
         // hold Right from frame 25, to enter GameMode before the
         // frame-22 demo divergence and test walking.
@@ -237,7 +249,7 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
     let mut nmi_fires = 0usize;
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for frame in 0..frames {
-        bus.buttons = effective_nes_buttons(frame, script);
+        bus.buttons = effective_nes_buttons(frame, script, bus.ram[0x0770]);
         bus.vblank = true;
         if bus.nmi_enabled {
             nmi_latched = true;
@@ -269,9 +281,11 @@ struct SmsBus {
     ram: [u8; 0x2000], // $C000-$DFFF, mirrored $E000-$FFFF
     // Controller: SMS port $DC, active-low (1 = released).
     port_dc: u8,
-    // Debug: when Some, log writes to these NES addresses (as $Cxxx).
+    // Debug: when Some, log writes to these NES addresses (as $Cxxx),
+    // capturing the CPU PC at the time of the write.
     watch: Option<Vec<u16>>,
-    watch_log: Vec<(u16, u8)>,
+    watch_log: Vec<(u16, u8, u16)>,
+    last_pc: u16,
 }
 
 impl SmsBus {
@@ -283,6 +297,7 @@ impl SmsBus {
             port_dc: 0xFF,
             watch: None,
             watch_log: Vec::new(),
+            last_pc: 0,
         }
     }
     fn rom_byte(&self, bank: u8, off: u16) -> u8 {
@@ -314,7 +329,7 @@ impl z80_emu::Bus for SmsBus {
                 if let Some(w) = &self.watch {
                     let nes = addr - 0xC000;
                     if w.contains(&nes) {
-                        self.watch_log.push((nes, value));
+                        self.watch_log.push((nes, value, self.last_pc));
                     }
                 }
             }
@@ -340,16 +355,23 @@ impl z80_emu::Bus for SmsBus {
     }
 }
 
-/// Inverse of the SMS $DC mapping: the NES buttons `rt_controller_latch`
-/// reconstructs from a $DC value (active-low). Two NES buttons share each
-/// SMS face button (A/Select on Button1, B/Start on Button2), so this is
-/// lossy — pressing Start yields B+Start. The reference applies the same
-/// round-trip so both sides see identical (aliased) NES input.
-fn sms_dc_to_nes(dc: u8) -> u8 {
+/// Inverse of the SMS $DC mapping, replicating `rt_controller_latch`
+/// exactly — including its **mode-dependent** face-button mapping keyed on
+/// OperMode ($0770):
+///   - title/menu mode (oper == 0): Button1 -> NES Select, Button2 -> NES Start
+///   - gameplay modes  (oper != 0): Button1 -> NES A,      Button2 -> NES B
+/// This matters because SMB's GameMenuRoutine starts the game on Start
+/// *alone* (`cmp #$10`); a fixed B+Start alias would never start the game.
+fn sms_dc_to_nes(dc: u8, title_mode: bool) -> u8 {
     let pressed = !dc;
     let mut nes = 0u8;
-    if pressed & (1 << 4) != 0 { nes |= Buttons::A | Buttons::SELECT; }
-    if pressed & (1 << 5) != 0 { nes |= Buttons::B | Buttons::START; }
+    if title_mode {
+        if pressed & (1 << 4) != 0 { nes |= Buttons::SELECT; }
+        if pressed & (1 << 5) != 0 { nes |= Buttons::START; }
+    } else {
+        if pressed & (1 << 4) != 0 { nes |= Buttons::A; }
+        if pressed & (1 << 5) != 0 { nes |= Buttons::B; }
+    }
     if pressed & (1 << 0) != 0 { nes |= Buttons::UP; }
     if pressed & (1 << 1) != 0 { nes |= Buttons::DOWN; }
     if pressed & (1 << 2) != 0 { nes |= Buttons::LEFT; }
@@ -357,10 +379,15 @@ fn sms_dc_to_nes(dc: u8) -> u8 {
     nes
 }
 
-/// NES buttons both sides should see for a script frame: the script's
-/// intent round-tripped through the SMS controller mapping.
-fn effective_nes_buttons(frame: usize, script: &str) -> u8 {
-    sms_dc_to_nes(nes_buttons_to_sms_dc(script_buttons(frame, script)))
+/// NES buttons the reference should see for a script frame: the script's
+/// intent round-tripped through the SMS controller mapping, using the
+/// reference's current OperMode so the title/gameplay split matches the
+/// runtime.
+fn effective_nes_buttons(frame: usize, script: &str, oper_mode: u8) -> u8 {
+    sms_dc_to_nes(
+        nes_buttons_to_sms_dc(script_buttons(frame, script)),
+        oper_mode == 0,
+    )
 }
 
 /// Map NES controller buttons to the SMS $DC port (active-low) the way
@@ -482,24 +509,41 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
     let debug_frame: Option<usize> = std::env::var("FD_DEBUG_FRAME")
         .ok()
         .and_then(|s| s.parse().ok());
+    // FD_WATCH=0x0001,0x000E,... — NES addresses to log writes to (with PC)
+    // during the debug frame. Defaults to $0001 (the first divergence).
+    let watch_list: Vec<u16> = std::env::var("FD_WATCH")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .filter_map(|t| u16::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![0x0001]);
 
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for _frame in 0..frames {
         bus.port_dc = nes_buttons_to_sms_dc(script_buttons(_frame, script));
-        if Some(_frame) == debug_frame {
-            bus.watch = Some(vec![0x0000, 0x07A7, 0x07A8]);
+        let dbg = Some(_frame) == debug_frame;
+        if dbg {
+            bus.watch = Some(watch_list.clone());
             bus.watch_log.clear();
         }
         fire_irq(&mut cpu, &mut bus);
         for _ in 0..SUBJ_INSN_PER_FRAME {
-            if cpu.halted || cpu.step(&mut bus).is_err() {
+            if cpu.halted {
+                break;
+            }
+            if dbg {
+                bus.last_pc = cpu.pc;
+            }
+            if cpu.step(&mut bus).is_err() {
                 break;
             }
         }
-        if Some(_frame) == debug_frame {
-            eprintln!("  [debug] frame {_frame} writes to $00/$07A7/$07A8:");
-            for (a, v) in bus.watch_log.iter().take(40) {
-                eprintln!("    ${a:04X} <- ${v:02X}");
+        if dbg {
+            eprintln!("  [debug] frame {_frame} watched writes (addr <- val @ pc):");
+            for (a, v, pc) in bus.watch_log.iter().take(60) {
+                eprintln!("    ${a:04X} <- ${v:02X} @ pc=${pc:04X}");
             }
             bus.watch = None;
         }
