@@ -60,6 +60,18 @@ fn script_buttons(frame: usize, script: &str) -> Buttons {
         }
         // Hold Start every frame (debugging controller delivery).
         "start_hold" => Buttons(Buttons::START),
+        // Press Start within the matched window (frames 15-17), then
+        // hold Right from frame 25, to enter GameMode before the
+        // frame-22 demo divergence and test walking.
+        "start_early_right" => {
+            if (15..18).contains(&frame) {
+                Buttons(Buttons::START)
+            } else if frame >= 25 {
+                Buttons(Buttons::RIGHT)
+            } else {
+                Buttons(0)
+            }
+        }
         _ => Buttons(0),
     }
 }
@@ -396,7 +408,7 @@ fn is_excluded(addr: usize) -> bool {
     }
     // Optional: exclude the VRAM update buffer ($0300-$03FF) to surface
     // game-logic divergences hidden behind render-buffer phasing.
-    if std::env::var("FD_EXCLUDE_VRAMBUF").is_ok() && (0x0300..0x0400).contains(&addr) {
+    if std::env::var("FD_EXCLUDE_VRAMBUF").is_ok() && (0x0300..0x0500).contains(&addr) {
         return true;
     }
     false
