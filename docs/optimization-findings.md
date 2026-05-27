@@ -129,6 +129,31 @@ this translation strategy. ~25–30 fps is the optimistic target after a
 major flag-and-register rearchitecture; ~10–12 fps is where bounded
 optimization lands.
 
+## Update: we pushed the flag rearchitecture (option 1) and it's decided
+
+Built interprocedural flag-liveness, native-flag N/Z branches
+(`a_holds_nz` tracking → `or a; jp`), and native-flag-aware producer
+liveness (`nz_shadow_live_after`). Net: **`rt_set_nz_a` calls dropped 30%
+(159K → 110K)** — a real, validated codegen win (init byte-identical, walk
+OK). **But steady-frame cycles moved ~0.5%.**
+
+That is the decisive result. The flag machinery is the most-*called*
+overhead but **not the dominant per-frame *cycle* cost.** Steady
+gameplay — especially with scrolling, which runs the AreaParser's
+incremental column loading every frame — is ~330–410K cycles dominated by
+the sheer volume of work in heavy routines (area parsing, sprite/OAM
+assembly, indexed memory), not by flags. Eliding even the #1 helper
+wholesale barely registers.
+
+**Conclusion:** the ~6× gap is irreducibly diffuse. No single optimization
+(or even the whole flag rearchitecture) closes it; it's the cumulative
+cost of faithfully executing every 6502 operation of a game that already
+maxes out the NES, on a CPU only ~2× faster. Full speed would require not
+translating but re-implementing — outside this project's generic-engine
+design. The realistic state is a correct, deterministic NES→SMS translator
+with a playable-but-slow (~6–10 fps) SMB 1-1. Further perf work has very
+low ROI.
+
 ## Other Z80 advantages worth exploiting later (generic, game-agnostic)
 
 - `ldir`/`lddr` for 6502 copy/fill loops (`lda $s,x; sta $d,x; dex; bne`).
