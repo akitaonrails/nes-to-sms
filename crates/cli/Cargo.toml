@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "trace-sms"
 path = "src/bin/trace_sms.rs"
 
+[[bin]]
+name = "frame-diff"
+path = "src/bin/frame_diff.rs"
+
 [dependencies]
 nes_rom = { workspace = true }
 cpu6502 = { workspace = true }
