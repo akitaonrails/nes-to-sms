@@ -87,6 +87,48 @@ Lower-risk reuse already in tree: the fusion machinery
 `Add16Plan` lifter are written and tested — they just need liveness to
 let them fire.
 
+## Results so far (measured, cycles/frame, steady gameplay)
+
+| After | cycles | note |
+|---|---|---|
+| fusion + lean rt_set_nz_a (cycle counting added here) | 370K | baseline for the cycle metric |
+| INX/INY/DEX/DEY → inc/dec (hl) | 345K | ~7%, biggest single |
+| CLC/SEC → set/res (hl) | 341K | ~1% |
+| step 1: interprocedural flag-liveness | 337K | ~1% |
+| step 2 core: native-flag N/Z branches (A-holds-NZ) | 336K | ~0.3% |
+
+Plus the earlier instruction-measured fusion/leaning (~8% in instructions,
+more in cycles). **Cumulative is roughly 10–15%, still ~5.5× over budget.**
+
+### The hard lesson
+
+The cost is *so diffuse* that each bounded, safe optimization moves the
+needle ~0.3–7%, and the big semantic-equivalence lift (16-bit add) only
+fires twice — gated by C/V flag-liveness, which is itself gated by the
+shadow-P representation. Confirmed: **the bulk of the cost is the
+producer side — `rt_set_nz_a`/`rt_adc_a`/etc. after nearly every op.**
+The branch-side wins (fusion, branch-via-A) don't remove those, because a
+producer can only skip its shadow update when the liveness proves *no*
+reader needs shadow-P — and as long as some branches still read shadow-P
+(non-fused, cross-block), the producers must keep writing it.
+
+### What would actually move it (and the realistic ceiling)
+
+The only thing that removes the producer cost wholesale: **make native
+branches the default everywhere** so shadow-P is read essentially nowhere
+(only PHP/PLP), letting the NZ-liveness mark almost all shadow updates
+dead — then drop them. That means whole-block flag dataflow + materialize
+shadow-P only at the rare true-read points. It's a large, multi-session
+rewrite, and even fully done the realistic ceiling is ~2–3× (~25–30 fps),
+not 60 — the SMS has too little headroom over the NES for a faithful
+translation to ever hit native speed on a maxed-out game like SMB.
+
+**Bottom line for decision-making:** the pipeline produces a correct,
+playable-logic SMB 1-1 ROM; making it *full-speed* is not reachable by
+this translation strategy. ~25–30 fps is the optimistic target after a
+major flag-and-register rearchitecture; ~10–12 fps is where bounded
+optimization lands.
+
 ## Other Z80 advantages worth exploiting later (generic, game-agnostic)
 
 - `ldir`/`lddr` for 6502 copy/fill loops (`lda $s,x; sta $d,x; dex; bne`).
