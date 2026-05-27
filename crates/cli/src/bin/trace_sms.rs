@@ -1885,6 +1885,12 @@ fn main() {
         print!(" ${b:02X}");
     }
     println!();
+    println!("Sprite data $C200 (NES $0200, first 32 bytes Y,tile,attr,X):");
+    for i in 0..32 {
+        let b = bus.ram[0x0200 + i];
+        print!(" ${b:02X}");
+    }
+    println!();
     println!("OAM staging $C900 (first 32 bytes = 8 sprites NES Y,tile,attr,X):");
     for i in 0..32 {
         let b = bus.ram[0x0900 + i];
