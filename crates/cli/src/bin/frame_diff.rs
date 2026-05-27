@@ -536,9 +536,9 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
             bus.watch_log.clear();
         }
         let sp_before = cpu.sp;
+        let cyc_before = cpu.cycles;
         fire_irq(&mut cpu, &mut bus);
         let fired = cpu.pc == 0x0038;
-        let mut nmi_insns = 0usize;
         let mut nmi_done = !fired;
         for _ in 0..SUBJ_INSN_PER_FRAME {
             if cpu.halted {
@@ -550,13 +550,10 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
             if cpu.step(&mut bus).is_err() {
                 break;
             }
-            if !nmi_done {
-                nmi_insns += 1;
-                if cpu.sp >= sp_before {
-                    nmi_done = true;
-                    if measure_nmi {
-                        nmi_costs.push(nmi_insns);
-                    }
+            if !nmi_done && cpu.sp >= sp_before {
+                nmi_done = true;
+                if measure_nmi {
+                    nmi_costs.push((cpu.cycles - cyc_before) as usize);
                 }
             }
         }
@@ -579,7 +576,7 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
         let tail = &nmi_costs[n.saturating_sub(n / 3).min(n - 1)..];
         let tail_avg = tail.iter().sum::<usize>() / tail.len().max(1);
         eprintln!(
-            "  [NMI cost] frames={n} avg={} min={min} max={max} steady_avg={tail_avg} insn/frame  (SMS budget ~6000)",
+            "  [NMI cost] frames={n} avg={} min={min} max={max} steady_avg={tail_avg} cycles/frame  (SMS budget ~59736)",
             total / n
         );
     }
