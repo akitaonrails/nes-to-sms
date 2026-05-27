@@ -1,0 +1,10 @@
+poc/target
+poc/out
+poc/input
+**/*.nes
+**/*.sms
+**/*.gg
+**/*.sg
+**/*.bin
+**/*.rom
+

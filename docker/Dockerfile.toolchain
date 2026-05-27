@@ -1,0 +1,29 @@
+FROM rust:1.95-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        cc65 \
+        cmake \
+        git \
+        imagemagick \
+        make \
+        mednafen \
+        pkg-config \
+        build-essential \
+        xvfb \
+        x11-utils \
+        xdotool \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build WLA-DX from source. Debian's package is too old for our needs.
+RUN git clone --depth=1 https://github.com/vhelin/wla-dx.git /tmp/wla-dx \
+    && cd /tmp/wla-dx \
+    && cmake -B build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --target wla-z80 wlalink --parallel \
+    && install -m 0755 build/binaries/wla-z80 /usr/local/bin/wla-z80 \
+    && install -m 0755 build/binaries/wlalink /usr/local/bin/wlalink \
+    && rm -rf /tmp/wla-dx
+
+# Sanity-check the assembler is on PATH.
+RUN wla-z80 -V | head -1 && wlalink -V | head -1

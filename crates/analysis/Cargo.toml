@@ -1,0 +1,12 @@
+[package]
+name = "analysis"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+cpu6502 = { workspace = true }
+ir = { workspace = true }
+profile = { workspace = true }

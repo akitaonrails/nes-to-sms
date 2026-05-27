@@ -1,0 +1,29 @@
+[package]
+name = "nes_to_sms"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "nes-to-sms"
+path = "src/main.rs"
+
+[[bin]]
+name = "trace-sms"
+path = "src/bin/trace_sms.rs"
+
+[dependencies]
+nes_rom = { workspace = true }
+cpu6502 = { workspace = true }
+profile = { workspace = true }
+ir = { workspace = true }
+analysis = { workspace = true }
+lower = { workspace = true }
+z80_emit = { workspace = true }
+assets = { workspace = true }
+sms_project = { workspace = true }
+oracle_6502 = { workspace = true }
+z80_emu = { workspace = true }
+validation = { workspace = true }

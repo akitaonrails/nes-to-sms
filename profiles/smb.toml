@@ -1,0 +1,7878 @@
+# Super Mario Bros. profile for the nes-to-sms pipeline.
+#
+# Function and label entries are auto-imported from the doppelganger
+# SMB disassembly (https://6502disassembly.com/nes-smb/). Functions
+# are labels that appear as JSR targets OR as .dd2 dispatch entries
+# (JumpEngine pattern). Data regions are extracted from .bulk/.dd1/
+# .dd2/.byte/.word directives.
+
+[rom]
+name    = "Super Mario Bros."
+mapper  = 0
+prg_kib = 32
+chr_kib = 8
+
+[vectors]
+nmi   = 0x8082
+reset = 0x8000
+irq   = 0xfff0
+
+[[chr_pack]]
+table = 1
+start = 0x00
+end = 0xff
+dest = 0
+
+[[chr_pack]]
+table = 0
+start = 0x00
+end = 0xbe
+dest = 0x100
+
+[[chr_pack]]
+table = 0
+start = 0xff
+end = 0xff
+dest = 0x1bf
+
+# === Functions (JSR + JumpEngine targets) ===
+
+[[function]]
+addr = 0x8000
+name = "Start"
+
+[[function]]
+addr = 0x8082
+name = "NonMaskableInterrupt"
+
+[[function]]
+addr = 0x8182
+name = "PauseRoutine"
+
+[[function]]
+addr = 0x81c6
+name = "SpriteShuffler"
+
+[[function]]
+addr = 0x8231
+name = "TitleScreenMode"
+
+[[function]]
+addr = 0x8245
+name = "GameMenuRoutine"
+
+[[function]]
+addr = 0x830e
+name = "GoContinue"
+
+[[function]]
+addr = 0x836b
+name = "DemoEngine"
+
+[[function]]
+addr = 0x838b
+name = "VictoryMode"
+
+[[function]]
+addr = 0x83a8
+name = "SetupVictoryMode"
+
+[[function]]
+addr = 0x83bd
+name = "PlayerVictoryWalk"
+
+[[function]]
+addr = 0x83f6
+name = "PrintVictoryMessages"
+
+[[function]]
+addr = 0x8461
+name = "PlayerEndWorld"
+
+[[function]]
+addr = 0x8567
+name = "ScreenRoutines"
+
+[[function]]
+addr = 0x858b
+name = "InitScreen"
+
+[[function]]
+addr = 0x85bf
+name = "GetAreaPalette"
+
+[[function]]
+addr = 0x85f1
+name = "GetPlayerColors"
+
+[[function]]
+addr = 0x8693
+name = "DisplayTimeUp"
+
+[[function]]
+addr = 0x86d3
+name = "GameOverInter"
+
+[[function]]
+addr = 0x86e0
+name = "NoInter"
+
+[[function]]
+addr = 0x86ff
+name = "DrawTitleScreen"
+
+[[function]]
+addr = 0x8749
+name = "WriteTopScore"
+
+[[function]]
+addr = 0x8808
+name = "WriteGameText"
+
+[[function]]
+addr = 0x89e1
+name = "ColorRotation"
+
+[[function]]
+addr = 0x8a4d
+name = "RemoveCoin_Axe"
+
+[[function]]
+addr = 0x8a8f
+name = "MoveVOffset"
+
+[[function]]
+addr = 0x8acd
+name = "RemBridge"
+
+[[function]]
+addr = 0x8e04
+name = "JumpEngine"
+
+[[function]]
+addr = 0x8e2d
+name = "WriteNTAddr"
+
+[[function]]
+addr = 0x8e5c
+name = "ReadJoypads"
+
+[[function]]
+addr = 0x8e6a
+name = "ReadPortBits"
+
+[[function]]
+addr = 0x8e92
+name = "UpdateScreenBuffer"
+
+[[function]]
+addr = 0x8edd
+name = "UpdateScreen"
+
+[[function]]
+addr = 0x8ee6
+name = "InitScroll"
+
+[[function]]
+addr = 0x8eed
+name = "WritePPUReg1"
+
+[[function]]
+addr = 0x8f11
+name = "OutputNumbers"
+
+[[function]]
+addr = 0x8f97
+name = "UpdateTopScore"
+
+[[function]]
+addr = 0x8f9e
+name = "TopScoreCheck"
+
+[[function]]
+addr = 0x8fcf
+name = "InitializeGame"
+
+[[function]]
+addr = 0x8fe4
+name = "InitializeArea"
+
+[[function]]
+addr = 0x9061
+name = "PrimaryGameSetup"
+
+[[function]]
+addr = 0x9071
+name = "SecondaryGameSetup"
+
+[[function]]
+addr = 0x9131
+name = "Entrance_GameTimerSetup"
+
+[[function]]
+addr = 0x90ed
+name = "GetAreaMusic"
+
+[[function]]
+addr = 0x91cd
+name = "PlayerLoseLife"
+
+[[function]]
+addr = 0x9218
+name = "GameOverMode"
+
+[[function]]
+addr = 0x9224
+name = "SetupGameOver"
+
+[[function]]
+addr = 0x9237
+name = "RunGameOver"
+
+[[function]]
+addr = 0x9248
+name = "TerminateGame"
+
+[[function]]
+addr = 0x92aa
+name = "DoNothing1"
+
+[[function]]
+addr = 0x92af
+name = "DoNothing2"
+
+[[function]]
+addr = 0x92c8
+name = "AreaParserTasks"
+
+[[function]]
+addr = 0x92db
+name = "AreaParserTaskInit"
+
+[[function]]
+addr = 0x93fc
+name = "AreaParserCore"
+
+[[function]]
+addr = 0x9508
+name = "ProcessAreaData"
+
+[[function]]
+addr = 0x9595
+name = "DecodeAreaData"
+
+[[function]]
+addr = 0x9716
+name = "KillEnemies"
+
+[[function]]
+addr = 0x972b
+name = "AreaFrenzy"
+
+[[function]]
+addr = 0x9645
+name = "LoopCmdE"
+
+[[function]]
+addr = 0x9646
+name = "BackColC"
+
+[[function]]
+addr = 0x9656
+name = "StarAObj"
+
+[[function]]
+addr = 0x965f
+name = "RunAObj"
+
+[[function]]
+addr = 0x96c5
+name = "AlterAreaAttributes"
+
+[[function]]
+addr = 0x96f2
+name = "ScrollLockObject_Warp"
+
+[[function]]
+addr = 0x970d
+name = "ScrollLockObject"
+
+[[function]]
+addr = 0x9740
+name = "AreaStyleObject"
+
+[[function]]
+addr = 0x974c
+name = "TreeLedge"
+
+[[function]]
+addr = 0x9778
+name = "MushroomLedge"
+
+[[function]]
+addr = 0x97ba
+name = "PulleyRopeObject"
+
+[[function]]
+addr = 0x9806
+name = "CastleObject"
+
+[[function]]
+addr = 0x986f
+name = "WaterPipe"
+
+[[function]]
+addr = 0x9882
+name = "IntroPipe"
+
+[[function]]
+addr = 0x98ab
+name = "ExitPipe"
+
+[[function]]
+addr = 0x98e5
+name = "VerticalPipe"
+
+[[function]]
+addr = 0x9939
+name = "GetPipeHeight"
+
+[[function]]
+addr = 0x9957
+name = "Hole_Water"
+
+[[function]]
+addr = 0x9968
+name = "QuestionBlockRow_High"
+
+[[function]]
+addr = 0x996b
+name = "QuestionBlockRow_Low"
+
+[[function]]
+addr = 0x9979
+name = "Bridge_High"
+
+[[function]]
+addr = 0x997c
+name = "Bridge_Middle"
+
+[[function]]
+addr = 0x997f
+name = "Bridge_Low"
+
+[[function]]
+addr = 0x9994
+name = "FlagBalls_Residual"
+
+[[function]]
+addr = 0x999e
+name = "FlagpoleObject"
+
+[[function]]
+addr = 0x99d0
+name = "EndlessRope"
+
+[[function]]
+addr = 0x99d7
+name = "BalancePlatRope"
+
+[[function]]
+addr = 0x99f2
+name = "RowOfCoins"
+
+[[function]]
+addr = 0x9a01
+name = "CastleBridgeObj"
+
+[[function]]
+addr = 0x9a09
+name = "AxeObj"
+
+[[function]]
+addr = 0x9a0e
+name = "ChainObj"
+
+[[function]]
+addr = 0x9a19
+name = "EmptyBlock"
+
+[[function]]
+addr = 0x9a2e
+name = "RowOfBricks"
+
+[[function]]
+addr = 0x9a3e
+name = "RowOfSolidBlocks"
+
+[[function]]
+addr = 0x9a50
+name = "ColumnOfBricks"
+
+[[function]]
+addr = 0x9a59
+name = "ColumnOfSolidBlocks"
+
+[[function]]
+addr = 0x9a69
+name = "BulletBillCannon"
+
+[[function]]
+addr = 0x9ab7
+name = "StaircaseObject"
+
+[[function]]
+addr = 0x9ad3
+name = "JumpSpring"
+
+[[function]]
+addr = 0x9b01
+name = "Hidden1UpBlock"
+
+[[function]]
+addr = 0x9b0e
+name = "QuestionBlock"
+
+[[function]]
+addr = 0x9b14
+name = "BrickWithCoins"
+
+[[function]]
+addr = 0x9b19
+name = "BrickWithItem"
+
+[[function]]
+addr = 0x9b36
+name = "GetAreaObjectID"
+
+[[function]]
+addr = 0x9b41
+name = "Hole_Empty"
+
+[[function]]
+addr = 0x9b7d
+name = "RenderUnderPart"
+
+[[function]]
+addr = 0x9bac
+name = "ChkLrgObjLength"
+
+[[function]]
+addr = 0x9bbb
+name = "GetLrgObjAttrib"
+
+[[function]]
+addr = 0x9c03
+name = "LoadAreaPointer"
+
+[[function]]
+addr = 0x9c09
+name = "GetAreaType"
+
+[[function]]
+addr = 0x9c13
+name = "FindAreaPointer"
+
+[[function]]
+addr = 0xaedc
+name = "GameMode"
+
+[[function]]
+addr = 0xaeea
+name = "GameCoreRoutine"
+
+[[function]]
+addr = 0xaf6f
+name = "UpdScrollVar"
+
+[[function]]
+addr = 0xaf93
+name = "ScrollHandler"
+
+[[function]]
+addr = 0xafc4
+name = "ScrollScreen"
+
+[[function]]
+addr = 0xaffb
+name = "InitScrlAmt"
+
+[[function]]
+addr = 0xb04a
+name = "GameRoutines"
+
+[[function]]
+addr = 0xb069
+name = "PlayerEntrance"
+
+[[function]]
+addr = 0xb0e6
+name = "AutoControlPlayer"
+
+[[function]]
+addr = 0xb0e9
+name = "PlayerCtrlRoutine"
+
+[[function]]
+addr = 0xb1c7
+name = "Vine_AutoClimb"
+
+[[function]]
+addr = 0xb1dd
+name = "SetEntr"
+
+[[function]]
+addr = 0xb200
+name = "MovePlayerYAxis"
+
+[[function]]
+addr = 0xb206
+name = "SideExitPipeEntry"
+
+[[function]]
+addr = 0xb213
+name = "ChgAreaMode"
+
+[[function]]
+addr = 0xb1e5
+name = "VerticalPipeEntry"
+
+[[function]]
+addr = 0xb21f
+name = "EnterSidePipe"
+
+[[function]]
+addr = 0xb233
+name = "PlayerChangeSize"
+
+[[function]]
+addr = 0xb245
+name = "PlayerInjuryBlink"
+
+[[function]]
+addr = 0xb269
+name = "PlayerDeath"
+
+[[function]]
+addr = 0xb273
+name = "DonePlayerTask"
+
+[[function]]
+addr = 0xb27d
+name = "PlayerFireFlower"
+
+[[function]]
+addr = 0xb297
+name = "ResetPalFireFlower"
+
+[[function]]
+addr = 0xb29a
+name = "ResetPalStar"
+
+[[function]]
+addr = 0xb2a3
+name = "ExitDeath"
+
+[[function]]
+addr = 0xb2a4
+name = "FlagpoleSlide"
+
+[[function]]
+addr = 0xb2ca
+name = "PlayerEndLevel"
+
+[[function]]
+addr = 0xb359
+name = "NoMoveSub"
+
+[[function]]
+addr = 0xb35a
+name = "func_B35A"
+
+[[function]]
+addr = 0xb36d
+name = "FallingSub"
+
+[[function]]
+addr = 0xb376
+name = "JumpSwimSub"
+
+[[function]]
+addr = 0xb3cf
+name = "ClimbingSub"
+
+[[function]]
+addr = 0xb5cc
+name = "ImposeFriction"
+
+[[function]]
+addr = 0xb689
+name = "FireballObjCore"
+
+[[function]]
+addr = 0xb6f9
+name = "BubbleCheck"
+
+[[function]]
+addr = 0xb70b
+name = "SetupBubble"
+
+[[function]]
+addr = 0xb74f
+name = "RunGameTimer"
+
+[[function]]
+addr = 0xb7a4
+name = "WarpZoneObject"
+
+[[function]]
+addr = 0xb8ba
+name = "JumpspringHandler"
+
+[[function]]
+addr = 0xb855
+name = "FlagpoleRoutine"
+
+[[function]]
+addr = 0xb91e
+name = "Setup_Vine"
+
+[[function]]
+addr = 0xb94b
+name = "VineObjectHandler"
+
+[[function]]
+addr = 0xb9bc
+name = "ProcessCannons"
+
+[[function]]
+addr = 0xba94
+name = "SpawnHammerObj"
+
+[[function]]
+addr = 0xbac3
+name = "ProcHammerObj"
+
+[[function]]
+addr = 0xbb38
+name = "CoinBlock"
+
+[[function]]
+addr = 0xbb51
+name = "SetupJumpCoin"
+
+[[function]]
+addr = 0xbb96
+name = "MiscObjectsCore"
+
+[[function]]
+addr = 0xbbfe
+name = "GiveOneCoin"
+
+[[function]]
+addr = 0xbc27
+name = "AddToScore"
+
+[[function]]
+addr = 0xbc30
+name = "GetSBNybbles"
+
+[[function]]
+addr = 0xbc36
+name = "UpdateNumber"
+
+[[function]]
+addr = 0xbc60
+name = "PwrUpJmp"
+
+[[function]]
+addr = 0xbc85
+name = "PowerUpObjHandler"
+
+[[function]]
+addr = 0xbd9b
+name = "BumpBlock"
+
+[[function]]
+addr = 0xbdd2
+name = "MushFlowerBlock"
+
+[[function]]
+addr = 0xbdd5
+name = "StarBlock"
+
+[[function]]
+addr = 0xbddf
+name = "VineBlock"
+
+[[function]]
+addr = 0xbdf6
+name = "BlockBumpedChk"
+
+[[function]]
+addr = 0xbe02
+name = "BrickShatter"
+
+[[function]]
+addr = 0xbe1f
+name = "CheckTopOfBlock"
+
+[[function]]
+addr = 0xbf96
+name = "SetXMoveAmt"
+
+[[function]]
+addr = 0xbfb7
+name = "MovePlatformUp"
+
+[[function]]
+addr = 0xbfd7
+name = "ImposeGravity"
+
+[[function]]
+addr = 0xc226
+name = "InitEnemyObject"
+
+[[function]]
+addr = 0xc22e
+name = "DoGroup"
+
+[[function]]
+addr = 0xc2f0
+name = "NoInitCode"
+
+[[function]]
+addr = 0xc2f1
+name = "InitGoomba"
+
+[[function]]
+addr = 0xc2f7
+name = "InitPodoboo"
+
+[[function]]
+addr = 0xc307
+name = "InitRetainerObj"
+
+[[function]]
+addr = 0xc30e
+name = "InitNormalEnemy"
+
+[[function]]
+addr = 0xc31e
+name = "InitRedKoopa"
+
+[[function]]
+addr = 0xc328
+name = "InitHammerBro"
+
+[[function]]
+addr = 0xc342
+name = "InitBloober"
+
+[[function]]
+addr = 0xc346
+name = "SmallBBox"
+
+[[function]]
+addr = 0xc34a
+name = "InitRedPTroopa"
+
+[[function]]
+addr = 0xc363
+name = "InitVStf"
+
+[[function]]
+addr = 0xc36b
+name = "InitBulletBill"
+
+[[function]]
+addr = 0xc375
+name = "InitCheepCheep"
+
+[[function]]
+addr = 0xc385
+name = "InitLakitu"
+
+[[function]]
+addr = 0xc38a
+name = "SetupLakitu"
+
+[[function]]
+addr = 0xc3a4
+name = "LakituAndSpinyHandler"
+
+[[function]]
+addr = 0xc459
+name = "InitLongFirebar"
+
+[[function]]
+addr = 0xc4a8
+name = "InitFlyingCheepCheep"
+
+[[function]]
+addr = 0xc549
+name = "InitBowser"
+
+[[function]]
+addr = 0xc5a3
+name = "InitBowserFlame"
+
+[[function]]
+addr = 0xc63d
+name = "InitFireworks"
+
+[[function]]
+addr = 0xc69c
+name = "BulletBillCheepCheep"
+
+[[function]]
+addr = 0xc71b
+name = "HandleGroupEnemies"
+
+[[function]]
+addr = 0xc7a0
+name = "InitEnemyFrenzy"
+
+[[function]]
+addr = 0xc7b7
+name = "NoFrenzyCode"
+
+[[function]]
+addr = 0xc7b8
+name = "EndFrenzy"
+
+[[function]]
+addr = 0xc7df
+name = "InitBalPlatform"
+
+[[function]]
+addr = 0xc83f
+name = "LargeLiftUp"
+
+[[function]]
+addr = 0xc845
+name = "LargeLiftDown"
+
+[[function]]
+addr = 0xc84b
+name = "PlatLiftUp"
+
+[[function]]
+addr = 0xc857
+name = "PlatLiftDown"
+
+[[function]]
+addr = 0xc871
+name = "PosPlatform"
+
+[[function]]
+addr = 0xc8d6
+name = "NoRunCode"
+
+[[function]]
+addr = 0xc8d7
+name = "RunRetainerObj"
+
+[[function]]
+addr = 0xc8e0
+name = "RunNormalEnemies"
+
+[[function]]
+addr = 0xc934
+name = "NoMoveCode"
+
+[[function]]
+addr = 0xc935
+name = "RunBowserFlame"
+
+[[function]]
+addr = 0xc947
+name = "RunFirebarObj"
+
+[[function]]
+addr = 0xc94d
+name = "RunSmallPlatform"
+
+[[function]]
+addr = 0xc965
+name = "RunLargePlatform"
+
+[[function]]
+addr = 0xc9b0
+name = "MovePodoboo"
+
+[[function]]
+addr = 0xc9d8
+name = "ProcHammerBro"
+
+[[function]]
+addr = 0xca77
+name = "MoveNormalEnemy"
+
+[[function]]
+addr = 0xcaeb
+name = "ChkKillGoomba"
+
+[[function]]
+addr = 0xcb66
+name = "MoveWithXMCntrs"
+
+[[function]]
+addr = 0xcb89
+name = "MoveBloober"
+
+[[function]]
+addr = 0xcbdf
+name = "ProcSwimmingB"
+
+[[function]]
+addr = 0xcc36
+name = "MoveBulletBill"
+
+[[function]]
+addr = 0xcd3c
+name = "ProcFirebar"
+
+[[function]]
+addr = 0xcf28
+name = "MoveLakitu"
+
+[[function]]
+addr = 0xcfec
+name = "BridgeCollapse"
+
+[[function]]
+addr = 0xd065
+name = "RunBowser"
+
+[[function]]
+addr = 0xd071
+name = "KillAllEnemies"
+
+[[function]]
+addr = 0xd1d9
+name = "SetFlameTimer"
+
+[[function]]
+addr = 0xd1eb
+name = "ProcBowserFlame"
+
+[[function]]
+addr = 0xd295
+name = "RunFireworks"
+
+[[function]]
+addr = 0xd2d9
+name = "RunStarFlagObj"
+
+[[function]]
+addr = 0xd2f2
+name = "GameTimerFireworks"
+
+[[function]]
+addr = 0xd311
+name = "StarFlagExit"
+
+[[function]]
+addr = 0xd312
+name = "AwardGameTimerPoints"
+
+[[function]]
+addr = 0xd34e
+name = "RaiseFlagSetoffFworks"
+
+[[function]]
+addr = 0xd365
+name = "DrawStarFlag"
+
+[[function]]
+addr = 0xd396
+name = "DrawFlagSetTimer"
+
+[[function]]
+addr = 0xd3a2
+name = "DelayToAreaEnd"
+
+[[function]]
+addr = 0xd410
+name = "FirebarSpin"
+
+[[function]]
+addr = 0xd432
+name = "BalancePlatform"
+
+[[function]]
+addr = 0xd5b1
+name = "StopPlatforms"
+
+[[function]]
+addr = 0xd5d3
+name = "YMovingPlatform"
+
+[[function]]
+addr = 0xd607
+name = "XMovingPlatform"
+
+[[function]]
+addr = 0xd631
+name = "DropPlatform"
+
+[[function]]
+addr = 0xd63d
+name = "RightPlatform"
+
+[[function]]
+addr = 0xd895
+name = "HandlePECollisions"
+
+[[function]]
+addr = 0xd92c
+name = "InjurePlayer"
+
+[[function]]
+addr = 0xd931
+name = "ForceInjury"
+
+[[function]]
+addr = 0xd948
+name = "SetPRout"
+
+[[function]]
+addr = 0xd958
+name = "KillPlayer"
+
+[[function]]
+addr = 0xd969
+name = "EnemyStomped"
+
+[[function]]
+addr = 0xd9d4
+name = "HandleStompedShellE"
+
+[[function]]
+addr = 0xda05
+name = "EnemyFacePlayer"
+
+[[function]]
+addr = 0xdb1c
+name = "EnemyTurnAround"
+
+[[function]]
+addr = 0xde1c
+name = "ErACM"
+
+[[function]]
+addr = 0xdee8
+name = "HandlePipeEntry"
+
+[[function]]
+addr = 0xdfb0
+name = "GetMTileAttrib"
+
+[[function]]
+addr = 0xe02f
+name = "SetStun"
+
+[[function]]
+addr = 0xe067
+name = "LandEnemyProperly"
+
+[[function]]
+addr = 0xe143
+name = "PlayerEnemyDiff"
+
+[[function]]
+addr = 0xe14f
+name = "EnemyLanding"
+
+[[function]]
+addr = 0xe15b
+name = "SubtEnemyYPos"
+
+[[function]]
+addr = 0xe163
+name = "EnemyJump"
+
+[[function]]
+addr = 0xe1ae
+name = "ChkUnderEnemy"
+
+[[function]]
+addr = 0xe1b5
+name = "ChkForNonSolids"
+
+[[function]]
+addr = 0xe236
+name = "GetMiscBoundBox"
+
+[[function]]
+addr = 0xe289
+name = "MoveBoundBoxOffscreen"
+
+[[function]]
+addr = 0xe29c
+name = "BoundingBoxCore"
+
+[[function]]
+addr = 0xe435
+name = "DrawVine"
+
+[[function]]
+addr = 0xe4dc
+name = "DrawHammer"
+
+[[function]]
+addr = 0xe5b5
+name = "DumpSixSpr"
+
+[[function]]
+addr = 0xe5bb
+name = "DumpFourSpr"
+
+[[function]]
+addr = 0xe5be
+name = "DumpThreeSpr"
+
+[[function]]
+addr = 0xe5c1
+name = "DumpTwoSpr"
+
+[[function]]
+addr = 0xe655
+name = "DrawFloateyNumber_Coin"
+
+[[function]]
+addr = 0xe686
+name = "JCoinGfxHandler"
+
+[[function]]
+addr = 0xe6d2
+name = "DrawPowerUp"
+
+[[function]]
+addr = 0xe87d
+name = "EnemyGfxHandler"
+
+[[function]]
+addr = 0xebaa
+name = "DrawEnemyObjRow"
+
+[[function]]
+addr = 0xebd1
+name = "DrawBlock"
+
+[[function]]
+addr = 0xec46
+name = "ChkLeftCo"
+
+[[function]]
+addr = 0xec53
+name = "DrawBrickChunks"
+
+[[function]]
+addr = 0xeced
+name = "DrawFirebar"
+
+[[function]]
+addr = 0xed61
+name = "KillFireBall"
+
+[[function]]
+addr = 0xede1
+name = "DrawBubble"
+
+[[function]]
+addr = 0xef3a
+name = "DoChangeSize"
+
+[[function]]
+addr = 0xef40
+name = "PlayerKilled"
+
+[[function]]
+addr = 0xefbe
+name = "RenderPlayerSub"
+
+[[function]]
+addr = 0xefdc
+name = "DrawPlayerLoop"
+
+[[function]]
+addr = 0xf028
+name = "NonAnimatedActs"
+
+[[function]]
+addr = 0xf034
+name = "ActionFalling"
+
+[[function]]
+addr = 0xf03c
+name = "ActionWalkRun"
+
+[[function]]
+addr = 0xf044
+name = "ActionClimbing"
+
+[[function]]
+addr = 0xf050
+name = "ActionSwimming"
+
+[[function]]
+addr = 0xf26d
+name = "DividePDiff"
+
+[[function]]
+addr = 0xf2d0
+name = "SoundEngine"
+
+[[function]]
+addr = 0xf381
+name = "Dump_Squ1_Regs"
+
+[[function]]
+addr = 0xf388
+name = "PlaySqu1Sfx"
+
+[[function]]
+addr = 0xf38b
+name = "SetFreq_Squ1"
+
+[[function]]
+addr = 0xf39f
+name = "Dump_Sq2_Regs"
+
+[[function]]
+addr = 0xf3a6
+name = "PlaySqu2Sfx"
+
+[[function]]
+addr = 0xf3a9
+name = "SetFreq_Squ2"
+
+[[function]]
+addr = 0xf3ad
+name = "SetFreq_Tri"
+
+[[function]]
+addr = 0xf4a7
+name = "StopSquare1Sfx"
+
+[[function]]
+addr = 0xf571
+name = "StopSquare2Sfx"
+
+[[function]]
+addr = 0xf667
+name = "NoiseSfxHandler"
+
+[[function]]
+addr = 0xf694
+name = "MusicHandler"
+
+[[function]]
+addr = 0xf8d8
+name = "LoadControlRegs"
+
+[[function]]
+addr = 0xfff0
+name = "IRQHandler"
+
+[[replacement]]
+addr = 0xf2d0
+runtime_label = "rt_sound_stub"
+reason = "Audio is deferred; skip SMB SoundEngine so NMI/frame traces stay bounded while APU writes are stubbed."
+
+# === Labels (branch targets / data labels) ===
+
+[[label]]
+addr = 0x800a
+name = "VBlank1"
+
+[[label]]
+addr = 0x800f
+name = "VBlank2"
+
+[[label]]
+addr = 0x8018
+name = "WBootCheck"
+
+[[label]]
+addr = 0x802b
+name = "ColdBoot"
+
+[[label]]
+addr = 0x8057
+name = "EndlessLoop"
+
+[[label]]
+addr = 0x809e
+name = "ScreenOff"
+
+[[label]]
+addr = 0x80d0
+name = "InitBuffer"
+
+[[label]]
+addr = 0x8100
+name = "DecTimers"
+
+[[label]]
+addr = 0x810e
+name = "DecTimersLoop"
+
+[[label]]
+addr = 0x8116
+name = "SkipExpTimer"
+
+[[label]]
+addr = 0x8119
+name = "NoDecTimers"
+
+[[label]]
+addr = 0x811b
+name = "PauseSkip"
+
+[[label]]
+addr = 0x8131
+name = "RotPRandomBit"
+
+[[label]]
+addr = 0x813d
+name = "Sprite0Clr"
+
+[[label]]
+addr = 0x8150
+name = "Sprite0Hit"
+
+[[label]]
+addr = 0x8159
+name = "HBlankDelay"
+
+[[label]]
+addr = 0x815c
+name = "SkipSprite0"
+
+[[label]]
+addr = 0x8178
+name = "SkipMainOper"
+
+[[label]]
+addr = 0x8194
+name = "ChkPauseTimer"
+
+[[label]]
+addr = 0x819d
+name = "ChkStart"
+
+[[label]]
+addr = 0x81bd
+name = "ClrPauseTimer"
+
+[[label]]
+addr = 0x81c2
+name = "SetPause"
+
+[[label]]
+addr = 0x81c5
+name = "ExitPause"
+
+[[label]]
+addr = 0x81cf
+name = "ShuffleLoop"
+
+[[label]]
+addr = 0x81e2
+name = "StrSprOffset"
+
+[[label]]
+addr = 0x81e5
+name = "NextSprOffset"
+
+[[label]]
+addr = 0x81f2
+name = "SetAmtOffset"
+
+[[label]]
+addr = 0x81f9
+name = "SetMiscOffset"
+
+[[label]]
+addr = 0x8227
+name = "SprInitLoop"
+
+[[label]]
+addr = 0x8255
+name = "StartGame"
+
+[[label]]
+addr = 0x8258
+name = "ChkSelect"
+
+[[label]]
+addr = 0x826c
+name = "ChkWorldSel"
+
+[[label]]
+addr = 0x8276
+name = "SelectBLogic"
+
+[[label]]
+addr = 0x829c
+name = "IncWorldSel"
+
+[[label]]
+addr = 0x82a9
+name = "UpdateShroom"
+
+[[label]]
+addr = 0x82bb
+name = "NullJoypad"
+
+[[label]]
+addr = 0x82c0
+name = "RunDemo"
+
+[[label]]
+addr = 0x82c9
+name = "ResetTitle"
+
+[[label]]
+addr = 0x82d8
+name = "ChkContinue"
+
+[[label]]
+addr = 0x82e6
+name = "StartWorld1"
+
+[[label]]
+addr = 0x8307
+name = "InitScores"
+
+[[label]]
+addr = 0x830d
+name = "ExitMenu"
+
+[[label]]
+addr = 0x8327
+name = "IconDataRead"
+
+[[label]]
+addr = 0x833f
+name = "ExitIcon"
+
+[[label]]
+addr = 0x8340
+name = "DemoActionData"
+
+[[label]]
+addr = 0x8355
+name = "DemoTimingData"
+
+[[label]]
+addr = 0x8380
+name = "DoAction"
+
+[[label]]
+addr = 0x838a
+name = "DemoOver"
+
+[[label]]
+addr = 0x839a
+name = "AutoPlayer"
+
+[[label]]
+addr = 0x83cd
+name = "PerformWalk"
+
+[[label]]
+addr = 0x83d0
+name = "DontWalk"
+
+[[label]]
+addr = 0x83f1
+name = "ExitVWalk"
+
+[[label]]
+addr = 0x8414
+name = "MRetainerMsg"
+
+[[label]]
+addr = 0x8418
+name = "ThankPlayer"
+
+[[label]]
+addr = 0x8423
+name = "SecondPartMsg"
+
+[[label]]
+addr = 0x8434
+name = "EvalForMusic"
+
+[[label]]
+addr = 0x843c
+name = "PrintMsg"
+
+[[label]]
+addr = 0x8443
+name = "IncMsgCounter"
+
+[[label]]
+addr = 0x8456
+name = "SetEndTimer"
+
+[[label]]
+addr = 0x845d
+name = "IncModeTask_A"
+
+[[label]]
+addr = 0x8460
+name = "ExitMsgs"
+
+[[label]]
+addr = 0x8486
+name = "EndExitOne"
+
+[[label]]
+addr = 0x8487
+name = "EndChkBButton"
+
+[[label]]
+addr = 0x849e
+name = "EndExitTwo"
+
+[[label]]
+addr = 0x84b7
+name = "ScoreUpdateData"
+
+[[label]]
+addr = 0x84d1
+name = "ChkNumTimer"
+
+[[label]]
+addr = 0x84db
+name = "DecNumTimer"
+
+[[label]]
+addr = 0x84ed
+name = "LoadNumTiles"
+
+[[label]]
+addr = 0x8500
+name = "ChkTallEnemy"
+
+[[label]]
+addr = 0x8523
+name = "GetAltOffset"
+
+[[label]]
+addr = 0x852b
+name = "FloateyPart"
+
+[[label]]
+addr = 0x8537
+name = "SetupNumSpr"
+
+[[label]]
+addr = 0x85bb
+name = "AreaPalette"
+
+[[label]]
+addr = 0x85c5
+name = "SetVRAMAddr_A"
+
+[[label]]
+addr = 0x85c8
+name = "NextSubtask"
+
+[[label]]
+addr = 0x85d7
+name = "PlayerColors"
+
+[[label]]
+addr = 0x85ee
+name = "NoBGColor"
+
+[[label]]
+addr = 0x85fd
+name = "ChkFiery"
+
+[[label]]
+addr = 0x8606
+name = "StartClrGet"
+
+[[label]]
+addr = 0x860a
+name = "ClrGetLoop"
+
+[[label]]
+addr = 0x8621
+name = "SetBGColor"
+
+[[label]]
+addr = 0x863f
+name = "SetVRAMOffset"
+
+[[label]]
+addr = 0x864c
+name = "SetVRAMAddr_B"
+
+[[label]]
+addr = 0x864f
+name = "NoAltPal"
+
+[[label]]
+addr = 0x86a2
+name = "NoTimeUp"
+
+[[label]]
+addr = 0x86c2
+name = "PlayerInter"
+
+[[label]]
+addr = 0x86c7
+name = "OutputInter"
+
+[[label]]
+addr = 0x86d3
+name = "GameOverInter"
+
+[[label]]
+addr = 0x86e0
+name = "NoInter"
+
+[[label]]
+addr = 0x86e9
+name = "TaskLoop"
+
+[[label]]
+addr = 0x86f9
+name = "OutputCol"
+
+[[label]]
+addr = 0x8719
+name = "OutputTScr"
+
+[[label]]
+addr = 0x8723
+name = "ChkHiByte"
+
+[[label]]
+addr = 0x8739
+name = "TScrClear"
+
+[[label]]
+addr = 0x8745
+name = "IncSubtask"
+
+[[label]]
+addr = 0x874e
+name = "IncModeTask_B"
+
+[[label]]
+addr = 0x8752
+name = "GameText"
+
+[[label]]
+addr = 0x8798
+name = "TwoPlayerTimeUp"
+
+[[label]]
+addr = 0x87c0
+name = "WarpZoneWelcome"
+
+[[label]]
+addr = 0x87ed
+name = "LuigiName"
+
+[[label]]
+addr = 0x87f2
+name = "WarpZoneNumbers"
+
+[[label]]
+addr = 0x87fe
+name = "GameTextOffsets"
+
+[[label]]
+addr = 0x8815
+name = "Chk2Players"
+
+[[label]]
+addr = 0x881b
+name = "LdGameText"
+
+[[label]]
+addr = 0x8820
+name = "GameTextLoop"
+
+[[label]]
+addr = 0x882e
+name = "EndGameText"
+
+[[label]]
+addr = 0x884d
+name = "PutLives"
+
+[[label]]
+addr = 0x885f
+name = "CheckPlayerName"
+
+[[label]]
+addr = 0x8873
+name = "ChkLuigi"
+
+[[label]]
+addr = 0x8878
+name = "NameLoop"
+
+[[label]]
+addr = 0x8881
+name = "ExitChkName"
+
+[[label]]
+addr = 0x8889
+name = "WarpNumLoop"
+
+[[label]]
+addr = 0x88ad
+name = "NoReset"
+
+[[label]]
+addr = 0x88d0
+name = "DrawMTLoop"
+
+[[label]]
+addr = 0x891a
+name = "RightCheck"
+
+[[label]]
+addr = 0x892a
+name = "LLeft"
+
+[[label]]
+addr = 0x892e
+name = "NextMTRow"
+
+[[label]]
+addr = 0x8930
+name = "SetAttrib"
+
+[[label]]
+addr = 0x8967
+name = "ExitDrawM"
+
+[[label]]
+addr = 0x897d
+name = "SetATHigh"
+
+[[label]]
+addr = 0x8990
+name = "AttribLoop"
+
+[[label]]
+addr = 0x89bd
+name = "SetVRAMCtrl"
+
+[[label]]
+addr = 0x89c9
+name = "BlankPalette"
+
+[[label]]
+addr = 0x89d1
+name = "Palette3Data"
+
+[[label]]
+addr = 0x89ef
+name = "GetBlankPal"
+
+[[label]]
+addr = 0x8a08
+name = "GetAreaPal"
+
+[[label]]
+addr = 0x8a38
+name = "ExitColorRot"
+
+[[label]]
+addr = 0x8a39
+name = "BlockGfxData"
+
+[[label]]
+addr = 0x8a58
+name = "WriteBlankMT"
+
+[[label]]
+addr = 0x8a87
+name = "UseBOffset"
+
+[[label]]
+addr = 0x8aa8
+name = "SaveHAddr"
+
+[[label]]
+addr = 0x8b10
+name = "Palette0_MTiles"
+
+[[label]]
+addr = 0x8bac
+name = "Palette1_MTiles"
+
+[[label]]
+addr = 0x8c64
+name = "Palette2_MTiles"
+
+[[label]]
+addr = 0x8c8c
+name = "Palette3_MTiles"
+
+[[label]]
+addr = 0x8da8
+name = "PrincessSaved1"
+
+[[label]]
+addr = 0x8dbf
+name = "PrincessSaved2"
+
+[[label]]
+addr = 0x8e3b
+name = "InitNTLoop"
+
+[[label]]
+addr = 0x8e4d
+name = "InitATLoop"
+
+[[label]]
+addr = 0x8e6c
+name = "PortLoop"
+
+[[label]]
+addr = 0x8e8d
+name = "Save8Bits"
+
+[[label]]
+addr = 0x8ea9
+name = "SetupWrites"
+
+[[label]]
+addr = 0x8eb3
+name = "GetLength"
+
+[[label]]
+addr = 0x8eb6
+name = "OutputToVRAM"
+
+[[label]]
+addr = 0x8eb9
+name = "RepeatByte"
+
+[[label]]
+addr = 0x8ef4
+name = "StatusBarData"
+
+[[label]]
+addr = 0x8f00
+name = "StatusBarOffset"
+
+[[label]]
+addr = 0x8f28
+name = "SetupNums"
+
+[[label]]
+addr = 0x8f47
+name = "DigitPLoop"
+
+[[label]]
+addr = 0x8f5e
+name = "ExitOutputN"
+
+[[label]]
+addr = 0x8f68
+name = "AddModLoop"
+
+[[label]]
+addr = 0x8f75
+name = "StoreNewD"
+
+[[label]]
+addr = 0x8f7c
+name = "EraseDMods"
+
+[[label]]
+addr = 0x8f80
+name = "EraseMLoop"
+
+[[label]]
+addr = 0x8f87
+name = "BorrowOne"
+
+[[label]]
+addr = 0x8f8e
+name = "CarryOne"
+
+[[label]]
+addr = 0x8fa1
+name = "GetScoreDiff"
+
+[[label]]
+addr = 0x8faf
+name = "CopyScore"
+
+[[label]]
+addr = 0x8fbb
+name = "NoTopSc"
+
+[[label]]
+addr = 0x8fcb
+name = "Sprite0Data"
+
+[[label]]
+addr = 0x8fd6
+name = "ClrSndLoop"
+
+[[label]]
+addr = 0x8fed
+name = "ClrTimersLoop"
+
+[[label]]
+addr = 0x8ffe
+name = "StartPage"
+
+[[label]]
+addr = 0x9012
+name = "SetInitNTHigh"
+
+[[label]]
+addr = 0x9047
+name = "SetSecHard"
+
+[[label]]
+addr = 0x904a
+name = "CheckHalfway"
+
+[[label]]
+addr = 0x9054
+name = "DoneInitArea"
+
+[[label]]
+addr = 0x9077
+name = "ClearVRLoop"
+
+[[label]]
+addr = 0x90ab
+name = "ShufAmtLoop"
+
+[[label]]
+addr = 0x90b6
+name = "ISpr0Loop"
+
+[[label]]
+addr = 0x90d2
+name = "InitPageLoop"
+
+[[label]]
+addr = 0x90d4
+name = "InitByteLoop"
+
+[[label]]
+addr = 0x90dc
+name = "InitByte"
+
+[[label]]
+addr = 0x90de
+name = "SkipByte"
+
+[[label]]
+addr = 0x90e7
+name = "MusicSelectData"
+
+[[label]]
+addr = 0x9106
+name = "ChkAreaType"
+
+[[label]]
+addr = 0x9110
+name = "StoreMusic"
+
+[[label]]
+addr = 0x9115
+name = "ExitGetM"
+
+[[label]]
+addr = 0x911a
+name = "AltYPosOffset"
+
+[[label]]
+addr = 0x912d
+name = "GameTimerData"
+
+[[label]]
+addr = 0x9153
+name = "ChkStPos"
+
+[[label]]
+addr = 0x9165
+name = "SetStPos"
+
+[[label]]
+addr = 0x9197
+name = "ChkOverR"
+
+[[label]]
+addr = 0x91b0
+name = "ChkSwimE"
+
+[[label]]
+addr = 0x91b8
+name = "SetPESub"
+
+[[label]]
+addr = 0x91e9
+name = "StillInGame"
+
+[[label]]
+addr = 0x91f6
+name = "GetHalfway"
+
+[[label]]
+addr = 0x9204
+name = "MaskHPNyb"
+
+[[label]]
+addr = 0x920f
+name = "SetHalfway"
+
+[[label]]
+addr = 0x9264
+name = "ContinueGame"
+
+[[label]]
+addr = 0x9281
+name = "GameIsOn"
+
+[[label]]
+addr = 0x9297
+name = "TransLoop"
+
+[[label]]
+addr = 0x92a9
+name = "ExTrans"
+
+[[label]]
+addr = 0x92ba
+name = "DoAPTasks"
+
+[[label]]
+addr = 0x92c7
+name = "SkipATRender"
+
+[[label]]
+addr = 0x92eb
+name = "NoColWrap"
+
+[[label]]
+addr = 0x92fa
+name = "BackSceneryData"
+
+[[label]]
+addr = 0x93b1
+name = "ForeSceneryData"
+
+[[label]]
+addr = 0x9408
+name = "ClrMTBuf"
+
+[[label]]
+addr = 0x9416
+name = "ThirdP"
+
+[[label]]
+addr = 0x941f
+name = "RendBack"
+
+[[label]]
+addr = 0x9445
+name = "SceLoop1"
+
+[[label]]
+addr = 0x9455
+name = "RendFore"
+
+[[label]]
+addr = 0x945f
+name = "SceLoop2"
+
+[[label]]
+addr = 0x9467
+name = "NoFore"
+
+[[label]]
+addr = 0x946d
+name = "RendTerr"
+
+[[label]]
+addr = 0x947e
+name = "TerMTile"
+
+[[label]]
+addr = 0x9488
+name = "StoreMT"
+
+[[label]]
+addr = 0x9491
+name = "TerrLoop"
+
+[[label]]
+addr = 0x94a8
+name = "NoCloud2"
+
+[[label]]
+addr = 0x94aa
+name = "TerrBChk"
+
+[[label]]
+addr = 0x94b6
+name = "NextTBit"
+
+[[label]]
+addr = 0x94ca
+name = "EndUChk"
+
+[[label]]
+addr = 0x94d3
+name = "RendBBuf"
+
+[[label]]
+addr = 0x94e0
+name = "ChkMTLow"
+
+[[label]]
+addr = 0x94f5
+name = "StrBlock"
+
+[[label]]
+addr = 0x950a
+name = "ProcADLoop"
+
+[[label]]
+addr = 0x9530
+name = "Chk1Row13"
+
+[[label]]
+addr = 0x9554
+name = "Chk1Row14"
+
+[[label]]
+addr = 0x955d
+name = "CheckRear"
+
+[[label]]
+addr = 0x9565
+name = "RdyDecode"
+
+[[label]]
+addr = 0x956b
+name = "SetBehind"
+
+[[label]]
+addr = 0x956e
+name = "NextAObj"
+
+[[label]]
+addr = 0x9571
+name = "ChkLength"
+
+[[label]]
+addr = 0x957b
+name = "ProcLoopb"
+
+[[label]]
+addr = 0x9588
+name = "EndAParse"
+
+[[label]]
+addr = 0x959d
+name = "Chk1stB"
+
+[[label]]
+addr = 0x95b3
+name = "ChkRow14"
+
+[[label]]
+addr = 0x95c3
+name = "ChkRow13"
+
+[[label]]
+addr = 0x95dd
+name = "Mask2MSB"
+
+[[label]]
+addr = 0x95e2
+name = "ChkSRows"
+
+[[label]]
+addr = 0x95f8
+name = "LrgObj"
+
+[[label]]
+addr = 0x9608
+name = "NotWPipe"
+
+[[label]]
+addr = 0x960d
+name = "SpecObj"
+
+[[label]]
+addr = 0x9612
+name = "MoveAOId"
+
+[[label]]
+addr = 0x9616
+name = "NormObj"
+
+[[label]]
+addr = 0x9635
+name = "LeavePar"
+
+[[label]]
+addr = 0x9636
+name = "InitRear"
+
+[[label]]
+addr = 0x9646
+name = "BackColC"
+
+[[label]]
+addr = 0x9656
+name = "StarAObj"
+
+[[label]]
+addr = 0x965f
+name = "RunAObj"
+
+[[label]]
+addr = 0x96e2
+name = "Alter2"
+
+[[label]]
+addr = 0x96ee
+name = "SetFore"
+
+[[label]]
+addr = 0x9701
+name = "WarpNum"
+
+[[label]]
+addr = 0x971c
+name = "KillELoop"
+
+[[label]]
+addr = 0x9724
+name = "NoKillE"
+
+[[label]]
+addr = 0x9728
+name = "FrenzyIDData"
+
+[[label]]
+addr = 0x9732
+name = "FreCompLoop"
+
+[[label]]
+addr = 0x973c
+name = "ExitAFrenzy"
+
+[[label]]
+addr = 0x9767
+name = "MidTreeL"
+
+[[label]]
+addr = 0x9773
+name = "EndTreeL"
+
+[[label]]
+addr = 0x978b
+name = "EndMushL"
+
+[[label]]
+addr = 0x97aa
+name = "AllUnder"
+
+[[label]]
+addr = 0x97b0
+name = "NoUnder"
+
+[[label]]
+addr = 0x97c8
+name = "RenderPul"
+
+[[label]]
+addr = 0x97ce
+name = "MushLExit"
+
+[[label]]
+addr = 0x97cf
+name = "CastleMetatiles"
+
+[[label]]
+addr = 0x981b
+name = "CRendLoop"
+
+[[label]]
+addr = 0x982d
+name = "ChkCFloor"
+
+[[label]]
+addr = 0x9847
+name = "NotTall"
+
+[[label]]
+addr = 0x9869
+name = "PlayerStop"
+
+[[label]]
+addr = 0x986e
+name = "ExitCastle"
+
+[[label]]
+addr = 0x9890
+name = "VPipeSectLoop"
+
+[[label]]
+addr = 0x989e
+name = "NoBlankP"
+
+[[label]]
+addr = 0x98a3
+name = "SidePipeTopPart"
+
+[[label]]
+addr = 0x98ce
+name = "DrawSidePart"
+
+[[label]]
+addr = 0x98f0
+name = "WarpPipe"
+
+[[label]]
+addr = 0x9925
+name = "DrawPipe"
+
+[[label]]
+addr = 0x994c
+name = "EmptyChkLoop"
+
+[[label]]
+addr = 0x9956
+name = "ExitEmptyChk"
+
+[[label]]
+addr = 0x99e9
+name = "DrawRope"
+
+[[label]]
+addr = 0x99fb
+name = "C_ObjectRow"
+
+[[label]]
+addr = 0x9a20
+name = "ColObj"
+
+[[label]]
+addr = 0x9a29
+name = "BrickMetatiles"
+
+[[label]]
+addr = 0x9a38
+name = "DrawBricks"
+
+[[label]]
+addr = 0x9a44
+name = "GetRow"
+
+[[label]]
+addr = 0x9a48
+name = "DrawRow"
+
+[[label]]
+addr = 0x9a5f
+name = "GetRow2"
+
+[[label]]
+addr = 0x9a85
+name = "SetupCannon"
+
+[[label]]
+addr = 0x9aa1
+name = "StrCOffset"
+
+[[label]]
+addr = 0x9ac1
+name = "NextStair"
+
+[[label]]
+addr = 0x9b28
+name = "BWithL"
+
+[[label]]
+addr = 0x9b2c
+name = "DrawQBlk"
+
+[[label]]
+addr = 0x9b3c
+name = "ExitDecBlock"
+
+[[label]]
+addr = 0x9b3d
+name = "HoleMetatiles"
+
+[[label]]
+addr = 0x9b70
+name = "StrWOffset"
+
+[[label]]
+addr = 0x9b73
+name = "NoWhirlP"
+
+[[label]]
+addr = 0x9b9d
+name = "DrawThisRow"
+
+[[label]]
+addr = 0x9ba0
+name = "WaitOneRow"
+
+[[label]]
+addr = 0x9bab
+name = "ExitUPartR"
+
+[[label]]
+addr = 0x9bba
+name = "LenSet"
+
+[[label]]
+addr = 0x9bdd
+name = "BlockBufferAddr"
+
+[[label]]
+addr = 0x9c68
+name = "StoreFore"
+
+[[label]]
+addr = 0x9ca3
+name = "StoreStyle"
+
+[[label]]
+addr = 0x9cbc
+name = "AreaAddrOffsets"
+
+[[label]]
+addr = 0x9cc1
+name = "World2Areas"
+
+[[label]]
+addr = 0x9cc6
+name = "World3Areas"
+
+[[label]]
+addr = 0x9cca
+name = "World4Areas"
+
+[[label]]
+addr = 0x9ccf
+name = "World5Areas"
+
+[[label]]
+addr = 0x9cd3
+name = "World6Areas"
+
+[[label]]
+addr = 0x9cd7
+name = "World7Areas"
+
+[[label]]
+addr = 0x9cdc
+name = "World8Areas"
+
+[[label]]
+addr = 0x9d2c
+name = "AreaDataAddrLow"
+
+[[label]]
+addr = 0x9d70
+name = "E_CastleArea1"
+
+[[label]]
+addr = 0x9d97
+name = "E_CastleArea2"
+
+[[label]]
+addr = 0x9db0
+name = "E_CastleArea3"
+
+[[label]]
+addr = 0x9ddf
+name = "E_CastleArea4"
+
+[[label]]
+addr = 0x9e0a
+name = "E_CastleArea5"
+
+[[label]]
+addr = 0x9e1f
+name = "E_CastleArea6"
+
+[[label]]
+addr = 0x9e59
+name = "E_GroundArea1"
+
+[[label]]
+addr = 0x9e7e
+name = "E_GroundArea2"
+
+[[label]]
+addr = 0x9e9b
+name = "E_GroundArea3"
+
+[[label]]
+addr = 0x9ea9
+name = "E_GroundArea4"
+
+[[label]]
+addr = 0x9ed0
+name = "E_GroundArea5"
+
+[[label]]
+addr = 0x9f01
+name = "E_GroundArea6"
+
+[[label]]
+addr = 0x9f1f
+name = "E_GroundArea7"
+
+[[label]]
+addr = 0x9f3c
+name = "E_GroundArea8"
+
+[[label]]
+addr = 0x9f51
+name = "E_GroundArea9"
+
+[[label]]
+addr = 0x9f7b
+name = "E_GroundArea10"
+
+[[label]]
+addr = 0x9f7c
+name = "E_GroundArea11"
+
+[[label]]
+addr = 0x9fa0
+name = "E_GroundArea12"
+
+[[label]]
+addr = 0x9fa9
+name = "E_GroundArea13"
+
+[[label]]
+addr = 0x9fce
+name = "E_GroundArea14"
+
+[[label]]
+addr = 0x9ff1
+name = "E_GroundArea15"
+
+[[label]]
+addr = 0x9ffa
+name = "E_GroundArea16"
+
+[[label]]
+addr = 0x9ffb
+name = "E_GroundArea17"
+
+[[label]]
+addr = 0xa035
+name = "E_GroundArea18"
+
+[[label]]
+addr = 0xa060
+name = "E_GroundArea19"
+
+[[label]]
+addr = 0xa08e
+name = "E_GroundArea20"
+
+[[label]]
+addr = 0xa0aa
+name = "E_GroundArea21"
+
+[[label]]
+addr = 0xa0b3
+name = "E_GroundArea22"
+
+[[label]]
+addr = 0xa160
+name = "E_WaterArea1"
+
+[[label]]
+addr = 0xa171
+name = "E_WaterArea2"
+
+[[label]]
+addr = 0xa19b
+name = "E_WaterArea3"
+
+[[label]]
+addr = 0xa1af
+name = "L_CastleArea1"
+
+[[label]]
+addr = 0xa210
+name = "L_CastleArea2"
+
+[[label]]
+addr = 0xa28f
+name = "L_CastleArea3"
+
+[[label]]
+addr = 0xa302
+name = "L_CastleArea4"
+
+[[label]]
+addr = 0xa36f
+name = "L_CastleArea5"
+
+[[label]]
+addr = 0xa3fa
+name = "L_CastleArea6"
+
+[[label]]
+addr = 0xa46b
+name = "L_GroundArea1"
+
+[[label]]
+addr = 0xa4ce
+name = "L_GroundArea2"
+
+[[label]]
+addr = 0xa537
+name = "L_GroundArea3"
+
+[[label]]
+addr = 0xa58a
+name = "L_GroundArea4"
+
+[[label]]
+addr = 0xa619
+name = "L_GroundArea5"
+
+[[label]]
+addr = 0xa68e
+name = "L_GroundArea6"
+
+[[label]]
+addr = 0xa6f3
+name = "L_GroundArea7"
+
+[[label]]
+addr = 0xa748
+name = "L_GroundArea8"
+
+[[label]]
+addr = 0xa7cd
+name = "L_GroundArea9"
+
+[[label]]
+addr = 0xa832
+name = "L_GroundArea10"
+
+[[label]]
+addr = 0xa83b
+name = "L_GroundArea11"
+
+[[label]]
+addr = 0xa87a
+name = "L_GroundArea12"
+
+[[label]]
+addr = 0xa88f
+name = "L_GroundArea13"
+
+[[label]]
+addr = 0xa8f6
+name = "L_GroundArea14"
+
+[[label]]
+addr = 0xa95b
+name = "L_GroundArea15"
+
+[[label]]
+addr = 0xa9ce
+name = "L_GroundArea16"
+
+[[label]]
+addr = 0xa9ff
+name = "L_GroundArea17"
+
+[[label]]
+addr = 0xaa92
+name = "L_GroundArea18"
+
+[[label]]
+addr = 0xab05
+name = "L_GroundArea19"
+
+[[label]]
+addr = 0xab7e
+name = "L_GroundArea20"
+
+[[label]]
+addr = 0xabd7
+name = "L_GroundArea21"
+
+[[label]]
+addr = 0xac02
+name = "L_GroundArea22"
+
+[[label]]
+addr = 0xae06
+name = "L_WaterArea1"
+
+[[label]]
+addr = 0xae45
+name = "L_WaterArea2"
+
+[[label]]
+addr = 0xaec0
+name = "L_WaterArea3"
+
+[[label]]
+addr = 0xaefe
+name = "GameEngine"
+
+[[label]]
+addr = 0xaf03
+name = "ProcELoop"
+
+[[label]]
+addr = 0xaf52
+name = "NoChgMus"
+
+[[label]]
+addr = 0xaf5d
+name = "CycleTwo"
+
+[[label]]
+addr = 0xaf64
+name = "ClrPlrPal"
+
+[[label]]
+addr = 0xaf67
+name = "SaveAB"
+
+[[label]]
+addr = 0xaf8f
+name = "RunParser"
+
+[[label]]
+addr = 0xaf92
+name = "ExitEng"
+
+[[label]]
+addr = 0xafba
+name = "ChkNearMid"
+
+[[label]]
+addr = 0xaffb
+name = "InitScrlAmt"
+
+[[label]]
+addr = 0xb000
+name = "ChkPOffscr"
+
+[[label]]
+addr = 0xb013
+name = "KeepOnscr"
+
+[[label]]
+addr = 0xb02e
+name = "InitPlatScrl"
+
+[[label]]
+addr = 0xb083
+name = "ChkBehPipe"
+
+[[label]]
+addr = 0xb08d
+name = "IntroEntr"
+
+[[label]]
+addr = 0xb09b
+name = "EntrMode2"
+
+[[label]]
+addr = 0xb0ac
+name = "VineEntr"
+
+[[label]]
+addr = 0xb0c7
+name = "OffVine"
+
+[[label]]
+addr = 0xb0d3
+name = "PlayerRdy"
+
+[[label]]
+addr = 0xb0e5
+name = "ExitEntr"
+
+[[label]]
+addr = 0xb0ff
+name = "DisJoyp"
+
+[[label]]
+addr = 0xb104
+name = "SaveJoyp"
+
+[[label]]
+addr = 0xb12b
+name = "SizeChk"
+
+[[label]]
+addr = 0xb13e
+name = "ChkMoveDir"
+
+[[label]]
+addr = 0xb14a
+name = "SetMoveDir"
+
+[[label]]
+addr = 0xb14c
+name = "PlayerSubs"
+
+[[label]]
+addr = 0xb179
+name = "PlayerHole"
+
+[[label]]
+addr = 0xb194
+name = "HoleDie"
+
+[[label]]
+addr = 0xb1a6
+name = "HoleBottom"
+
+[[label]]
+addr = 0xb1aa
+name = "ChkHoleX"
+
+[[label]]
+addr = 0xb1ba
+name = "ExitCtrl"
+
+[[label]]
+addr = 0xb1bb
+name = "CloudExit"
+
+[[label]]
+addr = 0xb1d1
+name = "AutoClimb"
+
+[[label]]
+addr = 0xb20b
+name = "ChgAreaPipe"
+
+[[label]]
+addr = 0xb21e
+name = "ExitCAPipe"
+
+[[label]]
+addr = 0xb22e
+name = "RightPipe"
+
+[[label]]
+addr = 0xb23d
+name = "EndChgSize"
+
+[[label]]
+addr = 0xb244
+name = "ExitChgSize"
+
+[[label]]
+addr = 0xb253
+name = "ExitBlink"
+
+[[label]]
+addr = 0xb255
+name = "InitChangeSize"
+
+[[label]]
+addr = 0xb268
+name = "ExitBoth"
+
+[[label]]
+addr = 0xb2a3
+name = "ExitDeath"
+
+[[label]]
+addr = 0xb2bc
+name = "SlidePlayer"
+
+[[label]]
+addr = 0xb2bf
+name = "NoFPObj"
+
+[[label]]
+addr = 0xb2e3
+name = "ChkStop"
+
+[[label]]
+addr = 0xb2f1
+name = "InCastle"
+
+[[label]]
+addr = 0xb2f6
+name = "RdyNextA"
+
+[[label]]
+addr = 0xb315
+name = "NextArea"
+
+[[label]]
+addr = 0xb328
+name = "ExitNA"
+
+[[label]]
+addr = 0xb338
+name = "SetCrouch"
+
+[[label]]
+addr = 0xb33b
+name = "ProcMove"
+
+[[label]]
+addr = 0xb34e
+name = "MoveSubs"
+
+[[label]]
+addr = 0xb359
+name = "NoMoveSub"
+
+[[label]]
+addr = 0xb363
+name = "GndMove"
+
+[[label]]
+addr = 0xb38d
+name = "DumpFall"
+
+[[label]]
+addr = 0xb393
+name = "ProcSwim"
+
+[[label]]
+addr = 0xb3a6
+name = "LRWater"
+
+[[label]]
+addr = 0xb3ac
+name = "LRAir"
+
+[[label]]
+addr = 0xb3b3
+name = "JSMove"
+
+[[label]]
+addr = 0xb3c4
+name = "ExitMov1"
+
+[[label]]
+addr = 0xb3c7
+name = "ClimbAdderLow"
+
+[[label]]
+addr = 0xb3cb
+name = "ClimbAdderHigh"
+
+[[label]]
+addr = 0xb3e0
+name = "MoveOnVine"
+
+[[label]]
+addr = 0xb406
+name = "ClimbFD"
+
+[[label]]
+addr = 0xb40a
+name = "CSetFDir"
+
+[[label]]
+addr = 0xb41f
+name = "ExitCSub"
+
+[[label]]
+addr = 0xb420
+name = "InitCSTimer"
+
+[[label]]
+addr = 0xb424
+name = "JumpMForceData"
+
+[[label]]
+addr = 0xb42b
+name = "FallMForceData"
+
+[[label]]
+addr = 0xb432
+name = "PlayerYSpdData"
+
+[[label]]
+addr = 0xb439
+name = "InitMForceData"
+
+[[label]]
+addr = 0xb440
+name = "MaxLeftXSpdData"
+
+[[label]]
+addr = 0xb447
+name = "FrictionData"
+
+[[label]]
+addr = 0xb465
+name = "ProcClimb"
+
+[[label]]
+addr = 0xb475
+name = "SetCAnim"
+
+[[label]]
+addr = 0xb479
+name = "CheckForJumping"
+
+[[label]]
+addr = 0xb488
+name = "NoJump"
+
+[[label]]
+addr = 0xb48b
+name = "ProcJumping"
+
+[[label]]
+addr = 0xb4a0
+name = "InitJS"
+
+[[label]]
+addr = 0xb4d2
+name = "ChkWtr"
+
+[[label]]
+addr = 0xb4e4
+name = "GetYPhy"
+
+[[label]]
+addr = 0xb511
+name = "PJumpSnd"
+
+[[label]]
+addr = 0xb51a
+name = "SJumpSnd"
+
+[[label]]
+addr = 0xb51c
+name = "X_Physics"
+
+[[label]]
+addr = 0xb52d
+name = "ProcPRun"
+
+[[label]]
+addr = 0xb545
+name = "ChkRFast"
+
+[[label]]
+addr = 0xb554
+name = "FastXSp"
+
+[[label]]
+addr = 0xb559
+name = "SetRTmr"
+
+[[label]]
+addr = 0xb55e
+name = "GetXPhy"
+
+[[label]]
+addr = 0xb56c
+name = "GetXPhy2"
+
+[[label]]
+addr = 0xb58b
+name = "ExitPhy"
+
+[[label]]
+addr = 0xb59e
+name = "ChkSkid"
+
+[[label]]
+addr = 0xb5ad
+name = "SetRunSpd"
+
+[[label]]
+addr = 0xb5b3
+name = "ProcSkid"
+
+[[label]]
+addr = 0xb5c5
+name = "SetAnimSpd"
+
+[[label]]
+addr = 0xb5db
+name = "JoypFrict"
+
+[[label]]
+addr = 0xb5de
+name = "LeftFrict"
+
+[[label]]
+addr = 0xb5fc
+name = "RghtFrict"
+
+[[label]]
+addr = 0xb617
+name = "XSpdSign"
+
+[[label]]
+addr = 0xb620
+name = "SetAbsSpd"
+
+[[label]]
+addr = 0xb664
+name = "ProcFireballs"
+
+[[label]]
+addr = 0xb66e
+name = "ProcAirBubbles"
+
+[[label]]
+addr = 0xb675
+name = "BublLoop"
+
+[[label]]
+addr = 0xb686
+name = "BublExit"
+
+[[label]]
+addr = 0xb6be
+name = "RunFB"
+
+[[label]]
+addr = 0xb6ee
+name = "EraseFB"
+
+[[label]]
+addr = 0xb6f2
+name = "NoFBall"
+
+[[label]]
+addr = 0xb714
+name = "PosBubl"
+
+[[label]]
+addr = 0xb732
+name = "MoveBubl"
+
+[[label]]
+addr = 0xb748
+name = "Y_Bubl"
+
+[[label]]
+addr = 0xb74a
+name = "ExitBubl"
+
+[[label]]
+addr = 0xb74d
+name = "BubbleTimerData"
+
+[[label]]
+addr = 0xb786
+name = "ResGTCtrl"
+
+[[label]]
+addr = 0xb79a
+name = "TimeUpOn"
+
+[[label]]
+addr = 0xb7a3
+name = "ExGTimer"
+
+[[label]]
+addr = 0xb7c7
+name = "WhLoop"
+
+[[label]]
+addr = 0xb7f1
+name = "NextWh"
+
+[[label]]
+addr = 0xb7f4
+name = "ExitWh"
+
+[[label]]
+addr = 0xb828
+name = "LeftWh"
+
+[[label]]
+addr = 0xb839
+name = "SetPWh"
+
+[[label]]
+addr = 0xb83b
+name = "WhPull"
+
+[[label]]
+addr = 0xb896
+name = "SkipScore"
+
+[[label]]
+addr = 0xb899
+name = "GiveFPScr"
+
+[[label]]
+addr = 0xb8ac
+name = "FPGfx"
+
+[[label]]
+addr = 0xb8b5
+name = "ExitFlagP"
+
+[[label]]
+addr = 0xb8d5
+name = "DownJSpr"
+
+[[label]]
+addr = 0xb8d9
+name = "PosJSpr"
+
+[[label]]
+addr = 0xb8f4
+name = "BounceJS"
+
+[[label]]
+addr = 0xb902
+name = "DrawJSpr"
+
+[[label]]
+addr = 0xb91d
+name = "ExJSPring"
+
+[[label]]
+addr = 0xb93d
+name = "NextVO"
+
+[[label]]
+addr = 0xb949
+name = "VineHeightData"
+
+[[label]]
+addr = 0xb96a
+name = "RunVSubs"
+
+[[label]]
+addr = 0xb979
+name = "VDrawLoop"
+
+[[label]]
+addr = 0xb98a
+name = "KillVine"
+
+[[label]]
+addr = 0xb999
+name = "WrCMTile"
+
+[[label]]
+addr = 0xb9b7
+name = "ExitVH"
+
+[[label]]
+addr = 0xb9ba
+name = "CannonBitMasks"
+
+[[label]]
+addr = 0xb9c3
+name = "ThreeSChk"
+
+[[label]]
+addr = 0xb9e9
+name = "FireCannon"
+
+[[label]]
+addr = 0xba1a
+name = "Chk_BB"
+
+[[label]]
+addr = 0xba2d
+name = "Next3Slt"
+
+[[label]]
+addr = 0xba30
+name = "ExCannon"
+
+[[label]]
+addr = 0xba4d
+name = "SetupBB"
+
+[[label]]
+addr = 0xba6a
+name = "ChkDSte"
+
+[[label]]
+addr = 0xba73
+name = "BBFly"
+
+[[label]]
+addr = 0xba76
+name = "RunBBSubs"
+
+[[label]]
+addr = 0xba85
+name = "KillBB"
+
+[[label]]
+addr = 0xba92
+name = "HammerXSpdData"
+
+[[label]]
+addr = 0xbaa0
+name = "SetMOfs"
+
+[[label]]
+addr = 0xbabf
+name = "NoHammer"
+
+[[label]]
+addr = 0xbaf3
+name = "SetHSpd"
+
+[[label]]
+addr = 0xbb09
+name = "SetHPos"
+
+[[label]]
+addr = 0xbb28
+name = "RunAllH"
+
+[[label]]
+addr = 0xbb2b
+name = "RunHSubs"
+
+[[label]]
+addr = 0xbb6c
+name = "JCoinC"
+
+[[label]]
+addr = 0xbb86
+name = "FMiscLoop"
+
+[[label]]
+addr = 0xbb92
+name = "UseMiscS"
+
+[[label]]
+addr = 0xbb98
+name = "MiscLoop"
+
+[[label]]
+addr = 0xbba7
+name = "ProcJumpCoin"
+
+[[label]]
+addr = 0xbbc9
+name = "JCoinRun"
+
+[[label]]
+addr = 0xbbe8
+name = "RunJCSubs"
+
+[[label]]
+addr = 0xbbf4
+name = "MiscLoopBack"
+
+[[label]]
+addr = 0xbbfa
+name = "ScoreOffsets"
+
+[[label]]
+addr = 0xbc22
+name = "CoinPoints"
+
+[[label]]
+addr = 0xbc46
+name = "NoZSup"
+
+[[label]]
+addr = 0xbc49
+name = "SetupPowerUp"
+
+[[label]]
+addr = 0xbc79
+name = "StrType"
+
+[[label]]
+addr = 0xbc7b
+name = "PutBehind"
+
+[[label]]
+addr = 0xbcaa
+name = "ShroomM"
+
+[[label]]
+addr = 0xbcb3
+name = "GrowThePowerUp"
+
+[[label]]
+addr = 0xbcd2
+name = "ChkPUSte"
+
+[[label]]
+addr = 0xbcd8
+name = "RunPUSubs"
+
+[[label]]
+addr = 0xbcea
+name = "ExitPUp"
+
+[[label]]
+addr = 0xbcfa
+name = "DBlockSte"
+
+[[label]]
+addr = 0xbd1a
+name = "ChkBrick"
+
+[[label]]
+addr = 0xbd2c
+name = "StartBTmr"
+
+[[label]]
+addr = 0xbd39
+name = "ContBTmr"
+
+[[label]]
+addr = 0xbd40
+name = "PutOldMT"
+
+[[label]]
+addr = 0xbd41
+name = "PutMTileB"
+
+[[label]]
+addr = 0xbd61
+name = "SmallBP"
+
+[[label]]
+addr = 0xbd62
+name = "BigBP"
+
+[[label]]
+addr = 0xbd78
+name = "Unbreak"
+
+[[label]]
+addr = 0xbd7b
+name = "InvOBit"
+
+[[label]]
+addr = 0xbdbd
+name = "BlockCode"
+
+[[label]]
+addr = 0xbde7
+name = "ExitBlockChk"
+
+[[label]]
+addr = 0xbdf8
+name = "BumpChkLoop"
+
+[[label]]
+addr = 0xbe01
+name = "MatchBump"
+
+[[label]]
+addr = 0xbe40
+name = "TopEx"
+
+[[label]]
+addr = 0xbeaa
+name = "ChkTop"
+
+[[label]]
+addr = 0xbecf
+name = "KillBlock"
+
+[[label]]
+addr = 0xbed1
+name = "UpdSte"
+
+[[label]]
+addr = 0xbed6
+name = "UpdateLoop"
+
+[[label]]
+addr = 0xbefe
+name = "NextBUpd"
+
+[[label]]
+addr = 0xbf23
+name = "SaveXSpd"
+
+[[label]]
+addr = 0xbf2c
+name = "UseAdder"
+
+[[label]]
+addr = 0xbf4c
+name = "ExXMove"
+
+[[label]]
+addr = 0xbf59
+name = "NoJSChk"
+
+[[label]]
+addr = 0xbf6d
+name = "ContVMove"
+
+[[label]]
+addr = 0xbf77
+name = "MoveRedPTroopa"
+
+[[label]]
+addr = 0xbf8e
+name = "SetMdMax"
+
+[[label]]
+addr = 0xbf94
+name = "SetHiMax"
+
+[[label]]
+addr = 0xbf9f
+name = "MaxSpdBlockData"
+
+[[label]]
+addr = 0xbfa1
+name = "unref_bfa1"
+
+[[label]]
+addr = 0xbfc5
+name = "SetDblSpd"
+
+[[label]]
+addr = 0xbfd1
+name = "RedPTroopaGrav"
+
+[[label]]
+addr = 0xbfe9
+name = "AlterYP"
+
+[[label]]
+addr = 0xc018
+name = "ChkUpM"
+
+[[label]]
+addr = 0xc046
+name = "ExVMove"
+
+[[label]]
+addr = 0xc053
+name = "ChkAreaTsk"
+
+[[label]]
+addr = 0xc05f
+name = "ChkBowserF"
+
+[[label]]
+addr = 0xc06a
+name = "ExitELCore"
+
+[[label]]
+addr = 0xc0cc
+name = "ProcLoopCommand"
+
+[[label]]
+addr = 0xc0d8
+name = "FindLoop"
+
+[[label]]
+addr = 0xc102
+name = "IncMLoop"
+
+[[label]]
+addr = 0xc115
+name = "WrongChk"
+
+[[label]]
+addr = 0xc11c
+name = "DoLpBack"
+
+[[label]]
+addr = 0xc122
+name = "InitMLp"
+
+[[label]]
+addr = 0xc12a
+name = "InitLCmd"
+
+[[label]]
+addr = 0xc12f
+name = "ChkEnemyFrenzy"
+
+[[label]]
+addr = 0xc150
+name = "ChkEndofBuffer"
+
+[[label]]
+addr = 0xc208
+name = "StrID"
+
+[[label]]
+addr = 0xc224
+name = "StrFre"
+
+[[label]]
+addr = 0xc22d
+name = "ExEPar"
+
+[[label]]
+addr = 0xc22e
+name = "DoGroup"
+
+[[function]]
+addr = 0xc231
+name = "ParseRow0e"
+
+[[label]]
+addr = 0xc24d
+name = "NotUse"
+
+[[label]]
+addr = 0xc250
+name = "CheckThreeBytes"
+
+[[label]]
+addr = 0xc25b
+name = "Inc3B"
+
+[[label]]
+addr = 0xc25e
+name = "Inc2B"
+
+[[label]]
+addr = 0xc30c
+name = "NormalXSpdData"
+
+[[label]]
+addr = 0xc316
+name = "GetESpd"
+
+[[label]]
+addr = 0xc319
+name = "SetESpd"
+
+[[label]]
+addr = 0xc355
+name = "GetCent"
+
+[[label]]
+addr = 0xc35a
+name = "TallBBox"
+
+[[label]]
+addr = 0xc35c
+name = "SetBBox"
+
+[[label]]
+addr = 0xc395
+name = "KillLakitu"
+
+[[label]]
+addr = 0xc3b4
+name = "ChkLak"
+
+[[label]]
+addr = 0xc3ca
+name = "ChkNoEn"
+
+[[label]]
+addr = 0xc3d3
+name = "CreateL"
+
+[[label]]
+addr = 0xc3e3
+name = "RetEOfs"
+
+[[label]]
+addr = 0xc3e5
+name = "ExLSHand"
+
+[[label]]
+addr = 0xc3e6
+name = "CreateSpiny"
+
+[[label]]
+addr = 0xc40f
+name = "DifLoop"
+
+[[label]]
+addr = 0xc433
+name = "UsePosv"
+
+[[label]]
+addr = 0xc434
+name = "SetSpSpd"
+
+[[label]]
+addr = 0xc440
+name = "SpinyRte"
+
+[[label]]
+addr = 0xc44e
+name = "ChpChpEx"
+
+[[label]]
+addr = 0xc498
+name = "FlyCCXSpeedData"
+
+[[label]]
+addr = 0xc4a4
+name = "FlyCCTimerData"
+
+[[label]]
+addr = 0xc4c4
+name = "MaxCC"
+
+[[label]]
+addr = 0xc4e4
+name = "GSeed"
+
+[[label]]
+addr = 0xc4f8
+name = "RSeed"
+
+[[label]]
+addr = 0xc51c
+name = "D2XPos1"
+
+[[label]]
+addr = 0xc530
+name = "D2XPos2"
+
+[[label]]
+addr = 0xc53c
+name = "FinCCst"
+
+[[label]]
+addr = 0xc577
+name = "FSLoop"
+
+[[label]]
+addr = 0xc59c
+name = "FlmEx"
+
+[[label]]
+addr = 0xc59d
+name = "FlameYPosData"
+
+[[label]]
+addr = 0xc5c9
+name = "SetFrT"
+
+[[label]]
+addr = 0xc5ec
+name = "SpawnFromMouth"
+
+[[label]]
+addr = 0xc614
+name = "SetMF"
+
+[[label]]
+addr = 0xc61f
+name = "FinishFlame"
+
+[[label]]
+addr = 0xc64c
+name = "StarFChk"
+
+[[label]]
+addr = 0xc689
+name = "ExitFWk"
+
+[[label]]
+addr = 0xc68a
+name = "Bitmasks"
+
+[[label]]
+addr = 0xc692
+name = "Enemy17YPosData"
+
+[[label]]
+addr = 0xc69a
+name = "SwimCC_IDData"
+
+[[label]]
+addr = 0xc6b4
+name = "ChkW2"
+
+[[label]]
+addr = 0xc6bc
+name = "Get17ID"
+
+[[label]]
+addr = 0xc6c3
+name = "Set17ID"
+
+[[label]]
+addr = 0xc6d1
+name = "GetRBit"
+
+[[label]]
+addr = 0xc6d6
+name = "ChkRBit"
+
+[[label]]
+addr = 0xc6e6
+name = "AddFBit"
+
+[[label]]
+addr = 0xc6fd
+name = "DoBulletBills"
+
+[[label]]
+addr = 0xc6ff
+name = "BB_SLoop"
+
+[[label]]
+addr = 0xc710
+name = "ExF17"
+
+[[label]]
+addr = 0xc711
+name = "FireBulletBill"
+
+[[label]]
+addr = 0xc72f
+name = "PullID"
+
+[[label]]
+addr = 0xc730
+name = "SnglID"
+
+[[label]]
+addr = 0xc73a
+name = "SetYGp"
+
+[[label]]
+addr = 0xc74d
+name = "CntGrp"
+
+[[label]]
+addr = 0xc750
+name = "GrLoop"
+
+[[label]]
+addr = 0xc752
+name = "GSltLp"
+
+[[label]]
+addr = 0xc784
+name = "NextED"
+
+[[label]]
+addr = 0xc7ba
+name = "LakituChk"
+
+[[label]]
+addr = 0xc7c6
+name = "NextFSlot"
+
+[[label]]
+addr = 0xc7d9
+name = "TallBBox2"
+
+[[label]]
+addr = 0xc7db
+name = "SetBBox2"
+
+[[label]]
+addr = 0xc7ed
+name = "AlignP"
+
+[[label]]
+addr = 0xc7f8
+name = "SetBPA"
+
+[[label]]
+addr = 0xc81f
+name = "SetYO"
+
+[[label]]
+addr = 0xc828
+name = "CommonPlatCode"
+
+[[label]]
+addr = 0xc82b
+name = "SPBBox"
+
+[[label]]
+addr = 0xc83b
+name = "CasPBB"
+
+[[label]]
+addr = 0xc848
+name = "LargeLiftBBox"
+
+[[label]]
+addr = 0xc860
+name = "CommonSmallLift"
+
+[[label]]
+addr = 0xc86b
+name = "PlatPosDataLow"
+
+[[label]]
+addr = 0xc86e
+name = "PlatPosDataHigh"
+
+[[label]]
+addr = 0xc88f
+name = "JmpEO"
+
+[[label]]
+addr = 0xc902
+name = "SkipMove"
+
+[[label]]
+addr = 0xc979
+name = "SkipPT"
+
+[[label]]
+addr = 0xc9cb
+name = "PdbM"
+
+[[label]]
+addr = 0xc9d0
+name = "XSpeedAdderData"
+
+[[label]]
+addr = 0xc9d4
+name = "RevivedXSpeed"
+
+[[label]]
+addr = 0xc9e1
+name = "ChkJH"
+
+[[label]]
+addr = 0xca0a
+name = "DecHT"
+
+[[label]]
+addr = 0xca37
+name = "SetHJ"
+
+[[label]]
+addr = 0xca4b
+name = "HJump"
+
+[[label]]
+addr = 0xca62
+name = "Shimmy"
+
+[[label]]
+addr = 0xca75
+name = "SetShim"
+
+[[label]]
+addr = 0xca98
+name = "FallE"
+
+[[label]]
+addr = 0xcaaf
+name = "MEHor"
+
+[[label]]
+addr = 0xcab2
+name = "SlowM"
+
+[[label]]
+addr = 0xcab4
+name = "SteadM"
+
+[[label]]
+addr = 0xcabb
+name = "AddHS"
+
+[[label]]
+addr = 0xcac8
+name = "ReviveStunned"
+
+[[label]]
+addr = 0xcadf
+name = "SetRSpd"
+
+[[label]]
+addr = 0xcaeb
+name = "ChkKillGoomba"
+
+[[label]]
+addr = 0xcaf8
+name = "HKGmba"
+
+[[label]]
+addr = 0xcb18
+name = "NoIncPT"
+
+[[label]]
+addr = 0xcb22
+name = "MovPTDwn"
+
+[[label]]
+addr = 0xcb3b
+name = "YSway"
+
+[[label]]
+addr = 0xcb44
+name = "NoMGPT"
+
+[[label]]
+addr = 0xcb5c
+name = "NoIncXM"
+
+[[label]]
+addr = 0xcb5d
+name = "IncPXM"
+
+[[label]]
+addr = 0xcb60
+name = "DecSeXM"
+
+[[label]]
+addr = 0xcb7c
+name = "XMRight"
+
+[[label]]
+addr = 0xcb87
+name = "BlooberBitmasks"
+
+[[label]]
+addr = 0xcba2
+name = "FBLeft"
+
+[[label]]
+addr = 0xcbaa
+name = "SBMDir"
+
+[[label]]
+addr = 0xcbac
+name = "BlooberSwim"
+
+[[label]]
+addr = 0xcbbb
+name = "SwimX"
+
+[[label]]
+addr = 0xcbce
+name = "LeftSwim"
+
+[[label]]
+addr = 0xcc03
+name = "BSwimE"
+
+[[label]]
+addr = 0xcc04
+name = "SlowSwim"
+
+[[label]]
+addr = 0xcc1b
+name = "NoSSw"
+
+[[label]]
+addr = 0xcc1c
+name = "ChkForFloatdown"
+
+[[label]]
+addr = 0xcc21
+name = "Floatdown"
+
+[[label]]
+addr = 0xcc28
+name = "NoFD"
+
+[[label]]
+addr = 0xcc29
+name = "ChkNeearPlayer"
+
+[[label]]
+addr = 0xcc3f
+name = "NotDefB"
+
+[[label]]
+addr = 0xcc46
+name = "SwimCCXMoveData"
+
+[[label]]
+addr = 0xcc53
+name = "CCSwim"
+
+[[label]]
+addr = 0xcc99
+name = "CCSwimUpwards"
+
+[[label]]
+addr = 0xccac
+name = "ChkSwimYPos"
+
+[[label]]
+addr = 0xccbf
+name = "YPDiff"
+
+[[label]]
+addr = 0xccc6
+name = "ExSwCC"
+
+[[label]]
+addr = 0xcd3a
+name = "FirebarYPos"
+
+[[label]]
+addr = 0xcd55
+name = "SusFbar"
+
+[[label]]
+addr = 0xcd65
+name = "SkpFSte"
+
+[[label]]
+addr = 0xcd6a
+name = "SetupGFB"
+
+[[label]]
+addr = 0xcd96
+name = "SetMFbar"
+
+[[label]]
+addr = 0xcd9c
+name = "DrawFbar"
+
+[[label]]
+addr = 0xcdb2
+name = "NextFbar"
+
+[[label]]
+addr = 0xcdba
+name = "SkipFBar"
+
+[[label]]
+addr = 0xcdcb
+name = "AddHA"
+
+[[label]]
+addr = 0xcde2
+name = "SubtR1"
+
+[[label]]
+addr = 0xcde6
+name = "ChkFOfs"
+
+[[label]]
+addr = 0xcdee
+name = "VAHandl"
+
+[[label]]
+addr = 0xcdff
+name = "AddVA"
+
+[[label]]
+addr = 0xce03
+name = "SetVFbr"
+
+[[label]]
+addr = 0xce28
+name = "AdjSm"
+
+[[label]]
+addr = 0xce31
+name = "BigJp"
+
+[[label]]
+addr = 0xce32
+name = "FBCLoop"
+
+[[label]]
+addr = 0xce3c
+name = "ChkVFBD"
+
+[[label]]
+addr = 0xce58
+name = "ChkFBCl"
+
+[[label]]
+addr = 0xce5c
+name = "Chk20fs"
+
+[[label]]
+addr = 0xce6f
+name = "ChgSDir"
+
+[[label]]
+addr = 0xce78
+name = "SetSDir"
+
+[[label]]
+addr = 0xce85
+name = "NoColFB"
+
+[[label]]
+addr = 0xce9a
+name = "GetHAdder"
+
+[[label]]
+addr = 0xceba
+name = "GetVAdder"
+
+[[label]]
+addr = 0xceda
+name = "FlyCCBPriority"
+
+[[label]]
+addr = 0xceed
+name = "FlyCC"
+
+[[label]]
+addr = 0xcf0c
+name = "AddCCF"
+
+[[label]]
+addr = 0xcf1e
+name = "BPGet"
+
+[[label]]
+addr = 0xcf25
+name = "LakituDiffAdj"
+
+[[label]]
+addr = 0xcf31
+name = "ChkLS"
+
+[[label]]
+addr = 0xcf40
+name = "Fr12S"
+
+[[label]]
+addr = 0xcf47
+name = "LdLDa"
+
+[[label]]
+addr = 0xcf53
+name = "SetLSpd"
+
+[[label]]
+addr = 0xcf67
+name = "SetLMov"
+
+[[label]]
+addr = 0xcf7d
+name = "ChkLakDif"
+
+[[label]]
+addr = 0xcf9c
+name = "SetLMovD"
+
+[[label]]
+addr = 0xcf9f
+name = "ChkPSpeed"
+
+[[label]]
+addr = 0xcfb5
+name = "LCFB5"
+
+[[label]]
+addr = 0xcfc1
+name = "ChkSpinyO"
+
+[[label]]
+addr = 0xcfcb
+name = "ChkEmySpd"
+
+[[label]]
+addr = 0xcfd1
+name = "SubDifAdj"
+
+[[label]]
+addr = 0xcfd6
+name = "SPixelLak"
+
+[[label]]
+addr = 0xcfdc
+name = "ExMoveLak"
+
+[[label]]
+addr = 0xd005
+name = "SetM2"
+
+[[label]]
+addr = 0xd00f
+name = "MoveD_Bowser"
+
+[[label]]
+addr = 0xd015
+name = "RemoveBridge"
+
+[[label]]
+addr = 0xd05e
+name = "NoBFall"
+
+[[label]]
+addr = 0xd061
+name = "PRandomRange"
+
+[[label]]
+addr = 0xd073
+name = "KillLoop"
+
+[[label]]
+addr = 0xd07f
+name = "BowserControl"
+
+[[label]]
+addr = 0xd08c
+name = "ChkMouth"
+
+[[label]]
+addr = 0xd094
+name = "FeetTmr"
+
+[[label]]
+addr = 0xd0a6
+name = "ResetMDr"
+
+[[label]]
+addr = 0xd0b0
+name = "B_FaceP"
+
+[[label]]
+addr = 0xd0d1
+name = "GetPRCmp"
+
+[[label]]
+addr = 0xd0ea
+name = "GetDToO"
+
+[[label]]
+addr = 0xd107
+name = "CompDtoO"
+
+[[label]]
+addr = 0xd10f
+name = "HammerChk"
+
+[[label]]
+addr = 0xd127
+name = "SetHmrTmr"
+
+[[label]]
+addr = 0xd139
+name = "SkipToFB"
+
+[[label]]
+addr = 0xd13c
+name = "MakeBJump"
+
+[[label]]
+addr = 0xd149
+name = "ChkFireB"
+
+[[label]]
+addr = 0xd154
+name = "SpawnFBr"
+
+[[label]]
+addr = 0xd173
+name = "SetFBTmr"
+
+[[label]]
+addr = 0xd187
+name = "CopyFToR"
+
+[[label]]
+addr = 0xd1bb
+name = "ExBgfxH"
+
+[[label]]
+addr = 0xd1d1
+name = "FlameTimerData"
+
+[[label]]
+addr = 0xd1ea
+name = "ExFl"
+
+[[label]]
+addr = 0xd1f9
+name = "SFlmX"
+
+[[label]]
+addr = 0xd220
+name = "SetGfxF"
+
+[[label]]
+addr = 0xd235
+name = "FlmeAt"
+
+[[label]]
+addr = 0xd23c
+name = "DrawFlameLoop"
+
+[[label]]
+addr = 0xd277
+name = "M3FOfs"
+
+[[label]]
+addr = 0xd281
+name = "M2FOfs"
+
+[[label]]
+addr = 0xd28b
+name = "M1FOfs"
+
+[[label]]
+addr = 0xd294
+name = "ExFlmeD"
+
+[[label]]
+addr = 0xd2a5
+name = "SetupExpl"
+
+[[label]]
+addr = 0xd309
+name = "SetFWC"
+
+[[label]]
+addr = 0xd30e
+name = "IncrementSFTask1"
+
+[[label]]
+addr = 0xd327
+name = "NoTTick"
+
+[[label]]
+addr = 0xd336
+name = "EndAreaPoints"
+
+[[label]]
+addr = 0xd33f
+name = "ELPGive"
+
+[[label]]
+addr = 0xd359
+name = "SetoffF"
+
+[[label]]
+addr = 0xd36d
+name = "DSFloop"
+
+[[label]]
+addr = 0xd396
+name = "DrawFlagSetTimer"
+
+[[label]]
+addr = 0xd39e
+name = "IncrementSFTask2"
+
+[[label]]
+addr = 0xd3af
+name = "StarFlagExit2"
+
+[[label]]
+addr = 0xd40a
+name = "PutinPipe"
+
+[[label]]
+addr = 0xd43b
+name = "DoBPl"
+
+[[label]]
+addr = 0xd44d
+name = "ChkForFall"
+
+[[label]]
+addr = 0xd462
+name = "ChkOtherForFall"
+
+[[label]]
+addr = 0xd494
+name = "ColFlg"
+
+[[label]]
+addr = 0xd498
+name = "PlatUp"
+
+[[label]]
+addr = 0xd49e
+name = "PlatSt"
+
+[[label]]
+addr = 0xd4a4
+name = "PlatDn"
+
+[[label]]
+addr = 0xd4a7
+name = "DoOtherPlatform"
+
+[[label]]
+addr = 0xd4bd
+name = "DrawEraseRope"
+
+[[label]]
+addr = 0xd4f7
+name = "EraseR1"
+
+[[label]]
+addr = 0xd4ff
+name = "OtherRope"
+
+[[label]]
+addr = 0xd528
+name = "EraseR2"
+
+[[label]]
+addr = 0xd530
+name = "EndRp"
+
+[[label]]
+addr = 0xd53e
+name = "ExitRp"
+
+[[label]]
+addr = 0xd550
+name = "GetLRp"
+
+[[label]]
+addr = 0xd56a
+name = "GetHRp"
+
+[[label]]
+addr = 0xd597
+name = "ExPRp"
+
+[[label]]
+addr = 0xd5bb
+name = "PlatformFall"
+
+[[label]]
+addr = 0xd5d0
+name = "ExPF"
+
+[[label]]
+addr = 0xd5ec
+name = "SkipIY"
+
+[[label]]
+addr = 0xd5ef
+name = "ChkYCenterPos"
+
+[[label]]
+addr = 0xd5fb
+name = "YMDown"
+
+[[label]]
+addr = 0xd5fe
+name = "ChkYPCollision"
+
+[[label]]
+addr = 0xd606
+name = "ExYPl"
+
+[[label]]
+addr = 0xd626
+name = "PPHSubt"
+
+[[label]]
+addr = 0xd628
+name = "SetPVar"
+
+[[label]]
+addr = 0xd630
+name = "ExXMP"
+
+[[label]]
+addr = 0xd63c
+name = "ExDPl"
+
+[[label]]
+addr = 0xd64e
+name = "ExRPl"
+
+[[label]]
+addr = 0xd679
+name = "ExLiftP"
+
+[[label]]
+addr = 0xd68d
+name = "LimitB"
+
+[[label]]
+addr = 0xd68f
+name = "ExtendLB"
+
+[[label]]
+addr = 0xd6d2
+name = "TooFar"
+
+[[label]]
+addr = 0xd6d5
+name = "ExScrnBd"
+
+[[label]]
+addr = 0xd706
+name = "GoombaDie"
+
+[[label]]
+addr = 0xd710
+name = "NoGoomba"
+
+[[label]]
+addr = 0xd72c
+name = "NoFToECol"
+
+[[label]]
+addr = 0xd733
+name = "ExitFBallEnemy"
+
+[[label]]
+addr = 0xd752
+name = "ChkBuzzyBeetle"
+
+[[label]]
+addr = 0xd75c
+name = "HurtBowser"
+
+[[label]]
+addr = 0xd77d
+name = "SetDBSte"
+
+[[label]]
+addr = 0xd789
+name = "ChkOtherEnemies"
+
+[[label]]
+addr = 0xd7a1
+name = "StnE"
+
+[[label]]
+addr = 0xd7b6
+name = "GoombaPoints"
+
+[[label]]
+addr = 0xd7bc
+name = "EnemySmackCore"
+
+[[label]]
+addr = 0xd7c3
+name = "ExHCF"
+
+[[label]]
+addr = 0xd7fa
+name = "ClHCol"
+
+[[label]]
+addr = 0xd7ff
+name = "ExPHC"
+
+[[label]]
+addr = 0xd83a
+name = "SetFor1Up"
+
+[[label]]
+addr = 0xd840
+name = "UpToSuper"
+
+[[label]]
+addr = 0xd847
+name = "UpToFiery"
+
+[[label]]
+addr = 0xd84c
+name = "NoPUp"
+
+[[label]]
+addr = 0xd880
+name = "NoPECol"
+
+[[label]]
+addr = 0xd88a
+name = "EColl"
+
+[[label]]
+addr = 0xd8f5
+name = "KSPts"
+
+[[label]]
+addr = 0xd8f8
+name = "ExPEC"
+
+[[label]]
+addr = 0xd8ff
+name = "ChkInj"
+
+[[label]]
+addr = 0xd90e
+name = "ChkETmrs"
+
+[[label]]
+addr = 0xd923
+name = "TInjE"
+
+[[label]]
+addr = 0xd946
+name = "SetKRout"
+
+[[label]]
+addr = 0xd958
+name = "KillPlayer"
+
+[[label]]
+addr = 0xd969
+name = "EnemyStomped"
+
+[[label]]
+addr = 0xd996
+name = "EnemyStompedPts"
+
+[[label]]
+addr = 0xd9d2
+name = "RevivalRateData"
+
+[[label]]
+addr = 0xd9f1
+name = "SBnce"
+
+[[label]]
+addr = 0xd9ff
+name = "LInj"
+
+[[label]]
+addr = 0xda0d
+name = "SFcRt"
+
+[[label]]
+addr = 0xda24
+name = "ExSFN"
+
+[[label]]
+addr = 0xda25
+name = "SetBitsMask"
+
+[[label]]
+addr = 0xda2c
+name = "ClearBitsMask"
+
+[[label]]
+addr = 0xda56
+name = "ECLoop"
+
+[[label]]
+addr = 0xda9b
+name = "YesEC"
+
+[[label]]
+addr = 0xdaaa
+name = "ReadyNextEnemy"
+
+[[label]]
+addr = 0xdab1
+name = "ExitECRoutine"
+
+[[label]]
+addr = 0xdad9
+name = "ShellCollisions"
+
+[[label]]
+addr = 0xdb15
+name = "MoveEOfs"
+
+[[label]]
+addr = 0xdb36
+name = "RXSpd"
+
+[[label]]
+addr = 0xdb44
+name = "ExTA"
+
+[[label]]
+addr = 0xdb78
+name = "ExLPC"
+
+[[label]]
+addr = 0xdba1
+name = "MoveBoundBox"
+
+[[label]]
+addr = 0xdbb7
+name = "ExSPC"
+
+[[label]]
+addr = 0xdc11
+name = "SideC"
+
+[[label]]
+addr = 0xdc14
+name = "NoSideC"
+
+[[label]]
+addr = 0xdc40
+name = "ExPlPos"
+
+[[label]]
+addr = 0xdc51
+name = "ExCPV"
+
+[[label]]
+addr = 0xdc82
+name = "SetFallS"
+
+[[label]]
+addr = 0xdc84
+name = "SetPSte"
+
+[[label]]
+addr = 0xdc86
+name = "ChkOnScr"
+
+[[label]]
+addr = 0xdc97
+name = "ExPBGCol"
+
+[[label]]
+addr = 0xdc98
+name = "ChkCollSize"
+
+[[label]]
+addr = 0xdcab
+name = "GBBAdr"
+
+[[label]]
+addr = 0xdcba
+name = "HeadChk"
+
+[[label]]
+addr = 0xdcea
+name = "SolidOrClimb"
+
+[[label]]
+addr = 0xdcf2
+name = "MYSpd"
+
+[[label]]
+addr = 0xdcf6
+name = "DoFootCheck"
+
+[[label]]
+addr = 0xdd1d
+name = "ChkFootMTile"
+
+[[label]]
+addr = 0xdd2d
+name = "ContChk"
+
+[[label]]
+addr = 0xdd44
+name = "LandPlyr"
+
+[[label]]
+addr = 0xdd5a
+name = "InitSteP"
+
+[[label]]
+addr = 0xdd66
+name = "SideCheckLoop"
+
+[[label]]
+addr = 0xdd85
+name = "BHalf"
+
+[[label]]
+addr = 0xdd9b
+name = "ExSCH"
+
+[[label]]
+addr = 0xdd9c
+name = "ChkSideMTiles"
+
+[[label]]
+addr = 0xdda9
+name = "ContSChk"
+
+[[label]]
+addr = 0xddbb
+name = "ChkPBtm"
+
+[[label]]
+addr = 0xddce
+name = "PipeDwnS"
+
+[[label]]
+addr = 0xddd7
+name = "PlyrPipe"
+
+[[label]]
+addr = 0xddea
+name = "SetCATmr"
+
+[[label]]
+addr = 0xddf0
+name = "ChkGERtn"
+
+[[label]]
+addr = 0xddff
+name = "StopPlayerMove"
+
+[[label]]
+addr = 0xde02
+name = "ExCSM"
+
+[[label]]
+addr = 0xde25
+name = "ClimbXPosAdder"
+
+[[label]]
+addr = 0xde27
+name = "ClimbPLocAdder"
+
+[[label]]
+addr = 0xde2e
+name = "HandleClimbing"
+
+[[label]]
+addr = 0xde38
+name = "ExHC"
+
+[[label]]
+addr = 0xde39
+name = "ChkForFlagpole"
+
+[[label]]
+addr = 0xde70
+name = "MtchF"
+
+[[label]]
+addr = 0xde73
+name = "RunFR"
+
+[[label]]
+addr = 0xde7a
+name = "VineCollision"
+
+[[label]]
+addr = 0xde88
+name = "PutPlayerOnVine"
+
+[[label]]
+addr = 0xdea1
+name = "SetVXPl"
+
+[[label]]
+addr = 0xdebc
+name = "ExPVne"
+
+[[label]]
+addr = 0xdec3
+name = "ExCInvT"
+
+[[label]]
+addr = 0xdedc
+name = "ExCJSp"
+
+[[label]]
+addr = 0xdee6
+name = "JSFnd"
+
+[[label]]
+addr = 0xdee7
+name = "NoJSFnd"
+
+[[label]]
+addr = 0xdf22
+name = "GetWNum"
+
+[[label]]
+addr = 0xdf4a
+name = "ExPipeE"
+
+[[label]]
+addr = 0xdf5e
+name = "RImpd"
+
+[[label]]
+addr = 0xdf66
+name = "NXSpd"
+
+[[label]]
+addr = 0xdf74
+name = "PlatF"
+
+[[label]]
+addr = 0xdf81
+name = "ExIPM"
+
+[[label]]
+addr = 0xdfab
+name = "CoinSd"
+
+[[label]]
+addr = 0xdfb8
+name = "ExEBG"
+
+[[label]]
+addr = 0xdfd8
+name = "DoIDCheckBGColl"
+
+[[label]]
+addr = 0xdfdf
+name = "HBChk"
+
+[[label]]
+addr = 0xdfe6
+name = "CInvu"
+
+[[label]]
+addr = 0xdff2
+name = "YesIn"
+
+[[label]]
+addr = 0xe016
+name = "GiveOEPoints"
+
+[[label]]
+addr = 0xe02b
+name = "Demote"
+
+[[label]]
+addr = 0xe048
+name = "SetWySpd"
+
+[[label]]
+addr = 0xe04a
+name = "SetNotW"
+
+[[label]]
+addr = 0xe054
+name = "ChkBBill"
+
+[[label]]
+addr = 0xe060
+name = "NoCDirF"
+
+[[label]]
+addr = 0xe066
+name = "ExEBGChk"
+
+[[label]]
+addr = 0xe07b
+name = "SChkA"
+
+[[label]]
+addr = 0xe09a
+name = "SetForStn"
+
+[[label]]
+addr = 0xe0a4
+name = "ExSteChk"
+
+[[label]]
+addr = 0xe0bd
+name = "InvtD"
+
+[[label]]
+addr = 0xe0c5
+name = "CNwCDir"
+
+[[label]]
+addr = 0xe0e2
+name = "ChkForRedKoopa"
+
+[[label]]
+addr = 0xe0ec
+name = "Chk2MSBSt"
+
+[[label]]
+addr = 0xe0f9
+name = "GetSteFromD"
+
+[[label]]
+addr = 0xe0fc
+name = "SetD6Ste"
+
+[[label]]
+addr = 0xe10a
+name = "SdeCLoop"
+
+[[label]]
+addr = 0xe11c
+name = "NextSdeC"
+
+[[label]]
+addr = 0xe123
+name = "ExESdeC"
+
+[[label]]
+addr = 0xe131
+name = "NoBump"
+
+[[label]]
+addr = 0xe140
+name = "InvEnemyDir"
+
+[[label]]
+addr = 0xe182
+name = "DoSide"
+
+[[label]]
+addr = 0xe185
+name = "HammerBroBGColl"
+
+[[label]]
+addr = 0xe196
+name = "UnderHammerBro"
+
+[[label]]
+addr = 0xe1c7
+name = "NSFnd"
+
+[[label]]
+addr = 0xe1ef
+name = "ClearBounceFlag"
+
+[[label]]
+addr = 0xe23d
+name = "FBallB"
+
+[[label]]
+addr = 0xe267
+name = "CMBits"
+
+[[label]]
+addr = 0xe306
+name = "SORte"
+
+[[label]]
+addr = 0xe309
+name = "NoOfs"
+
+[[label]]
+addr = 0xe31f
+name = "SOLft"
+
+[[label]]
+addr = 0xe322
+name = "NoOfs2"
+
+[[label]]
+addr = 0xe35f
+name = "FirstBoxGreater"
+
+[[label]]
+addr = 0xe37e
+name = "CollisionFound"
+
+[[label]]
+addr = 0xe392
+name = "unref_e392"
+
+[[label]]
+addr = 0xe3a3
+name = "ResJmpM"
+
+[[label]]
+addr = 0xe3a5
+name = "BBChk_E"
+
+[[label]]
+addr = 0xe429
+name = "RetXC"
+
+[[label]]
+addr = 0xe42b
+name = "RetYC"
+
+[[label]]
+addr = 0xe433
+name = "VineYPosAdder"
+
+[[label]]
+addr = 0xe479
+name = "VineTL"
+
+[[label]]
+addr = 0xe490
+name = "SkpVTop"
+
+[[label]]
+addr = 0xe492
+name = "ChkFTop"
+
+[[label]]
+addr = 0xe4a2
+name = "NextVSp"
+
+[[label]]
+addr = 0xe4b0
+name = "StkLp"
+
+[[label]]
+addr = 0xe4c0
+name = "FirstSprXPos"
+
+[[label]]
+addr = 0xe4c4
+name = "FirstSprYPos"
+
+[[label]]
+addr = 0xe4c8
+name = "SecondSprXPos"
+
+[[label]]
+addr = 0xe4cc
+name = "SecondSprYPos"
+
+[[label]]
+addr = 0xe4d0
+name = "FirstSprTilenum"
+
+[[label]]
+addr = 0xe4d8
+name = "HammerSprAttrib"
+
+[[label]]
+addr = 0xe4ec
+name = "ForceHPose"
+
+[[label]]
+addr = 0xe4f0
+name = "GetHPose"
+
+[[label]]
+addr = 0xe4f7
+name = "RdnerH"
+
+[[label]]
+addr = 0xe540
+name = "NoHOffscr"
+
+[[label]]
+addr = 0xe5c7
+name = "ExitDumpSpr"
+
+[[label]]
+addr = 0xe5e9
+name = "ShrinkPlatform"
+
+[[label]]
+addr = 0xe61a
+name = "SChk2"
+
+[[label]]
+addr = 0xe624
+name = "SChk3"
+
+[[label]]
+addr = 0xe62e
+name = "SChk4"
+
+[[label]]
+addr = 0xe638
+name = "SChk5"
+
+[[label]]
+addr = 0xe642
+name = "SChk6"
+
+[[label]]
+addr = 0xe64b
+name = "SLChk"
+
+[[label]]
+addr = 0xe654
+name = "ExDLPl"
+
+[[label]]
+addr = 0xe65c
+name = "NotRsNum"
+
+[[label]]
+addr = 0xe6bd
+name = "ExJcGfx"
+
+[[label]]
+addr = 0xe6be
+name = "PowerUpGfxTable"
+
+[[label]]
+addr = 0xe6f7
+name = "PUpDrawLoop"
+
+[[label]]
+addr = 0xe73b
+name = "PUpOfs"
+
+[[label]]
+addr = 0xe8cd
+name = "SBBAt"
+
+[[label]]
+addr = 0xe8e1
+name = "CheckForPodoboo"
+
+[[label]]
+addr = 0xe8fe
+name = "SBwsrGfxOfs"
+
+[[label]]
+addr = 0xe900
+name = "CheckForGoomba"
+
+[[label]]
+addr = 0xe910
+name = "GmbaAnim"
+
+[[label]]
+addr = 0xe940
+name = "CheckFrontSte"
+
+[[label]]
+addr = 0xe946
+name = "FlipBowserOver"
+
+[[label]]
+addr = 0xe949
+name = "DrawBowser"
+
+[[label]]
+addr = 0xe94c
+name = "CheckBowserRear"
+
+[[label]]
+addr = 0xe955
+name = "ChkRearSte"
+
+[[label]]
+addr = 0xe965
+name = "CheckForSpiny"
+
+[[label]]
+addr = 0xe977
+name = "NotEgg"
+
+[[label]]
+addr = 0xe97a
+name = "CheckForLakitu"
+
+[[label]]
+addr = 0xe98d
+name = "NoLAFr"
+
+[[label]]
+addr = 0xe9de
+name = "CheckForBloober"
+
+[[label]]
+addr = 0xea4b
+name = "DrawEnemyObject"
+
+[[label]]
+addr = 0xea61
+name = "SkipToOffScrChk"
+
+[[label]]
+addr = 0xeab6
+name = "ContES"
+
+[[label]]
+addr = 0xeaca
+name = "ESRtnr"
+
+[[label]]
+addr = 0xead3
+name = "SpnySC"
+
+[[label]]
+addr = 0xead7
+name = "MirrorEnemyGfx"
+
+[[label]]
+addr = 0xeaf2
+name = "EggExc"
+
+[[label]]
+addr = 0xeb3e
+name = "NVFlak"
+
+[[label]]
+addr = 0xeb74
+name = "LcChk"
+
+[[label]]
+addr = 0xeb7e
+name = "Row3C"
+
+[[label]]
+addr = 0xeb89
+name = "Row23C"
+
+[[label]]
+addr = 0xeb93
+name = "AllRowC"
+
+[[label]]
+addr = 0xeba9
+name = "ExEGHandler"
+
+[[label]]
+addr = 0xebe7
+name = "DBlkLoop"
+
+[[label]]
+addr = 0xec0a
+name = "ChkRep"
+
+[[label]]
+addr = 0xec21
+name = "SetBFlip"
+
+[[label]]
+addr = 0xec35
+name = "BlkOffscr"
+
+[[label]]
+addr = 0xec45
+name = "PullOfsB"
+
+[[label]]
+addr = 0xec52
+name = "ExDBlk"
+
+[[label]]
+addr = 0xec65
+name = "DChunks"
+
+[[label]]
+addr = 0xecc9
+name = "ChnkOfs"
+
+[[label]]
+addr = 0xecdd
+name = "ExBCDr"
+
+[[label]]
+addr = 0xecde
+name = "DrawFireball"
+
+[[label]]
+addr = 0xed02
+name = "FireA"
+
+[[label]]
+addr = 0xed06
+name = "ExplosionTiles"
+
+[[label]]
+addr = 0xed61
+name = "KillFireBall"
+
+[[label]]
+addr = 0xed9c
+name = "ToSP"
+
+[[label]]
+addr = 0xedaa
+name = "BotSP"
+
+[[label]]
+addr = 0xedc3
+name = "SOfs"
+
+[[label]]
+addr = 0xedd1
+name = "SOfs2"
+
+[[label]]
+addr = 0xedde
+name = "ExSPl"
+
+[[label]]
+addr = 0xee06
+name = "ExDBub"
+
+[[label]]
+addr = 0xee9f
+name = "SwimTiles"
+
+[[label]]
+addr = 0xeee7
+name = "SwimKickTileNum"
+
+[[label]]
+addr = 0xeef3
+name = "CntPl"
+
+[[label]]
+addr = 0xef1f
+name = "SwimKT"
+
+[[label]]
+addr = 0xef2d
+name = "BigKTS"
+
+[[label]]
+addr = 0xef33
+name = "ExPGH"
+
+[[label]]
+addr = 0xef3a
+name = "DoChangeSize"
+
+[[label]]
+addr = 0xef40
+name = "PlayerKilled"
+
+[[label]]
+addr = 0xef76
+name = "SUpdR"
+
+[[label]]
+addr = 0xef8c
+name = "PROfsLoop"
+
+[[label]]
+addr = 0xef95
+name = "NPROffscr"
+
+[[label]]
+addr = 0xefa6
+name = "PIntLoop"
+
+[[label]]
+addr = 0xf028
+name = "NonAnimatedActs"
+
+[[label]]
+addr = 0xf034
+name = "ActionFalling"
+
+[[label]]
+addr = 0xf03c
+name = "ActionWalkRun"
+
+[[label]]
+addr = 0xf044
+name = "ActionClimbing"
+
+[[label]]
+addr = 0xf050
+name = "ActionSwimming"
+
+[[label]]
+addr = 0xf068
+name = "FourFrameExtent"
+
+[[label]]
+addr = 0xf08c
+name = "SetAnimC"
+
+[[label]]
+addr = 0xf08f
+name = "ExAnimC"
+
+[[label]]
+addr = 0xf09b
+name = "SzOfs"
+
+[[label]]
+addr = 0xf0c3
+name = "CszNext"
+
+[[label]]
+addr = 0xf0c6
+name = "GorSLog"
+
+[[label]]
+addr = 0xf0d7
+name = "ShrinkPlayer"
+
+[[label]]
+addr = 0xf0e5
+name = "ShrPlF"
+
+[[label]]
+addr = 0xf105
+name = "KilledAtt"
+
+[[label]]
+addr = 0xf117
+name = "C_S_IGAtt"
+
+[[label]]
+addr = 0xf129
+name = "ExPlyrAt"
+
+[[label]]
+addr = 0xf142
+name = "RelWOfs"
+
+[[label]]
+addr = 0xf1a5
+name = "ObjOffsetData"
+
+[[label]]
+addr = 0xf1fa
+name = "XOfsLoop"
+
+[[label]]
+addr = 0xf21e
+name = "XLdBData"
+
+[[label]]
+addr = 0xf22a
+name = "ExXofsBS"
+
+[[label]]
+addr = 0xf237
+name = "HighPosUnitData"
+
+[[label]]
+addr = 0xf23d
+name = "YOfsLoop"
+
+[[label]]
+addr = 0xf260
+name = "YLdBData"
+
+[[label]]
+addr = 0xf26c
+name = "ExYOfsBS"
+
+[[label]]
+addr = 0xf280
+name = "SetOscrO"
+
+[[label]]
+addr = 0xf281
+name = "ExDivPD"
+
+[[label]]
+addr = 0xf296
+name = "NoHFlip"
+
+[[label]]
+addr = 0xf2a0
+name = "SetHFAt"
+
+[[label]]
+addr = 0xf2d9
+name = "SndOn"
+
+[[label]]
+addr = 0xf2ee
+name = "InPause"
+
+[[label]]
+addr = 0xf312
+name = "PTone1F"
+
+[[label]]
+addr = 0xf316
+name = "ContPau"
+
+[[label]]
+addr = 0xf325
+name = "PTone2F"
+
+[[label]]
+addr = 0xf327
+name = "PTRegC"
+
+[[label]]
+addr = 0xf32e
+name = "DecPauC"
+
+[[label]]
+addr = 0xf344
+name = "SkipPIn"
+
+[[label]]
+addr = 0xf377
+name = "NoIncDAC"
+
+[[label]]
+addr = 0xf37d
+name = "StrWave"
+
+[[label]]
+addr = 0xf38d
+name = "Dump_Freq_Regs"
+
+[[label]]
+addr = 0xf39e
+name = "NoTone"
+
+[[label]]
+addr = 0xf3cd
+name = "PlaySmallJump"
+
+[[label]]
+addr = 0xf3d1
+name = "PlayBigJump"
+
+[[label]]
+addr = 0xf3d3
+name = "JumpRegContents"
+
+[[label]]
+addr = 0xf3df
+name = "ContinueSndJump"
+
+[[label]]
+addr = 0xf3ec
+name = "N2Prt"
+
+[[label]]
+addr = 0xf3f2
+name = "FPS2nd"
+
+[[label]]
+addr = 0xf3f4
+name = "DmpJpFPS"
+
+[[label]]
+addr = 0xf3ff
+name = "PlayBump"
+
+[[label]]
+addr = 0xf403
+name = "Fthrow"
+
+[[label]]
+addr = 0xf419
+name = "DecJpFPS"
+
+[[label]]
+addr = 0xf43f
+name = "CheckSfx1Buffer"
+
+[[label]]
+addr = 0xf45a
+name = "ExS1H"
+
+[[label]]
+addr = 0xf45b
+name = "PlaySwimStomp"
+
+[[label]]
+addr = 0xf47d
+name = "PlaySmackEnemy"
+
+[[label]]
+addr = 0xf49d
+name = "SmSpc"
+
+[[label]]
+addr = 0xf49f
+name = "SmTick"
+
+[[label]]
+addr = 0xf4b5
+name = "ExSfx1"
+
+[[label]]
+addr = 0xf4b6
+name = "PlayPipeDownInj"
+
+[[label]]
+addr = 0xf4d1
+name = "NoPDwnL"
+
+[[label]]
+addr = 0xf518
+name = "PlayCoinGrab"
+
+[[label]]
+addr = 0xf51e
+name = "PlayTimerTick"
+
+[[label]]
+addr = 0xf522
+name = "CGrab_TTickRegL"
+
+[[label]]
+addr = 0xf538
+name = "N2Tone"
+
+[[label]]
+addr = 0xf53a
+name = "PlayBlast"
+
+[[label]]
+addr = 0xf545
+name = "ContinueBlast"
+
+[[label]]
+addr = 0xf550
+name = "SBlasJ"
+
+[[label]]
+addr = 0xf552
+name = "PlayPowerUpGrab"
+
+[[label]]
+addr = 0xf565
+name = "LoadSqu2Regs"
+
+[[label]]
+addr = 0xf56d
+name = "EmptySfx2Buffer"
+
+[[label]]
+addr = 0xf57b
+name = "EsSfx2"
+
+[[label]]
+addr = 0xf5a6
+name = "CheckSfx2Buffer"
+
+[[label]]
+addr = 0xf5c1
+name = "ExS2H"
+
+[[label]]
+addr = 0xf5c8
+name = "PlayBowserFall"
+
+[[label]]
+addr = 0xf5d1
+name = "BlstSJp"
+
+[[label]]
+addr = 0xf5de
+name = "PBFRegs"
+
+[[label]]
+addr = 0xf5e0
+name = "EL_LRegs"
+
+[[label]]
+addr = 0xf5e2
+name = "PlayExtraLife"
+
+[[label]]
+addr = 0xf5ec
+name = "DivLLoop"
+
+[[label]]
+addr = 0xf5fc
+name = "PlayGrowPowerUp"
+
+[[label]]
+addr = 0xf600
+name = "PlayGrowVine"
+
+[[label]]
+addr = 0xf602
+name = "GrowItemRegs"
+
+[[label]]
+addr = 0xf628
+name = "StopGrowItems"
+
+[[label]]
+addr = 0xf64d
+name = "PlayNoiseSfx"
+
+[[label]]
+addr = 0xf666
+name = "ExSfx3"
+
+[[label]]
+addr = 0xf67f
+name = "ExNH"
+
+[[label]]
+addr = 0xf680
+name = "PlayBowserFlame"
+
+[[label]]
+addr = 0xf691
+name = "ContinueMusic"
+
+[[label]]
+addr = 0xf6a4
+name = "LoadEventMusic"
+
+[[label]]
+addr = 0xf6b1
+name = "NoStopSfx"
+
+[[label]]
+addr = 0xf6c8
+name = "LoadAreaMusic"
+
+[[label]]
+addr = 0xf6cf
+name = "NoStop1"
+
+[[label]]
+addr = 0xf6d1
+name = "GMLoopB"
+
+[[label]]
+addr = 0xf6f5
+name = "LoadHeader"
+
+[[label]]
+addr = 0xf74b
+name = "EndOfMusicData"
+
+[[label]]
+addr = 0xf757
+name = "NotTRO"
+
+[[label]]
+addr = 0xf774
+name = "MusicLoopBack"
+
+[[label]]
+addr = 0xf786
+name = "Squ2NoteHandler"
+
+[[label]]
+addr = 0xf792
+name = "Rest"
+
+[[label]]
+addr = 0xf798
+name = "SkipFqL1"
+
+[[label]]
+addr = 0xf7b1
+name = "NoDecEnv1"
+
+[[label]]
+addr = 0xf7dc
+name = "Squ1NoteHandler"
+
+[[label]]
+addr = 0xf7f1
+name = "SkipCtrlL"
+
+[[label]]
+addr = 0xf80a
+name = "NoDecEnv2"
+
+[[label]]
+addr = 0xf810
+name = "DeathMAltReg"
+
+[[label]]
+addr = 0xf817
+name = "DoAltLoad"
+
+[[label]]
+addr = 0xf83e
+name = "TriNoteHandler"
+
+[[label]]
+addr = 0xf854
+name = "NotDOrD4"
+
+[[label]]
+addr = 0xf864
+name = "MediN"
+
+[[label]]
+addr = 0xf868
+name = "LongN"
+
+[[label]]
+addr = 0xf86a
+name = "LoadTriCtrlReg"
+
+[[label]]
+addr = 0xf8a9
+name = "StrongBeat"
+
+[[label]]
+addr = 0xf8b1
+name = "LongBeat"
+
+[[label]]
+addr = 0xf8b9
+name = "SilentBeat"
+
+[[label]]
+addr = 0xf8bb
+name = "PlayBeat"
+
+[[label]]
+addr = 0xf8e3
+name = "NotECstlM"
+
+[[label]]
+addr = 0xf8ed
+name = "WaterMus"
+
+[[label]]
+addr = 0xf8ef
+name = "AllMus"
+
+[[label]]
+addr = 0xf90d
+name = "MusicHeaderData"
+
+[[label]]
+addr = 0xf943
+name = "Str_CloudHdr"
+
+[[label]]
+addr = 0xf958
+name = "SilenceHdr"
+
+[[label]]
+addr = 0xf95c
+name = "CastleMusHdr"
+
+[[label]]
+addr = 0xf961
+name = "VictoryMusHdr"
+
+[[label]]
+addr = 0xf966
+name = "GameOverMusHdr"
+
+[[label]]
+addr = 0xf96b
+name = "WaterMusHdr"
+
+[[label]]
+addr = 0xf971
+name = "WinCastleMusHdr"
+
+[[label]]
+addr = 0xf9b2
+name = "DeathMusHdr"
+
+[[label]]
+addr = 0xf9b8
+name = "Star_CloudMData"
+
+[[label]]
+addr = 0xfa01
+name = "GroundM_P1Data"
+
+[[label]]
+addr = 0xfa1c
+name = "SilenceData"
+
+[[label]]
+addr = 0xfa49
+name = "GroundM_P2AData"
+
+[[label]]
+addr = 0xfa75
+name = "GroundM_P2BData"
+
+[[label]]
+addr = 0xfa9d
+name = "GroundM_P2CData"
+
+[[label]]
+addr = 0xfac2
+name = "GroundM_P3AData"
+
+[[label]]
+addr = 0xfadb
+name = "GroundM_P3BData"
+
+[[label]]
+addr = 0xfaf9
+name = "GroundMLdInData"
+
+[[label]]
+addr = 0xfb25
+name = "GroundM_P4AData"
+
+[[label]]
+addr = 0xfb4b
+name = "GroundM_P4BData"
+
+[[label]]
+addr = 0xfb72
+name = "DeathMusData"
+
+[[label]]
+addr = 0xfb74
+name = "GroundM_P4CData"
+
+[[label]]
+addr = 0xfba4
+name = "CastleMusData"
+
+[[label]]
+addr = 0xfc45
+name = "GameOverMusData"
+
+[[label]]
+addr = 0xfcb0
+name = "WinLevelMusData"
+
+[[label]]
+addr = 0xfd52
+name = "WaterMusData"
+
+[[label]]
+addr = 0xfec8
+name = "VictoryMusData"
+
+# === RAM tags ===
+
+[[ram_tag]]
+start = 0x0300
+end   = 0x03ff
+name  = "VRAM_Buffer1"
+
+[[ram_tag]]
+start = 0x0400
+end   = 0x04ff
+name  = "VRAM_Buffer2"
+
+[[ram_tag]]
+start = 0x0700
+end   = 0x07ff
+name  = "OAMStaging"
+
+[[ram_tag]]
+start = 0x06a0
+end   = 0x06a0
+name  = "VRAM_Buffer1_Offset"
+
+# === Data regions ===
+
+[[data_region]]
+start = 0x805a
+end   = 0x8081
+
+[[data_region]]
+start = 0x8218
+end   = 0x821f
+
+[[data_region]]
+start = 0x8237
+end   = 0x8242
+
+[[data_region]]
+start = 0x831d
+end   = 0x8320
+
+[[data_region]]
+start = 0x8340
+end   = 0x8343
+
+[[data_region]]
+start = 0x8355
+end   = 0x8358
+
+[[data_region]]
+start = 0x83a6
+end   = 0x83af
+
+[[data_region]]
+start = 0x849f
+end   = 0x84bb
+
+[[data_region]]
+start = 0x856d
+end   = 0x858a
+
+[[data_region]]
+start = 0x85bb
+end   = 0x85be
+
+[[data_region]]
+start = 0x85cb
+end   = 0x85e2
+
+[[data_region]]
+start = 0x8752
+end   = 0x8755
+
+[[data_region]]
+start = 0x875a
+end   = 0x875d
+
+[[data_region]]
+start = 0x8762
+end   = 0x8765
+
+[[data_region]]
+start = 0x8768
+end   = 0x876b
+
+[[data_region]]
+start = 0x8770
+end   = 0x877c
+
+[[data_region]]
+start = 0x877e
+end   = 0x8781
+
+[[data_region]]
+start = 0x8783
+end   = 0x8786
+
+[[data_region]]
+start = 0x8788
+end   = 0x878b
+
+[[data_region]]
+start = 0x878f
+end   = 0x879b
+
+[[data_region]]
+start = 0x87a0
+end   = 0x87a3
+
+[[data_region]]
+start = 0x87aa
+end   = 0x87ae
+
+[[data_region]]
+start = 0x87b3
+end   = 0x87b6
+
+[[data_region]]
+start = 0x87bb
+end   = 0x87c3
+
+[[data_region]]
+start = 0x87c9
+end   = 0x87cc
+
+[[data_region]]
+start = 0x87d2
+end   = 0x87d5
+
+[[data_region]]
+start = 0x87d8
+end   = 0x87f0
+
+[[data_region]]
+start = 0x87f2
+end   = 0x8801
+
+[[data_region]]
+start = 0x89c3
+end   = 0x89c6
+
+[[data_region]]
+start = 0x89c9
+end   = 0x89cc
+
+[[data_region]]
+start = 0x89d1
+end   = 0x89e0
+
+[[data_region]]
+start = 0x8a39
+end   = 0x8a4c
+
+[[data_region]]
+start = 0x8b08
+end   = 0x8d52
+
+[[data_region]]
+start = 0x8d54
+end   = 0x8d5a
+
+[[data_region]]
+start = 0x8d5d
+end   = 0x8d64
+
+[[data_region]]
+start = 0x8d67
+end   = 0x8d6e
+
+[[data_region]]
+start = 0x8d71
+end   = 0x8d78
+
+[[data_region]]
+start = 0x8d7b
+end   = 0x8d82
+
+[[data_region]]
+start = 0x8d87
+end   = 0x8d8a
+
+[[data_region]]
+start = 0x8d90
+end   = 0x8d93
+
+[[data_region]]
+start = 0x8d95
+end   = 0x8d9b
+
+[[data_region]]
+start = 0x8da0
+end   = 0x8da3
+
+[[data_region]]
+start = 0x8da8
+end   = 0x8dae
+
+[[data_region]]
+start = 0x8db0
+end   = 0x8db4
+
+[[data_region]]
+start = 0x8db6
+end   = 0x8db9
+
+[[data_region]]
+start = 0x8dbe
+end   = 0x8dc8
+
+[[data_region]]
+start = 0x8dcd
+end   = 0x8dd0
+
+[[data_region]]
+start = 0x8dd7
+end   = 0x8dda
+
+[[data_region]]
+start = 0x8ddd
+end   = 0x8de4
+
+[[data_region]]
+start = 0x8de6
+end   = 0x8de9
+
+[[data_region]]
+start = 0x8dee
+end   = 0x8df5
+
+[[data_region]]
+start = 0x8dfc
+end   = 0x8dff
+
+[[data_region]]
+start = 0x8e03
+end   = 0x8e03
+
+[[data_region]]
+start = 0x8ef4
+end   = 0x8f03
+
+[[data_region]]
+start = 0x8fbc
+end   = 0x8fbf
+
+[[data_region]]
+start = 0x8fcb
+end   = 0x8fce
+
+[[data_region]]
+start = 0x90e7
+end   = 0x90ec
+
+[[data_region]]
+start = 0x9116
+end   = 0x911f
+
+[[data_region]]
+start = 0x9125
+end   = 0x9128
+
+[[data_region]]
+start = 0x912d
+end   = 0x9130
+
+[[data_region]]
+start = 0x91bd
+end   = 0x91cc
+
+[[data_region]]
+start = 0x921e
+end   = 0x9223
+
+[[data_region]]
+start = 0x92cb
+end   = 0x92da
+
+[[data_region]]
+start = 0x92f7
+end   = 0x92fd
+
+[[data_region]]
+start = 0x932a
+end   = 0x932d
+
+[[data_region]]
+start = 0x935a
+end   = 0x935d
+
+[[data_region]]
+start = 0x938a
+end   = 0x93b4
+
+[[data_region]]
+start = 0x93be
+end   = 0x93c1
+
+[[data_region]]
+start = 0x93cb
+end   = 0x93ce
+
+[[data_region]]
+start = 0x93d8
+end   = 0x93fb
+
+[[data_region]]
+start = 0x9504
+end   = 0x9507
+
+[[data_region]]
+start = 0x9667
+end   = 0x96c4
+
+[[data_region]]
+start = 0x9728
+end   = 0x972a
+
+[[data_region]]
+start = 0x9746
+end   = 0x974b
+
+[[data_region]]
+start = 0x97b7
+end   = 0x97b9
+
+[[data_region]]
+start = 0x97cf
+end   = 0x97d2
+
+[[data_region]]
+start = 0x97d4
+end   = 0x97d7
+
+[[data_region]]
+start = 0x97d9
+end   = 0x97dc
+
+[[data_region]]
+start = 0x97de
+end   = 0x97e1
+
+[[data_region]]
+start = 0x97e3
+end   = 0x97e6
+
+[[data_region]]
+start = 0x97e8
+end   = 0x97eb
+
+[[data_region]]
+start = 0x97ed
+end   = 0x97f0
+
+[[data_region]]
+start = 0x97f2
+end   = 0x97f5
+
+[[data_region]]
+start = 0x97f7
+end   = 0x97fa
+
+[[data_region]]
+start = 0x97fc
+end   = 0x97ff
+
+[[data_region]]
+start = 0x9801
+end   = 0x9804
+
+[[data_region]]
+start = 0x989f
+end   = 0x98aa
+
+[[data_region]]
+start = 0x98dd
+end   = 0x98e4
+
+[[data_region]]
+start = 0x99ee
+end   = 0x99f1
+
+[[data_region]]
+start = 0x99fb
+end   = 0x9a00
+
+[[data_region]]
+start = 0x9a25
+end   = 0x9a2d
+
+[[data_region]]
+start = 0x9aa5
+end   = 0x9aa8
+
+[[data_region]]
+start = 0x9aae
+end   = 0x9ab1
+
+[[data_region]]
+start = 0x9b3d
+end   = 0x9b40
+
+[[data_region]]
+start = 0x9bdd
+end   = 0x9be0
+
+[[data_region]]
+start = 0x9bf6
+end   = 0x9bfb
+
+[[data_region]]
+start = 0x9cb4
+end   = 0x9cb7
+
+[[data_region]]
+start = 0x9cbc
+end   = 0x9cbf
+
+[[data_region]]
+start = 0x9cc1
+end   = 0x9cc4
+
+[[data_region]]
+start = 0x9cc6
+end   = 0x9ccd
+
+[[data_region]]
+start = 0x9ccf
+end   = 0x9cda
+
+[[data_region]]
+start = 0x9cdc
+end   = 0x9d73
+
+[[data_region]]
+start = 0x9d96
+end   = 0x9d9a
+
+[[data_region]]
+start = 0x9daf
+end   = 0x9db3
+
+[[data_region]]
+start = 0x9dde
+end   = 0x9de2
+
+[[data_region]]
+start = 0x9e09
+end   = 0x9e0d
+
+[[data_region]]
+start = 0x9e1e
+end   = 0x9e22
+
+[[data_region]]
+start = 0x9e58
+end   = 0x9e5c
+
+[[data_region]]
+start = 0x9e7d
+end   = 0x9e81
+
+[[data_region]]
+start = 0x9e9a
+end   = 0x9e9e
+
+[[data_region]]
+start = 0x9ea8
+end   = 0x9eac
+
+[[data_region]]
+start = 0x9ecf
+end   = 0x9ed3
+
+[[data_region]]
+start = 0x9f00
+end   = 0x9f04
+
+[[data_region]]
+start = 0x9f1e
+end   = 0x9f22
+
+[[data_region]]
+start = 0x9f3b
+end   = 0x9f3f
+
+[[data_region]]
+start = 0x9f50
+end   = 0x9f54
+
+[[data_region]]
+start = 0x9f7b
+end   = 0x9f7f
+
+[[data_region]]
+start = 0x9f9f
+end   = 0x9fa3
+
+[[data_region]]
+start = 0x9fa8
+end   = 0x9fac
+
+[[data_region]]
+start = 0x9fcd
+end   = 0x9fd1
+
+[[data_region]]
+start = 0x9ff0
+end   = 0x9ff4
+
+[[data_region]]
+start = 0x9ff9
+end   = 0x9ffe
+
+[[data_region]]
+start = 0xa034
+end   = 0xa038
+
+[[data_region]]
+start = 0xa05f
+end   = 0xa063
+
+[[data_region]]
+start = 0xa08d
+end   = 0xa091
+
+[[data_region]]
+start = 0xa0a9
+end   = 0xa0ad
+
+[[data_region]]
+start = 0xa0b2
+end   = 0xa0b6
+
+[[data_region]]
+start = 0xa0d7
+end   = 0xa0db
+
+[[data_region]]
+start = 0xa104
+end   = 0xa108
+
+[[data_region]]
+start = 0xa132
+end   = 0xa136
+
+[[data_region]]
+start = 0xa15f
+end   = 0xa163
+
+[[data_region]]
+start = 0xa170
+end   = 0xa174
+
+[[data_region]]
+start = 0xa19a
+end   = 0xa19e
+
+[[data_region]]
+start = 0xa1ae
+end   = 0xa1b4
+
+[[data_region]]
+start = 0xa20f
+end   = 0xa215
+
+[[data_region]]
+start = 0xa28e
+end   = 0xa294
+
+[[data_region]]
+start = 0xa301
+end   = 0xa307
+
+[[data_region]]
+start = 0xa36e
+end   = 0xa374
+
+[[data_region]]
+start = 0xa3f9
+end   = 0xa3ff
+
+[[data_region]]
+start = 0xa46a
+end   = 0xa470
+
+[[data_region]]
+start = 0xa4cd
+end   = 0xa4d3
+
+[[data_region]]
+start = 0xa536
+end   = 0xa53c
+
+[[data_region]]
+start = 0xa589
+end   = 0xa58f
+
+[[data_region]]
+start = 0xa618
+end   = 0xa61e
+
+[[data_region]]
+start = 0xa68d
+end   = 0xa693
+
+[[data_region]]
+start = 0xa6f2
+end   = 0xa6f8
+
+[[data_region]]
+start = 0xa747
+end   = 0xa74d
+
+[[data_region]]
+start = 0xa7cc
+end   = 0xa7d2
+
+[[data_region]]
+start = 0xa831
+end   = 0xa837
+
+[[data_region]]
+start = 0xa83a
+end   = 0xa840
+
+[[data_region]]
+start = 0xa879
+end   = 0xa87f
+
+[[data_region]]
+start = 0xa88e
+end   = 0xa894
+
+[[data_region]]
+start = 0xa8f5
+end   = 0xa8fb
+
+[[data_region]]
+start = 0xa95a
+end   = 0xa960
+
+[[data_region]]
+start = 0xa9cd
+end   = 0xa9d3
+
+[[data_region]]
+start = 0xa9fe
+end   = 0xaa04
+
+[[data_region]]
+start = 0xaa91
+end   = 0xaa97
+
+[[data_region]]
+start = 0xab04
+end   = 0xab0a
+
+[[data_region]]
+start = 0xab7d
+end   = 0xab83
+
+[[data_region]]
+start = 0xabd6
+end   = 0xabdc
+
+[[data_region]]
+start = 0xac01
+end   = 0xac07
+
+[[data_region]]
+start = 0xac34
+end   = 0xac3a
+
+[[data_region]]
+start = 0xacd7
+end   = 0xacdd
+
+[[data_region]]
+start = 0xad78
+end   = 0xad7e
+
+[[data_region]]
+start = 0xae05
+end   = 0xae0b
+
+[[data_region]]
+start = 0xae44
+end   = 0xae4a
+
+[[data_region]]
+start = 0xaebf
+end   = 0xaec5
+
+[[data_region]]
+start = 0xaeda
+end   = 0xaedb
+
+[[data_region]]
+start = 0xaee2
+end   = 0xaee9
+
+[[data_region]]
+start = 0xb034
+end   = 0xb037
+
+[[data_region]]
+start = 0xb04f
+end   = 0xb068
+
+[[data_region]]
+start = 0xb2c2
+end   = 0xb2c5
+
+[[data_region]]
+start = 0xb351
+end   = 0xb358
+
+[[data_region]]
+start = 0xb3c7
+end   = 0xb3ce
+
+[[data_region]]
+start = 0xb424
+end   = 0xb427
+
+[[data_region]]
+start = 0xb42b
+end   = 0xb42e
+
+[[data_region]]
+start = 0xb432
+end   = 0xb435
+
+[[data_region]]
+start = 0xb439
+end   = 0xb43c
+
+[[data_region]]
+start = 0xb440
+end   = 0xb44f
+
+[[data_region]]
+start = 0xb58c
+end   = 0xb58e
+
+[[data_region]]
+start = 0xb687
+end   = 0xb688
+
+[[data_region]]
+start = 0xb74b
+end   = 0xb74e
+
+[[data_region]]
+start = 0xb84b
+end   = 0xb84e
+
+[[data_region]]
+start = 0xb850
+end   = 0xb853
+
+[[data_region]]
+start = 0xb8b6
+end   = 0xb8b9
+
+[[data_region]]
+start = 0xb949
+end   = 0xb94a
+
+[[data_region]]
+start = 0xb9ba
+end   = 0xb9bb
+
+[[data_region]]
+start = 0xba31
+end   = 0xba32
+
+[[data_region]]
+start = 0xba89
+end   = 0xba8c
+
+[[data_region]]
+start = 0xba92
+end   = 0xba93
+
+[[data_region]]
+start = 0xbbf8
+end   = 0xbbfd
+
+[[data_region]]
+start = 0xbceb
+end   = 0xbcec
+
+[[data_region]]
+start = 0xbdc0
+end   = 0xbdd1
+
+[[data_region]]
+start = 0xbde8
+end   = 0xbdef
+
+[[data_region]]
+start = 0xbdf1
+end   = 0xbdf4
+
+[[data_region]]
+start = 0xbf9f
+end   = 0xbfa0
+
+[[data_region]]
+start = 0xc06b
+end   = 0xc06e
+
+[[data_region]]
+start = 0xc076
+end   = 0xc079
+
+[[data_region]]
+start = 0xc081
+end   = 0xc084
+
+[[data_region]]
+start = 0xc282
+end   = 0xc2ef
+
+[[data_region]]
+start = 0xc30c
+end   = 0xc30d
+
+[[data_region]]
+start = 0xc326
+end   = 0xc327
+
+[[data_region]]
+start = 0xc398
+end   = 0xc3a3
+
+[[data_region]]
+start = 0xc44f
+end   = 0xc452
+
+[[data_region]]
+start = 0xc454
+end   = 0xc457
+
+[[data_region]]
+start = 0xc488
+end   = 0xc4a7
+
+[[data_region]]
+start = 0xc59d
+end   = 0xc5a2
+
+[[data_region]]
+start = 0xc631
+end   = 0xc634
+
+[[data_region]]
+start = 0xc637
+end   = 0xc63a
+
+[[data_region]]
+start = 0xc68a
+end   = 0xc695
+
+[[data_region]]
+start = 0xc69a
+end   = 0xc69b
+
+[[data_region]]
+start = 0xc7ab
+end   = 0xc7b6
+
+[[data_region]]
+start = 0xc86b
+end   = 0xc870
+
+[[data_region]]
+start = 0xc892
+end   = 0xc8d5
+
+[[data_region]]
+start = 0xc90a
+end   = 0xc933
+
+[[data_region]]
+start = 0xc98a
+end   = 0xc997
+
+[[data_region]]
+start = 0xc9ce
+end   = 0xc9d7
+
+[[data_region]]
+start = 0xca10
+end   = 0xca11
+
+[[data_region]]
+start = 0xcb87
+end   = 0xcb88
+
+[[data_region]]
+start = 0xcc46
+end   = 0xcc49
+
+[[data_region]]
+start = 0xccc7
+end   = 0xccca
+
+[[data_region]]
+start = 0xcd2a
+end   = 0xcd31
+
+[[data_region]]
+start = 0xcd34
+end   = 0xcd37
+
+[[data_region]]
+start = 0xcd3a
+end   = 0xcd3b
+
+[[data_region]]
+start = 0xced5
+end   = 0xced8
+
+[[data_region]]
+start = 0xceda
+end   = 0xcedd
+
+[[data_region]]
+start = 0xcf25
+end   = 0xcf27
+
+[[data_region]]
+start = 0xcfdd
+end   = 0xcfe2
+
+[[data_region]]
+start = 0xcfe6
+end   = 0xcfe9
+
+[[data_region]]
+start = 0xd061
+end   = 0xd064
+
+[[data_region]]
+start = 0xd1d1
+end   = 0xd1d4
+
+[[data_region]]
+start = 0xd2cd
+end   = 0xd2d8
+
+[[data_region]]
+start = 0xd2e8
+end   = 0xd2f1
+
+[[data_region]]
+start = 0xd6d6
+end   = 0xd6d8
+
+[[data_region]]
+start = 0xd736
+end   = 0xd73d
+
+[[data_region]]
+start = 0xd84d
+end   = 0xd852
+
+[[data_region]]
+start = 0xd892
+end   = 0xd894
+
+[[data_region]]
+start = 0xd965
+end   = 0xd968
+
+[[data_region]]
+start = 0xd9d2
+end   = 0xd9d3
+
+[[data_region]]
+start = 0xda25
+end   = 0xda32
+
+[[data_region]]
+start = 0xdc17
+end   = 0xdc18
+
+[[data_region]]
+start = 0xdc62
+end   = 0xdc63
+
+[[data_region]]
+start = 0xde03
+end   = 0xde04
+
+[[data_region]]
+start = 0xde25
+end   = 0xde2c
+
+[[data_region]]
+start = 0xdf8b
+end   = 0xdf8e
+
+[[data_region]]
+start = 0xdf96
+end   = 0xdf99
+
+[[data_region]]
+start = 0xdfb9
+end   = 0xdfbc
+
+[[data_region]]
+start = 0xdfbf
+end   = 0xdfc0
+
+[[data_region]]
+start = 0xe1fd
+end   = 0xe22c
+
+[[data_region]]
+start = 0xe3ad
+end   = 0xe3b3
+
+[[data_region]]
+start = 0xe3cc
+end   = 0xe3cf
+
+[[data_region]]
+start = 0xe432
+end   = 0xe434
+
+[[data_region]]
+start = 0xe4c0
+end   = 0xe4db
+
+[[data_region]]
+start = 0xe541
+end   = 0xe54a
+
+[[data_region]]
+start = 0xe682
+end   = 0xe685
+
+[[data_region]]
+start = 0xe6be
+end   = 0xe6d1
+
+[[data_region]]
+start = 0xe73e
+end   = 0xe741
+
+[[data_region]]
+start = 0xe744
+end   = 0xe747
+
+[[data_region]]
+start = 0xe74a
+end   = 0xe74d
+
+[[data_region]]
+start = 0xe750
+end   = 0xe753
+
+[[data_region]]
+start = 0xe756
+end   = 0xe759
+
+[[data_region]]
+start = 0xe75c
+end   = 0xe75f
+
+[[data_region]]
+start = 0xe762
+end   = 0xe765
+
+[[data_region]]
+start = 0xe768
+end   = 0xe76b
+
+[[data_region]]
+start = 0xe76e
+end   = 0xe771
+
+[[data_region]]
+start = 0xe774
+end   = 0xe777
+
+[[data_region]]
+start = 0xe77a
+end   = 0xe77d
+
+[[data_region]]
+start = 0xe780
+end   = 0xe783
+
+[[data_region]]
+start = 0xe786
+end   = 0xe789
+
+[[data_region]]
+start = 0xe78c
+end   = 0xe78f
+
+[[data_region]]
+start = 0xe792
+end   = 0xe795
+
+[[data_region]]
+start = 0xe798
+end   = 0xe79b
+
+[[data_region]]
+start = 0xe79e
+end   = 0xe7a1
+
+[[data_region]]
+start = 0xe7a4
+end   = 0xe7a7
+
+[[data_region]]
+start = 0xe7aa
+end   = 0xe7ad
+
+[[data_region]]
+start = 0xe7b0
+end   = 0xe7b3
+
+[[data_region]]
+start = 0xe7b6
+end   = 0xe7b9
+
+[[data_region]]
+start = 0xe7bc
+end   = 0xe7bf
+
+[[data_region]]
+start = 0xe7c2
+end   = 0xe7c5
+
+[[data_region]]
+start = 0xe7c8
+end   = 0xe7cb
+
+[[data_region]]
+start = 0xe7ce
+end   = 0xe7d1
+
+[[data_region]]
+start = 0xe7d4
+end   = 0xe7d7
+
+[[data_region]]
+start = 0xe7da
+end   = 0xe7dd
+
+[[data_region]]
+start = 0xe7e0
+end   = 0xe7e3
+
+[[data_region]]
+start = 0xe7e6
+end   = 0xe7e9
+
+[[data_region]]
+start = 0xe7ec
+end   = 0xe7ef
+
+[[data_region]]
+start = 0xe7f2
+end   = 0xe7f5
+
+[[data_region]]
+start = 0xe7f8
+end   = 0xe7fb
+
+[[data_region]]
+start = 0xe7fe
+end   = 0xe801
+
+[[data_region]]
+start = 0xe804
+end   = 0xe807
+
+[[data_region]]
+start = 0xe80a
+end   = 0xe80d
+
+[[data_region]]
+start = 0xe810
+end   = 0xe813
+
+[[data_region]]
+start = 0xe816
+end   = 0xe819
+
+[[data_region]]
+start = 0xe81c
+end   = 0xe81f
+
+[[data_region]]
+start = 0xe822
+end   = 0xe825
+
+[[data_region]]
+start = 0xe828
+end   = 0xe82b
+
+[[data_region]]
+start = 0xe82e
+end   = 0xe831
+
+[[data_region]]
+start = 0xe834
+end   = 0xe837
+
+[[data_region]]
+start = 0xe83a
+end   = 0xe83d
+
+[[data_region]]
+start = 0xe840
+end   = 0xe843
+
+[[data_region]]
+start = 0xe85b
+end   = 0xe85e
+
+[[data_region]]
+start = 0xe876
+end   = 0xe87b
+
+[[data_region]]
+start = 0xebcd
+end   = 0xebd0
+
+[[data_region]]
+start = 0xed06
+end   = 0xed08
+
+[[data_region]]
+start = 0xee07
+end   = 0xee0a
+
+[[data_region]]
+start = 0xee17
+end   = 0xee1a
+
+[[data_region]]
+start = 0xee1f
+end   = 0xee22
+
+[[data_region]]
+start = 0xee27
+end   = 0xee2a
+
+[[data_region]]
+start = 0xee2f
+end   = 0xee32
+
+[[data_region]]
+start = 0xee37
+end   = 0xee3a
+
+[[data_region]]
+start = 0xee3f
+end   = 0xee42
+
+[[data_region]]
+start = 0xee47
+end   = 0xee4a
+
+[[data_region]]
+start = 0xee4f
+end   = 0xee52
+
+[[data_region]]
+start = 0xee57
+end   = 0xee5a
+
+[[data_region]]
+start = 0xee5f
+end   = 0xee62
+
+[[data_region]]
+start = 0xee67
+end   = 0xee6a
+
+[[data_region]]
+start = 0xee6f
+end   = 0xee72
+
+[[data_region]]
+start = 0xee77
+end   = 0xee7a
+
+[[data_region]]
+start = 0xee7f
+end   = 0xee82
+
+[[data_region]]
+start = 0xee87
+end   = 0xee8a
+
+[[data_region]]
+start = 0xee8f
+end   = 0xee92
+
+[[data_region]]
+start = 0xee97
+end   = 0xee9a
+
+[[data_region]]
+start = 0xee9f
+end   = 0xeea2
+
+[[data_region]]
+start = 0xeea7
+end   = 0xeeaa
+
+[[data_region]]
+start = 0xeeaf
+end   = 0xeeb2
+
+[[data_region]]
+start = 0xeeb7
+end   = 0xeeba
+
+[[data_region]]
+start = 0xeebf
+end   = 0xeec2
+
+[[data_region]]
+start = 0xeec7
+end   = 0xeeca
+
+[[data_region]]
+start = 0xeecf
+end   = 0xeed2
+
+[[data_region]]
+start = 0xeed7
+end   = 0xeeda
+
+[[data_region]]
+start = 0xeedf
+end   = 0xeee2
+
+[[data_region]]
+start = 0xeee7
+end   = 0xeee8
+
+[[data_region]]
+start = 0xef9e
+end   = 0xefa1
+
+[[data_region]]
+start = 0xf09c
+end   = 0xf09f
+
+[[data_region]]
+start = 0xf1a5
+end   = 0xf1a7
+
+[[data_region]]
+start = 0xf1e3
+end   = 0xf1e6
+
+[[data_region]]
+start = 0xf1f3
+end   = 0xf1f5
+
+[[data_region]]
+start = 0xf22b
+end   = 0xf22e
+
+[[data_region]]
+start = 0xf234
+end   = 0xf238
+
+[[data_region]]
+start = 0xf2ca
+end   = 0xf2cd
+
+[[data_region]]
+start = 0xf3b1
+end   = 0xf3b4
+
+[[data_region]]
+start = 0xf4d4
+end   = 0xf4d7
+
+[[data_region]]
+start = 0xf4da
+end   = 0xf4dd
+
+[[data_region]]
+start = 0xf4f5
+end   = 0xf4fb
+
+[[data_region]]
+start = 0xf500
+end   = 0xf503
+
+[[data_region]]
+start = 0xf508
+end   = 0xf50b
+
+[[data_region]]
+start = 0xf510
+end   = 0xf513
+
+[[data_region]]
+start = 0xf62b
+end   = 0xf62e
+
+[[data_region]]
+start = 0xf90d
+end   = 0xf910
+
+[[data_region]]
+start = 0xf915
+end   = 0xf918
+
+[[data_region]]
+start = 0xf91d
+end   = 0xf920
+
+[[data_region]]
+start = 0xf93e
+end   = 0xf9bb
+
+[[data_region]]
+start = 0xf9d2
+end   = 0xf9d5
+
+[[data_region]]
+start = 0xf9e6
+end   = 0xf9e9
+
+[[data_region]]
+start = 0xf9f8
+end   = 0xf9fb
+
+[[data_region]]
+start = 0xfa01
+end   = 0xfa04
+
+[[data_region]]
+start = 0xfa1c
+end   = 0xfa20
+
+[[data_region]]
+start = 0xfa49
+end   = 0xfa4c
+
+[[data_region]]
+start = 0xfa75
+end   = 0xfa78
+
+[[data_region]]
+start = 0xfa9d
+end   = 0xfaa0
+
+[[data_region]]
+start = 0xfac2
+end   = 0xfac5
+
+[[data_region]]
+start = 0xfadb
+end   = 0xfade
+
+[[data_region]]
+start = 0xfaef
+end   = 0xfaf2
+
+[[data_region]]
+start = 0xfaf9
+end   = 0xfafc
+
+[[data_region]]
+start = 0xfb1a
+end   = 0xfb1d
+
+[[data_region]]
+start = 0xfb25
+end   = 0xfb28
+
+[[data_region]]
+start = 0xfb4b
+end   = 0xfb4e
+
+[[data_region]]
+start = 0xfb72
+end   = 0xfb77
+
+[[data_region]]
+start = 0xfb81
+end   = 0xfb84
+
+[[data_region]]
+start = 0xfb86
+end   = 0xfb89
+
+[[data_region]]
+start = 0xfb90
+end   = 0xfb95
+
+[[data_region]]
+start = 0xfb9f
+end   = 0xfba2
+
+[[data_region]]
+start = 0xfba4
+end   = 0xfba7
+
+[[data_region]]
+start = 0xfc06
+end   = 0xfc09
+
+[[data_region]]
+start = 0xfc37
+end   = 0xfc3a
+
+[[data_region]]
+start = 0xfc45
+end   = 0xfc48
+
+[[data_region]]
+start = 0xfc72
+end   = 0xfc75
+
+[[data_region]]
+start = 0xfcb0
+end   = 0xfcb3
+
+[[data_region]]
+start = 0xfcec
+end   = 0xfcf0
+
+[[data_region]]
+start = 0xfd11
+end   = 0xfd14
+
+[[data_region]]
+start = 0xfd52
+end   = 0xfd55
+
+[[data_region]]
+start = 0xfdba
+end   = 0xfdbd
+
+[[data_region]]
+start = 0xfdc2
+end   = 0xfdc5
+
+[[data_region]]
+start = 0xfdf2
+end   = 0xfdf5
+
+[[data_region]]
+start = 0xfe51
+end   = 0xfe54
+
+[[data_region]]
+start = 0xfe75
+end   = 0xfe78
+
+[[data_region]]
+start = 0xfe9d
+end   = 0xfea0
+
+[[data_region]]
+start = 0xfec8
+end   = 0xfecb
+
+[[data_region]]
+start = 0xfedc
+end   = 0xfedf
+
+[[data_region]]
+start = 0xfeec
+end   = 0xfeef
+
+[[data_region]]
+start = 0xfefd
+end   = 0xff03
+
+[[data_region]]
+start = 0xff66
+end   = 0xff69
+
+[[data_region]]
+start = 0xff96
+end   = 0xff9d
+
+[[data_region]]
+start = 0xffa2
+end   = 0xffa5
+
+[[data_region]]
+start = 0xffca
+end   = 0xffcd
+
+[[data_region]]
+start = 0xffea
+end   = 0xffed
+
+[[data_region]]
+start = 0xfffa
+end   = 0xffff
+
+[[jump_engine]]
+caller = 0x8215
+targets = ["TitleScreenMode", "GameMode", "VictoryMode", "GameOverMode"]
+
+[[jump_engine]]
+caller = 0x8234
+targets = ["InitializeGame", "ScreenRoutines", "PrimaryGameSetup", "GameMenuRoutine"]
+
+[[jump_engine]]
+caller = 0x83a3
+targets = ["BridgeCollapse", "SetupVictoryMode", "PlayerVictoryWalk", "PrintVictoryMessages", "PlayerEndWorld"]
+
+[[jump_engine]]
+caller = 0x856a
+targets = ["InitScreen", "SetupIntermediate", "WriteTopStatusLine", "WriteBottomStatusLine", "DisplayTimeUp", "ResetSpritesAndScreenTimer", "DisplayIntermediate", "ResetSpritesAndScreenTimer", "AreaParserTaskControl", "GetAreaPalette", "GetBackgroundColor", "GetAlternatePalette1", "DrawTitleScreen", "ClearBuffersDrawIcon", "WriteTopScore"]
+
+[[jump_engine]]
+caller = 0x921b
+targets = ["SetupGameOver", "ScreenRoutines", "RunGameOver"]
+
+[[jump_engine]]
+caller = 0x92c8
+targets = ["AreaParserTaskInit", "AreaParserNoOp", "AreaParserNoOp", "AreaParserCore", "AreaParserTaskInit", "AreaParserNoOp", "AreaParserNoOp", "AreaParserCore"]
+
+[[jump_engine]]
+caller = 0x9664
+targets = ["VerticalPipe", "AreaStyleObject", "RowOfBricks", "RowOfSolidBlocks", "RowOfCoins", "ColumnOfBricks", "ColumnOfSolidBlocks", "VerticalPipe", "Hole_Empty", "PulleyRopeObject", "Bridge_High", "Bridge_Middle", "Bridge_Low", "Hole_Water", "QuestionBlockRow_High", "QuestionBlockRow_Low", "EndlessRope", "BalancePlatRope", "CastleObject", "StaircaseObject", "ExitPipe", "FlagBalls_Residual", "QuestionBlock", "QuestionBlock", "QuestionBlock", "Hidden1UpBlock", "BrickWithItem", "BrickWithItem", "BrickWithItem", "BrickWithCoins", "BrickWithItem", "WaterPipe", "EmptyBlock", "JumpSpring", "IntroPipe", "FlagpoleObject", "AxeObj", "ChainObj", "CastleBridgeObj", "ScrollLockObject_Warp", "ScrollLockObject", "ScrollLockObject", "AreaFrenzy", "AreaFrenzy", "AreaFrenzy", "LoopCmdE", "AlterAreaAttributes"]
+
+[[jump_engine]]
+caller = 0x9743
+targets = ["TreeLedge", "MushroomLedge", "BulletBillCannon"]
+
+[[jump_engine]]
+caller = 0xaedf
+targets = ["InitializeArea", "ScreenRoutines", "SecondaryGameSetup", "GameCoreRoutine"]
+
+[[jump_engine]]
+caller = 0xb04c
+targets = ["Entrance_GameTimerSetup", "Vine_AutoClimb", "SideExitPipeEntry", "VerticalPipeEntry", "FlagpoleSlide", "PlayerEndLevel", "PlayerLoseLife", "PlayerEntrance", "PlayerCtrlRoutine", "PlayerChangeSize", "PlayerInjuryBlink", "PlayerDeath", "PlayerFireFlower"]
+
+[[jump_engine]]
+caller = 0xc27f
+targets = ["InitNormalEnemy", "InitNormalEnemy", "InitNormalEnemy", "InitRedKoopa", "NoInitCode", "InitHammerBro", "InitGoomba", "InitBloober", "InitBulletBill", "NoInitCode", "InitCheepCheep", "InitCheepCheep", "InitPodoboo", "InitPiranhaPlant", "InitJumpGPTroopa", "InitRedPTroopa", "InitHorizFlySwimEnemy", "InitLakitu", "InitEnemyFrenzy", "NoInitCode", "InitEnemyFrenzy", "InitEnemyFrenzy", "InitEnemyFrenzy", "InitEnemyFrenzy", "EndFrenzy", "NoInitCode", "NoInitCode", "InitShortFirebar", "InitShortFirebar", "InitShortFirebar", "InitShortFirebar", "InitLongFirebar", "NoInitCode", "NoInitCode", "NoInitCode", "NoInitCode", "InitBalPlatform", "InitVertPlatform", "LargeLiftUp", "LargeLiftDown", "InitHoriPlatform", "InitDropPlatform", "InitHoriPlatform", "PlatLiftUp", "PlatLiftDown", "InitBowser", "PwrUpJmp", "Setup_Vine", "NoInitCode", "NoInitCode", "NoInitCode", "NoInitCode", "NoInitCode", "InitRetainerObj", "EndOFEnemyInitCode"]
+
+[[jump_engine]]
+caller = 0xc7a8
+targets = ["LakituAndSpinyHandler", "NoFrenzyCode", "InitFlyingCheepCheep", "InitBowserFlame", "InitFireworks", "BulletBillCheepCheep"]
+
+[[jump_engine]]
+caller = 0xc88f
+targets = ["RunNormalEnemies", "RunBowserFlame", "RunFireworks", "NoRunCode", "NoRunCode", "NoRunCode", "NoRunCode", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "NoRunCode", "RunLargePlatform", "RunLargePlatform", "RunLargePlatform", "RunLargePlatform", "RunLargePlatform", "RunLargePlatform", "RunLargePlatform", "RunSmallPlatform", "RunSmallPlatform", "RunBowser", "PowerUpObjHandler", "VineObjectHandler", "NoRunCode", "RunStarFlagObj", "JumpspringHandler", "NoRunCode", "WarpZoneObject", "RunRetainerObj"]
+
+[[jump_engine]]
+caller = 0xc907
+targets = ["MoveNormalEnemy", "MoveNormalEnemy", "MoveNormalEnemy", "MoveNormalEnemy", "MoveNormalEnemy", "ProcHammerBro", "MoveNormalEnemy", "MoveBloober", "MoveBulletBill", "NoMoveCode", "MoveSwimmingCheepCheep", "MoveSwimmingCheepCheep", "MovePodoboo", "MovePiranhaPlant", "MoveJumpingEnemy", "ProcMoveRedPTroopa", "MoveFlyGreenPTroopa", "MoveLakitu", "MoveNormalEnemy", "NoMoveCode", "MoveFlyingCheepCheep"]
+
+[[jump_engine]]
+caller = 0xc987
+targets = ["BalancePlatform", "YMovingPlatform", "MoveLargeLiftPlat", "MoveLargeLiftPlat", "XMovingPlatform", "DropPlatform", "RightPlatform"]
+
+[[jump_engine]]
+caller = 0xd2e5
+targets = ["StarFlagExit", "GameTimerFireworks", "AwardGameTimerPoints", "RaiseFlagSetoffFworks", "DelayToAreaEnd"]
+
+
+# ── Additional JumpEngine sites (extracted from PRG scan) ──
+# These were missed in the initial scan. The analyzer auto-discovers
+# the target addresses via JSR/JMP graph walking; the engine just adds
+# the dispatch override.
+
+[[jump_engine]]
+caller = 0x92C8
+targets = ["L_92DB", "L_88AE", "L_88AE", "AreaParserCore", "L_92DB", "L_88AE", "L_88AE", "AreaParserCore"]
+
+[[jump_engine]]
+caller = 0xB34E
+targets = ["L_B35A", "JumpSwimSub", "FallingSub", "ClimbingSub"]
+
+[[jump_engine]]
+caller = 0xBDBD
+targets = ["MushFlowerBlock", "CoinBlock", "CoinBlock", "L_BDD8", "MushFlowerBlock", "VineBlock", "StarBlock", "CoinBlock", "L_BDD8"]
+
+[[jump_engine]]
+caller = 0xC88F
+targets = ["L_C8E0", "RunBowserFlame", "RunFireworks", "NoRunCode", "NoRunCode", "NoRunCode", "NoRunCode", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "NoRunCode"]
+
+# ── ScreenRoutines sub-task entry points (resolves the
+#     SetupIntermediate / WriteTopStatusLine / etc. stubs that were
+#     just no-op `ret`s, blocking the title-screen render). ──
+[[function]]
+addr = 0x859B
+name = "SetupIntermediate"
+
+[[function]]
+addr = 0x8652
+name = "WriteTopStatusLine"
+
+[[function]]
+addr = 0x865A
+name = "WriteBottomStatusLine"
+
+[[function]]
+addr = 0x86A8
+name = "DisplayIntermediate"
+
+[[function]]
+addr = 0x889D
+name = "ResetSpritesAndScreenTimer"
+
+[[function]]
+addr = 0x88AE
+name = "AreaParserNoOp"
+
+[[function]]
+addr = 0x86E6
+name = "AreaParserTaskControl"
+
+[[function]]
+addr = 0x85E3
+name = "GetBackgroundColor"
+
+[[function]]
+addr = 0x8643
+name = "GetAlternatePalette1"
+
+[[function]]
+addr = 0x8732
+name = "ClearBuffersDrawIcon"

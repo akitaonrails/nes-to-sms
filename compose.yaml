@@ -1,0 +1,52 @@
+services:
+  poc:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.toolchain
+    working_dir: /work/poc
+    volumes:
+      - .:/work
+      - /mnt/terachad/Emulators/EmuDeck/roms:/roms:ro
+    # Override with DOCKER_UID/DOCKER_GID if your Docker setup writes root-owned
+    # files into the bind mount.
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    command:
+      - cargo
+      - run
+      - --
+      - /roms/nes/Super Mario Bros. (World).nes
+      - out/smb
+
+  sms-smoke:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.toolchain
+    working_dir: /work/poc
+    volumes:
+      - .:/work
+      - /mnt/terachad/Emulators/EmuDeck/roms:/roms:ro
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    command:
+      - bash
+      - scripts/smoke_sms.sh
+      - out/smb/poc.sms
+
+  sms-visual:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.toolchain
+    working_dir: /work/poc
+    volumes:
+      - .:/work
+      - /mnt/terachad/Emulators/EmuDeck/roms:/roms:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${XDG_RUNTIME_DIR}:${XDG_RUNTIME_DIR}
+    environment:
+      DISPLAY: ${DISPLAY}
+      SDL_VIDEODRIVER: x11
+      SDL_AUDIODRIVER: dummy
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    command:
+      - bash
+      - scripts/run_sms_visual.sh
+      - out/smb/poc.sms

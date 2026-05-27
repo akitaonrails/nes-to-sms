@@ -1,0 +1,11 @@
+# Keep local ROMs and generated experiments out of version control.
+input/*
+out/*
+
+!.gitignore
+
+
+
+# Added by cargo
+
+/target

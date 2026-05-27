@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/nes_rom",
+    "crates/cpu6502",
+    "crates/profile",
+    "crates/z80_emit",
+    "crates/oracle_6502",
+    "crates/z80_emu",
+    "crates/assets",
+    "crates/ir",
+    "crates/analysis",
+    "crates/lower",
+    "crates/sms_project",
+    "crates/validation",
+    "crates/cli",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+nes_rom    = { path = "crates/nes_rom" }
+cpu6502    = { path = "crates/cpu6502" }
+profile    = { path = "crates/profile" }
+z80_emit   = { path = "crates/z80_emit" }
+oracle_6502 = { path = "crates/oracle_6502" }
+z80_emu    = { path = "crates/z80_emu" }
+assets     = { path = "crates/assets" }
+ir         = { path = "crates/ir" }
+analysis   = { path = "crates/analysis" }
+lower      = { path = "crates/lower" }
+sms_project = { path = "crates/sms_project" }
+validation = { path = "crates/validation" }

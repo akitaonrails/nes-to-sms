@@ -1,0 +1,7 @@
+target/
+out/
+**/out/
+*.sms
+*.nes
+.ai-jail
+third_party/nesrecomp/
