@@ -389,6 +389,12 @@ impl Program {
     pub fn ld_sp_imm(&mut self, value: u16) {
         self.emit_imm16(0x31, value, format!("ld sp,${:04X}", value));
     }
+    /// Block copy (HL)->(DE), BC bytes, ascending. ED B0.
+    pub fn ldir(&mut self) {
+        self.sec().push_byte(0xED);
+        self.sec().push_byte(0xB0);
+        self.sec().push_asm("  ldir".to_string());
+    }
 
     pub fn ld_hl_label(&mut self, label: &str) {
         self.emit_jp_like(0x21, label, format!("ld hl,{}", label));

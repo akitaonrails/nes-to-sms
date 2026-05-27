@@ -1300,6 +1300,231 @@ fn match_add16(
 /// Emit the lifted 16-bit add: native `add`/`adc` with the carry threaded
 /// in the Z80 carry flag (no shadow-P traffic). Leaves A = high byte of
 /// the result, matching the faithful idiom.
+// ---------------------------------------------------------------------------
+// LDIR copy-loop lifting — the Z80's block-transfer advantage. SMB copies
+// tables→buffers byte-at-a-time; in our translation each byte pays
+// rt_read_indexed + rt_write_indexed. `ldir` does the whole block.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct CopyLoopPlan {
+    src_sms: u16, // SMS address of the first copied source byte
+    dst_sms: u16, // SMS address of the first copied dest byte
+    count: u16,
+    idx_shadow: u16, // SHADOW_X or SHADOW_Y
+    exit_idx: u8,    // value the loop index holds on exit
+    end: usize,      // one past the loop's back-branch
+}
+
+/// Is A read (used) before being overwritten after op `i`? Conservative
+/// (live) at boundaries.
+fn a_live_after(ops: &[ir::Op], i: usize) -> bool {
+    use ir::Op;
+    for op in ops.iter().skip(i + 1) {
+        match op {
+            Op::StaMem { .. }
+            | Op::SaxMem { .. }
+            | Op::CmpImm(_)
+            | Op::CmpMem { .. }
+            | Op::AdcImm(_)
+            | Op::AdcMem { .. }
+            | Op::SbcImm(_)
+            | Op::SbcMem { .. }
+            | Op::AndImm(_)
+            | Op::AndMem { .. }
+            | Op::OraImm(_)
+            | Op::OraMem { .. }
+            | Op::EorImm(_)
+            | Op::EorMem { .. }
+            | Op::BitMem { .. }
+            | Op::Tax
+            | Op::Tay
+            | Op::Pha
+            | Op::AslA
+            | Op::LsrA
+            | Op::RolA
+            | Op::RorA => return true,
+            Op::LdaImm(_) | Op::LdaMem { .. } | Op::Pla | Op::Txa | Op::Tya => return false,
+            _ => {}
+        }
+        if is_flag_boundary(op) {
+            return true;
+        }
+    }
+    true
+}
+
+/// SMS address of an indexed base `b` (the un-indexed table address) for a
+/// copy source: low PRG ($8000-$BFFF) is mapped directly; RAM mirrors to
+/// $C000+. High PRG / other → None (would need a bank swap).
+fn src_base_sms(b: u16, region: ir::MemRegion) -> Option<u16> {
+    use ir::MemRegion::*;
+    match region {
+        PrgRom if b < 0xC000 => Some(b),
+        Ram | RamMirror | Stack => Some(nes_ram_addr_to_sms(b)),
+        ZeroPage => Some(sms_layout::NES_ZP_BASE + (b & 0xFF)),
+        _ => None,
+    }
+}
+/// SMS address of an indexed RAM destination base.
+fn dst_base_sms(b: u16, region: ir::MemRegion) -> Option<u16> {
+    use ir::MemRegion::*;
+    match region {
+        Ram | RamMirror | Stack => Some(nes_ram_addr_to_sms(b)),
+        ZeroPage => Some(sms_layout::NES_ZP_BASE + (b & 0xFF)),
+        _ => None,
+    }
+}
+/// Extract (base_addr, region) if `op` is an LDA/STA indexed by the given
+/// register (X if `want_x`, else Y).
+fn indexed_mem(op: &ir::Op, want_x: bool, is_load: bool) -> Option<(u16, ir::MemRegion)> {
+    use ir::{AddrExpr, Op};
+    let (addr, region) = match (op, is_load) {
+        (Op::LdaMem { addr, region }, true) => (addr, region),
+        (Op::StaMem { addr, region }, false) => (addr, region),
+        _ => return None,
+    };
+    match addr {
+        AddrExpr::AbsIndexedX(b) if want_x => Some((*b, *region)),
+        AddrExpr::AbsIndexedY(b) if !want_x => Some((*b, *region)),
+        _ => None,
+    }
+}
+
+/// Recognize a same-index copy loop beginning with `LDX/LDY #init` at `i`:
+///   LDX/LDY #init ; L: LDA src,i ; STA dst,i ; INC i ; CPX/CPY #N ; B?? L
+///   (ascending, count = N-init)  — or —
+///   LDX/LDY #init ; L: LDA src,i ; STA dst,i ; DEX/DEY ; BPL L
+///   (descending, count = init+1)
+/// Lifts to `ldir` only when the loop body is exactly the copy, the label
+/// has no other referrer, and A / N / Z / C are dead afterward (the index
+/// is restored to its exit value explicitly).
+fn match_copy_loop(
+    ops: &[ir::Op],
+    i: usize,
+    routine: &ir::Routine,
+    reads: Option<&std::collections::HashMap<String, u8>>,
+) -> Option<CopyLoopPlan> {
+    use ir::{Cond, Op};
+    let (init, want_x) = match &ops[i] {
+        Op::LdxImm(v) => (*v, true),
+        Op::LdyImm(v) => (*v, false),
+        _ => return None,
+    };
+    let lbl_idx = skip_source(ops, i + 1);
+    let label = match ops.get(lbl_idx)? {
+        Op::Label(l) => l.clone(),
+        _ => return None,
+    };
+    let a = skip_source(ops, lbl_idx + 1);
+    let b = skip_source(ops, a + 1);
+    let c = skip_source(ops, b + 1);
+    // LDA src,idx ; STA dst,idx
+    let (src_b, src_r) = indexed_mem(ops.get(a)?, want_x, true)?;
+    let (dst_b, dst_r) = indexed_mem(ops.get(b)?, want_x, false)?;
+    let src_sms_base = src_base_sms(src_b, src_r)?;
+    let dst_sms_base = dst_base_sms(dst_b, dst_r)?;
+    // Step op (INC/DEC matching idx) then optional CMP then branch.
+    let ascending = matches!(
+        (ops.get(c)?, want_x),
+        (Op::Inx, true) | (Op::Iny, false)
+    );
+    let descending = matches!(
+        (ops.get(c)?, want_x),
+        (Op::Dex, true) | (Op::Dey, false)
+    );
+    if !ascending && !descending {
+        return None;
+    }
+    let (count, exit_idx, branch_idx) = if ascending {
+        // CPX/CPY #N then loop-while-below branch.
+        let d = skip_source(ops, c + 1);
+        let n = match (ops.get(d)?, want_x) {
+            (Op::CpxImm(n), true) | (Op::CpyImm(n), false) => *n,
+            _ => return None,
+        };
+        let e = skip_source(ops, d + 1);
+        match ops.get(e)? {
+            Op::BranchIf { cond, target }
+                if target == &label
+                    && matches!(cond, Cond::NoCarry | Cond::Negative | Cond::NotZero) => {}
+            _ => return None,
+        }
+        if n <= init {
+            return None;
+        }
+        ((n - init) as u16, n, e)
+    } else {
+        // DEX/DEY ; BPL L  (copies init..0)
+        let d = skip_source(ops, c + 1);
+        match ops.get(d)? {
+            Op::BranchIf {
+                cond: Cond::Positive,
+                target,
+            } if target == &label => {}
+            _ => return None,
+        }
+        ((init as u16) + 1, 0xFFu8, d)
+    };
+    if count == 0 {
+        return None;
+    }
+    let lo = if ascending { init } else { 0 };
+    let src_start = src_sms_base.wrapping_add(lo as u16);
+    let dst_start = dst_sms_base.wrapping_add(lo as u16);
+    // Non-overlap: ROM source never overlaps RAM dest; for RAM→RAM require
+    // separation ≥ count.
+    let src_is_rom = matches!(src_r, ir::MemRegion::PrgRom);
+    if !src_is_rom {
+        let lo16 = src_start.min(dst_start);
+        let hi16 = src_start.max(dst_start);
+        if hi16 - lo16 < count {
+            return None;
+        }
+    }
+    // The label must have no referrer other than this loop's back-branch.
+    let refs = routine
+        .ops
+        .iter()
+        .filter(|op| match op {
+            Op::BranchIf { target, .. } | Op::Jmp { target } => target == &label,
+            _ => false,
+        })
+        .count();
+    if refs != 1 {
+        return None;
+    }
+    // A and N/Z/C must be dead after the loop (index restored explicitly).
+    if a_live_after(ops, branch_idx) || flags_live_after(ops, branch_idx, F_N | F_Z | F_C, reads) {
+        return None;
+    }
+    Some(CopyLoopPlan {
+        src_sms: src_start,
+        dst_sms: dst_start,
+        count,
+        idx_shadow: if want_x {
+            sms_layout::SHADOW_X
+        } else {
+            sms_layout::SHADOW_Y
+        },
+        exit_idx,
+        end: branch_idx + 1,
+    })
+}
+
+/// Emit a lifted copy loop: `ld hl,src; ld de,dst; ld bc,count; ldir`,
+/// then restore the loop index's exit value. (A is dead; flags dead.)
+fn emit_copy_loop(program: &mut z80_emit::Program, plan: &CopyLoopPlan) {
+    program.comment(format!("[lifted copy loop: {} bytes via ldir]", plan.count));
+    program.ld_hl_imm(plan.src_sms);
+    program.ld_de_imm(plan.dst_sms);
+    program.ld_bc_imm(plan.count);
+    program.ldir();
+    // Restore the 6502 index register to its post-loop value (preserves A).
+    program.ld_hl_imm(plan.idx_shadow);
+    program.data(None, &[0x36, plan.exit_idx]); // ld (hl),exit_idx
+}
+
 fn emit_add16(program: &mut z80_emit::Program, plan: &Add16Plan) {
     program.comment("[lifted 16-bit add]");
     // low byte: A = lo_src + lo_op  (CLC absorbed → plain add)
@@ -1401,11 +1626,22 @@ pub fn lower_routine(
     let mut fuse_cmp_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
     let mut fuse_nz_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
     let mut add16_plans: Vec<Option<Add16Plan>> = vec![None; ops_slice.len()];
+    let mut copy_loop_plans: Vec<Option<CopyLoopPlan>> = vec![None; ops_slice.len()];
     let mut fuse_consumed: Vec<bool> = vec![false; ops_slice.len()];
-    // 16-bit add idiom first (it spans 7 ops and subsumes the LDA/CLC/ADC
+    // Copy loops first — they span the most ops (init + label + body +
+    // back-branch) and subsume the inner LDA/STA/INC fusions.
+    for i in 0..ops_slice.len() {
+        if let Some(plan) = match_copy_loop(ops_slice, i, routine, opts.routine_flag_reads) {
+            for slot in fuse_consumed.iter_mut().take(plan.end).skip(i + 1) {
+                *slot = true;
+            }
+            copy_loop_plans[i] = Some(plan);
+        }
+    }
+    // 16-bit add idiom next (it spans 7 ops and subsumes the LDA/CLC/ADC
     // fusions that would otherwise match its pieces).
     for i in 0..ops_slice.len() {
-        if fuse_consumed[i] {
+        if fuse_consumed[i] || copy_loop_plans[i].is_some() {
             continue;
         }
         if let Some(plan) = match_add16(ops_slice, i, opts.routine_flag_reads) {
@@ -1457,6 +1693,11 @@ pub fn lower_routine(
     let mut a_holds_nz = false;
     for (op_idx, op) in routine.ops.iter().enumerate() {
         if fuse_consumed[op_idx] {
+            continue;
+        }
+        if let Some(plan) = &copy_loop_plans[op_idx] {
+            emit_copy_loop(program, plan);
+            a_holds_nz = false; // A is dead post-loop; index restored explicitly
             continue;
         }
         if let Some(plan) = &add16_plans[op_idx] {
