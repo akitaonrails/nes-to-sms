@@ -259,6 +259,50 @@ VRAM-upload loops (mem→VDP data port) map to the Z80's `OTIR` similarly.
 This is the highest-ROI remaining codegen lever and the one that targets
 where the cycles actually go. Implementing it next.
 
+## Idiom-lifting attempted — doesn't pay off on SMB (decisive)
+
+Built two semantic-equivalence lifters and measured them on SMB:
+- **16-bit add → native carry threading**: fires **2×** (needs N/Z/C/V
+  dead after; rarely true).
+- **copy loop → LDIR**: fires **0×**. SMB's copy loops have *dynamic*
+  bounds and set the index non-adjacently (e.g. `UpdateShroom` enters
+  with X from a prior JSR, so `count = N − X` isn't a compile-time
+  constant). Static recognition can't match them.
+
+Both are sound, oracle-validated infrastructure (0 regressions) but
+confirm the research consensus: **SMB's real code shapes defeat static
+idiom-lifting** — the irregularity is exactly why automatic 6502→Z80
+"can't be made playable" by translation tricks. Combined with the
+producer-flag-elision result (30% fewer `rt_set_nz_a`, ~0% cycles),
+codegen optimization has hit its floor here.
+
+## THE PRACTICAL ANSWER: emulator overclock (recipe)
+
+Since the target is emulator-only, overclock the Z80 ~7–8× → the heavy
+NMI fits in a 60 Hz frame → full-speed gameplay. **Genesis Plus GX** is
+the cleanest: its overclock applies to the SMS Z80, and the value is read
+with `atoi` with no visible clamp — the menu only *offers* ≤200%, but a
+larger value written straight into the core-options file works.
+
+RetroArch + Genesis Plus GX (native on Arch):
+```sh
+sudo pacman -S --needed retroarch libretro-genesis-plus-gx
+# generate config once, then set a high overclock (bypasses the 200% menu cap):
+mkdir -p ~/.config/retroarch
+printf 'genesis_plus_gx_overclock = "800%%"\n' >> ~/.config/retroarch/retroarch-core-options.cfg
+retroarch -L /usr/lib/libretro/genesis_plus_gx_libretro.so /mnt/data/Projects/nes-to-sms/out/smb/sms.sms
+```
+(800% ≈ 8×; lower it if the host can't keep up. RetroArch default keys:
+arrows = D-pad, X/Z = buttons, Enter = Start.)
+
+MAME alternative: `mame sms -cart out/smb/sms.sms`, then Tab → Slider
+Controls → "Overclock CPU maincpu" → raise to ~700–800% (needs the SMS
+BIOS romset; interactive-only, not saved).
+
+This makes the translated SMB 1-1 play at full speed **in the emulator** —
+accepting that it won't run on real SMS hardware, which is the right
+trade given the negative-headroom hardware reality.
+
 ## Other Z80 advantages worth exploiting later (generic, game-agnostic)
 
 - `ldir`/`lddr` for 6502 copy/fill loops (`lda $s,x; sta $d,x; dex; bne`).
