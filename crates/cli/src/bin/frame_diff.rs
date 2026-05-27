@@ -231,6 +231,9 @@ struct SmsBus {
     ram: [u8; 0x2000], // $C000-$DFFF, mirrored $E000-$FFFF
     // Controller: SMS port $DC, active-low (1 = released).
     port_dc: u8,
+    // Debug: when Some, log writes to these NES addresses (as $Cxxx).
+    watch: Option<Vec<u16>>,
+    watch_log: Vec<(u16, u8)>,
 }
 
 impl SmsBus {
@@ -240,6 +243,8 @@ impl SmsBus {
             slot_bank: [0, 1, 2],
             ram: [0; 0x2000],
             port_dc: 0xFF,
+            watch: None,
+            watch_log: Vec::new(),
         }
     }
     fn rom_byte(&self, bank: u8, off: u16) -> u8 {
@@ -266,7 +271,15 @@ impl z80_emu::Bus for SmsBus {
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
             0x0000..=0xBFFF => {} // ROM
-            0xC000..=0xDFFF => self.ram[(addr - 0xC000) as usize] = value,
+            0xC000..=0xDFFF => {
+                self.ram[(addr - 0xC000) as usize] = value;
+                if let Some(w) = &self.watch {
+                    let nes = addr - 0xC000;
+                    if w.contains(&nes) {
+                        self.watch_log.push((nes, value));
+                    }
+                }
+            }
             0xE000..=0xFFFB => self.ram[(addr - 0xE000) as usize] = value,
             0xFFFC => {}
             0xFFFD => self.slot_bank[0] = value,
@@ -378,14 +391,29 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
         bus.ram[0x772]
     );
 
+    let debug_frame: Option<usize> = std::env::var("FD_DEBUG_FRAME")
+        .ok()
+        .and_then(|s| s.parse().ok());
+
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for _frame in 0..frames {
         bus.port_dc = nes_buttons_to_sms_dc(script_buttons(_frame, script));
+        if Some(_frame) == debug_frame {
+            bus.watch = Some(vec![0x0000, 0x07A7, 0x07A8]);
+            bus.watch_log.clear();
+        }
         fire_irq(&mut cpu, &mut bus);
         for _ in 0..SUBJ_INSN_PER_FRAME {
             if cpu.halted || cpu.step(&mut bus).is_err() {
                 break;
             }
+        }
+        if Some(_frame) == debug_frame {
+            eprintln!("  [debug] frame {_frame} writes to $00/$07A7/$07A8:");
+            for (a, v) in bus.watch_log.iter().take(40) {
+                eprintln!("    ${a:04X} <- ${v:02X}");
+            }
+            bus.watch = None;
         }
         snaps.push(snap_nes_ram(&bus));
     }
@@ -485,6 +513,14 @@ fn main() {
     // Compare frame by frame. Report the first divergence and the
     // addresses that differ, focusing on the game-state page $0700-$07FF
     // first (operation mode, task, timers) then the whole $0000-$07FF.
+    // Debug: $07A7 trajectory both sides.
+    eprint!("  [traj] ref $07A7:");
+    for f in 0..frames.min(ref_snaps.len()).min(8) { eprint!(" {:02X}", ref_snaps[f][0x7A7]); }
+    eprintln!();
+    eprint!("  [traj] subj $07A7:");
+    for f in 0..frames.min(subj_snaps.len()).min(8) { eprint!(" {:02X}", subj_snaps[f][0x7A7]); }
+    eprintln!();
+
     println!("\n=== divergence report ===");
     let mut first_div: Option<usize> = None;
     // Tally which addresses diverge across ALL frames (to see whether

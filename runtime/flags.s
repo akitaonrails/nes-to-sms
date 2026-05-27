@@ -559,13 +559,14 @@ _lsr_mem_no_z:
 ; ─── rt_rol_mem ───────────────────────────────────────────────────────────────
 ; 6502 ROL memory: rotate byte at (HL) left through shadow carry.
 rt_rol_mem:
+  push af                   ; preserve caller's A (restored at end)
   push hl
   push bc
-  ; Load shadow C into Z80 carry.
-  push af
+  ; Load shadow C into Z80 carry. Do NOT restore flags before the `rl`,
+  ; or the carry we just extracted is lost (the old bug). `ld a,(hl)`
+  ; does not affect flags, so the carry survives into the `rl`.
   ld   a, ($cb03)
   rrca                      ; shadow C -> Z80 carry
-  pop  af
   ld   a, (hl)
   rl   a                    ; rotate through carry; old bit 7 -> Z80 carry; shadow C -> bit 0
   ld   (hl), a
@@ -596,21 +597,25 @@ _rol_mem_no_n:
 _rol_mem_no_z:
   ld   a, b
   ld   ($cb03), a
-  pop  af
+  pop  af                   ; discard the juggled result+flags
   pop  bc
   pop  hl
+  pop  af                   ; restore caller's A
   ret
 
 ; ─── rt_ror_mem ───────────────────────────────────────────────────────────────
 ; 6502 ROR memory: rotate byte at (HL) right through shadow carry.
+; Preserves caller's A.
 rt_ror_mem:
+  push af                   ; preserve caller's A (restored at end)
   push hl
   push bc
-  push af
+  ; Load shadow C into Z80 carry. `rrca` rotates A (= shadow P) so bit 0
+  ; (shadow C) lands in the Z80 carry; the rotated A is scratch. We must
+  ; NOT pop/restore flags before the `rr` below, or the carry is lost.
   ld   a, ($cb03)
   rrca                      ; shadow C -> Z80 carry
-  pop  af
-  ld   a, (hl)
+  ld   a, (hl)              ; `ld` does not affect flags, carry preserved
   rr   a                    ; old bit 0 -> carry; shadow C -> bit 7
   ld   (hl), a
   push af
@@ -640,9 +645,10 @@ _ror_mem_no_n:
 _ror_mem_no_z:
   ld   a, b
   ld   ($cb03), a
-  pop  af
+  pop  af                   ; discard the juggled result+flags
   pop  bc
   pop  hl
+  pop  af                   ; restore caller's A
   ret
 
 ; ─── rt_inc_mem ───────────────────────────────────────────────────────────────
