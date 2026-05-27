@@ -10,7 +10,7 @@
 ;   $C200-$C7FF  NES RAM mirror ($0200-$07FF)
 ;   $C800-$C8FF  VRAM update buffer
 ;   $C900-$C9FF  Sprite attribute staging (Y at $C900, X/tile at $C940)
-;   $CC00-$D2FF  SMS nametable high-byte shadow ($3800-$3EFF mirrored + $9400)
+;   $CC00-$D3FF  SMS nametable high-byte shadow ($3700-$3EFF mirrored + $9500)
 ;   $CB00        Shadow X
 ;   $CB01        Shadow Y
 ;   $CB02        Shadow S (init $FD)
@@ -113,22 +113,23 @@ boot_main:
   call vdp_write_block
 
   ; 5. Load CHR tiles from data_chr into VRAM at $0000.
-  ;    VRAM Mode 4 layout: $0000-$37FF tile patterns (14 KiB), $3800-
-  ;    $3EFF name table (1792 bytes), $3F00-$3FFF SAT (256 bytes). SMB
-  ;    converted CHR is 16 KiB; clamp the upload to $3800 bytes.
+  ;    VRAM Mode 4 layout (224-line mode): $0000-$36FF tile patterns
+  ;    (~13.75 KiB), $3700-$3EFF name table (2 KiB, 32x32), $3F00-$3FFF
+  ;    SAT. SMB converted CHR is 16 KiB; clamp the upload to $3700 bytes.
   ld  a, $00
   ld  d, $00
   call vdp_set_vram_addr
   ld  a, :data_chr
   ld  ($ffff), a
   ld  hl, data_chr
-  ld  bc, $3800
+  ld  bc, $3700
   call vdp_write_block
 
-  ; 6. Load nametable from data_nametable into VRAM at $3800.
-  ;    32*28*2 = 1792 ($0700) bytes.
+  ; 6. Load nametable from data_nametable into VRAM at $3700 (224-line
+  ;    mode base = (R2 & $0C)<<10 | $700, R2=$FF -> $3700).
+  ;    32*28*2 = 1792 ($0700) bytes covers the visible rows 0-27.
   ld  a, $00
-  ld  d, $38
+  ld  d, $37
   call vdp_set_vram_addr
   ld  a, :data_nametable
   ld  ($ffff), a
@@ -193,8 +194,10 @@ boot_main:
   call mem_fill
 
   ; 12. Enable display and frame interrupts (VDP reg 1).
-  ;     %11100000: display on, frame INT enabled, 8×8 sprites.
-  ld  a, %11100000
+  ;     %11110000: display on, frame INT enabled, M1=1 (224-line mode),
+  ;     8×8 sprites. 224 lines (28 tile rows) vs 192 so the NES 30-row
+  ;     playfield's lower rows (e.g. the ground) aren't clipped.
+  ld  a, %11110000
   ld  b, 1
   call vdp_set_register
   ; NOTE: do NOT `ei` here. If an IRQ fires between this point and the

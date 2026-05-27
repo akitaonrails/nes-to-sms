@@ -48,13 +48,13 @@ _chrmap_bg_base_ready:
   ; collision block/metatile buffers.
   ld   hl, ($cb17)
   ld   a, h
-  cp   $38
+  cp   $37
   jr   c, _chrmap_bg_skip_shadow
   cp   $40
   jr   nc, _chrmap_bg_skip_shadow
   inc  hl                    ; high-byte address within SMS nametable
   ld   a, h
-  add  a, $94                ; $3800->$CC00, $3E00->$D200
+  add  a, $95                ; $3700->$CC00, $3E00->$D300 (224-line base)
   ld   h, a
   ld   (hl), c
 _chrmap_bg_skip_shadow:
@@ -117,7 +117,7 @@ rt_attr_base_tl:
   srl  a
   srl  a
   srl  a
-  add  a, $38
+  add  a, $37
   ld   d, a
   ret
 
@@ -160,8 +160,8 @@ _chrmap_attr_write_one:
   ld   h, d
   ld   l, e
   ld   a, h
-  add  a, $94
-  ld   h, a                  ; HL = shadow address for this high byte
+  add  a, $95
+  ld   h, a                  ; HL = shadow address for this high byte (224-line base)
   ld   a, (hl)
   and  $f7                   ; clear palette bit, preserve mapped tile bit
   or   b

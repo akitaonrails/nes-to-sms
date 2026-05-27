@@ -1,0 +1,18 @@
+# RetroArch + Genesis Plus GX (Sega 8-bit) for running the translated .sms
+# with the Z80 overclocked, so the heavy translated NMI fits in a 60 Hz
+# frame. Emulator-only target (does not run on real SMS hardware).
+FROM nes-to-sms-sms-visual:latest
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        retroarch unzip wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Genesis Plus GX core (not in Debian apt) from the libretro buildbot.
+RUN mkdir -p /opt/cores \
+    && wget -q -O /opt/cores/gpgx.so.zip \
+        http://buildbot.libretro.com/nightly/linux/x86_64/latest/genesis_plus_gx_libretro.so.zip \
+    && unzip -o /opt/cores/gpgx.so.zip -d /opt/cores \
+    && rm /opt/cores/gpgx.so.zip \
+    && ls -la /opt/cores

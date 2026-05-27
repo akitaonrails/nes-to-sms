@@ -203,14 +203,15 @@ _ppu_w_ppudata:
 
 _ppudata_direct_nametable_tile:
   ; DE = NES nametable byte. Convert `(DE - $2000) & $03FF` to
-  ; SMS `$3800 + offset * 2`, write tile low byte and clear attrs.
+  ; SMS `$3700 + offset * 2` (224-line-mode name table base), write tile
+  ; low byte and clear attrs.
   ld   a, d
   and  $03
   ld   d, a
   sla  e
   rl   d
   ld   a, d
-  add  a, $38
+  add  a, $37
   ld   d, a
   ld   a, e
   out  ($bf), a

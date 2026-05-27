@@ -151,14 +151,14 @@ _vbuf_flush_loop:
 
 _vbuf_flush_nametable_tile:
   ; DE = NES nametable byte. Convert `(DE - $2000) & $03FF` to
-  ; SMS `$3800 + offset * 2`.
+  ; SMS `$3700 + offset * 2` (224-line-mode name table base).
   ld   a, d
   and  $03
   ld   d, a                  ; DE now 0..$03BF
   sla  e
   rl   d                     ; DE *= 2
   ld   a, d
-  add  a, $38
+  add  a, $37
   ld   d, a                  ; DE now SMS nametable address
 
   ld   a, e
@@ -256,7 +256,7 @@ _vbuf_flush_attribute_byte:
 _vbuf_attr_base_tl:
   ; Build DE = SMS nametable high-byte address for the top-left tile covered
   ; by attribute offset $CB19. Formula:
-  ;   high = $38 + (attr_offset >> 3)
+  ;   high = $37 + (attr_offset >> 3)   ; 224-line-mode name table base
   ;   low  = 1 + ((attr_offset & 7) * 8)
   ld   a, ($cb19)
   and  $07
@@ -269,7 +269,7 @@ _vbuf_attr_base_tl:
   srl  a
   srl  a
   srl  a
-  add  a, $38
+  add  a, $37
   ld   d, a
   ret
 

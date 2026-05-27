@@ -1954,7 +1954,7 @@ fn main() {
     println!();
     println!("VRAM peek $3800 (nametable start):");
     for i in 0..32 {
-        let b = bus.vram[0x3800 + i];
+        let b = bus.vram[0x3700 + i];
         print!(" ${b:02X}");
     }
     println!();
@@ -1973,18 +1973,18 @@ fn main() {
     // Quick nametable scan: find any non-zero entry.
     let mut nz_count = 0;
     for i in 0..1792 {
-        if bus.vram[0x3800 + i] != 0 {
+        if bus.vram[0x3700 + i] != 0 {
             nz_count += 1;
         }
     }
     println!("Nametable non-zero bytes: {nz_count}/1792");
     let mut chr_nz = 0;
-    for i in 0..0x3800 {
+    for i in 0..0x3700 {
         if bus.vram[i] != 0 {
             chr_nz += 1;
         }
     }
-    println!("Tile pattern non-zero bytes: {chr_nz}/{}", 0x3800);
+    println!("Tile pattern non-zero bytes: {chr_nz}/{}", 0x3700);
 
     // ASCII nametable dump: print each cell's low-byte tile index as 2-hex.
     // SMS nametable is 32 cols x 28 rows of 16-bit entries (low/high bytes).
@@ -1992,7 +1992,7 @@ fn main() {
     for row in 0..28 {
         let mut line = String::new();
         for col in 0..32 {
-            let off = 0x3800 + (row * 32 + col) * 2;
+            let off = 0x3700 + (row * 32 + col) * 2;
             let lo = bus.vram[off];
             if lo == 0 {
                 line.push_str("..");
@@ -2154,7 +2154,7 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
 
     for row in 0..28 {
         for col in 0..32 {
-            let off = 0x3800 + (row * 32 + col) * 2;
+            let off = 0x3700 + (row * 32 + col) * 2;
             let lo = bus.vram[off];
             let hi = bus.vram[off + 1];
             let tile_index = ((hi as u16 & 1) << 8) | lo as u16;
