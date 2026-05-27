@@ -93,12 +93,29 @@ Useful: `FD_TRAJ=0xADDR` dumps one address's per-frame trajectory both sides.
      ALU helpers (`rt_cmp_a` 49K, `rt_lsr_a` 44K, `rt_adc_a` 29K,
      `rt_sbc_a` 19K), `rt_map_sprite_tile` 32K, `rt_ppu_write` 18K.
      Root cause is structural: every 6502 op maintains shadow-P flags in
-     RAM ($CB03) via helper calls. Micro-leaning the helpers (they each
-     do 2-3 redundant `push af`/`pop af`) is worth ~10-20%; reaching
-     real-time needs a codegen change to **lazy/native Z80 flag
-     evaluation** (sync shadow P only when actually read), which would
-     elide most `rt_set_nz_a`/`rt_cmp_a`/etc. calls. This is the next
-     major arc.
+     RAM ($CB03) via helper calls.
+
+     **Native-flag fusion (done):** CMP/LDA/AND/ORA/EOR immediately
+     followed by branch(es) that read their flags, with those flags dead
+     afterward, now lower to a native `cp`/`or a`/`and` + native
+     conditional jumps (`jp z/nz/c/nc/m/p`) instead of the helper +
+     shadow-P bit test. `rt_cmp_a` -53%, `rt_set_nz_a` -20%. Plus
+     `rt_set_nz_a` was leaned (one push/pop pair vs three).
+
+     **Cycle metric (z80_emu now counts approx T-states):** baseline
+     steady gameplay ≈ **370K cycles/frame vs ~59,736 budget = ~6.2×**
+     (~10 fps). A cycle-weighted breakdown shows the cost is **diffuse**:
+     all flag helpers combined are only ~17% of the frame; the rest is
+     indexed memory access (~8%), the emulated 6502 stack, bank-switch
+     trampolines (`rt_far_call`), sprite/PPU helpers, and — dominant —
+     the sheer count of Z80 ops the faithful per-6502-instruction
+     translation emits. **Eliminating 100% of flag helpers caps at
+     ~1.2×.** Reaching 60 fps (6.2×) is not an incremental-optimization
+     problem; it needs a codegen rearchitecture: persistent 6502→Z80
+     register allocation (keep A/X/Y in Z80 regs, not shadow RAM), lazy
+     flags across whole blocks, the native Z80 stack for PHA/PLA, and a
+     static bank layout to remove far-calls. That is a research-grade
+     effort with uncertain landing (likely 2-3×, not 6×).
   2. **Title-render glitch** (frame-22 VRAM-buffer phasing): title and
      level briefly overlay. Cosmetic to gameplay.
 
