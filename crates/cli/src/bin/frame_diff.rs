@@ -77,6 +77,7 @@ struct NesBus {
     strobe: bool,
     ctrl_shift: u8,
     buttons: u8,
+    joy_reads: u64,
 }
 
 impl NesBus {
@@ -90,6 +91,7 @@ impl NesBus {
             strobe: false,
             ctrl_shift: 0,
             buttons: 0,
+            joy_reads: 0,
         }
     }
 
@@ -123,6 +125,7 @@ impl oracle_6502::Bus for NesBus {
             }
             0x4016 => {
                 // Controller 1 serial read: bit0 = next button bit.
+                self.joy_reads += 1;
                 let bit = self.ctrl_shift & 1;
                 if !self.strobe {
                     self.ctrl_shift >>= 1;
@@ -216,6 +219,7 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
         }
         snaps.push(bus.ram);
     }
+    eprintln!("  ref total $4016 reads: {}", bus.joy_reads);
     (init_snap, snaps)
 }
 
@@ -403,6 +407,15 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
         nmi_enabled(&bus),
         bus.ram[0x772]
     );
+    // Helper: report if the unresolved-jsr trap has fired ($CB1D=$E1)
+    // and which routine id ($CB1B/$CB1C).
+    let report_trap = |bus: &SmsBus, when: &str| {
+        if bus.ram[0x0B1D] == 0xE1 {
+            let id = bus.ram[0x0B1B] as u16 | ((bus.ram[0x0B1C] as u16) << 8);
+            eprintln!("  *** TRAP fired ({when}): unresolved routine id={id} ($CB1B)");
+        }
+    };
+    report_trap(&bus, "pre-roll");
 
     let debug_frame: Option<usize> = std::env::var("FD_DEBUG_FRAME")
         .ok()
@@ -430,6 +443,7 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
         }
         snaps.push(snap_nes_ram(&bus));
     }
+    report_trap(&bus, "after frames");
     (init_snap, snaps)
 }
 
