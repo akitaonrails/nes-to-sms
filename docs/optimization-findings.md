@@ -154,6 +154,64 @@ design. The realistic state is a correct, deterministic NES→SMS translator
 with a playable-but-slow (~6–10 fps) SMB 1-1. Further perf work has very
 low ROI.
 
+## Prior art & external research (May 2026)
+
+Researched whether others have done 6502→Z80 and how to approach native speed.
+
+**Has anyone done 6502→Z80 translation?** Essentially not automatically.
+Community consensus (nesdev, 6502.org): automatic 6502→Z80 translation
+can't produce "anything playable"; real NES→SMS conversions are *manual
+reimplementations*. The *reverse* (Z80→6502) has been done historically
+(Geoff Crammond's *The Sentinel* BBC→CPC; a Z80→6502 recompiler for the
+*Pentagram* port). 6502→65816 *is* done (`upernes`, NES→SNES) — but only
+because the 65816 is a 6502 superset, making it ~1:1.
+
+**The performance ceiling is confirmed — and worse than assumed.** The
+Z80 averages ~13 clocks/instruction vs the 6502's ~4; a 3.5 MHz Z80 ≈ a
+1 MHz 6502 for general code. So the SMS Z80 (3.58 MHz ≈ ~1 MHz-6502) is
+*slower* than the NES's 1.79 MHz 6502 for equivalent work — **negative
+headroom**, not the ~2× I first assumed. A faithful instruction-by-
+instruction translation hits the Z80's worst case (every 6502 op → several
+13-clock Z80 ops).
+
+**Why modern static recompilation (N64Recomp etc.) reaches native speed,
+and we can't:** those translate MIPS→C and run on a *vastly* faster modern
+CPU, letting a whole-program C compiler optimize and the huge target
+headroom absorb all overhead. Our target is *slower* than our source —
+the exact inverse. Recompilation reaches native speed only when the host
+dwarfs the guest.
+
+**Techniques people use, and their realistic gains:**
+- *Lazy flag (condition-code) evaluation* — QEMU/Bochs standard; a DBT
+  paper reports ~40% (two-phase: intra-block redundancy removal + inter-
+  block lazy eval), a hobbyist emulator ~10%. We implemented this; it
+  dropped `rt_set_nz_a` 30% but ~0.5% of *cycles*, because flags aren't
+  our cycle bottleneck.
+- *Guest→host register allocation* — maps guest registers to host
+  registers (we keep A in Z80 A; X/Y still in RAM).
+- *Loop-idiom recognition → block instructions* — LLVM's
+  `LoopIdiomRecognize` rewrites copy/fill loops into `memcpy`/`memset`.
+  The Z80 analog is **`LDIR`/`LDDR`** (block move). The research
+  explicitly notes the Z80's block-transfer instructions are where it
+  *beats* the 6502 — for "scrolling screens in video games" and large
+  data moves. **This is exactly our measured bottleneck** (the area
+  parser's per-column VRAM-buffer copying during scroll). So this is the
+  one remaining research-backed, generic optimization that targets where
+  our cycles actually go and where the Z80 has a genuine advantage.
+
+**Net:** the literature agrees full speed is unreachable for faithful
+6502→Z80 on a maxed-out NES game (negative headroom; "not anything
+playable" automatically). The single highest-ROI remaining lever is
+`LDIR`-lifting of copy/fill loops — it won't hit 60 fps but it targets
+the real hot path, unlike the flag work.
+
+Sources: nesdev forum (NES→SMS feasibility); 6502.org / AtariAge
+(Z80↔6502 recompilers); thecodersblog & HN (Z80 ~13 vs 6502 ~4
+clocks/instr; 3.5 MHz Z80 ≈ 1 MHz 6502); silviocesare & IEEE/ResearchGate
+(lazy condition-code evaluation, ~10–40%); LLVM `LoopIdiomRecognize`
+(loop→block-op idiom recognition); N64Recomp (native-speed static
+recompilation via host headroom).
+
 ## Other Z80 advantages worth exploiting later (generic, game-agnostic)
 
 - `ldir`/`lddr` for 6502 copy/fill loops (`lda $s,x; sta $d,x; dex; bne`).
