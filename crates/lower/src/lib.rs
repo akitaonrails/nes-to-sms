@@ -985,6 +985,145 @@ fn emit_fused_branches(
 }
 
 // ---------------------------------------------------------------------------
+// 16-bit add idiom lifting
+// ---------------------------------------------------------------------------
+// The 6502 has no 16-bit add, so it does:
+//     LDA lo ; CLC ; ADC loOp ; STA lo ; LDA hi ; ADC hiOp ; STA hi
+// threading the carry between the two ADCs through the (emulated) status
+// byte — which costs two rt_adc_a calls + the CLC dance. The Z80 has the
+// same carry flag, so we thread it *natively* between a real `add` and
+// `adc`, dropping all the shadow-flag machinery. SMB does this constantly
+// (player/object 16-bit positions, camera scroll), so it's a hot path.
+//
+// We lift only when the resulting flags are dead afterward (the native
+// carry/sign/zero after `adc` would otherwise need to be reflected into
+// the shadow byte) and all addresses are constant (non-indexed), so the
+// observable result — the two stored bytes — is provably identical.
+
+#[derive(Clone, Copy)]
+enum Val16 {
+    Imm(u8),
+    Mem(u16), // SMS address
+}
+
+#[derive(Clone, Copy)]
+struct Add16Plan {
+    lo_src: u16,
+    lo_op: Val16,
+    lo_dst: u16,
+    hi_src: Val16,
+    hi_op: Val16,
+    hi_dst: u16,
+    end: usize, // one past the last consumed op
+}
+
+/// Next op index at/after `i` skipping `Source` comments.
+fn skip_source(ops: &[ir::Op], mut i: usize) -> usize {
+    while i < ops.len() && matches!(ops[i], ir::Op::Source { .. }) {
+        i += 1;
+    }
+    i
+}
+
+/// `LdaMem`/`StaMem` with a constant (non-indexed) address → SMS address.
+fn lda_const(op: &ir::Op) -> Option<u16> {
+    match op {
+        ir::Op::LdaMem { addr, region } => const_addr_to_sms(addr, *region),
+        _ => None,
+    }
+}
+fn sta_const(op: &ir::Op) -> Option<u16> {
+    match op {
+        ir::Op::StaMem { addr, region } => const_addr_to_sms(addr, *region),
+        _ => None,
+    }
+}
+/// An LDA source (immediate or constant memory) as a Val16.
+fn lda_src_val(op: &ir::Op) -> Option<Val16> {
+    match op {
+        ir::Op::LdaImm(v) => Some(Val16::Imm(*v)),
+        ir::Op::LdaMem { addr, region } => const_addr_to_sms(addr, *region).map(Val16::Mem),
+        _ => None,
+    }
+}
+/// An ADC operand (immediate or constant memory) as a Val16.
+fn adc_val(op: &ir::Op) -> Option<Val16> {
+    match op {
+        ir::Op::AdcImm(v) => Some(Val16::Imm(*v)),
+        ir::Op::AdcMem { addr, region } => const_addr_to_sms(addr, *region).map(Val16::Mem),
+        _ => None,
+    }
+}
+
+/// Recognize the 16-bit ADD idiom starting at op `i`. Returns a plan if
+/// the full shape matches with constant addresses and the result flags
+/// are dead afterward.
+fn match_add16(ops: &[ir::Op], i: usize) -> Option<Add16Plan> {
+    use ir::Op;
+    let lo_src = lda_const(&ops[i])?; // LDA lo
+    let i2 = skip_source(ops, i + 1);
+    if !matches!(ops.get(i2)?, Op::Clc) {
+        return None; // CLC
+    }
+    let i3 = skip_source(ops, i2 + 1);
+    let lo_op = adc_val(ops.get(i3)?)?; // ADC loOp
+    let i4 = skip_source(ops, i3 + 1);
+    let lo_dst = sta_const(ops.get(i4)?)?; // STA lo
+    let i5 = skip_source(ops, i4 + 1);
+    let hi_src = lda_src_val(ops.get(i5)?)?; // LDA hi
+    let i6 = skip_source(ops, i5 + 1);
+    // The high ADC must NOT be preceded by another CLC (that would reset
+    // the carry and break the 16-bit chain). adc_val rejects anything but
+    // ADC, and i6 is the op right after the high LDA.
+    let hi_op = adc_val(ops.get(i6)?)?; // ADC hiOp
+    let i7 = skip_source(ops, i6 + 1);
+    let hi_dst = sta_const(ops.get(i7)?)?; // STA hi
+    // Result flags must be dead — otherwise the shadow byte would be stale.
+    if flags_live_after(ops, i7, F_N | F_Z | F_C | F_V) {
+        return None;
+    }
+    Some(Add16Plan {
+        lo_src,
+        lo_op,
+        lo_dst,
+        hi_src,
+        hi_op,
+        hi_dst,
+        end: i7 + 1,
+    })
+}
+
+/// Emit the lifted 16-bit add: native `add`/`adc` with the carry threaded
+/// in the Z80 carry flag (no shadow-P traffic). Leaves A = high byte of
+/// the result, matching the faithful idiom.
+fn emit_add16(program: &mut z80_emit::Program, plan: &Add16Plan) {
+    program.comment("[lifted 16-bit add]");
+    // low byte: A = lo_src + lo_op  (CLC absorbed → plain add)
+    program.ld_a_abs(plan.lo_src);
+    match plan.lo_op {
+        Val16::Imm(v) => program.add_a_imm(v),
+        Val16::Mem(a) => {
+            program.ld_hl_imm(a);
+            program.add_a_hl_ptr();
+        }
+    }
+    program.ld_abs_a(plan.lo_dst);
+    // high byte: A = hi_src + hi_op + carry
+    match plan.hi_src {
+        Val16::Imm(v) => program.ld_a_imm(v),
+        Val16::Mem(a) => program.ld_a_abs(a),
+    }
+    match plan.hi_op {
+        Val16::Imm(v) => program.adc_a_imm(v),
+        Val16::Mem(a) => {
+            program.ld_hl_imm(a);
+            program.adc_a_hl_ptr();
+        }
+    }
+    program.ld_abs_a(plan.hi_dst);
+}
+
+// ---------------------------------------------------------------------------
 // lower_routine
 // ---------------------------------------------------------------------------
 
@@ -1047,8 +1186,25 @@ pub fn lower_routine(
     // emit their branch run natively and mark the run `fuse_consumed`.
     let mut fuse_cmp_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
     let mut fuse_nz_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
+    let mut add16_plans: Vec<Option<Add16Plan>> = vec![None; ops_slice.len()];
     let mut fuse_consumed: Vec<bool> = vec![false; ops_slice.len()];
+    // 16-bit add idiom first (it spans 7 ops and subsumes the LDA/CLC/ADC
+    // fusions that would otherwise match its pieces).
     for i in 0..ops_slice.len() {
+        if fuse_consumed[i] {
+            continue;
+        }
+        if let Some(plan) = match_add16(ops_slice, i) {
+            for slot in fuse_consumed.iter_mut().take(plan.end).skip(i + 1) {
+                *slot = true;
+            }
+            add16_plans[i] = Some(plan);
+        }
+    }
+    for i in 0..ops_slice.len() {
+        if fuse_consumed[i] || add16_plans[i].is_some() {
+            continue;
+        }
         let (end, target) = match &ops_slice[i] {
             // CMP sets N/Z/C; all three must be dead after the run.
             Op::CmpImm(_) | Op::CmpMem { .. } => {
@@ -1081,6 +1237,10 @@ pub fn lower_routine(
 
     for (op_idx, op) in routine.ops.iter().enumerate() {
         if fuse_consumed[op_idx] {
+            continue;
+        }
+        if let Some(plan) = &add16_plans[op_idx] {
+            emit_add16(program, plan);
             continue;
         }
         match op {
@@ -2244,6 +2404,31 @@ mod tests {
     // -------------------------------------------------------------------
     // CmpImm
     // -------------------------------------------------------------------
+    // 16-bit add idiom: LDA $86; CLC; ADC #$01; STA $86; LDA $6D;
+    // ADC #$00; STA $6D  (player X += 1, 16-bit). Flags killed afterward
+    // (CLV + CMP) so it lifts to native add/adc with no rt_adc_a.
+    #[test]
+    fn add16_lifts_to_native() {
+        let zp = |z| ir::AddrExpr::ZpConst(z);
+        let build = lower_and_finish(vec![
+            Op::LdaMem { addr: zp(0x86), region: MemRegion::ZeroPage },
+            Op::Clc,
+            Op::AdcImm(0x01),
+            Op::StaMem { addr: zp(0x86), region: MemRegion::ZeroPage },
+            Op::LdaMem { addr: zp(0x6D), region: MemRegion::ZeroPage },
+            Op::AdcImm(0x00),
+            Op::StaMem { addr: zp(0x6D), region: MemRegion::ZeroPage },
+            Op::Clv,        // kills V
+            Op::CmpImm(0),  // kills N/Z/C
+            Op::Rts,
+        ]);
+        // native add a,$01 (C6 01) and adc a,$00 (CE 00); no rt_adc_a.
+        assert!(build.bytes.windows(2).any(|w| w == [0xC6, 0x01]));
+        assert!(build.bytes.windows(2).any(|w| w == [0xCE, 0x00]));
+        assert!(!build.asm.contains("call rt_adc_a"));
+        assert!(build.asm.contains("[lifted 16-bit add]"));
+    }
+
     #[test]
     fn cmp_imm_3() {
         let build = lower_and_finish(vec![Op::CmpImm(3)]);
