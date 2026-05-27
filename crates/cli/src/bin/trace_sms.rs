@@ -1150,6 +1150,8 @@ fn main() {
         }
         if first_runtime_trap_step.is_none() && bus.ram[0x0B1D] == 0xE1 {
             first_runtime_trap_step = Some(step);
+            let id = (bus.ram[0x0B1C] as u16) << 8 | bus.ram[0x0B1B] as u16;
+            eprintln!("*** first trap at step {step}: unresolved_id=${id:04X} pc=${pc:04X}");
         }
         if first_ram_exec_step.is_none() && pc >= 0xC000 {
             first_ram_exec_step = Some((step, pc));

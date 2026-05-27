@@ -58,6 +58,8 @@ fn script_buttons(frame: usize, script: &str) -> Buttons {
                 Buttons(0)
             }
         }
+        // Hold Start every frame (debugging controller delivery).
+        "start_hold" => Buttons(Buttons::START),
         _ => Buttons(0),
     }
 }
@@ -78,6 +80,7 @@ struct NesBus {
     ctrl_shift: u8,
     buttons: u8,
     joy_reads: u64,
+    joy_dbg: u32,
 }
 
 impl NesBus {
@@ -92,6 +95,7 @@ impl NesBus {
             ctrl_shift: 0,
             buttons: 0,
             joy_reads: 0,
+            joy_dbg: 0,
         }
     }
 
@@ -126,6 +130,13 @@ impl oracle_6502::Bus for NesBus {
             0x4016 => {
                 // Controller 1 serial read: bit0 = next button bit.
                 self.joy_reads += 1;
+                if self.buttons != 0 && self.joy_dbg < 24 {
+                    self.joy_dbg += 1;
+                    eprintln!(
+                        "    [ref $4016 read] buttons=${:02X} strobe={} shift=${:02X} -> bit {}",
+                        self.buttons, self.strobe as u8, self.ctrl_shift, self.ctrl_shift & 1
+                    );
+                }
                 let bit = self.ctrl_shift & 1;
                 if !self.strobe {
                     self.ctrl_shift >>= 1;
@@ -205,12 +216,23 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
     let init_snap = bus.ram;
     eprintln!("  ref pre-roll: {pre} insn, nmi_enabled={}", bus.nmi_enabled);
 
+    // Mirror the subject runtime's "once NMI has been enabled, keep
+    // firing the frame NMI even if SMB later clears $2000 bit 7" latch
+    // ($CB1A in runtime/boot.s). Without this the reference stops
+    // running NMIs (and thus ReadJoypads) whenever SMB briefly disables
+    // NMI during the title, so it never sees a controller press.
+    let mut nmi_latched = bus.nmi_enabled;
+    let mut nmi_fires = 0usize;
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for frame in 0..frames {
-        bus.buttons = script_buttons(frame, script).0;
+        bus.buttons = effective_nes_buttons(frame, script);
         bus.vblank = true;
         if bus.nmi_enabled {
+            nmi_latched = true;
+        }
+        if nmi_latched {
             cpu.nmi(&mut bus);
+            nmi_fires += 1;
         }
         for _ in 0..REF_INSN_PER_FRAME {
             if cpu.step(&mut bus).is_err() {
@@ -219,7 +241,7 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
         }
         snaps.push(bus.ram);
     }
-    eprintln!("  ref total $4016 reads: {}", bus.joy_reads);
+    eprintln!("  ref total $4016 reads: {}, nmi fires: {nmi_fires}", bus.joy_reads);
     (init_snap, snaps)
 }
 
@@ -306,6 +328,29 @@ impl z80_emu::Bus for SmsBus {
     }
 }
 
+/// Inverse of the SMS $DC mapping: the NES buttons `rt_controller_latch`
+/// reconstructs from a $DC value (active-low). Two NES buttons share each
+/// SMS face button (A/Select on Button1, B/Start on Button2), so this is
+/// lossy — pressing Start yields B+Start. The reference applies the same
+/// round-trip so both sides see identical (aliased) NES input.
+fn sms_dc_to_nes(dc: u8) -> u8 {
+    let pressed = !dc;
+    let mut nes = 0u8;
+    if pressed & (1 << 4) != 0 { nes |= Buttons::A | Buttons::SELECT; }
+    if pressed & (1 << 5) != 0 { nes |= Buttons::B | Buttons::START; }
+    if pressed & (1 << 0) != 0 { nes |= Buttons::UP; }
+    if pressed & (1 << 1) != 0 { nes |= Buttons::DOWN; }
+    if pressed & (1 << 2) != 0 { nes |= Buttons::LEFT; }
+    if pressed & (1 << 3) != 0 { nes |= Buttons::RIGHT; }
+    nes
+}
+
+/// NES buttons both sides should see for a script frame: the script's
+/// intent round-tripped through the SMS controller mapping.
+fn effective_nes_buttons(frame: usize, script: &str) -> u8 {
+    sms_dc_to_nes(nes_buttons_to_sms_dc(script_buttons(frame, script)))
+}
+
 /// Map NES controller buttons to the SMS $DC port (active-low) the way
 /// `runtime/input.s` expects: bit0 Up, bit1 Down, bit2 Left, bit3
 /// Right, bit4 Button1 (NES A / Select), bit5 Button2 (NES B / Start).
@@ -347,6 +392,11 @@ fn is_excluded(addr: usize) -> bool {
     // addresses the original leaves, so faithful replication is
     // impossible. They are dispatch internals, not game state.
     if (0x0004..0x0008).contains(&addr) {
+        return true;
+    }
+    // Optional: exclude the VRAM update buffer ($0300-$03FF) to surface
+    // game-logic divergences hidden behind render-buffer phasing.
+    if std::env::var("FD_EXCLUDE_VRAMBUF").is_ok() && (0x0300..0x0400).contains(&addr) {
         return true;
     }
     false

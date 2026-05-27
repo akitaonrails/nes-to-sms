@@ -34,33 +34,68 @@ Useful: `FD_TRAJ=0xADDR` dumps one address's per-frame trajectory both sides.
   - Residual frame-22 divergence is the VRAM render-buffer fill/flush
     *phasing* during DrawTitleScreen + attract-demo object positions —
     rendering detail, not game logic.
-- **M3 ◑ (in progress)** Start → gameplay.
-  - The subject correctly transitions title→GameMode on Start
-    (`$0770` 0→1, `$0772` resets, `$074A`=$10=Start).
-  - **Blocker:** GameMode init then stalls — the player never spawns
-    ($0086/$000E freeze) and the gameplay path hits the unresolved-jsr
-    trap. The 47 unresolved labels are dominated by the **sound engine**
-    (`L_F0D7..L_F64D` = NES `$F000+`) plus specific enemy init/move
-    routines. Level-start music is the likely trap; sprite-0-hit
-    emulation and the area parser are also on this path.
-  - **Reference caveat:** the reference NES controller model's
-    ReadJoypads timing doesn't coincide with the Start window, so the
-    *reference* stays at the title. Needs fixing for proper gameplay
-    differential validation (the subject's controller path works).
+- **M3 ◑ (in progress)** Start → gameplay. Verified working on the
+  SUBJECT directly (trace-sms):
+  - Start press → GameMode (`$0770` 0→1, `$0772` resets).
+  - **1-1 loads and Mario spawns at the correct start position**
+    (`$0086`=$28 page 0, `$00CE`/Y=$B0). No unresolved-jsr trap on this
+    path (earlier "trap" reading was a misread; the milestone is *not*
+    reached, i.e. no trap).
+  - Controller input is delivered: the game sees Right
+    (`$06FC`=$01 = Right in SMB's MSB-first SavedJoypad order).
+  - **Headline blocker: Mario won't walk.** With Right held, X stays
+    `$28` and X-speed stays 0 — input reaches the game but the
+    horizontal-movement physics doesn't apply. Not a trap → a
+    translation bug in the player-movement path. Needs differential
+    isolation.
+  - **Reference controller: fixed.** Two issues resolved: (a) the
+    reference must latch "NMI enabled" like the runtime's `$CB1A` latch,
+    or it stops running ReadJoypads when SMB briefly disables NMI;
+    (b) inputs must be round-tripped through the SMS $DC mapping
+    (`effective_nes_buttons`) so both sides see the same aliased NES
+    buttons (Start→B+Start). The reference now reads the controller
+    every frame and decodes Start correctly.
+  - **Why the reference still won't enter GameMode on Start:** the
+    title **demo** diverges at frame 22 (see below), so by the Start
+    frame (40) the two title states differ. Pressing Start *before*
+    frame 22, or fixing the frame-22 divergence, is required for a
+    valid gameplay diff.
+- **Frame-22 divergence (root of the demo + physics issues):** both
+  VRAM update buffers (`$0300-$03FF` VRAM_Buffer1, `$0400-$04FF`
+  VRAM_Buffer2) diverge — the subject has them *full* during
+  DrawTitleScreen while the reference has already *flushed* them. The
+  subject is one frame behind in the fill/flush cycle. This phasing
+  cascades: the subject spawns a demo player ($0086=$28 at frame 26)
+  that the reference doesn't. The demo auto-plays Mario, so this is the
+  **same physics bug** surfacing in attract mode.
 - **M4 ☐** Playable 1-1 in mednafen.
 
-## Next concrete steps
+## Next concrete steps (for a focused follow-up session)
 
-1. Resolve the GameMode trap. Audio is deferred (master plan), so the
-   cleanest unblock is to make the sound-engine entry a faithful no-op
-   (or lift the sound routines so APU writes are stubbed) rather than
-   trap. Confirm the exact trapping routine id via the `$CB1B` marker.
-2. Fix the reference controller (ReadJoypads timing / button delivery)
-   so frame-diff can validate the gameplay path the same way it
-   validated the title.
-3. With both, drive `--script start_right` and converge player physics
-   (x/y position, scroll) against the reference, then validate visually
-   in mednafen.
+1. **Isolate the player-movement physics bug.** It's the headline
+   blocker and likely the root of the frame-22 demo divergence too.
+   Approach: add a `start_early` script that presses Start within the
+   matched window (frames 15-19, before the frame-22 demo divergence)
+   so both sides enter GameMode from identical state, then diff the
+   player-movement vars ($0086 X, $0057/$0700 X-speed, $074A/direction
+   bits) frame by frame. The first diverging var names the broken
+   routine. Suspect: the joypad→Left_Right_Buttons split or the
+   horizontal-accel routine.
+2. **Resolve the frame-22 VRAM-buffer fill/flush phasing.** Confirm
+   whether WriteBufferToScreen flushes large buffers the same frame the
+   reference does; the subject lagging one frame suggests a buffer-size
+   or per-frame-flush-cap difference in the runtime VRAM-buffer code.
+3. Once both are fixed and frame-diff matches through gameplay,
+   validate visually in mednafen (`--buttons-at-frame 30:start
+   45:right`).
+
+## Verified-working summary (the good news)
+
+Boot → title (22 frames byte-identical to reference) → Start →
+GameMode → 1-1 area load → Mario spawns at the correct start position,
+and the game reads controller input. The pipeline genuinely translates
+SMB through gameplay entry. The remaining gap is the horizontal-movement
+physics (Mario won't walk) and the title-demo render-buffer phasing.
 
 ## Invariant to preserve
 
