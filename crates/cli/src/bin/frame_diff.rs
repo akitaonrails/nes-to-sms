@@ -332,7 +332,20 @@ fn snap_nes_ram(bus: &SmsBus) -> [u8; 0x800] {
 /// 6502 stack, so its contents legitimately differ and are not game
 /// state.
 fn is_excluded(addr: usize) -> bool {
-    (0x0100..0x0200).contains(&addr)
+    // 6502 stack page: call-frame scratch.
+    if (0x0100..0x0200).contains(&addr) {
+        return true;
+    }
+    // JumpEngine dispatch scratch ($04/$05 = pulled return address,
+    // $06/$07 = selected target pointer). Our JumpEngineCall replaces
+    // SMB's JumpEngine wholesale with a cp/jp chain and does not write
+    // these — and could only write Z80 (slot-1) addresses, not the NES
+    // addresses the original leaves, so faithful replication is
+    // impossible. They are dispatch internals, not game state.
+    if (0x0004..0x0008).contains(&addr) {
+        return true;
+    }
+    false
 }
 
 /// Returns (init_snapshot, per_frame_snapshots). Mirrors run_reference:
@@ -513,13 +526,17 @@ fn main() {
     // Compare frame by frame. Report the first divergence and the
     // addresses that differ, focusing on the game-state page $0700-$07FF
     // first (operation mode, task, timers) then the whole $0000-$07FF.
-    // Debug: $07A7 trajectory both sides.
-    eprint!("  [traj] ref $07A7:");
-    for f in 0..frames.min(ref_snaps.len()).min(8) { eprint!(" {:02X}", ref_snaps[f][0x7A7]); }
-    eprintln!();
-    eprint!("  [traj] subj $07A7:");
-    for f in 0..frames.min(subj_snaps.len()).min(8) { eprint!(" {:02X}", subj_snaps[f][0x7A7]); }
-    eprintln!();
+    // Debug: trajectory of a chosen address both sides (FD_TRAJ=0xADDR).
+    if let Ok(spec) = std::env::var("FD_TRAJ") {
+        let addr = usize::from_str_radix(spec.trim_start_matches("0x"), 16).unwrap_or(0x7A7);
+        let lo = frames.min(ref_snaps.len()).min(subj_snaps.len());
+        eprint!("  [traj ${addr:04X}] ref :");
+        for f in 0..lo { eprint!(" {:02X}", ref_snaps[f][addr]); }
+        eprintln!();
+        eprint!("  [traj ${addr:04X}] subj:");
+        for f in 0..lo { eprint!(" {:02X}", subj_snaps[f][addr]); }
+        eprintln!();
+    }
 
     println!("\n=== divergence report ===");
     let mut first_div: Option<usize> = None;
