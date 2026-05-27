@@ -863,16 +863,34 @@ fn emit_native_branch(
     }
 }
 
-/// Emit the branch run that follows a fused `cp` (ops `[start, end)` are
-/// `Source` comments and NZ/C `BranchIf`s). The `cp` already set the Z80
-/// native flags; conditional jumps preserve them, so the chain is valid.
-fn emit_fused_cmp_branches(
+/// Map a 6502 branch condition to the Z80 native condition that holds
+/// after an op that sets S/Z from its result (e.g. `or a` after a load,
+/// or `inc`/`dec`). Only N/Z conditions are derivable this way; C/V
+/// branches aren't.
+fn nz_cond_to_z80(cond: &ir::Cond) -> Option<Z80Cond> {
+    use ir::Cond;
+    Some(match cond {
+        Cond::Zero => Z80Cond::Z,
+        Cond::NotZero => Z80Cond::Nz,
+        Cond::Negative => Z80Cond::M,
+        Cond::Positive => Z80Cond::P,
+        _ => return None,
+    })
+}
+
+/// Emit the branch run that follows a fused flag-producer (ops
+/// `[start, end)` are `Source` comments and fusable `BranchIf`s). The
+/// producer already set the Z80 native flags; conditional jumps preserve
+/// them, so the chain stays valid. `map` translates each 6502 condition
+/// to the native condition.
+fn emit_fused_branches(
     program: &mut z80_emit::Program,
     routine: &ir::Routine,
     ops: &[ir::Op],
     start: usize,
     end: usize,
     emit_comments: bool,
+    map: fn(&ir::Cond) -> Option<Z80Cond>,
 ) {
     use ir::Op;
     for op in ops.iter().take(end).skip(start) {
@@ -883,7 +901,7 @@ fn emit_fused_cmp_branches(
                 }
             }
             Op::BranchIf { cond, target } => {
-                let z = cmp_cond_to_z80(cond).expect("fusion run only holds fusable conds");
+                let z = map(cond).expect("fusion run only holds fusable conds");
                 emit_native_branch(program, routine, z, target);
             }
             _ => {}
@@ -925,35 +943,53 @@ pub fn lower_routine(
     // instead of rt_cmp_a + shadow-P bit tests. Ops in the run are marked
     // `fuse_consumed` and skipped by the main loop (the CMP emits them).
     let ops_slice = &routine.ops;
-    let mut fuse_cmp_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
-    let mut fuse_consumed: Vec<bool> = vec![false; ops_slice.len()];
-    for i in 0..ops_slice.len() {
-        if !matches!(ops_slice[i], Op::CmpImm(_) | Op::CmpMem { .. }) {
-            continue;
-        }
+    // A flag producer is fusable if, walking forward over Source-transparent
+    // ops, it is immediately followed by ≥1 BranchIf reading flags it sets
+    // (per `map`), and those flags are dead after the run (so skipping the
+    // shadow-P write is sound). Helper: returns the run end if fusable.
+    let scan_run = |i: usize, map: fn(&ir::Cond) -> Option<Z80Cond>, dead_mask: u8| -> Option<usize> {
         let mut j = i + 1;
         let mut saw_branch = false;
         while j < ops_slice.len() {
             match &ops_slice[j] {
                 Op::Source { .. } => j += 1,
-                Op::BranchIf { cond, .. } if cmp_cond_to_z80(cond).is_some() => {
+                Op::BranchIf { cond, .. } if map(cond).is_some() => {
                     saw_branch = true;
                     j += 1;
                 }
                 _ => break,
             }
         }
-        if !saw_branch {
-            continue;
+        if saw_branch && !flags_live_after(ops_slice, j - 1, dead_mask) {
+            Some(j)
+        } else {
+            None
         }
-        // N/Z/C must be dead after the run so skipping the shadow-P
-        // update is sound (no later PHP/branch reads stale flags).
-        if flags_live_after(ops_slice, j - 1, F_N | F_Z | F_C) {
-            continue;
-        }
-        fuse_cmp_end[i] = Some(j);
-        for slot in fuse_consumed.iter_mut().take(j).skip(i + 1) {
-            *slot = true;
+    };
+
+    // `fuse_cmp_end`/`fuse_nz_end`: producer index → run end (exclusive).
+    // CMP fuses to a native `cp`; LDA fuses to the load + `or a`. Both
+    // emit their branch run natively and mark the run `fuse_consumed`.
+    let mut fuse_cmp_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
+    let mut fuse_nz_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
+    let mut fuse_consumed: Vec<bool> = vec![false; ops_slice.len()];
+    for i in 0..ops_slice.len() {
+        let (end, target) = match &ops_slice[i] {
+            // CMP sets N/Z/C; all three must be dead after the run.
+            Op::CmpImm(_) | Op::CmpMem { .. } => {
+                (scan_run(i, cmp_cond_to_z80, F_N | F_Z | F_C), &mut fuse_cmp_end)
+            }
+            // LDA sets only N/Z (C/V untouched, stay valid in shadow P).
+            Op::LdaImm(_) | Op::LdaMem { .. } => {
+                (scan_run(i, nz_cond_to_z80, F_N | F_Z), &mut fuse_nz_end)
+            }
+            _ => continue,
+        };
+        if let Some(j) = end {
+            target[i] = Some(j);
+            for slot in fuse_consumed.iter_mut().take(j).skip(i + 1) {
+                *slot = true;
+            }
         }
     }
 
@@ -1011,7 +1047,18 @@ pub fn lower_routine(
             // ------------------------------------------------------------------
             Op::LdaImm(v) => {
                 program.ld_a_imm(*v);
-                if nz_live[op_idx] {
+                if let Some(end) = fuse_nz_end[op_idx] {
+                    program.or_a(); // set Z80 S/Z from A
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        nz_cond_to_z80,
+                    );
+                } else if nz_live[op_idx] {
                     program.call(SET_NZ_A);
                 }
             }
@@ -1081,7 +1128,18 @@ pub fn lower_routine(
                         program.ld_a_imm(0x00);
                     }
                 }
-                if nz_live[op_idx] {
+                if let Some(end) = fuse_nz_end[op_idx] {
+                    program.or_a(); // set Z80 S/Z from the loaded value in A
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        nz_cond_to_z80,
+                    );
+                } else if nz_live[op_idx] {
                     program.call(SET_NZ_A);
                 }
             }
@@ -1411,13 +1469,14 @@ pub fn lower_routine(
             Op::CmpImm(v) => {
                 if let Some(end) = fuse_cmp_end[op_idx] {
                     program.cp_imm(*v);
-                    emit_fused_cmp_branches(
+                    emit_fused_branches(
                         program,
                         routine,
                         ops_slice,
                         op_idx + 1,
                         end,
                         opts.emit_source_comments,
+                        cmp_cond_to_z80,
                     );
                 } else {
                     program.ld_b_imm(*v);
@@ -1429,13 +1488,14 @@ pub fn lower_routine(
                 if let Some(end) = fuse_cmp_end[op_idx] {
                     emit_mem_to_b(program, addr, *region);
                     program.cp_b();
-                    emit_fused_cmp_branches(
+                    emit_fused_branches(
                         program,
                         routine,
                         ops_slice,
                         op_idx + 1,
                         end,
                         opts.emit_source_comments,
+                        cmp_cond_to_z80,
                     );
                 } else {
                     emit_mem_to_b(program, addr, *region);
