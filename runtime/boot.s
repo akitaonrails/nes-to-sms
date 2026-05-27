@@ -316,7 +316,12 @@ _irq_skip_translated_nmi:
 
 _apply_scroll:
   ; Write latched scroll X to VDP reg 8, scroll Y to VDP reg 9.
+  ; The SMS horizontal scroll is the OPPOSITE direction of the NES: a
+  ; larger reg8 shifts the background right (camera left), whereas a
+  ; larger NES PPUSCROLL-X moves the camera right. So negate X
+  ; (reg8 = -scrollX) — otherwise walking right scrolls backwards.
   ld  a, ($cb0c)
+  neg
   ld  b, 8
   call vdp_set_register
   ld  a, ($cb0d)
