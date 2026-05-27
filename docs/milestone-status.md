@@ -80,8 +80,27 @@ Useful: `FD_TRAJ=0xADDR` dumps one address's per-frame trajectory both sides.
   *flushed* them (subject is one flush-frame behind). This affects the
   attract **demo** and the reference's title timing; it does **not**
   affect Start→gameplay, which is validated working.
-- **M4 ◑** Playable 1-1 — validated in the in-repo emulator (walk +
-  jump). Final step: confirm visually in mednafen.
+- **M4 ◑** Playable 1-1 — logic validated in the in-repo emulator (walk
+  + jump) and **reaches gameplay in mednafen** (title → Start → "WORLD
+  1-1" → level renders). Two gaps remain for a *good* play experience:
+  1. **Performance (the real blocker).** Measured per-frame NMI cost
+     (`FD_MEASURE_NMI=1`): **steady-state ≈ 45,800 Z80 instructions/frame
+     vs a ~6,000 budget (~59,736 cycles ÷ ~10 cyc/insn) → ~7.6× too
+     slow** (~8 fps in mednafen). The area-parse frame peaks at ~423K.
+     Hot helpers (instruction share, by call count over a ~30M-insn run):
+     `rt_set_nz_a` 198K (≈20% of all insns), indexed access
+     (`rt_read_indexed`/`rt_write_indexed`/`_dispatch_remap_de`) ≈147K,
+     ALU helpers (`rt_cmp_a` 49K, `rt_lsr_a` 44K, `rt_adc_a` 29K,
+     `rt_sbc_a` 19K), `rt_map_sprite_tile` 32K, `rt_ppu_write` 18K.
+     Root cause is structural: every 6502 op maintains shadow-P flags in
+     RAM ($CB03) via helper calls. Micro-leaning the helpers (they each
+     do 2-3 redundant `push af`/`pop af`) is worth ~10-20%; reaching
+     real-time needs a codegen change to **lazy/native Z80 flag
+     evaluation** (sync shadow P only when actually read), which would
+     elide most `rt_set_nz_a`/`rt_cmp_a`/etc. calls. This is the next
+     major arc.
+  2. **Title-render glitch** (frame-22 VRAM-buffer phasing): title and
+     level briefly overlay. Cosmetic to gameplay.
 
 ## Next concrete steps
 

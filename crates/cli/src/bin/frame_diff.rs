@@ -520,6 +520,13 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
         })
         .unwrap_or_else(|| vec![0x0001]);
 
+    // FD_MEASURE_NMI=1 — measure the per-frame NMI cost (instructions from
+    // IRQ-inject until the stack unwinds back, i.e. the NMI chain returns to
+    // the main wait-loop). This is the real per-frame work that must fit in
+    // the SMS budget (~59,736 Z80 cycles ≈ ~6,000 instructions/frame).
+    let measure_nmi = std::env::var("FD_MEASURE_NMI").is_ok();
+    let mut nmi_costs: Vec<usize> = Vec::new();
+
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for _frame in 0..frames {
         bus.port_dc = nes_buttons_to_sms_dc(script_buttons(_frame, script));
@@ -528,7 +535,11 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
             bus.watch = Some(watch_list.clone());
             bus.watch_log.clear();
         }
+        let sp_before = cpu.sp;
         fire_irq(&mut cpu, &mut bus);
+        let fired = cpu.pc == 0x0038;
+        let mut nmi_insns = 0usize;
+        let mut nmi_done = !fired;
         for _ in 0..SUBJ_INSN_PER_FRAME {
             if cpu.halted {
                 break;
@@ -538,6 +549,15 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
             }
             if cpu.step(&mut bus).is_err() {
                 break;
+            }
+            if !nmi_done {
+                nmi_insns += 1;
+                if cpu.sp >= sp_before {
+                    nmi_done = true;
+                    if measure_nmi {
+                        nmi_costs.push(nmi_insns);
+                    }
+                }
             }
         }
         if dbg {
@@ -550,6 +570,19 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
         snaps.push(snap_nes_ram(&bus));
     }
     report_trap(&bus, "after frames");
+    if measure_nmi && !nmi_costs.is_empty() {
+        let n = nmi_costs.len();
+        let total: usize = nmi_costs.iter().sum();
+        let max = *nmi_costs.iter().max().unwrap();
+        let min = *nmi_costs.iter().min().unwrap();
+        // steady-state = last third of frames (past area-parse/intermediate)
+        let tail = &nmi_costs[n.saturating_sub(n / 3).min(n - 1)..];
+        let tail_avg = tail.iter().sum::<usize>() / tail.len().max(1);
+        eprintln!(
+            "  [NMI cost] frames={n} avg={} min={min} max={max} steady_avg={tail_avg} insn/frame  (SMS budget ~6000)",
+            total / n
+        );
+    }
     (init_snap, snaps)
 }
 
