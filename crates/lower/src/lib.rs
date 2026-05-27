@@ -878,6 +878,48 @@ fn nz_cond_to_z80(cond: &ir::Cond) -> Option<Z80Cond> {
     })
 }
 
+/// Lower INX/INY/DEX/DEY. Instead of the old `push af; ld a,(shadow);
+/// inc a; ld (shadow),a; pop af` dance, modify the shadow byte in place
+/// with `inc/dec (hl)` — 2 ops, preserves A, and sets Z80 native S/Z so
+/// the common `DEX;BNE` loop idiom fuses to a native jump.
+#[allow(clippy::too_many_arguments)]
+fn emit_inc_dec_xy(
+    program: &mut z80_emit::Program,
+    routine: &ir::Routine,
+    ops: &[ir::Op],
+    op_idx: usize,
+    shadow_addr: u16,
+    is_inc: bool,
+    fuse_end: Option<usize>,
+    nz_live: bool,
+    emit_comments: bool,
+) {
+    program.ld_hl_imm(shadow_addr);
+    if is_inc {
+        program.inc_hl_ptr(); // inc (hl): sets S/Z, preserves A
+    } else {
+        program.dec_hl_ptr();
+    }
+    if let Some(end) = fuse_end {
+        emit_fused_branches(
+            program,
+            routine,
+            ops,
+            op_idx + 1,
+            end,
+            emit_comments,
+            nz_cond_to_z80,
+        );
+    } else if nz_live {
+        // Non-adjacent reader of the flags: persist to shadow P. The new
+        // value is at (HL); preserve the caller's A across the helper.
+        program.push_af();
+        program.ld_a_hl_ptr();
+        program.call(runtime_symbols::SET_NZ_A);
+        program.pop_af();
+    }
+}
+
 /// Tail for an N/Z producer whose result is already in A with Z80 S/Z
 /// set (AND/ORA/EOR): emit the fused native branch run if fusable, else
 /// the rt_set_nz_a call if the flags are live.
@@ -1017,7 +1059,11 @@ pub fn lower_routine(
             | Op::OraImm(_)
             | Op::OraMem { .. }
             | Op::EorImm(_)
-            | Op::EorMem { .. } => (scan_run(i, nz_cond_to_z80, F_N | F_Z), &mut fuse_nz_end),
+            | Op::EorMem { .. }
+            | Op::Inx
+            | Op::Iny
+            | Op::Dex
+            | Op::Dey => (scan_run(i, nz_cond_to_z80, F_N | F_Z), &mut fuse_nz_end),
             _ => continue,
         };
         if let Some(j) = end {
@@ -1664,49 +1710,53 @@ pub fn lower_routine(
 
             // INX/INY/DEX/DEY update shadow X or Y plus N/Z. A is NOT
             // touched on the 6502, so bracket with push/pop AF.
-            Op::Inx => {
-                program.push_af();
-                program.ld_a_abs(SHADOW_X);
-                program.inc_a();
-                program.ld_abs_a(SHADOW_X);
-                if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
-                }
-                program.pop_af();
-            }
+            Op::Inx => emit_inc_dec_xy(
+                program,
+                routine,
+                ops_slice,
+                op_idx,
+                SHADOW_X,
+                true,
+                fuse_nz_end[op_idx],
+                nz_live[op_idx],
+                opts.emit_source_comments,
+            ),
 
-            Op::Iny => {
-                program.push_af();
-                program.ld_a_abs(SHADOW_Y);
-                program.inc_a();
-                program.ld_abs_a(SHADOW_Y);
-                if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
-                }
-                program.pop_af();
-            }
+            Op::Iny => emit_inc_dec_xy(
+                program,
+                routine,
+                ops_slice,
+                op_idx,
+                SHADOW_Y,
+                true,
+                fuse_nz_end[op_idx],
+                nz_live[op_idx],
+                opts.emit_source_comments,
+            ),
 
-            Op::Dex => {
-                program.push_af();
-                program.ld_a_abs(SHADOW_X);
-                program.dec_a();
-                program.ld_abs_a(SHADOW_X);
-                if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
-                }
-                program.pop_af();
-            }
+            Op::Dex => emit_inc_dec_xy(
+                program,
+                routine,
+                ops_slice,
+                op_idx,
+                SHADOW_X,
+                false,
+                fuse_nz_end[op_idx],
+                nz_live[op_idx],
+                opts.emit_source_comments,
+            ),
 
-            Op::Dey => {
-                program.push_af();
-                program.ld_a_abs(SHADOW_Y);
-                program.dec_a();
-                program.ld_abs_a(SHADOW_Y);
-                if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
-                }
-                program.pop_af();
-            }
+            Op::Dey => emit_inc_dec_xy(
+                program,
+                routine,
+                ops_slice,
+                op_idx,
+                SHADOW_Y,
+                false,
+                fuse_nz_end[op_idx],
+                nz_live[op_idx],
+                opts.emit_source_comments,
+            ),
 
             // ------------------------------------------------------------------
             // Branches
@@ -2380,12 +2430,11 @@ mod tests {
     #[test]
     fn inx_sequence() {
         let build = lower_and_finish(vec![Op::Inx]);
-        // ld a,($CB00) = 3A 00 CB
-        assert!(build.bytes.windows(3).any(|w| w == [0x3A, 0x00, 0xCB]));
-        // inc a = 3C
-        assert!(build.bytes.contains(&0x3C));
-        // ld ($CB00),a = 32 00 CB
-        assert!(build.bytes.windows(3).any(|w| w == [0x32, 0x00, 0xCB]));
+        // ld hl,$CB00 = 21 00 CB
+        assert!(build.bytes.windows(3).any(|w| w == [0x21, 0x00, 0xCB]));
+        // inc (hl) = 34 (modifies shadow X in place, preserves A)
+        assert!(build.bytes.contains(&0x34));
+        // flags live across the routine end -> still persists to shadow P
         assert!(build.asm.contains("call rt_set_nz_a"));
     }
 

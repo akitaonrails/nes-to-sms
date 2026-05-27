@@ -657,6 +657,20 @@ impl Cpu {
                 let v = self.a;
                 self.a = self.do_dec(v);
             }
+            // inc (hl) / dec (hl): read-modify-write memory, set S/Z/H/PV,
+            // preserve carry (same flag semantics as inc/dec r).
+            0x34 => {
+                let addr = self.hl();
+                let v = bus.read(addr);
+                let r = self.do_inc(v);
+                bus.write(addr, r);
+            }
+            0x35 => {
+                let addr = self.hl();
+                let v = bus.read(addr);
+                let r = self.do_dec(v);
+                bus.write(addr, r);
+            }
 
             // ── ld r,n ────────────────────────────────────────────────
             0x06 => {
