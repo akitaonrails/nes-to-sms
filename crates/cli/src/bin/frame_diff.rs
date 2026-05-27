@@ -110,6 +110,11 @@ struct NesBus {
     vblank: bool,
     addr_latch_toggle: bool,
     nmi_enabled: bool, // $2000 bit 7
+    ppu_mask: u8,      // $2001 (rendering-enable bits 3/4)
+    // Synthetic sprite-0 hit phase, mirroring the subject runtime's $CB12:
+    // 0 = before hit (first poll while rendering returns bit6=0 and arms),
+    // 1 = hit reached (subsequent polls return bit6=1). Reset each frame.
+    sprite0_phase: u8,
     // Controller
     strobe: bool,
     ctrl_shift: u8,
@@ -126,6 +131,8 @@ impl NesBus {
             vblank: false,
             addr_latch_toggle: false,
             nmi_enabled: false,
+            ppu_mask: 0,
+            sprite0_phase: 0,
             strobe: false,
             ctrl_shift: 0,
             buttons: 0,
@@ -151,6 +158,19 @@ impl oracle_6502::Bus for NesBus {
                         let mut v = 0u8;
                         if self.vblank {
                             v |= 0x80;
+                        }
+                        // Synthetic sprite-0 hit (bit 6), mirroring the subject
+                        // runtime's $CB12 handshake (runtime/ppu.s): only while
+                        // rendering is enabled (PPUMASK bits 3/4); the first poll
+                        // arms the phase and returns 0, later polls return 1. SMB's
+                        // NMI waits for bit6 to clear then set — without this the
+                        // reference NMI spins forever and never runs the engine.
+                        if self.ppu_mask & 0x18 != 0 {
+                            if self.sprite0_phase == 0 {
+                                self.sprite0_phase = 1;
+                            } else {
+                                v |= 0x40;
+                            }
                         }
                         // Reading $2002 clears VBlank + resets the $2005/$2006 toggle.
                         self.vblank = false;
@@ -195,6 +215,9 @@ impl oracle_6502::Bus for NesBus {
                 let reg = 0x2000 + (addr & 7);
                 if reg == 0x2000 {
                     self.nmi_enabled = value & 0x80 != 0;
+                }
+                if reg == 0x2001 {
+                    self.ppu_mask = value; // rendering-enable bits for sprite-0 synth
                 }
                 if reg == 0x2005 || reg == 0x2006 {
                     self.addr_latch_toggle = !self.addr_latch_toggle;
@@ -256,12 +279,32 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
     // ($CB1A in runtime/boot.s). Without this the reference stops
     // running NMIs (and thus ReadJoypads) whenever SMB briefly disables
     // NMI during the title, so it never sees a controller press.
+    // FD_TRACE_FRAME=N: during frame N, log visits to GameMenuRoutine
+    // decision PCs (which path it takes when Start is pressed).
+    let trace_frame: Option<usize> = std::env::var("FD_TRACE_FRAME")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let trace_pcs: &[(u16, &str)] = &[
+        (0x8231, "TitleScreenMode"),
+        (0x8E04, "JumpEngine"),
+        (0x8245, "GameMenuRoutine"),
+        (0x8255, "StartGame"),
+        (0x8258, "ChkSelect(not-start)"),
+        (0x82D8, "ChkContinue"),
+        (0x82E6, "StartWorld1"),
+        (0x82F2, "inc OperMode"),
+        (0x82C9, "ResetTitle"),
+        (0x82C0, "RunDemo"),
+        (0x82BB, "NullJoypad"),
+    ];
+
     let mut nmi_latched = bus.nmi_enabled;
     let mut nmi_fires = 0usize;
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for frame in 0..frames {
         bus.buttons = effective_nes_buttons(frame, script, bus.ram[0x0770]);
         bus.vblank = true;
+        bus.sprite0_phase = 0; // new frame: re-arm the sprite-0 hit handshake
         if bus.nmi_enabled {
             nmi_latched = true;
         }
@@ -269,7 +312,17 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
             cpu.nmi(&mut bus);
             nmi_fires += 1;
         }
+        let tracing = Some(frame) == trace_frame;
         for _ in 0..REF_INSN_PER_FRAME {
+            if tracing {
+                let pc = cpu.pc;
+                if let Some((_, name)) = trace_pcs.iter().find(|(p, _)| *p == pc) {
+                    eprintln!(
+                        "  [trace f{frame}] {name} (pc=${pc:04X}) A=${:02X} $06FC=${:02X} $07A2(demoT)=${:02X}",
+                        cpu.a, bus.ram[0x06FC], bus.ram[0x07A2]
+                    );
+                }
+            }
             if cpu.step(&mut bus).is_err() {
                 break;
             }
