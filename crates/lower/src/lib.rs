@@ -80,6 +80,12 @@ pub struct LowerOptions<'p> {
     pub profile: Option<&'p profile::Profile>,
     /// If true, every IR Op emits a `; 6502 $XXXX: ...` comment in the Z80 listing.
     pub emit_source_comments: bool,
+    /// Interprocedural flag liveness: routine entry-label → mask of flags
+    /// (F_N/F_Z/F_C/F_V) it may read before writing. Lets `flags_live_after`
+    /// see past a JSR/JMP to a callee that doesn't read the flags in
+    /// question, instead of conservatively assuming every call reads them.
+    /// `None` (e.g. unit tests) keeps the conservative behavior.
+    pub routine_flag_reads: Option<&'p std::collections::HashMap<String, u8>>,
 }
 
 impl<'p> Default for LowerOptions<'p> {
@@ -87,6 +93,7 @@ impl<'p> Default for LowerOptions<'p> {
         Self {
             profile: None,
             emit_source_comments: true,
+            routine_flag_reads: None,
         }
     }
 }
@@ -774,17 +781,98 @@ fn is_flag_boundary(op: &ir::Op) -> bool {
     )
 }
 
+/// Flags routine R may read before writing, scanning from its entry. A
+/// safe over-approximation: writes are only credited on the guaranteed
+/// straight-line entry path (crediting stops at the first control-flow
+/// divergence/join); calls and computed jumps are treated as reading any
+/// not-yet-written flag. So a flag is excluded only when R provably
+/// writes it before any read on every path — sound for the use below.
+pub fn routine_incoming_flag_reads(ops: &[ir::Op]) -> u8 {
+    use ir::Op;
+    let mut incoming = 0u8;
+    let mut written = 0u8;
+    let mut frozen = false;
+    for op in ops {
+        incoming |= flags_read(op) & !written;
+        // A call/computed-jump may read any flag the callee reads; without
+        // its mask here, assume it reads all not-yet-written flags.
+        if matches!(
+            op,
+            Op::Jsr { .. }
+                | Op::JsrUnknown { .. }
+                | Op::JumpEngineCall { .. }
+                | Op::JmpIndirect { .. }
+                | Op::Php
+        ) {
+            incoming |= (F_N | F_Z | F_C | F_V) & !written;
+        }
+        if !frozen {
+            written |= flags_written(op);
+        }
+        if matches!(
+            op,
+            Op::Label(_)
+                | Op::BranchIf { .. }
+                | Op::Jmp { .. }
+                | Op::JmpIndirect { .. }
+                | Op::Jsr { .. }
+                | Op::JsrUnknown { .. }
+                | Op::JumpEngineCall { .. }
+                | Op::Rts
+                | Op::Rti
+        ) {
+            frozen = true;
+        }
+    }
+    incoming
+}
+
+/// Mask of flags a JSR/JMP target may read. Known routine → its computed
+/// mask; unknown/computed target → all flags (conservative).
+fn callee_flag_reads(target: &str, map: Option<&std::collections::HashMap<String, u8>>) -> u8 {
+    match map.and_then(|m| m.get(target)) {
+        Some(&mask) => mask,
+        None => F_N | F_Z | F_C | F_V,
+    }
+}
+
 /// Are any of the `which` flags live after op index `i` — i.e. read by a
 /// later op before being overwritten? Conservative (live) at boundaries
-/// and at end-of-routine.
-fn flags_live_after(ops: &[ir::Op], i: usize, which: u8) -> bool {
+/// and at end-of-routine. With `reads` (interprocedural map), a JSR/JMP to
+/// a callee that doesn't read a pending flag is transparent rather than a
+/// hard boundary, letting liveness see the real downstream overwrite.
+fn flags_live_after(
+    ops: &[ir::Op],
+    i: usize,
+    which: u8,
+    reads: Option<&std::collections::HashMap<String, u8>>,
+) -> bool {
+    use ir::Op;
     let mut pending = which;
     for op in ops.iter().skip(i + 1) {
         if flags_read(op) & pending != 0 {
             return true;
         }
-        if is_flag_boundary(op) {
-            return true;
+        match op {
+            // A direct call is transparent if the callee reads none of the
+            // pending flags: execution returns and continues past it.
+            Op::Jsr { target } => {
+                if callee_flag_reads(target, reads) & pending != 0 {
+                    return true;
+                }
+            }
+            // A tail jump to a routine that doesn't read the pending flags
+            // means those flags reach that routine unread; treat as dead
+            // here (its own RTS/flag-return convention is its concern, and
+            // we stay conservative for unknown targets via callee_flag_reads).
+            Op::Jmp { target } => {
+                if callee_flag_reads(target, reads) & pending != 0 {
+                    return true;
+                }
+                return false; // no fall-through past a tail jump
+            }
+            _ if is_flag_boundary(op) => return true,
+            _ => {}
         }
         pending &= !flags_written(op);
         if pending == 0 {
@@ -1058,7 +1146,11 @@ fn adc_val(op: &ir::Op) -> Option<Val16> {
 /// Recognize the 16-bit ADD idiom starting at op `i`. Returns a plan if
 /// the full shape matches with constant addresses and the result flags
 /// are dead afterward.
-fn match_add16(ops: &[ir::Op], i: usize) -> Option<Add16Plan> {
+fn match_add16(
+    ops: &[ir::Op],
+    i: usize,
+    reads: Option<&std::collections::HashMap<String, u8>>,
+) -> Option<Add16Plan> {
     use ir::Op;
     let lo_src = lda_const(&ops[i])?; // LDA lo
     let i2 = skip_source(ops, i + 1);
@@ -1079,7 +1171,7 @@ fn match_add16(ops: &[ir::Op], i: usize) -> Option<Add16Plan> {
     let i7 = skip_source(ops, i6 + 1);
     let hi_dst = sta_const(ops.get(i7)?)?; // STA hi
     // Result flags must be dead — otherwise the shadow byte would be stale.
-    if flags_live_after(ops, i7, F_N | F_Z | F_C | F_V) {
+    if flags_live_after(ops, i7, F_N | F_Z | F_C | F_V, reads) {
         return None;
     }
     Some(Add16Plan {
@@ -1174,7 +1266,7 @@ pub fn lower_routine(
                 _ => break,
             }
         }
-        if saw_branch && !flags_live_after(ops_slice, j - 1, dead_mask) {
+        if saw_branch && !flags_live_after(ops_slice, j - 1, dead_mask, opts.routine_flag_reads) {
             Some(j)
         } else {
             None
@@ -1194,7 +1286,7 @@ pub fn lower_routine(
         if fuse_consumed[i] {
             continue;
         }
-        if let Some(plan) = match_add16(ops_slice, i) {
+        if let Some(plan) = match_add16(ops_slice, i, opts.routine_flag_reads) {
             for slot in fuse_consumed.iter_mut().take(plan.end).skip(i + 1) {
                 *slot = true;
             }
@@ -2676,6 +2768,7 @@ runtime_label = "rt_replacement"
         let opts = LowerOptions {
             profile: Some(&prof),
             emit_source_comments: true,
+            routine_flag_reads: None,
         };
         let routine = make_routine(
             "test_routine",

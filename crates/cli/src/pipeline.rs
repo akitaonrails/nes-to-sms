@@ -272,6 +272,20 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // bank). Without this, forward-reference branches inside a routine
     // see an empty label_section map and pessimistically emit the
     // trampoline pattern.
+    // Interprocedural flag-liveness map: routine label → incoming-flag-read
+    // mask. Lets the lowerer see past calls to flag-agnostic callees when
+    // deciding whether a fused/lifted op's flags are dead. Keyed by both
+    // the L_XXXX entry label and the routine name (JSR targets use either).
+    let flag_reads: std::collections::HashMap<String, u8> = {
+        let mut m = std::collections::HashMap::new();
+        for r in &routines {
+            let mask = lower::routine_incoming_flag_reads(&r.ops);
+            m.insert(format_label(r.entry), mask);
+            m.insert(r.name.clone(), mask);
+        }
+        m
+    };
+
     let label_section_map: std::collections::HashMap<String, usize> = {
         let mut p = z80_emit::Program::new();
         let mut sidx: u32 = 0;
@@ -286,6 +300,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
         let dry_opts = LowerOptions {
             profile: Some(&prof),
             emit_source_comments: false,
+            routine_flag_reads: Some(&flag_reads),
         };
         for r in &routines {
             if p.current_addr().saturating_sub(sbase) >= SECTION_MAX_BYTES {
@@ -316,6 +331,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
     let opts = LowerOptions {
         profile: Some(&prof),
         emit_source_comments: true,
+        routine_flag_reads: Some(&flag_reads),
     };
 
     // Translated reset alias so boot.s can `jp translated_reset`.

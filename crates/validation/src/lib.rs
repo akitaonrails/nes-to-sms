@@ -235,6 +235,7 @@ fn lower_all_for_validation(routines: &[Routine]) -> Result<LoweredProgram, Stri
     let opts = LowerOptions {
         profile: None,
         emit_source_comments: false,
+        routine_flag_reads: None,
     };
 
     for r in routines {
@@ -473,6 +474,7 @@ fn lower_for_validation(routine: &Routine) -> Result<(Vec<u8>, u16), String> {
     let opts = LowerOptions {
         profile: None,
         emit_source_comments: false,
+        routine_flag_reads: None,
     };
     lower::lower_routine(&mut program, routine, &opts).map_err(|e| format!("{e}"))?;
 
