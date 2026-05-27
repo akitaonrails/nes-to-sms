@@ -882,6 +882,60 @@ fn flags_live_after(
     true
 }
 
+/// Tracks, while lowering a routine, whether Z80 A currently holds the
+/// value whose N/Z are the live 6502 N/Z. Returns:
+///   Some(true)  — after this op, A holds the N/Z-determining value
+///   Some(false) — after this op, it does not (N/Z come from elsewhere,
+///                 A was reloaded by something opaque, or a join point)
+///   None        — op preserves A and the 6502 N/Z (e.g. STA, CLC)
+fn op_nz_effect(op: &ir::Op) -> Option<bool> {
+    use ir::Op;
+    match op {
+        // A := result; 6502 N/Z computed from A.
+        Op::LdaImm(_)
+        | Op::LdaMem { .. }
+        | Op::AndImm(_)
+        | Op::AndMem { .. }
+        | Op::OraImm(_)
+        | Op::OraMem { .. }
+        | Op::EorImm(_)
+        | Op::EorMem { .. }
+        | Op::AdcImm(_)
+        | Op::AdcMem { .. }
+        | Op::SbcImm(_)
+        | Op::SbcMem { .. }
+        | Op::Txa
+        | Op::Tya
+        | Op::Pla
+        | Op::AslA
+        | Op::LsrA
+        | Op::RolA
+        | Op::RorA => Some(true),
+        // Preserve A and the 6502 N/Z.
+        Op::StaMem { .. }
+        | Op::StxMem { .. }
+        | Op::StyMem { .. }
+        | Op::SaxMem { .. }
+        | Op::Clc
+        | Op::Sec
+        | Op::Cli
+        | Op::Sei
+        | Op::Clv
+        | Op::Cld
+        | Op::Sed
+        | Op::Txs
+        | Op::Pha
+        | Op::Php
+        | Op::Nop
+        | Op::Source { .. }
+        | Op::BranchIf { .. } => None,
+        // Everything else (LDX/LDY/INC/DEC/transfers-to-XY/compares/BIT,
+        // labels = join points, calls, jumps, IO reads, unknown) sets N/Z
+        // from non-A or makes A's relationship unknown → conservative.
+        _ => Some(false),
+    }
+}
+
 /// A Z80 native branch condition.
 #[derive(Clone, Copy)]
 enum Z80Cond {
@@ -1327,13 +1381,37 @@ pub fn lower_routine(
         }
     }
 
+    // Native-flag branch tracking: does Z80 A currently hold the value
+    // whose N/Z are the live 6502 N/Z? When true at an N/Z branch we test
+    // the flag natively (`or a; jp cc`) instead of `ld hl,SHADOW_P; bit
+    // n,(hl)`. Independent of the shadow update (re-derives from A), so
+    // it's correctness-safe; the producer still maintains shadow-P.
+    let mut a_holds_nz = false;
     for (op_idx, op) in routine.ops.iter().enumerate() {
         if fuse_consumed[op_idx] {
             continue;
         }
         if let Some(plan) = &add16_plans[op_idx] {
             emit_add16(program, plan);
+            a_holds_nz = false; // lifted add's flags are dead; don't claim A's N/Z
             continue;
+        }
+        // Native N/Z branch: re-derive the flag from A instead of reading
+        // shadow-P, when A provably holds the N/Z-determining value.
+        if let Op::BranchIf { cond, target } = op {
+            if a_holds_nz {
+                if let Some(z) = nz_cond_to_z80(cond) {
+                    program.or_a(); // set Z80 S/Z from A
+                    emit_native_branch(program, routine, z, target);
+                    continue; // a_holds_nz unchanged (branch preserves A)
+                }
+            }
+        }
+        // Update the A-holds-N/Z tracker by op type (before the match, so
+        // arms that `continue` still update it). Op type, not emit shape,
+        // determines the effect.
+        if let Some(v) = op_nz_effect(op) {
+            a_holds_nz = v;
         }
         match op {
             // ------------------------------------------------------------------
