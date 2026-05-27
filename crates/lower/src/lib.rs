@@ -827,6 +827,64 @@ pub fn routine_incoming_flag_reads(ops: &[ir::Op]) -> u8 {
     incoming
 }
 
+/// Shadow-P N/Z liveness for a producer whose result is in **A** (LDA,
+/// AND/ORA/EOR, ADC/SBC, TXA/TYA, PLA, shifts-on-A). In the native-flag
+/// model an N/Z branch is lowered as `or a; jp cc` (reading A) **iff A
+/// still holds this value** — exactly the `a_holds_nz` tracker's state.
+/// So such branches are NOT shadow-P readers and don't keep the producer's
+/// shadow write alive. Returns true only if a genuine shadow reader (a
+/// non-native N/Z branch, PHP, or an opaque boundary) is reachable before
+/// the N/Z are overwritten. Sound: any uncertainty returns true.
+///
+/// `a_clean` here tracks the same transitions as the lowering tracker
+/// (`op_nz_effect`): it starts true at the producer, a flag-writer ends
+/// the scan (overwrite → dead), and an A-clobbering op clears it — so the
+/// analysis and the branch lowering always agree on native-vs-shadow.
+fn nz_shadow_live_after(
+    ops: &[ir::Op],
+    i: usize,
+    reads: Option<&std::collections::HashMap<String, u8>>,
+) -> bool {
+    use ir::{Cond, Op};
+    let mut a_clean = true;
+    for op in ops.iter().skip(i + 1) {
+        // Shadow-P readers of N/Z:
+        match op {
+            Op::BranchIf { cond, .. }
+                if matches!(
+                    cond,
+                    Cond::Zero | Cond::NotZero | Cond::Negative | Cond::Positive
+                ) =>
+            {
+                if !a_clean {
+                    return true; // lowered as `ld hl,SHADOW_P; bit n,(hl)`
+                }
+                // else native `or a; jp` — not a shadow read; keep scanning.
+            }
+            Op::Php => return true,
+            _ => {}
+        }
+        // N/Z overwritten before any shadow read → producer's write is dead.
+        if flags_written(op) & (F_N | F_Z) != 0 {
+            return false;
+        }
+        // Track A cleanliness (mirrors the a_holds_nz tracker).
+        if matches!(op_nz_effect(op), Some(false)) {
+            a_clean = false;
+        }
+        // Opaque boundaries: a JSR to a callee that doesn't read N/Z is
+        // transparent (we already cleared a_clean); anything else may hide
+        // a downstream shadow reader / flag-return convention → live.
+        if is_flag_boundary(op) {
+            match op {
+                Op::Jsr { target } if callee_flag_reads(target, reads) & (F_N | F_Z) == 0 => {}
+                _ => return true,
+            }
+        }
+    }
+    true
+}
+
 /// Mask of flags a JSR/JMP target may read. Known routine → its computed
 /// mask; unknown/computed target → all flags (conservative).
 fn callee_flag_reads(target: &str, map: Option<&std::collections::HashMap<String, u8>>) -> u8 {
@@ -1294,7 +1352,17 @@ pub fn lower_routine(
         .ops
         .iter()
         .enumerate()
-        .map(|(i, _)| nz_flags_live_after(&routine.ops, i))
+        .map(|(i, op)| {
+            // A-result producers (N/Z derivable from A) get the native-flag
+            // aware liveness: branches that read A natively don't keep the
+            // shadow write alive. Other producers (N/Z from X/Y/mem) keep
+            // the conservative shadow liveness.
+            if matches!(op_nz_effect(op), Some(true)) {
+                nz_shadow_live_after(&routine.ops, i, opts.routine_flag_reads)
+            } else {
+                nz_flags_live_after(&routine.ops, i)
+            }
+        })
         .collect();
 
     // CMP→branch fusion plan. `fuse_cmp_end[i] = Some(j)` marks a CMP at
