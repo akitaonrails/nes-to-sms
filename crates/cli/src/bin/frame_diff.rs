@@ -62,6 +62,17 @@ fn script_buttons(frame: usize, script: &str) -> Buttons {
         }
         // Hold Start every frame (debugging controller delivery).
         "start_hold" => Buttons(Buttons::START),
+        // Press Start at frames 28-33 — early enough that the title is at
+        // Task=03 (GameMenuRoutine) with DemoTimer>0, so BOTH the 6502
+        // reference and the subject enter GameMode (before the demo
+        // auto-plays). Used to diff gameplay sprite data apples-to-apples.
+        "g" => {
+            if (28..34).contains(&frame) {
+                Buttons(Buttons::START)
+            } else {
+                Buttons(0)
+            }
+        }
         // Start, wait out the intermediate screen, then hold A (jump).
         "start_jump" => {
             if (40..45).contains(&frame) {
@@ -686,6 +697,27 @@ fn main() {
         eprint!("  [traj ${addr:04X}] subj:");
         for f in 0..lo { eprint!(" {:02X}", subj_snaps[f][addr]); }
         eprintln!();
+    }
+
+    // Sprite-data differential: dump $0200-$023F (16 OAM entries: Y,tile,
+    // attr,X) for ref and subj at FD_DUMP_SPRITES=<frame>, to compare the
+    // sprite tiles SMB builds vs what our translation builds.
+    if let Ok(fs) = std::env::var("FD_DUMP_SPRITES") {
+        if let Ok(f) = fs.parse::<usize>() {
+            let dump = |label: &str, snap: &[u8; 0x800]| {
+                eprint!("  [sprites @{f}] {label}:");
+                for i in 0..64 {
+                    eprint!(" {:02X}", snap[0x200 + i]);
+                }
+                eprintln!();
+            };
+            if f < ref_snaps.len() {
+                dump("ref ", &ref_snaps[f]);
+            }
+            if f < subj_snaps.len() {
+                dump("subj", &subj_snaps[f]);
+            }
+        }
     }
 
     println!("\n=== divergence report ===");
