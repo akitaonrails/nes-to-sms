@@ -878,6 +878,34 @@ fn nz_cond_to_z80(cond: &ir::Cond) -> Option<Z80Cond> {
     })
 }
 
+/// Tail for an N/Z producer whose result is already in A with Z80 S/Z
+/// set (AND/ORA/EOR): emit the fused native branch run if fusable, else
+/// the rt_set_nz_a call if the flags are live.
+#[allow(clippy::too_many_arguments)]
+fn emit_nz_producer_tail(
+    program: &mut z80_emit::Program,
+    routine: &ir::Routine,
+    ops: &[ir::Op],
+    op_idx: usize,
+    fuse_end: Option<usize>,
+    nz_live: bool,
+    emit_comments: bool,
+) {
+    if let Some(end) = fuse_end {
+        emit_fused_branches(
+            program,
+            routine,
+            ops,
+            op_idx + 1,
+            end,
+            emit_comments,
+            nz_cond_to_z80,
+        );
+    } else if nz_live {
+        program.call(runtime_symbols::SET_NZ_A);
+    }
+}
+
 /// Emit the branch run that follows a fused flag-producer (ops
 /// `[start, end)` are `Source` comments and fusable `BranchIf`s). The
 /// producer already set the Z80 native flags; conditional jumps preserve
@@ -979,10 +1007,17 @@ pub fn lower_routine(
             Op::CmpImm(_) | Op::CmpMem { .. } => {
                 (scan_run(i, cmp_cond_to_z80, F_N | F_Z | F_C), &mut fuse_cmp_end)
             }
-            // LDA sets only N/Z (C/V untouched, stay valid in shadow P).
-            Op::LdaImm(_) | Op::LdaMem { .. } => {
-                (scan_run(i, nz_cond_to_z80, F_N | F_Z), &mut fuse_nz_end)
-            }
+            // LDA/AND/ORA/EOR (imm) set only N/Z (C/V untouched, stay valid
+            // in shadow P). AND/ORA/EOR set Z80 flags directly; LDA needs a
+            // trailing `or a` (added at emit time).
+            Op::LdaImm(_)
+            | Op::LdaMem { .. }
+            | Op::AndImm(_)
+            | Op::AndMem { .. }
+            | Op::OraImm(_)
+            | Op::OraMem { .. }
+            | Op::EorImm(_)
+            | Op::EorMem { .. } => (scan_run(i, nz_cond_to_z80, F_N | F_Z), &mut fuse_nz_end),
             _ => continue,
         };
         if let Some(j) = end {
@@ -1390,8 +1425,18 @@ pub fn lower_routine(
             // ALU: AND / ORA / EOR
             // ------------------------------------------------------------------
             Op::AndImm(v) => {
-                program.and_imm(*v);
-                if nz_live[op_idx] {
+                program.and_imm(*v); // sets Z80 S/Z
+                if let Some(end) = fuse_nz_end[op_idx] {
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        nz_cond_to_z80,
+                    );
+                } else if nz_live[op_idx] {
                     program.call(SET_NZ_A);
                 }
             }
@@ -1425,42 +1470,72 @@ pub fn lower_routine(
                 // Simplest clean solution: for AND/OR/EOR immediate-like forms,
                 // if memory address is constant just load it and use a temp path.
                 // For now emit data byte 0xA0 = `and b` directly via .db.
-                program.data(None, &[0xA0]); // and b
-                if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
-                }
+                program.data(None, &[0xA0]); // and b (sets Z80 S/Z)
+                emit_nz_producer_tail(
+                    program,
+                    routine,
+                    ops_slice,
+                    op_idx,
+                    fuse_nz_end[op_idx],
+                    nz_live[op_idx],
+                    opts.emit_source_comments,
+                );
             }
 
             Op::OraImm(v) => {
-                program.or_imm(*v);
-                if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
-                }
+                program.or_imm(*v); // sets Z80 S/Z
+                emit_nz_producer_tail(
+                    program,
+                    routine,
+                    ops_slice,
+                    op_idx,
+                    fuse_nz_end[op_idx],
+                    nz_live[op_idx],
+                    opts.emit_source_comments,
+                );
             }
 
             Op::OraMem { addr, region } => {
                 emit_mem_to_b(program, addr, *region);
                 program.comment("or b  ; A = A | B");
-                program.data(None, &[0xB0]); // or b
-                if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
-                }
+                program.data(None, &[0xB0]); // or b (sets Z80 S/Z)
+                emit_nz_producer_tail(
+                    program,
+                    routine,
+                    ops_slice,
+                    op_idx,
+                    fuse_nz_end[op_idx],
+                    nz_live[op_idx],
+                    opts.emit_source_comments,
+                );
             }
 
             Op::EorImm(v) => {
-                program.xor_imm(*v);
-                if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
-                }
+                program.xor_imm(*v); // sets Z80 S/Z
+                emit_nz_producer_tail(
+                    program,
+                    routine,
+                    ops_slice,
+                    op_idx,
+                    fuse_nz_end[op_idx],
+                    nz_live[op_idx],
+                    opts.emit_source_comments,
+                );
             }
 
             Op::EorMem { addr, region } => {
                 emit_mem_to_b(program, addr, *region);
                 program.comment("xor b  ; A = A ^ B");
-                program.data(None, &[0xA8]); // xor b
-                if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
-                }
+                program.data(None, &[0xA8]); // xor b (sets Z80 S/Z)
+                emit_nz_producer_tail(
+                    program,
+                    routine,
+                    ops_slice,
+                    op_idx,
+                    fuse_nz_end[op_idx],
+                    nz_live[op_idx],
+                    opts.emit_source_comments,
+                );
             }
 
             // ------------------------------------------------------------------

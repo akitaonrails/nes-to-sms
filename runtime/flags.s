@@ -21,34 +21,30 @@
 
 ; ─── rt_set_nz_a ──────────────────────────────────────────────────────────────
 ; Updates shadow P bits N (bit 7) and Z (bit 1) from the current value of A.
-; A is preserved.  B is clobbered (used as scratch for new P value).
+; A is preserved.  B/C preserved (push bc).
+;
+; Lean rewrite: branchless N, single branch for Z, one push/pop pair —
+; vs the old triple push af/pop af juggle. This is the hottest runtime
+; helper, so the per-call saving matters.
 rt_set_nz_a:
-  push af
-  ; Load current shadow P, clear N and Z.
+  push bc
+  ld   b, a                 ; B = caller A (preserved; also the N/Z source)
   ld   a, ($cb03)
-  and  %01111101            ; clear bit 7 (N) and bit 1 (Z)
-  ld   b, a                 ; B = P with N,Z cleared
-  pop  af                   ; restore A
-  push af
-  ; Test A for zero.
-  or   a                    ; sets Z80 Z flag; does not change A
-  jr   nz, _set_nz_not_zero
+  and  %01111101            ; clear shadow N (bit 7) and Z (bit 1)
+  ld   c, a                 ; C = P with N,Z cleared
   ld   a, b
-  or   %00000010            ; set 6502 Z (bit 1)
-  ld   b, a
-_set_nz_not_zero:
-  pop  af
-  push af
-  ; Test bit 7 of A for N.
-  bit  7, a
-  jr   z, _set_nz_done
+  and  %10000000            ; isolate N = bit 7 of the value
+  or   c                    ; merge N into P
+  ld   c, a
   ld   a, b
-  or   %10000000            ; set 6502 N (bit 7)
-  ld   b, a
+  or   a                    ; Z80 Z = (value == 0)
+  jr   nz, _set_nz_done
+  set  1, c                 ; set shadow Z (bit 1)
 _set_nz_done:
-  ld   a, b
-  ld   ($cb03), a           ; write updated P
-  pop  af                   ; restore caller's A
+  ld   a, c
+  ld   ($cb03), a           ; write updated shadow P
+  ld   a, b                 ; restore caller's A
+  pop  bc
   ret
 
 ; ─── rt_adc_a ─────────────────────────────────────────────────────────────────
