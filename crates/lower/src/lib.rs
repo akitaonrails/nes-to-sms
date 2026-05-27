@@ -303,16 +303,21 @@ fn emit_stxy_mem(
     program.pop_af();
 }
 
+/// Set or clear a single shadow-P bit. `mask` is the OR mask (set) or the
+/// AND mask (clear, i.e. the complement). Emits `ld hl,SHADOW_P; set/res
+/// n,(hl)` — 2 ops, preserves A, no push/pop af dance.
 fn emit_flag_update(program: &mut z80_emit::Program, mask: u8, set: bool) {
-    program.push_af();
-    program.ld_a_abs(sms_layout::SHADOW_P);
-    if set {
-        program.or_imm(mask);
+    let bit = if set {
+        mask.trailing_zeros()
     } else {
-        program.and_imm(mask);
+        (!mask).trailing_zeros()
+    } as u8;
+    program.ld_hl_imm(sms_layout::SHADOW_P);
+    if set {
+        program.set_n_hl_ptr(bit);
+    } else {
+        program.res_n_hl_ptr(bit);
     }
-    program.ld_abs_a(sms_layout::SHADOW_P);
-    program.pop_af();
 }
 
 fn nes_ram_addr_to_sms(nes_addr: u16) -> u16 {
@@ -2580,16 +2585,17 @@ runtime_label = "rt_replacement"
     #[test]
     fn sec_sets_carry_bit() {
         let build = lower_and_finish(vec![Op::Sec]);
-        // ld a,(SHADOW_P): 3A 03 CB, or $01: F6 01, ld (SHADOW_P),a: 32 03 CB
-        assert!(build.bytes.windows(3).any(|w| w == [0x3A, 0x03, 0xCB]));
-        assert!(build.bytes.windows(2).any(|w| w == [0xF6, 0x01]));
-        assert!(build.bytes.windows(3).any(|w| w == [0x32, 0x03, 0xCB]));
+        // ld hl,$CB03 (21 03 CB) ; set 0,(hl) (CB C6)
+        assert!(build.bytes.windows(3).any(|w| w == [0x21, 0x03, 0xCB]));
+        assert!(build.bytes.windows(2).any(|w| w == [0xCB, 0xC6]));
     }
 
     #[test]
     fn clc_clears_carry_bit() {
         let build = lower_and_finish(vec![Op::Clc]);
-        assert!(build.bytes.windows(2).any(|w| w == [0xE6, 0xFE]));
+        // ld hl,$CB03 (21 03 CB) ; res 0,(hl) (CB 86)
+        assert!(build.bytes.windows(3).any(|w| w == [0x21, 0x03, 0xCB]));
+        assert!(build.bytes.windows(2).any(|w| w == [0xCB, 0x86]));
     }
 
     // -------------------------------------------------------------------
