@@ -655,6 +655,243 @@ fn overwrites_nz(op: &ir::Op) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Per-flag liveness (N/Z/C/V) — foundation for native-flag fusion.
+// ---------------------------------------------------------------------------
+// Internal flag bitmask (NOT the 6502 P layout — just a set).
+const F_N: u8 = 1;
+const F_Z: u8 = 2;
+const F_C: u8 = 4;
+const F_V: u8 = 8;
+
+/// Which of N/Z/C/V the op *reads*. Branches read their condition flag.
+/// ADC/SBC read carry-in; ROL/ROR rotate through carry; PHP reads all.
+fn flags_read(op: &ir::Op) -> u8 {
+    use ir::{Cond, Op};
+    match op {
+        Op::BranchIf { cond, .. } => match cond {
+            Cond::Carry | Cond::NoCarry => F_C,
+            Cond::Zero | Cond::NotZero => F_Z,
+            Cond::Negative | Cond::Positive => F_N,
+            Cond::Overflow | Cond::NoOverflow => F_V,
+        },
+        Op::AdcImm(_)
+        | Op::AdcMem { .. }
+        | Op::SbcImm(_)
+        | Op::SbcMem { .. }
+        | Op::RolA
+        | Op::RolMem { .. }
+        | Op::RorA
+        | Op::RorMem { .. } => F_C,
+        Op::Php => F_N | F_Z | F_C | F_V,
+        _ => 0,
+    }
+}
+
+/// Which of N/Z/C/V the op *overwrites*.
+fn flags_written(op: &ir::Op) -> u8 {
+    use ir::Op;
+    match op {
+        Op::LdaImm(_)
+        | Op::LdaMem { .. }
+        | Op::LdxImm(_)
+        | Op::LdxMem { .. }
+        | Op::LdyImm(_)
+        | Op::LdyMem { .. }
+        | Op::AndImm(_)
+        | Op::AndMem { .. }
+        | Op::OraImm(_)
+        | Op::OraMem { .. }
+        | Op::EorImm(_)
+        | Op::EorMem { .. }
+        | Op::IncMem { .. }
+        | Op::DecMem { .. }
+        | Op::Inx
+        | Op::Iny
+        | Op::Dex
+        | Op::Dey
+        | Op::Tax
+        | Op::Tay
+        | Op::Txa
+        | Op::Tya
+        | Op::Tsx
+        | Op::Pla => F_N | F_Z,
+        Op::AdcImm(_) | Op::AdcMem { .. } | Op::SbcImm(_) | Op::SbcMem { .. } => {
+            F_N | F_Z | F_C | F_V
+        }
+        Op::CmpImm(_)
+        | Op::CmpMem { .. }
+        | Op::CpxImm(_)
+        | Op::CpxMem { .. }
+        | Op::CpyImm(_)
+        | Op::CpyMem { .. } => F_N | F_Z | F_C,
+        Op::AslA
+        | Op::AslMem { .. }
+        | Op::LsrA
+        | Op::LsrMem { .. }
+        | Op::RolA
+        | Op::RolMem { .. }
+        | Op::RorA
+        | Op::RorMem { .. } => F_N | F_Z | F_C,
+        Op::BitMem { .. } => F_N | F_Z | F_V,
+        Op::Plp => F_N | F_Z | F_C | F_V,
+        Op::Sec | Op::Clc => F_C,
+        Op::Clv => F_V,
+        _ => 0,
+    }
+}
+
+/// Ops that end a basic block / cross a routine boundary where we must be
+/// conservative (downstream code we can't see here may read the flags via
+/// PHP/PLP or fall-through).
+fn is_flag_boundary(op: &ir::Op) -> bool {
+    use ir::Op;
+    matches!(
+        op,
+        Op::Rts
+            | Op::Rti
+            | Op::Jsr { .. }
+            | Op::JsrUnknown { .. }
+            | Op::JumpEngineCall { .. }
+            | Op::Jmp { .. }
+            | Op::JmpIndirect { .. }
+            | Op::Brk
+            | Op::Pha
+            | Op::Php
+            | Op::PpuWrite { .. }
+            | Op::PpuRead { .. }
+            | Op::ApuWrite { .. }
+            | Op::ApuRead { .. }
+            | Op::OamDmaWrite { .. }
+            | Op::MapperWrite { .. }
+            | Op::ControllerRead { .. }
+            | Op::Unsupported { .. }
+            | Op::Jam { .. }
+    )
+}
+
+/// Are any of the `which` flags live after op index `i` — i.e. read by a
+/// later op before being overwritten? Conservative (live) at boundaries
+/// and at end-of-routine.
+fn flags_live_after(ops: &[ir::Op], i: usize, which: u8) -> bool {
+    let mut pending = which;
+    for op in ops.iter().skip(i + 1) {
+        if flags_read(op) & pending != 0 {
+            return true;
+        }
+        if is_flag_boundary(op) {
+            return true;
+        }
+        pending &= !flags_written(op);
+        if pending == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// A Z80 native branch condition.
+#[derive(Clone, Copy)]
+enum Z80Cond {
+    Z,
+    Nz,
+    C,
+    Nc,
+    M,
+    P,
+}
+
+impl Z80Cond {
+    fn invert(self) -> Z80Cond {
+        match self {
+            Z80Cond::Z => Z80Cond::Nz,
+            Z80Cond::Nz => Z80Cond::Z,
+            Z80Cond::C => Z80Cond::Nc,
+            Z80Cond::Nc => Z80Cond::C,
+            Z80Cond::M => Z80Cond::P,
+            Z80Cond::P => Z80Cond::M,
+        }
+    }
+    fn jp(self, p: &mut z80_emit::Program, target: &str) {
+        match self {
+            Z80Cond::Z => p.jp_z(target),
+            Z80Cond::Nz => p.jp_nz(target),
+            Z80Cond::C => p.jp_c(target),
+            Z80Cond::Nc => p.jp_nc(target),
+            Z80Cond::M => p.jp_m(target),
+            Z80Cond::P => p.jp_p(target),
+        }
+    }
+}
+
+/// Map a 6502 branch condition to the Z80 native condition that holds
+/// after a `cp` (A - operand). Carry is inverted: 6502 C=1 (A>=operand,
+/// no borrow) is Z80 NC. Overflow conditions can't come from `cp` (CMP
+/// doesn't set V), so they aren't fusable.
+fn cmp_cond_to_z80(cond: &ir::Cond) -> Option<Z80Cond> {
+    use ir::Cond;
+    Some(match cond {
+        Cond::Zero => Z80Cond::Z,
+        Cond::NotZero => Z80Cond::Nz,
+        Cond::Carry => Z80Cond::Nc,
+        Cond::NoCarry => Z80Cond::C,
+        Cond::Negative => Z80Cond::M,
+        Cond::Positive => Z80Cond::P,
+        Cond::Overflow | Cond::NoOverflow => return None,
+    })
+}
+
+/// Emit a branch on a Z80 native flag, handling cross-section (far)
+/// targets the same way `Op::BranchIf` does: for a far target, invert
+/// the condition to skip past a `far_jmp`. Conditional jumps don't
+/// clobber flags, so chained native branches off one `cp` stay valid.
+fn emit_native_branch(
+    program: &mut z80_emit::Program,
+    routine: &ir::Routine,
+    cond: Z80Cond,
+    target: &str,
+) {
+    let local = routine.branch_labels.iter().any(|l| l.as_str() == target)
+        || routine.name.as_str() == target
+        || program.label_section_idx(target) == Some(program.current_section_idx());
+    if local {
+        cond.jp(program, target);
+    } else {
+        let skip = program.fresh_label("br_skip");
+        cond.invert().jp(program, &skip);
+        program.far_jmp(target);
+        program.label(&skip);
+    }
+}
+
+/// Emit the branch run that follows a fused `cp` (ops `[start, end)` are
+/// `Source` comments and NZ/C `BranchIf`s). The `cp` already set the Z80
+/// native flags; conditional jumps preserve them, so the chain is valid.
+fn emit_fused_cmp_branches(
+    program: &mut z80_emit::Program,
+    routine: &ir::Routine,
+    ops: &[ir::Op],
+    start: usize,
+    end: usize,
+    emit_comments: bool,
+) {
+    use ir::Op;
+    for op in ops.iter().take(end).skip(start) {
+        match op {
+            Op::Source { pc, text } => {
+                if emit_comments {
+                    program.comment(format!("6502 ${pc:04X}: {text}"));
+                }
+            }
+            Op::BranchIf { cond, target } => {
+                let z = cmp_cond_to_z80(cond).expect("fusion run only holds fusable conds");
+                emit_native_branch(program, routine, z, target);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // lower_routine
 // ---------------------------------------------------------------------------
 
@@ -682,7 +919,48 @@ pub fn lower_routine(
         .map(|(i, _)| nz_flags_live_after(&routine.ops, i))
         .collect();
 
+    // CMP→branch fusion plan. `fuse_cmp_end[i] = Some(j)` marks a CMP at
+    // `i` whose flags are consumed only by the branch run `[i+1, j)` and
+    // are dead afterward — lowered with a native `cp` + native jumps
+    // instead of rt_cmp_a + shadow-P bit tests. Ops in the run are marked
+    // `fuse_consumed` and skipped by the main loop (the CMP emits them).
+    let ops_slice = &routine.ops;
+    let mut fuse_cmp_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
+    let mut fuse_consumed: Vec<bool> = vec![false; ops_slice.len()];
+    for i in 0..ops_slice.len() {
+        if !matches!(ops_slice[i], Op::CmpImm(_) | Op::CmpMem { .. }) {
+            continue;
+        }
+        let mut j = i + 1;
+        let mut saw_branch = false;
+        while j < ops_slice.len() {
+            match &ops_slice[j] {
+                Op::Source { .. } => j += 1,
+                Op::BranchIf { cond, .. } if cmp_cond_to_z80(cond).is_some() => {
+                    saw_branch = true;
+                    j += 1;
+                }
+                _ => break,
+            }
+        }
+        if !saw_branch {
+            continue;
+        }
+        // N/Z/C must be dead after the run so skipping the shadow-P
+        // update is sound (no later PHP/branch reads stale flags).
+        if flags_live_after(ops_slice, j - 1, F_N | F_Z | F_C) {
+            continue;
+        }
+        fuse_cmp_end[i] = Some(j);
+        for slot in fuse_consumed.iter_mut().take(j).skip(i + 1) {
+            *slot = true;
+        }
+    }
+
     for (op_idx, op) in routine.ops.iter().enumerate() {
+        if fuse_consumed[op_idx] {
+            continue;
+        }
         match op {
             // ------------------------------------------------------------------
             Op::Label(name) => {
@@ -1131,13 +1409,38 @@ pub fn lower_routine(
             // ALU: CMP / CPX / CPY
             // ------------------------------------------------------------------
             Op::CmpImm(v) => {
-                program.ld_b_imm(*v);
-                program.call(CMP_A_VIA_SHADOW);
+                if let Some(end) = fuse_cmp_end[op_idx] {
+                    program.cp_imm(*v);
+                    emit_fused_cmp_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                    );
+                } else {
+                    program.ld_b_imm(*v);
+                    program.call(CMP_A_VIA_SHADOW);
+                }
             }
 
             Op::CmpMem { addr, region } => {
-                emit_mem_to_b(program, addr, *region);
-                program.call(CMP_A_VIA_SHADOW);
+                if let Some(end) = fuse_cmp_end[op_idx] {
+                    emit_mem_to_b(program, addr, *region);
+                    program.cp_b();
+                    emit_fused_cmp_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                    );
+                } else {
+                    emit_mem_to_b(program, addr, *region);
+                    program.call(CMP_A_VIA_SHADOW);
+                }
             }
 
             Op::CpxImm(v) => {
@@ -1756,6 +2059,34 @@ mod tests {
         let build = lower_and_finish(vec![Op::CmpImm(3)]);
         // ld b,$03 = 06 03
         assert!(build.bytes.windows(2).any(|w| w == [0x06, 0x03]));
+        assert!(build.asm.contains("call rt_cmp_a"));
+    }
+
+    // CMP #$10 / BEQ ; a later CMP overwrites N/Z/C before any boundary,
+    // so the first compare's flags are dead after the branch -> fuse to a
+    // native `cp $10` + native `jp z` (no rt_cmp_a, no shadow-P bit test).
+    #[test]
+    fn cmp_beq_fuses_to_native() {
+        let build = lower_and_finish(vec![
+            Op::CmpImm(0x10),
+            Op::BranchIf {
+                cond: Cond::Zero,
+                target: "L_x".into(),
+            },
+            Op::CmpImm(0x20), // writes N/Z/C, reads none -> kills first cmp's flags
+            Op::BranchIf {
+                cond: Cond::NotZero,
+                target: "L_x".into(),
+            },
+            Op::Label("L_x".into()),
+            Op::Rts,
+        ]);
+        // native cp $10 = FE 10
+        assert!(build.bytes.windows(2).any(|w| w == [0xFE, 0x10]));
+        // fused branch is a native jp z
+        assert!(build.asm.contains("jp z,L_x"));
+        // the second compare (flags live across the following Rts) still
+        // falls back to the helper.
         assert!(build.asm.contains("call rt_cmp_a"));
     }
 
