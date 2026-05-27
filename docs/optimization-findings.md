@@ -212,6 +212,53 @@ clocks/instr; 3.5 MHz Z80 ≈ 1 MHz 6502); silviocesare & IEEE/ResearchGate
 (loop→block-op idiom recognition); N64Recomp (native-speed static
 recompilation via host headroom).
 
+## Emulator-side overclock (relaxing the hardware-accuracy goal)
+
+If the target is *emulator-only* (acceptable per the project owner), the
+~6× gap can be sidestepped by **overclocking the emulated Z80**: keep the
+VDP and frame-IRQ at 60 Hz but give the CPU more cycles between IRQs, so
+the heavy translated NMI completes within a video frame → full-speed game
+logic. Our ROM is logic-faithful (not timing-faithful) and audio is
+stubbed, so nothing depends on exact CPU timing. The frame-diff oracle
+already proves the logic runs correctly given enough cycles/frame.
+
+Required multiplier: steady frames ≈ 330–410K approx-cycles vs the
+~59,736 budget → **~7–8×**.
+
+Emulator support (researched May 2026):
+- **mednafen**: *no* SMS CPU-clock/overclock setting. Can't.
+- **Genesis Plus GX** (libretro): `genesis_plus_gx_overclock` affects the
+  Z80 (`z80_cycle_ratio`); menu exposes 100–200%, code supports up to
+  500%. 500% → ~30–45 fps (not full, but very playable).
+- **MAME/MESS**: runtime "Overclock CPU maincpu" slider (Tab → Slider
+  Controls); larger range, likely enough for ~700–800%. Interactive-only
+  (can't be saved). Runs our ROM via `mame sms -cart out/smb/sms.sms`.
+- Both `mame` (~340 MB) and `retroarch` (~14 MB; GPGX core fetched from
+  libretro buildbot) are installable in the Debian toolchain image.
+
+**Combined strategy:** the underrated `LDIR`/`OTIR` finding *lowers* the
+multiplier the emulator must supply. If block-transfer lifting cuts the
+hot copy/upload loops, ~7–8× drops toward ~4–5×, which GPGX's 500% (or a
+modest MAME slider) covers — i.e., full speed reachable on a stock,
+unpatched emulator.
+
+## The underrated finding in practice: LDIR/OTIR block-transfer lifting
+
+SMB's hot per-frame loops are byte-at-a-time copies — `LDA src,X; STA
+dst,X; INX; CPX #N; B?? loop` — and in our translation **each byte pays
+`rt_read_indexed` + `rt_write_indexed`** (the 122K-call cost), ~200 cyc/
+byte. The Z80's `LDIR` does the whole block at ~21 cyc/byte — a ~10×
+local win, and it's precisely where the Z80 beats the 6502.
+
+Feasibility confirmed: most source tables live in low PRG ($8000–$BFFF),
+which our layout maps **directly** at the same SMS address (slot 2 =
+`data_prg_low`), so `LDIR` needs no bank switch. RAM→RAM copies are also
+direct. (High-PRG $C000+ sources would need a slot-2 swap — defer those.)
+VRAM-upload loops (mem→VDP data port) map to the Z80's `OTIR` similarly.
+
+This is the highest-ROI remaining codegen lever and the one that targets
+where the cycles actually go. Implementing it next.
+
 ## Other Z80 advantages worth exploiting later (generic, game-agnostic)
 
 - `ldir`/`lddr` for 6502 copy/fill loops (`lda $s,x; sta $d,x; dex; bne`).
