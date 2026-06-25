@@ -812,6 +812,10 @@ addr = 0xc38a
 name = "SetupLakitu"
 
 [[function]]
+addr = 0xc395
+name = "KillLakitu"
+
+[[function]]
 addr = 0xc3a4
 name = "LakituAndSpinyHandler"
 
@@ -834,6 +838,10 @@ name = "InitBowser"
 [[function]]
 addr = 0xc5a3
 name = "InitBowserFlame"
+
+[[function]]
+addr = 0xc5ec
+name = "SpawnFromMouth"
 
 [[function]]
 addr = 0xc63d
@@ -948,6 +956,10 @@ addr = 0xc9d8
 name = "ProcHammerBro"
 
 [[function]]
+addr = 0xca12
+name = "HammerBroJumpCode"
+
+[[function]]
 addr = 0xca77
 name = "MoveNormalEnemy"
 
@@ -1010,6 +1022,14 @@ name = "RunBowser"
 [[function]]
 addr = 0xd071
 name = "KillAllEnemies"
+
+[[function]]
+addr = 0xd07f
+name = "BowserControl"
+
+[[function]]
+addr = 0xd13c
+name = "MakeBJump"
 
 [[function]]
 addr = 0xd1d9
@@ -1164,6 +1184,14 @@ addr = 0xe163
 name = "EnemyJump"
 
 [[function]]
+addr = 0xe196
+name = "UnderHammerBro"
+
+[[function]]
+addr = 0xe1a7
+name = "NoUnderHammerBro"
+
+[[function]]
 addr = 0xe1ae
 name = "ChkUnderEnemy"
 
@@ -1286,6 +1314,10 @@ name = "ActionClimbing"
 [[function]]
 addr = 0xf050
 name = "ActionSwimming"
+
+[[function]]
+addr = 0xf0d7
+name = "ShrinkPlayer"
 
 [[function]]
 addr = 0xf26d

@@ -10,8 +10,8 @@ After correcting the `SetupVictoryMode` profile address (`$83A8` table entry →
 `$83B0` routine start), naming the `$BDD8` block dispatch target as
 `ExtraLifeMushBlock`, adding piranha init/run roots, and adding platform/lift
 handler roots, and adding named enemy variant roots, the regenerated project
-reports 30 unresolved labels, 623/623 lifted routines, and 0 current lift/lower
-failures.
+plus eight local gameplay entrypoints, the regenerated project reports 22
+unresolved labels, 631/631 lifted routines, and 0 current lift/lower failures.
 
 ## Current acceptance route
 
@@ -54,15 +54,13 @@ The named table-dispatched enemy handlers are now profile roots, including
 Piranha plants, platform/lift handlers, Cheep-cheeps, flying/swimming enemies,
 Paratroopas, firebars, and the enemy-init terminator.
 
-Remaining gameplay-labelled unresolved entries are local labels inside broader
-enemy/player routines, not obvious top-level jump-engine targets:
+The remaining enemy/player local labels were checked against the disassembly and
+added as profile roots where they are used as external transfer targets:
 
-- `L_C395`, `L_C5EC`, `L_CA12`, `L_D07F`, `L_D13C`, `L_E196`, `L_E1A7`,
-  `L_F0D7`
+- `KillLakitu`, `SpawnFromMouth`, `HammerBroJumpCode`, `BowserControl`,
+  `MakeBJump`, `UnderHammerBro`, `NoUnderHammerBro`, `ShrinkPlayer`
 
-**Action:** classify each against the disassembly before promoting. If a label
-is only a local branch target inside an already lifted routine, prefer range or
-branch-label ownership fixes over adding roots.
+No non-sound unresolved labels remain in the current report.
 
 ### Platform / lift handlers
 
@@ -80,9 +78,7 @@ world victory, but it now discovers and lifts as `$83B0-$83BD`.
 
 ### Player / miscellaneous gameplay
 
-The remaining non-sound labels are the eight local labels listed in the enemy
-section above. `L_F0D7` is player/control-adjacent; the others are in enemy or
-castle enemy regions.
+No player/misc gameplay labels remain unresolved in the current report.
 
 ## Illegal-op / data-artifact suspects
 
@@ -104,12 +100,9 @@ become profile data/range metadata, not unsupported-op lowering.
 
 ## Suggested next order
 
-1. **Named local labels in enemy/player regions.** Resolve `L_C395`, `L_C5EC`,
-   `L_CA12`, `L_D07F`, `L_D13C`, `L_E196`, `L_E1A7`, and `L_F0D7` only after
-   checking each against the disassembly for true entrypoint vs local branch.
-2. **World/castle victory route.** `SetupVictoryMode` now lifts, but the broader
+1. **World/castle victory route.** `SetupVictoryMode` now lifts, but the broader
    victory mode still needs an explicit route/test outside 1-1.
-3. **Sound phase.** Keep `$Fxxx` sound labels deferred until the APU/PSG runtime
+2. **Sound phase.** Keep `$Fxxx` sound labels deferred until the APU/PSG runtime
    plan is active.
 
 Sound labels stay deferred until the audio phase.
