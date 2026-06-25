@@ -506,25 +506,27 @@ pub fn run(args: &Args) -> Result<String, Error> {
     std::fs::write(reports_dir.join("discovery.txt"), &analyzed.report.text)?;
     std::fs::write(reports_dir.join("lifted.txt"), lifted_report(&routines))?;
     std::fs::write(reports_dir.join("chr_map.txt"), chr_report)?;
-    if !lift_failures.is_empty() {
-        std::fs::write(
-            reports_dir.join("lift_failures.txt"),
-            lift_failures.join("\n"),
-        )?;
-    }
-    if !lower_failures.is_empty() {
-        std::fs::write(
-            reports_dir.join("lower_failures.txt"),
-            lower_failures.join("\n"),
-        )?;
-    }
-    if !unresolved.is_empty() {
+    write_optional_report(
+        &reports_dir.join("lift_failures.txt"),
+        (!lift_failures.is_empty()).then(|| lift_failures.join("\n")),
+    )?;
+    write_optional_report(
+        &reports_dir.join("lower_failures.txt"),
+        (!lower_failures.is_empty()).then(|| lower_failures.join("\n")),
+    )?;
+    let unresolved_report = if !unresolved.is_empty() {
         let mut report = String::new();
         for (idx, label) in unresolved.iter().enumerate() {
             report.push_str(&format!("{idx:04X}  {label}\n"));
         }
-        std::fs::write(reports_dir.join("unresolved_labels.txt"), report)?;
-    }
+        Some(report)
+    } else {
+        None
+    };
+    write_optional_report(
+        &reports_dir.join("unresolved_labels.txt"),
+        unresolved_report,
+    )?;
 
     // 11. Optional differential validation.
     let mut validation_summary = String::new();
@@ -843,6 +845,19 @@ fn lifted_report(routines: &[ir::Routine]) -> String {
         ));
     }
     s
+}
+
+fn write_optional_report(path: &std::path::Path, content: Option<String>) -> Result<(), Error> {
+    if let Some(content) = content {
+        std::fs::write(path, content)?;
+    } else {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
 }
 
 /// 32-byte SMS CRAM with a placeholder grayscale ramp.

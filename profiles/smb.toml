@@ -80,7 +80,7 @@ addr = 0x838b
 name = "VictoryMode"
 
 [[function]]
-addr = 0x83a8
+addr = 0x83b0
 name = "SetupVictoryMode"
 
 [[function]]
