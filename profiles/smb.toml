@@ -776,6 +776,10 @@ addr = 0xc328
 name = "InitHammerBro"
 
 [[function]]
+addr = 0xc33d
+name = "InitHorizFlySwimEnemy"
+
+[[function]]
 addr = 0xc342
 name = "InitBloober"
 
@@ -814,6 +818,10 @@ name = "LakituAndSpinyHandler"
 [[function]]
 addr = 0xc459
 name = "InitLongFirebar"
+
+[[function]]
+addr = 0xc45c
+name = "InitShortFirebar"
 
 [[function]]
 addr = 0xc4a8
@@ -856,6 +864,10 @@ addr = 0xc7b8
 name = "EndFrenzy"
 
 [[function]]
+addr = 0xc7d1
+name = "InitJumpGPTroopa"
+
+[[function]]
 addr = 0xc7df
 name = "InitBalPlatform"
 
@@ -890,6 +902,10 @@ name = "PlatLiftDown"
 [[function]]
 addr = 0xc871
 name = "PosPlatform"
+
+[[function]]
+addr = 0xc881
+name = "EndOFEnemyInitCode"
 
 [[function]]
 addr = 0xc8d6
@@ -940,6 +956,18 @@ addr = 0xcaeb
 name = "ChkKillGoomba"
 
 [[function]]
+addr = 0xcaf9
+name = "MoveJumpingEnemy"
+
+[[function]]
+addr = 0xcaff
+name = "ProcMoveRedPTroopa"
+
+[[function]]
+addr = 0xcb25
+name = "MoveFlyGreenPTroopa"
+
+[[function]]
 addr = 0xcb66
 name = "MoveWithXMCntrs"
 
@@ -956,8 +984,16 @@ addr = 0xcc36
 name = "MoveBulletBill"
 
 [[function]]
+addr = 0xcc4a
+name = "MoveSwimmingCheepCheep"
+
+[[function]]
 addr = 0xcd3c
 name = "ProcFirebar"
+
+[[function]]
+addr = 0xcedf
+name = "MoveFlyingCheepCheep"
 
 [[function]]
 addr = 0xcf28

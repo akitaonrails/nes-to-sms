@@ -9,8 +9,9 @@ converter changes should remain generic.
 After correcting the `SetupVictoryMode` profile address (`$83A8` table entry →
 `$83B0` routine start), naming the `$BDD8` block dispatch target as
 `ExtraLifeMushBlock`, adding piranha init/run roots, and adding platform/lift
-handler roots, the regenerated project reports 39 unresolved labels, 610/610
-lifted routines, and 0 current lift/lower failures.
+handler roots, and adding named enemy variant roots, the regenerated project
+reports 30 unresolved labels, 623/623 lifted routines, and 0 current lift/lower
+failures.
 
 ## Current acceptance route
 
@@ -49,18 +50,19 @@ a generic APU-to-PSG/audio-runtime phase.
 
 ### Enemy initialization and run dispatch
 
-These are table-dispatched enemy handlers already named in the SMB jump-engine
-tables. They are broad-SMB reachable, but not required by the current 1-1 clear
-route if the relevant object types do not spawn or are not interacted with.
+The named table-dispatched enemy handlers are now profile roots, including
+Piranha plants, platform/lift handlers, Cheep-cheeps, flying/swimming enemies,
+Paratroopas, firebars, and the enemy-init terminator.
 
-- Init: `EndOFEnemyInitCode`, `InitHorizFlySwimEnemy`, `InitJumpGPTroopa`,
-  `InitShortFirebar`
-- Run/move: `MoveFlyGreenPTroopa`, `MoveFlyingCheepCheep`, `MoveJumpingEnemy`,
-  `MoveSwimmingCheepCheep`, `ProcMoveRedPTroopa`
+Remaining gameplay-labelled unresolved entries are local labels inside broader
+enemy/player routines, not obvious top-level jump-engine targets:
 
-**Action:** promote/repair through profile-owned jump-engine/data metadata, not
-Rust-side SMB logic. Piranha init/run are now profile roots; prioritize
-platform/lift handlers, then later water/flying enemy variants.
+- `L_C395`, `L_C5EC`, `L_CA12`, `L_D07F`, `L_D13C`, `L_E196`, `L_E1A7`,
+  `L_F0D7`
+
+**Action:** classify each against the disassembly before promoting. If a label
+is only a local branch target inside an already lifted routine, prefer range or
+branch-label ownership fixes over adding roots.
 
 ### Platform / lift handlers
 
@@ -78,13 +80,9 @@ world victory, but it now discovers and lifts as `$83B0-$83BD`.
 
 ### Player / miscellaneous gameplay
 
-- `L_F0D7` — player/control-adjacent cold path in the high `$F0xx` region.
-- `L_C395`, `L_C5EC`, `L_CA12`, `L_D07F`, `L_D13C`, `L_E196`, `L_E1A7` —
-  unnamed labels inside enemy/platform/player-adjacent regions.
-
-**Action:** classify each against the disassembly before promoting. If a label
-is only a local branch target inside an already lifted routine, the better fix
-may be range ownership/fallthrough repair rather than adding more roots.
+The remaining non-sound labels are the eight local labels listed in the enemy
+section above. `L_F0D7` is player/control-adjacent; the others are in enemy or
+castle enemy regions.
 
 ## Illegal-op / data-artifact suspects
 
@@ -106,14 +104,12 @@ become profile data/range metadata, not unsupported-op lowering.
 
 ## Suggested next order
 
-1. **Enemy variants after platform coverage.** Cheep-cheep/flying/paratroopa
-   movement should follow once common ground/platform play is stable.
-2. **World/castle victory route.** `SetupVictoryMode` now lifts, but the broader
-   victory mode still needs an explicit route/test outside 1-1.
-3. **Named local labels in enemy/player regions.** Resolve `L_C395`, `L_C5EC`,
+1. **Named local labels in enemy/player regions.** Resolve `L_C395`, `L_C5EC`,
    `L_CA12`, `L_D07F`, `L_D13C`, `L_E196`, `L_E1A7`, and `L_F0D7` only after
    checking each against the disassembly for true entrypoint vs local branch.
-4. **Sound phase.** Keep `$Fxxx` sound labels deferred until the APU/PSG runtime
+2. **World/castle victory route.** `SetupVictoryMode` now lifts, but the broader
+   victory mode still needs an explicit route/test outside 1-1.
+3. **Sound phase.** Keep `$Fxxx` sound labels deferred until the APU/PSG runtime
    plan is active.
 
 Sound labels stay deferred until the audio phase.
