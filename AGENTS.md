@@ -24,8 +24,10 @@
 
 ## Project constraints
 
-- The deliverable is a porting-assistant pipeline with SMB as proof, not a promise of arbitrary automatic NES conversion.
-- Do not make progress by Rust-side hand-porting SMB gameplay/rendering or by lifting isolated slices that are not reachable through the analyzer/profile pipeline.
+- The deliverable is a general NES-to-SMS conversion tool: given an NES binary, the pipeline should convert it to an SMS project/ROM as close to 1:1 as the hardware allows. SMB is the active stress-test and regression target, not the product boundary.
+- Do not treat this as a proof-of-concept, demo, or World 1-1-only milestone. Short routes and SMB-specific traces are diagnostics for the converter, not the end goal.
+- Do not make progress by Rust-side hand-porting SMB gameplay/rendering or by adding SMB-only logic to the converter. Game-specific knowledge belongs in profiles/data/runtimes where the architecture explicitly supports profile-driven conversion, and any SMB fix should be framed as a generic converter capability whenever possible.
+- Do not make progress by lifting isolated slices that are not reachable through the analyzer/profile pipeline.
 - Fail closed: unsupported opcodes, unknown indirect targets, and untagged/unsupported memory semantics should report errors or validation skips, not silently emit bogus Z80.
 - `--validate` writes `reports/validation.txt` but intentionally does not fail the project generation on red results.
 - Do not commit ROMs or generated ROM artifacts. `.gitignore` excludes `*.nes`, `*.sms`, `out/`, `**/out/`, and `target/`; use local ROM paths only in examples/docs.

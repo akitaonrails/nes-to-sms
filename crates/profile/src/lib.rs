@@ -190,6 +190,17 @@ fn validate(p: &Profile) -> Result<(), LoadError> {
             )));
         }
     }
+    let mut jump_engine_callers = BTreeMap::new();
+    for (idx, j) in p.jump_engines.iter().enumerate() {
+        if let Some(prev_idx) = jump_engine_callers.insert(j.caller, idx) {
+            return Err(LoadError::Validation(format!(
+                "duplicate jump_engine caller ${:04X}: entries #{} and #{}",
+                j.caller,
+                prev_idx + 1,
+                idx + 1
+            )));
+        }
+    }
     let mut used_chr_slots = [false; 448];
     for r in &p.chr_packs {
         if r.table > 1 {
@@ -370,5 +381,29 @@ start = 0x9000
 end   = 0x8000
 "#;
         assert!(matches!(load_from_str(s), Err(LoadError::Validation(_))));
+    }
+
+    #[test]
+    fn rejects_duplicate_jump_engine_caller() {
+        let s = r#"
+[rom]
+name = "x"
+mapper = 0
+prg_kib = 32
+chr_kib = 8
+
+[[jump_engine]]
+caller = 0x8000
+targets = ["A"]
+
+[[jump_engine]]
+caller = 0x8000
+targets = ["B"]
+"#;
+        let err = load_from_str(s).expect_err("duplicate caller should fail");
+        assert!(matches!(err, LoadError::Validation(_)));
+        assert!(err
+            .to_string()
+            .contains("duplicate jump_engine caller $8000"));
     }
 }

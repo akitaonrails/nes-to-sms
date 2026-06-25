@@ -193,6 +193,23 @@ boot_main:
   xor a
   call mem_fill
 
+  ; 11c. Build the horizontal-flip byte LUT (software sprite flipping; the SMS
+  ; VDP has no per-sprite flip bit). See runtime/sat.s.
+  call rt_build_hflip_lut
+
+  ; 11d. Init the background sub-palette variant cache to "unassigned" ($FF)
+  ; and reset the variant pool allocator. See runtime/chrmap.s.
+  ld  hl, $d600
+  ld  bc, $0400             ; 1024 cache entries
+  ld  a, $ff
+  call mem_fill
+  ld  hl, $da00             ; per-cell base-slot shadow
+  ld  bc, $0380             ; 896 cells
+  xor a
+  call mem_fill
+  xor a
+  ld  ($ca00), a            ; bg variant pool next-free slot = 0
+
   ; 12. Enable display and frame interrupts (VDP reg 1).
   ;     %11110000: display on, frame INT enabled, M1=1 (224-line mode),
   ;     8×8 sprites. 224 lines (28 tile rows) vs 192 so the NES 30-row
@@ -253,14 +270,14 @@ irq_handler:
   xor a
   ld  ($cb12), a
 
-  ; Upload sprite attribute table from staging area.
-  call rt_sat_upload
-
-  ; Apply latched scroll registers to VDP.
-  call _apply_scroll
-
-  ; Flush VRAM update buffer.
-  call vbuf_flush
+  ; NOTE: the VDP flushes (SAT upload, scroll apply, VRAM buffer) run AFTER the
+  ; translated NMI below, not before. SMB's NMI is what writes THIS frame's OAM
+  ; ($4014 -> $C900), scroll ($2005 -> $CB0C) and background tiles ($2007). The
+  ; background tile writes go straight to VRAM during the NMI, so if we flushed
+  ; sprites + scroll before it we'd show this frame's background with last
+  ; frame's sprite positions and scroll -- the few-pixel sprite/background
+  ; misalignment ("blocks rendered too early"). Flushing after keeps all three
+  ; in sync for the frame.
 
   ; Do not invoke the translated NMI handler until NES PPUCTRL bit 7 has enabled
   ; NMI at least once. The SMS frame IRQ is our timing source, but NES reset code
@@ -306,6 +323,12 @@ _irq_call_translated_nmi:
   ld  ($fffe), a
 
 _irq_skip_translated_nmi:
+
+  ; Flush this frame's prepared state to the VDP (see note above): sprites from
+  ; the OAM staging, the latched scroll, and the queued VRAM buffer.
+  call rt_sat_upload
+  call _apply_scroll
+  call vbuf_flush
 
   pop de
   pop bc

@@ -234,45 +234,71 @@ _ppudata_direct_palette:
   ; write it directly to the corresponding CRAM entry. This lets games load
   ; their own palettes through ordinary $2006/$2007 traffic instead of being
   ; stuck with the boot placeholder palette.
-  pop  af
-  ld   ($cb15), a            ; preserve NES palette byte
+  pop  af                    ; A = NES palette colour index
 
-  ; CRAM address = low 5 bits of NES palette address. The NES mirrors
-  ; $3F10/$3F14/$3F18/$3F1C to $3F00/$3F04/$3F08/$3F0C.
+  ; P = NES palette index (low 5 bits). Read it from E (PPUADDR low) BEFORE the
+  ; LUT lookup clobbers DE. Background tiles now bake the sub-palette into their
+  ; pixels and always use SMS palette 0 (CRAM 0-15 = the four NES bg
+  ; sub-palettes), so the colour map is direct:
+  ;   P = 0 or $10  -> universal background: write CRAM 0,4,8,12 (every bg
+  ;                    sub-palette's colour 0, which the NES reads from $3F00).
+  ;   P in 4/8/$C/$14/$18/$1C -> NES colour-0 mirrors; skip (kept = sky).
+  ;   else          -> CRAM[P] directly (bg colours 1-3 of each sub-palette;
+  ;                    sprite colours in 16-31, whose colour 0 is transparent).
+  ld   b, a                  ; B = NES colour index (save across LUT)
   ld   a, e
   and  $1f
-  cp   $10
-  jr   z, _ppudata_palette_mirror
-  cp   $14
-  jr   z, _ppudata_palette_mirror
-  cp   $18
-  jr   z, _ppudata_palette_mirror
-  cp   $1c
-  jr   z, _ppudata_palette_mirror
-  jr   _ppudata_palette_addr_ready
-_ppudata_palette_mirror:
-  sub  $10
-_ppudata_palette_addr_ready:
-  ld   ($cb16), a            ; remember CRAM address after NES mirror mapping
-  call vdp_set_cram_addr
+  ld   ($cb16), a            ; P (stashed; B is needed for the colour index)
 
-  ld   a, ($cb15)
+  ; SMS colour from the NES master-palette LUT -> C.
+  ld   a, b
   and  $3f
-  ld   e, a
-  ld   d, $00
-  ld   hl, _nes_to_sms_palette
+  ld   l, a
+  ld   h, $00
+  ld   de, _nes_to_sms_palette
   add  hl, de
   ld   a, (hl)
-  ld   c, a
-  out  ($be), a
-  ; SMS background tiles can select either 16-color palette. Color index 0 of
-  ; palette 1 is CRAM[16], so keep it mirrored to the universal background
-  ; color; otherwise nonzero NES attribute regions show black boxes around
-  ; tiles whose transparent/background pixels use color 0.
+  ld   c, a                  ; C = SMS --BBGGRR colour
+
   ld   a, ($cb16)
-  or   a
-  jp   nz, _ppudata_inc_addr
-  ld   a, $10
+  ld   b, a                  ; B = P
+  cp   $00
+  jr   z, _pal_universal
+  cp   $10
+  jr   z, _pal_universal
+  cp   $04
+  jp   z, _ppudata_inc_addr
+  cp   $08
+  jp   z, _ppudata_inc_addr
+  cp   $0c
+  jp   z, _ppudata_inc_addr
+  cp   $14
+  jp   z, _ppudata_inc_addr
+  cp   $18
+  jp   z, _ppudata_inc_addr
+  cp   $1c
+  jp   z, _ppudata_inc_addr
+  ; normal entry: CRAM[P] = C
+  ld   a, b
+  call vdp_set_cram_addr
+  ld   a, c
+  out  ($be), a
+  jp   _ppudata_inc_addr
+
+_pal_universal:
+  xor  a
+  call vdp_set_cram_addr
+  ld   a, c
+  out  ($be), a
+  ld   a, $04
+  call vdp_set_cram_addr
+  ld   a, c
+  out  ($be), a
+  ld   a, $08
+  call vdp_set_cram_addr
+  ld   a, c
+  out  ($be), a
+  ld   a, $0c
   call vdp_set_cram_addr
   ld   a, c
   out  ($be), a

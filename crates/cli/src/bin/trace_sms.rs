@@ -236,7 +236,11 @@ impl SmsBus {
 }
 
 fn parse_hex_addr(s: &str) -> Option<u16> {
-    u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()
+    u16::from_str_radix(
+        s.trim().trim_start_matches("0x").trim_start_matches('$'),
+        16,
+    )
+    .ok()
 }
 
 fn parse_addr_range(s: &str) -> Option<(u16, u16)> {
@@ -414,6 +418,49 @@ fn parse_button_event(spec: &str) -> Result<(usize, u8), String> {
         .parse::<usize>()
         .map_err(|_| format!("invalid frame in --buttons-at-frame: {frame}"))?;
     Ok((frame, buttons_to_sms_port_dc(buttons)))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RamExpectation {
+    addr: u16,
+    value: u8,
+}
+
+fn parse_ram_expectation(spec: &str) -> Result<RamExpectation, String> {
+    let (addr, value) = spec
+        .split_once('=')
+        .or_else(|| spec.split_once(':'))
+        .ok_or_else(|| format!("expected ADDR=HEX for --expect-ram, got {spec}"))?;
+    let addr = parse_hex_addr(addr).ok_or_else(|| format!("invalid RAM address: {addr}"))?;
+    let value = parse_hex_u8(value)?;
+    Ok(RamExpectation { addr, value })
+}
+
+fn ram_index(addr: u16) -> Option<usize> {
+    let idx = match addr {
+        0x0000..=0x1FFF => addr,
+        0xC000..=0xDFFF => addr - 0xC000,
+        0xE000..=0xFFFF => addr - 0xE000,
+        _ => return None,
+    };
+    Some(usize::from(idx))
+}
+
+fn load_button_script(path: &str) -> Result<Vec<(usize, u8)>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read button script {path}: {err}"))?;
+    let mut events = Vec::new();
+    for (line_idx, raw) in text.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        events.push(
+            parse_button_event(line)
+                .map_err(|err| format!("invalid button script {path}:{}: {err}", line_idx + 1))?,
+        );
+    }
+    Ok(events)
 }
 
 #[derive(Clone)]
@@ -1015,6 +1062,9 @@ fn main() {
             eprintln!("usage: trace-sms <rom.sms> [--steps N] [--log-pcs]");
             eprintln!("                     [--buttons a,b,start,up,down,left,right]");
             eprintln!("                     [--buttons-at-frame FRAME:buttons]");
+            eprintln!("                     [--buttons-script path]");
+            eprintln!("                     [--expect-no-trap]");
+            eprintln!("                     [--expect-ram ADDR=HEX]");
             eprintln!("                     [--pad1-raw HEX]");
             eprintln!("                     [--search-end-routes]");
             std::process::exit(2);
@@ -1027,6 +1077,8 @@ fn main() {
     let mut delayed_controller_port_dc: Option<u8> = None;
     let mut buttons_after_frame: Option<usize> = None;
     let mut button_events: Vec<(usize, u8)> = Vec::new();
+    let mut expect_no_trap = false;
+    let mut ram_expectations: Vec<RamExpectation> = Vec::new();
     let mut search_late_routes = false;
     let mut search_end_routes = false;
     let mut i = 2;
@@ -1062,6 +1114,23 @@ fn main() {
                 button_events.push(
                     parse_button_event(value)
                         .unwrap_or_else(|err| panic!("invalid --buttons-at-frame: {err}")),
+                );
+            }
+            "--buttons-script" => {
+                i += 1;
+                let path = args.get(i).expect("--buttons-script path");
+                button_events.extend(
+                    load_button_script(path)
+                        .unwrap_or_else(|err| panic!("invalid --buttons-script: {err}")),
+                );
+            }
+            "--expect-no-trap" => expect_no_trap = true,
+            "--expect-ram" => {
+                i += 1;
+                let value = args.get(i).expect("--expect-ram ADDR=HEX");
+                ram_expectations.push(
+                    parse_ram_expectation(value)
+                        .unwrap_or_else(|err| panic!("invalid --expect-ram: {err}")),
                 );
             }
             "--pad1-raw" => {
@@ -2024,6 +2093,49 @@ fn main() {
             println!("Wrote framebuffer PPM to {path}");
         }
     }
+
+    let mut acceptance_failed = false;
+    if expect_no_trap {
+        if let Some(step) = first_runtime_trap_step {
+            let id = (bus.ram[0x0B1C] as u16) << 8 | bus.ram[0x0B1B] as u16;
+            eprintln!(
+                "EXPECT FAIL: runtime trap marker hit at step {step}, unresolved_id=${id:04X}"
+            );
+            acceptance_failed = true;
+        } else if bus.ram[0x0B1D] == 0xE1 {
+            let id = (bus.ram[0x0B1C] as u16) << 8 | bus.ram[0x0B1B] as u16;
+            eprintln!("EXPECT FAIL: runtime trap marker set, unresolved_id=${id:04X}");
+            acceptance_failed = true;
+        } else {
+            println!("EXPECT ok: no runtime trap marker");
+        }
+    }
+    for expected in &ram_expectations {
+        let Some(idx) = ram_index(expected.addr) else {
+            eprintln!(
+                "EXPECT FAIL: RAM address ${:04X} is outside 8 KiB RAM/mirror",
+                expected.addr
+            );
+            acceptance_failed = true;
+            continue;
+        };
+        let actual = bus.ram[idx];
+        if actual != expected.value {
+            eprintln!(
+                "EXPECT FAIL: RAM ${:04X} expected ${:02X}, got ${:02X}",
+                expected.addr, expected.value, actual
+            );
+            acceptance_failed = true;
+        } else {
+            println!(
+                "EXPECT ok: RAM ${:04X} == ${:02X}",
+                expected.addr, expected.value
+            );
+        }
+    }
+    if acceptance_failed {
+        std::process::exit(1);
+    }
 }
 
 fn print_milestone(label: &str, step: Option<usize>) {
@@ -2182,8 +2294,20 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
                         | (((p3 >> bit) & 1) << 3);
                     let color = bus.cram[palette_offset + c as usize];
                     let (r, g, b) = cram_to_rgb(color);
-                    let sx = col * 8 + px;
-                    let sy = row * 8 + py;
+                    // Apply the SMS background scroll so this render matches
+                    // what the hardware/emulator displays: reg8 shifts the bg
+                    // right, reg9 shifts it up (both wrap). reg0 bit 1 locks
+                    // horizontal scroll on rows 0-1 (the status bar), so honor
+                    // that the way the VDP does.
+                    let lock_top = bus.vdp_regs[0] & 0x02 != 0;
+                    let reg8 = if lock_top && row < 2 {
+                        0
+                    } else {
+                        bus.vdp_regs[8] as usize
+                    };
+                    let reg9 = bus.vdp_regs[9] as usize;
+                    let sx = (col * 8 + px + reg8) & 0xFF;
+                    let sy = (row * 8 + py + (224 - (reg9 % 224))) % 224;
                     let pi = (sy * W + sx) * 3;
                     pixels[pi] = r;
                     pixels[pi + 1] = g;
@@ -2192,6 +2316,12 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
             }
         }
     }
+    eprintln!(
+        "framebuffer scroll: reg8={} reg9={} | NES scrollX($CB0C)={} cam_lo($071C)={} cam_pg($071A)={} playerX($0086)={} playerPg($006D)={} | bg_variant_pool_next($CA00)={}",
+        bus.vdp_regs[8], bus.vdp_regs[9],
+        bus.ram[0x0B0C], bus.ram[0x071C], bus.ram[0x071A], bus.ram[0x0086], bus.ram[0x006D],
+        bus.ram[0x0A00]
+    );
 
     // ── Sprite layer overlay ──────────────────────────────────────────────
     // SAT layout in VRAM at $3F00:

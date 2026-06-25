@@ -736,6 +736,15 @@ fn build_chr_maps(physical: &[[Option<u16>; 256]; 2]) -> (Vec<u8>, usize) {
         }
     }
 
+    // Unmapped sprite tiles resolve to a reserved blank/transparent slot
+    // instead of slot 0 (a real, non-blank tile). In 224-line mode the name
+    // table sits at $3700 (slot 440); within the valid sprite region 256-439
+    // the profile packs patterns into 256-422, reserves slot 423 as the blank
+    // (unpacked = all-zero = transparent), and keeps 424-439 as runtime flip
+    // scratch. This is how SMB's blank sprite tile $FC -- and any sprite tile
+    // that didn't fit -- end up see-through rather than garbage. Value is
+    // relative to the VDP sprite pattern base (reg6 = $2000): slot 423 -> 167.
+    const BLANK_SPRITE_VALUE: u8 = 167;
     for (table_idx, table) in physical.iter().take(2).enumerate() {
         for slot in table.iter().take(256) {
             let value = match slot {
@@ -743,11 +752,11 @@ fn build_chr_maps(physical: &[[Option<u16>; 256]; 2]) -> (Vec<u8>, usize) {
                 Some(slot @ 256..=511) if table_idx == 0 => (*slot - 256) as u8,
                 Some(_) => {
                     unmapped += 1;
-                    0
+                    BLANK_SPRITE_VALUE
                 }
                 None => {
                     unmapped += 1;
-                    0
+                    BLANK_SPRITE_VALUE
                 }
             };
             out.push(value);

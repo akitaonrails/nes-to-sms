@@ -1,0 +1,66 @@
+# SMB stress-target acceptance input: deterministic 1-1 clear route.
+#
+# Format is generic trace-sms input data: FRAME:buttons.
+# Buttons are held from that frame until the next event. Blank lines and
+# comments are ignored. This file is not converter logic; it is regression
+# data for the active SMB profile/stress target.
+
+80:start
+220:right
+415:right,a
+440:right
+540:right,a
+570:right
+720:right,a
+750:right
+795:right,a
+850:right
+980:right,a
+1030:right
+1120:right,a
+1180:right
+1320:right,a
+1380:right
+1390:right,a
+1425:right
+1510:right,a
+1580:right
+1600:right,a
+1660:right
+1670:right,a
+1740:right
+1750:right,a
+1780:right
+1805:right,a
+1840:right
+1970:right,a
+2040:right
+2100:right,a
+2170:right
+2220:right,a
+2270:right
+2280:right,a
+2330:right
+2410:right,a
+2430:right
+2530:right,a
+2580:right
+2584:right,a
+2630:right
+2655:right
+2705:right,a
+2740:right
+2768:right,a
+2788:right
+3150:right,a
+3190:right
+3250:right,a
+3290:right
+3350:right,a
+3390:right
+3850:right,a
+3890:right
+3950:right,a
+3990:right
+4050:right,a
+4090:right

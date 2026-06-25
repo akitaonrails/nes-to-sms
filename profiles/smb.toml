@@ -23,17 +23,23 @@ start = 0x00
 end = 0xff
 dest = 0
 
+# Sprite patterns (NES pattern table 0) -> SMS slots $100-$1A6 (256-422).
+# 224-line mode moves the name table to $3700 (= slot 440), so only sprite
+# slots up to 439 are valid VRAM. Reserved layout within 256-439:
+#   256-422  packed sprite patterns ($00-$A6)
+#   423      blank/transparent tile (unpacked = zero); unmapped sprite tiles
+#            fall back here (see build_chr_maps, BLANK_SPRITE_VALUE = 167).
+#   424-439  16 scratch slots the runtime rewrites each frame to emulate the
+#            horizontal/vertical sprite flips the SMS VDP can't do in hardware
+#            (runtime/sat.s rt_sat_resolve / do_flip).
+# NES sprite tile $FC (SMB's blank/transparent tile) isn't packed, so it
+# resolves to the blank slot. Sprite tiles $A7-$FF don't fit and fall back to
+# transparent (high-range graphics: score popups, flag, etc.).
 [[chr_pack]]
 table = 0
 start = 0x00
-end = 0xbe
+end = 0xa6
 dest = 0x100
-
-[[chr_pack]]
-table = 0
-start = 0xff
-end = 0xff
-dest = 0x1bf
 
 # === Functions (JSR + JumpEngine targets) ===
 
@@ -7819,20 +7825,12 @@ targets = ["StarFlagExit", "GameTimerFireworks", "AwardGameTimerPoints", "RaiseF
 # the dispatch override.
 
 [[jump_engine]]
-caller = 0x92C8
-targets = ["L_92DB", "L_88AE", "L_88AE", "AreaParserCore", "L_92DB", "L_88AE", "L_88AE", "AreaParserCore"]
-
-[[jump_engine]]
 caller = 0xB34E
 targets = ["L_B35A", "JumpSwimSub", "FallingSub", "ClimbingSub"]
 
 [[jump_engine]]
 caller = 0xBDBD
 targets = ["MushFlowerBlock", "CoinBlock", "CoinBlock", "L_BDD8", "MushFlowerBlock", "VineBlock", "StarBlock", "CoinBlock", "L_BDD8"]
-
-[[jump_engine]]
-caller = 0xC88F
-targets = ["L_C8E0", "RunBowserFlame", "RunFireworks", "NoRunCode", "NoRunCode", "NoRunCode", "NoRunCode", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "RunFirebarObj", "NoRunCode"]
 
 # ── ScreenRoutines sub-task entry points (resolves the
 #     SetupIntermediate / WriteTopStatusLine / etc. stubs that were
