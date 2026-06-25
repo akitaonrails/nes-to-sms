@@ -7,9 +7,10 @@ metric. SMB-specific facts here belong in `profiles/smb.toml` or runtime data;
 converter changes should remain generic.
 
 After correcting the `SetupVictoryMode` profile address (`$83A8` table entry →
-`$83B0` routine start) and naming the `$BDD8` block dispatch target as
-`ExtraLifeMushBlock`, the regenerated project reports 45 unresolved labels,
-605/605 lifted routines, and 0 current lift/lower failures.
+`$83B0` routine start), naming the `$BDD8` block dispatch target as
+`ExtraLifeMushBlock`, and adding piranha init/run roots, the regenerated project
+reports 43 unresolved labels, 606/606 lifted routines, and 0 current lift/lower
+failures.
 
 ## Current acceptance route
 
@@ -53,14 +54,13 @@ tables. They are broad-SMB reachable, but not required by the current 1-1 clear
 route if the relevant object types do not spawn or are not interacted with.
 
 - Init: `EndOFEnemyInitCode`, `InitHorizFlySwimEnemy`, `InitJumpGPTroopa`,
-  `InitPiranhaPlant`, `InitShortFirebar`
+  `InitShortFirebar`
 - Run/move: `MoveFlyGreenPTroopa`, `MoveFlyingCheepCheep`, `MoveJumpingEnemy`,
-  `MovePiranhaPlant`, `MoveSwimmingCheepCheep`, `ProcMoveRedPTroopa`
+  `MoveSwimmingCheepCheep`, `ProcMoveRedPTroopa`
 
 **Action:** promote/repair through profile-owned jump-engine/data metadata, not
-Rust-side SMB logic. Prioritize handlers whose level objects appear in normal
-SMB progression: piranha plants, platform/lift handlers, then later water/flying
-enemy variants.
+Rust-side SMB logic. Piranha init/run are now profile roots; prioritize
+platform/lift handlers, then later water/flying enemy variants.
 
 ### Platform / lift handlers
 
@@ -111,17 +111,16 @@ become profile data/range metadata, not unsupported-op lowering.
 
 ## Suggested next order
 
-1. **Piranha init/run (`InitPiranhaPlant`, `MovePiranhaPlant`).** Common SMB
-   gameplay, profile-dispatchable, and a good regression target outside the
-   1-1 clear route.
-2. **Platform/lift handlers.** Needed for broad level coverage; keep fixes in
+1. **Platform/lift handlers.** Needed for broad level coverage; keep fixes in
    profile/runtime semantics, not SMB-specific Rust branches.
-3. **Enemy variants after platform coverage.** Cheep-cheep/flying/paratroopa
+2. **Enemy variants after platform coverage.** Cheep-cheep/flying/paratroopa
    movement should follow once common ground/platform play is stable.
-4. **World/castle victory route.** `SetupVictoryMode` now lifts, but the broader
+3. **World/castle victory route.** `SetupVictoryMode` now lifts, but the broader
    victory mode still needs an explicit route/test outside 1-1.
-5. **Named local labels in enemy/player regions.** Resolve `L_C395`, `L_C5EC`,
+4. **Named local labels in enemy/player regions.** Resolve `L_C395`, `L_C5EC`,
    `L_CA12`, `L_D07F`, `L_D13C`, `L_E196`, `L_E1A7`, and `L_F0D7` only after
    checking each against the disassembly for true entrypoint vs local branch.
+5. **Sound phase.** Keep `$Fxxx` sound labels deferred until the APU/PSG runtime
+   plan is active.
 
 Sound labels stay deferred until the audio phase.

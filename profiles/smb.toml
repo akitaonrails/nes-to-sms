@@ -840,6 +840,10 @@ addr = 0xc71b
 name = "HandleGroupEnemies"
 
 [[function]]
+addr = 0xc787
+name = "InitPiranhaPlant"
+
+[[function]]
 addr = 0xc7a0
 name = "InitEnemyFrenzy"
 
@@ -1002,6 +1006,10 @@ name = "DrawFlagSetTimer"
 [[function]]
 addr = 0xd3a2
 name = "DelayToAreaEnd"
+
+[[function]]
+addr = 0xd3b0
+name = "MovePiranhaPlant"
 
 [[function]]
 addr = 0xd410
