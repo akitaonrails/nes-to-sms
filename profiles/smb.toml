@@ -860,6 +860,18 @@ addr = 0xc7df
 name = "InitBalPlatform"
 
 [[function]]
+addr = 0xc803
+name = "InitDropPlatform"
+
+[[function]]
+addr = 0xc80b
+name = "InitHoriPlatform"
+
+[[function]]
+addr = 0xc812
+name = "InitVertPlatform"
+
+[[function]]
 addr = 0xc83f
 name = "LargeLiftUp"
 
@@ -1038,6 +1050,10 @@ name = "DropPlatform"
 [[function]]
 addr = 0xd63d
 name = "RightPlatform"
+
+[[function]]
+addr = 0xd64f
+name = "MoveLargeLiftPlat"
 
 [[function]]
 addr = 0xd895

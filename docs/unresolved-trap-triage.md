@@ -8,9 +8,9 @@ converter changes should remain generic.
 
 After correcting the `SetupVictoryMode` profile address (`$83A8` table entry →
 `$83B0` routine start), naming the `$BDD8` block dispatch target as
-`ExtraLifeMushBlock`, and adding piranha init/run roots, the regenerated project
-reports 43 unresolved labels, 606/606 lifted routines, and 0 current lift/lower
-failures.
+`ExtraLifeMushBlock`, adding piranha init/run roots, and adding platform/lift
+handler roots, the regenerated project reports 39 unresolved labels, 610/610
+lifted routines, and 0 current lift/lower failures.
 
 ## Current acceptance route
 
@@ -64,15 +64,10 @@ platform/lift handlers, then later water/flying enemy variants.
 
 ### Platform / lift handlers
 
-These are high-value for broad playability because platform levels need them,
-even if the 1-1 script avoids them:
-
-- Init: `InitDropPlatform`, `InitHoriPlatform`, `InitVertPlatform`
-- Run: `MoveLargeLiftPlat`
-
-**Action:** likely next gameplay bucket after piranha/victory checks. Keep the
-fix profile-driven: ensure table entries are discovered/lifted and any data
-regions near platform dispatch are classified correctly.
+The high-value platform roots `InitDropPlatform`, `InitHoriPlatform`,
+`InitVertPlatform`, and `MoveLargeLiftPlat` are now profile roots and no longer
+unresolved. They are still broader-SMB coverage items rather than part of the
+1-1 scripted acceptance path.
 
 ### End-level / victory
 
@@ -102,7 +97,7 @@ Still worth watching in this bucket:
 - `BumpBlock`'s `$BDD8` table entry is now named `ExtraLifeMushBlock` and lifts
   as `$BDD8-$BDDF`; future changes near that range should still verify
   code-vs-data boundaries.
-- Enemy/platform dispatch entries around the `$C2xx` tables should be promoted
+- Remaining enemy dispatch entries around the `$C2xx` tables should be promoted
   only after confirming the bytes are code entrypoints, not table data.
 
 **Action:** before promoting labels near these ranges, verify whether the bytes
@@ -111,16 +106,14 @@ become profile data/range metadata, not unsupported-op lowering.
 
 ## Suggested next order
 
-1. **Platform/lift handlers.** Needed for broad level coverage; keep fixes in
-   profile/runtime semantics, not SMB-specific Rust branches.
-2. **Enemy variants after platform coverage.** Cheep-cheep/flying/paratroopa
+1. **Enemy variants after platform coverage.** Cheep-cheep/flying/paratroopa
    movement should follow once common ground/platform play is stable.
-3. **World/castle victory route.** `SetupVictoryMode` now lifts, but the broader
+2. **World/castle victory route.** `SetupVictoryMode` now lifts, but the broader
    victory mode still needs an explicit route/test outside 1-1.
-4. **Named local labels in enemy/player regions.** Resolve `L_C395`, `L_C5EC`,
+3. **Named local labels in enemy/player regions.** Resolve `L_C395`, `L_C5EC`,
    `L_CA12`, `L_D07F`, `L_D13C`, `L_E196`, `L_E1A7`, and `L_F0D7` only after
    checking each against the disassembly for true entrypoint vs local branch.
-5. **Sound phase.** Keep `$Fxxx` sound labels deferred until the APU/PSG runtime
+4. **Sound phase.** Keep `$Fxxx` sound labels deferred until the APU/PSG runtime
    plan is active.
 
 Sound labels stay deferred until the audio phase.
