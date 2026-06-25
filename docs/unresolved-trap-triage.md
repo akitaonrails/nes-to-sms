@@ -7,8 +7,9 @@ metric. SMB-specific facts here belong in `profiles/smb.toml` or runtime data;
 converter changes should remain generic.
 
 After correcting the `SetupVictoryMode` profile address (`$83A8` table entry →
-`$83B0` routine start), the regenerated project reports 46 unresolved labels,
-604/604 lifted routines, and 0 current lift/lower failures.
+`$83B0` routine start) and naming the `$BDD8` block dispatch target as
+`ExtraLifeMushBlock`, the regenerated project reports 45 unresolved labels,
+605/605 lifted routines, and 0 current lift/lower failures.
 
 ## Current acceptance route
 
@@ -83,8 +84,6 @@ world victory, but it now discovers and lifts as `$83B0-$83BD`.
 ### Player / miscellaneous gameplay
 
 - `L_F0D7` — player/control-adjacent cold path in the high `$F0xx` region.
-- `L_BDD8` — block/power-up jump-engine entry referenced from `BumpBlock`'s
-  block-result table.
 - `L_C395`, `L_C5EC`, `L_CA12`, `L_D07F`, `L_D13C`, `L_E196`, `L_E1A7` —
   unnamed labels inside enemy/platform/player-adjacent regions.
 
@@ -100,8 +99,9 @@ the report writer now removes stale optional reports on zero-failure runs.
 
 Still worth watching in this bucket:
 
-- `BumpBlock` references `L_BDD8` through its table, so future changes near that
-  range should still verify code-vs-data boundaries.
+- `BumpBlock`'s `$BDD8` table entry is now named `ExtraLifeMushBlock` and lifts
+  as `$BDD8-$BDDF`; future changes near that range should still verify
+  code-vs-data boundaries.
 - Enemy/platform dispatch entries around the `$C2xx` tables should be promoted
   only after confirming the bytes are code entrypoints, not table data.
 
@@ -111,16 +111,17 @@ become profile data/range metadata, not unsupported-op lowering.
 
 ## Suggested next order
 
-1. **`BumpBlock` / `L_BDD8` table-boundary audit.** Likely data-vs-code issue
-   and important for block correctness.
-2. **Piranha init/run (`InitPiranhaPlant`, `MovePiranhaPlant`).** Common SMB
+1. **Piranha init/run (`InitPiranhaPlant`, `MovePiranhaPlant`).** Common SMB
    gameplay, profile-dispatchable, and a good regression target outside the
    1-1 clear route.
-3. **Platform/lift handlers.** Needed for broad level coverage; keep fixes in
+2. **Platform/lift handlers.** Needed for broad level coverage; keep fixes in
    profile/runtime semantics, not SMB-specific Rust branches.
-4. **Enemy variants after platform coverage.** Cheep-cheep/flying/paratroopa
+3. **Enemy variants after platform coverage.** Cheep-cheep/flying/paratroopa
    movement should follow once common ground/platform play is stable.
-5. **World/castle victory route.** `SetupVictoryMode` now lifts, but the broader
+4. **World/castle victory route.** `SetupVictoryMode` now lifts, but the broader
    victory mode still needs an explicit route/test outside 1-1.
+5. **Named local labels in enemy/player regions.** Resolve `L_C395`, `L_C5EC`,
+   `L_CA12`, `L_D07F`, `L_D13C`, `L_E196`, `L_E1A7`, and `L_F0D7` only after
+   checking each against the disassembly for true entrypoint vs local branch.
 
 Sound labels stay deferred until the audio phase.

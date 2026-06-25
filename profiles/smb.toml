@@ -708,6 +708,10 @@ addr = 0xbdd5
 name = "StarBlock"
 
 [[function]]
+addr = 0xbdd8
+name = "ExtraLifeMushBlock"
+
+[[function]]
 addr = 0xbddf
 name = "VineBlock"
 
@@ -7830,7 +7834,7 @@ targets = ["L_B35A", "JumpSwimSub", "FallingSub", "ClimbingSub"]
 
 [[jump_engine]]
 caller = 0xBDBD
-targets = ["MushFlowerBlock", "CoinBlock", "CoinBlock", "L_BDD8", "MushFlowerBlock", "VineBlock", "StarBlock", "CoinBlock", "L_BDD8"]
+targets = ["MushFlowerBlock", "CoinBlock", "CoinBlock", "ExtraLifeMushBlock", "MushFlowerBlock", "VineBlock", "StarBlock", "CoinBlock", "ExtraLifeMushBlock"]
 
 # ── ScreenRoutines sub-task entry points (resolves the
 #     SetupIntermediate / WriteTopStatusLine / etc. stubs that were
