@@ -8,10 +8,10 @@ converter changes should remain generic.
 
 After correcting the `SetupVictoryMode` profile address (`$83A8` table entry →
 `$83B0` routine start), naming the `$BDD8` block dispatch target as
-`ExtraLifeMushBlock`, adding piranha init/run roots, and adding platform/lift
-handler roots, and adding named enemy variant roots, the regenerated project
-plus eight local gameplay entrypoints, the regenerated project reports 22
-unresolved labels, 631/631 lifted routines, and 0 current lift/lower failures.
+`ExtraLifeMushBlock`, adding piranha init/run roots, platform/lift handler
+roots, named enemy variant roots, and eight local gameplay entrypoints, the
+regenerated project reports 22 unresolved labels, 631/631 lifted routines, and
+0 current lift/lower failures.
 
 ## Current acceptance route
 
@@ -30,6 +30,8 @@ target/release/trace-sms out/smb/sms.sms --steps 300000000 \
 That means the labels below are not reached by this one scripted path, or are
 only present behind cold/deferred dispatch entries. They still matter for broad
 SMB playability and for general converter coverage.
+
+Latest broad Rust verification for this state: `cargo test --workspace` passes.
 
 ## Buckets
 

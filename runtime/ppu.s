@@ -61,7 +61,7 @@ rt_ppu_write:
   jp   _ppu_w_done
 
 _ppu_w_ctrl:
-  ; $2000 PPUCTRL: store to shadow.
+  ; $2000 PPUCTRL: store to shadow and sync the SMS-side state it controls.
   ; Bits of interest for future phases:
   ;   bit 0-1: nametable select
   ;   bit 2:   VRAM addr increment (0=+1, 1=+32)
@@ -73,6 +73,7 @@ _ppu_w_ctrl:
   push af
   ld   ($cb08), a
   call _ppu_sync_sprite_base
+  call _ppu_sync_vdp_reg1
   jp   _ppu_w_done
 
 _ppu_sync_sprite_base:
@@ -91,11 +92,44 @@ _ppu_sprite_base_set:
   ret
 
 _ppu_w_mask:
-  ; $2001 PPUMASK: store to shadow.
+  ; $2001 PPUMASK: store to shadow and mirror rendering enable to SMS VDP
+  ; register 1. NES bit 3 enables background and bit 4 enables sprites; the SMS
+  ; has a single display-enable bit, so display is on when either NES plane is
+  ; enabled and off when both are disabled. This keeps blanking generic instead
+  ; of relying on boot's initial always-on display state.
   pop  af
   push af
   ld   ($cb09), a
+  call _ppu_sync_vdp_reg1
   jp   _ppu_w_done
+
+_ppu_sync_vdp_reg1:
+  ; Compose SMS VDP register 1 from NES PPU shadows:
+  ;   bit 7 = frame interrupt enable (kept on; SMS IRQ drives the NES NMI shim)
+  ;   bit 6 = display enable (from PPUMASK bg/sprite enable bits)
+  ;   bit 5 = Mode 4 / M1
+  ;   bit 4 = 224-line mode
+  ;   bit 1 = sprite size (from PPUCTRL bit 5: 0=8x8, 1=8x16)
+  ld   a, %10110000          ; frame INT on, display off, M1 + 224-line mode
+  ld   c, a
+  ld   a, ($cb09)
+  and  $18                   ; PPUMASK bg or sprite enable
+  jr   z, _ppu_reg1_display_done
+  ld   a, c
+  or   $40
+  ld   c, a
+_ppu_reg1_display_done:
+  ld   a, ($cb08)
+  bit  5, a                  ; PPUCTRL sprite size: 8x16 when set
+  jr   z, _ppu_reg1_sprite_done
+  ld   a, c
+  or   $02
+  ld   c, a
+_ppu_reg1_sprite_done:
+  ld   a, c
+  ld   b, 1
+  call vdp_set_register
+  ret
 
 _ppu_w_status:
   ; $2002 is read-only; writes are ignored on real hardware.

@@ -5,3 +5,4 @@ out/
 *.nes
 .ai-jail
 third_party/nesrecomp/
+.slim/deepwork/

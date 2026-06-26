@@ -8,13 +8,32 @@
 
 ## Executive Status
 
-We do not yet have a playable SMS port of Super Mario Bros. We do have a
-working project-local pipeline that parses the NES ROM, extracts real SMB data,
-generates a bootable SMS ROM, emits readable Z80 assembly, and has the first
-generic 6502-to-IR-to-Z80 lowering path for small real SMB code slices.
+We do not yet have a finished or human-playable SMS port of Super Mario Bros.
+We do have a Rust workspace pipeline that parses the NES ROM, discovers and
+lifts hundreds of SMB routines, lowers them to Z80, emits a WLA-DX SMS project,
+assembles a bootable ROM, and can run a deterministic `trace-sms` acceptance
+route through the World 1-1 transition without hitting an unresolved-runtime
+trap.
 
-The project has moved beyond random sprite experiments. It still remains far
-from a complete game translation.
+The active implementation now lives under the root `Cargo.toml` workspace. The
+old `poc/` tree is legacy experiment history unless a task explicitly asks for
+it. The project has moved beyond planning and one-off visual experiments, but
+it still remains far from a complete game translation.
+
+### 2026-06-25 Snapshot
+
+- Latest SMB project generation reports **631/631 lifted routines**, **0 lift
+  failures**, and **0 lower failures**.
+- Remaining strict unresolved labels are **22 deferred sound-engine labels** in
+  `$F3xx-$F6xx`; no non-sound gameplay labels remain in the current unresolved
+  report.
+- `profiles/smb/acceptance/1-1-clear.buttons` reaches the expected post-1-1 /
+  1-2 transition state under `trace-sms` with `--expect-no-trap` and RAM checks
+  for `$0760`, `$075C`, and `$000E`.
+- `cargo test --workspace` passes for the current Rust workspace.
+- Audio is still intentionally stubbed/deferred. Human playability, visual
+  equivalence, second-emulator validation, and full game completion remain
+  open.
 
 ## What We Have
 

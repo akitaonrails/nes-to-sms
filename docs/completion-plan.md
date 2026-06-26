@@ -432,6 +432,22 @@ SMS-native terms.
 Approximate PSG output. Deferred until gameplay works because
 gameplay is the bar; audio is a finish line.
 
+Current unresolved-trap policy: the remaining `$F3xx-$F6xx` unresolved labels
+are treated as sound-engine internals while `SoundEngine` is skipped/stubbed.
+Do not close them by adding ordinary gameplay roots. This phase starts by
+deciding the generic audio boundary, then either translating the sound engine
+through an APU shim or replacing it with a profile/runtime-owned PSG event path.
+
+- [ ] **F.0 Sound boundary decision.** Choose and document whether v1 audio is:
+      (a) translated NES sound engine plus a generic APU-write shim, or
+      (b) profile/runtime replacement that emits PSG events directly. The choice
+      must apply to NROM games generally, not only SMB.
+
+      **Acceptance:** remaining `$F3xx-$F6xx` labels are either intentionally
+      translated as part of the chosen sound-engine path or remain explicitly
+      skipped behind a documented runtime/profile replacement. No silent
+      unresolved traps during accepted gameplay routes.
+
 - [ ] **F.1 APU write log → event stream.** Runtime currently logs
       APU writes to a ring buffer. Add a structured event format:
       `(frame, reg, value)`.
@@ -638,7 +654,20 @@ SMB-complete but in scope for the pipeline being generalizable.
 
 Add discoveries that change priorities here, dated.
 
-(empty for now)
+### 2026-06-25 — Unresolved traps reduced to deferred sound only
+
+- Current SMB generation reports **631 discovered/lifted routines**, **0 lift
+  failures**, and **0 lower failures**.
+- The unresolved strict-trap set is now **22 labels**, all in the deferred
+  `$F3xx-$F6xx` sound-engine area. Non-sound gameplay dispatch gaps were closed
+  through profile-root fixes rather than Rust-side SMB special cases.
+- The profile-owned 1-1 acceptance route passes under `trace-sms` with
+  `--expect-no-trap` and post-transition RAM checks for `$0760`, `$075C`, and
+  `$000E`.
+- `cargo test --workspace` passes for this state.
+- Next safest work is either external emulator validation of the accepted route
+  or a deliberate audio/APU-to-PSG phase. Do not promote the remaining sound
+  labels as ordinary gameplay roots before that audio plan exists.
 
 ---
 

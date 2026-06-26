@@ -11,7 +11,7 @@
 //!   ROM banks live in `rom_banks[bank][offset]`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use z80_emu::{Bus, Cpu, StepError};
 
@@ -461,6 +461,68 @@ fn load_button_script(path: &str) -> Result<Vec<(usize, u8)>, String> {
         );
     }
     Ok(events)
+}
+
+#[derive(Debug, Clone)]
+struct RouteCheckpoint {
+    frame: usize,
+    name: String,
+}
+
+fn parse_checkpoint_spec(spec: &str) -> Result<RouteCheckpoint, String> {
+    let (frame, name) = spec
+        .split_once(':')
+        .or_else(|| spec.split_once('='))
+        .ok_or_else(|| format!("expected FRAME:name for --checkpoint, got {spec}"))?;
+    let frame = frame
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("invalid checkpoint frame: {frame}"))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("checkpoint name must not be empty".to_string());
+    }
+    Ok(RouteCheckpoint {
+        frame,
+        name: name.to_string(),
+    })
+}
+
+fn load_checkpoint_script(path: &str) -> Result<Vec<RouteCheckpoint>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read checkpoint script {path}: {err}"))?;
+    let mut checkpoints = Vec::new();
+    for (line_idx, raw) in text.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        checkpoints.push(
+            parse_checkpoint_spec(line).map_err(|err| {
+                format!("invalid checkpoint script {path}:{}: {err}", line_idx + 1)
+            })?,
+        );
+    }
+    Ok(checkpoints)
+}
+
+fn checkpoint_slug(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch == '-' || ch == '_' {
+            out.push(ch);
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        "checkpoint".to_string()
+    } else {
+        trimmed
+    }
 }
 
 #[derive(Clone)]
@@ -1063,6 +1125,9 @@ fn main() {
             eprintln!("                     [--buttons a,b,start,up,down,left,right]");
             eprintln!("                     [--buttons-at-frame FRAME:buttons]");
             eprintln!("                     [--buttons-script path]");
+            eprintln!("                     [--checkpoint FRAME:name]");
+            eprintln!("                     [--checkpoint-script path]");
+            eprintln!("                     [--checkpoint-dir dir]");
             eprintln!("                     [--expect-no-trap]");
             eprintln!("                     [--expect-ram ADDR=HEX]");
             eprintln!("                     [--pad1-raw HEX]");
@@ -1079,6 +1144,8 @@ fn main() {
     let mut button_events: Vec<(usize, u8)> = Vec::new();
     let mut expect_no_trap = false;
     let mut ram_expectations: Vec<RamExpectation> = Vec::new();
+    let mut checkpoints: Vec<RouteCheckpoint> = Vec::new();
+    let mut checkpoint_dir: PathBuf = PathBuf::from("out/smb/checkpoints");
     let mut search_late_routes = false;
     let mut search_end_routes = false;
     let mut i = 2;
@@ -1124,6 +1191,26 @@ fn main() {
                         .unwrap_or_else(|err| panic!("invalid --buttons-script: {err}")),
                 );
             }
+            "--checkpoint" => {
+                i += 1;
+                let value = args.get(i).expect("--checkpoint FRAME:name");
+                checkpoints.push(
+                    parse_checkpoint_spec(value)
+                        .unwrap_or_else(|err| panic!("invalid --checkpoint: {err}")),
+                );
+            }
+            "--checkpoint-script" => {
+                i += 1;
+                let path = args.get(i).expect("--checkpoint-script path");
+                checkpoints.extend(
+                    load_checkpoint_script(path)
+                        .unwrap_or_else(|err| panic!("invalid --checkpoint-script: {err}")),
+                );
+            }
+            "--checkpoint-dir" => {
+                i += 1;
+                checkpoint_dir = PathBuf::from(args.get(i).expect("--checkpoint-dir path"));
+            }
             "--expect-no-trap" => expect_no_trap = true,
             "--expect-ram" => {
                 i += 1;
@@ -1146,6 +1233,7 @@ fn main() {
         i += 1;
     }
     button_events.sort_by_key(|(frame, _)| *frame);
+    checkpoints.sort_by_key(|checkpoint| checkpoint.frame);
 
     if search_late_routes {
         run_late_route_search(&rom_path, &button_events);
@@ -1195,6 +1283,8 @@ fn main() {
     let mut next_irq_at = IRQ_PERIOD;
     let mut irqs_fired = 0usize;
     let mut next_button_event = 0usize;
+    let mut next_checkpoint = 0usize;
+    let mut checkpoint_dump_failed = false;
     let dump_each_frame_to = std::env::var("SMS_DUMP_EACH_FRAME").ok();
     let stop_on_fall = std::env::var("SMS_STOP_ON_FALL")
         .ok()
@@ -1329,6 +1419,21 @@ fn main() {
                 let _ = std::fs::create_dir_all(dir);
                 let path = format!("{dir}/frame_{:03}.ppm", irqs_fired);
                 let _ = dump_framebuffer_ppm(&bus, &path);
+            }
+            while next_checkpoint < checkpoints.len()
+                && irqs_fired >= checkpoints[next_checkpoint].frame
+            {
+                let checkpoint = &checkpoints[next_checkpoint];
+                if let Err(err) =
+                    dump_route_checkpoint(&bus, &cpu, step, irqs_fired, checkpoint, &checkpoint_dir)
+                {
+                    eprintln!(
+                        "checkpoint dump failed for {} at frame {}: {err}",
+                        checkpoint.name, checkpoint.frame
+                    );
+                    checkpoint_dump_failed = true;
+                }
+                next_checkpoint += 1;
             }
             // Per-frame peek of game state: mode/task plus key SMB gameplay
             // RAM. The gameplay fields are from the canonical SMB RAM map:
@@ -2095,6 +2200,19 @@ fn main() {
     }
 
     let mut acceptance_failed = false;
+    if checkpoint_dump_failed {
+        eprintln!("EXPECT FAIL: one or more checkpoint artifacts failed to write");
+        acceptance_failed = true;
+    }
+    if next_checkpoint < checkpoints.len() {
+        eprintln!(
+            "EXPECT FAIL: {} checkpoint(s) not reached; next is frame {} ({})",
+            checkpoints.len() - next_checkpoint,
+            checkpoints[next_checkpoint].frame,
+            checkpoints[next_checkpoint].name
+        );
+        acceptance_failed = true;
+    }
     if expect_no_trap {
         if let Some(step) = first_runtime_trap_step {
             let id = (bus.ram[0x0B1C] as u16) << 8 | bus.ram[0x0B1B] as u16;
@@ -2252,6 +2370,120 @@ fn print_fall_snapshot(snapshot: &FallSnapshot) {
     );
 }
 
+fn dump_route_checkpoint(
+    bus: &SmsBus,
+    cpu: &Cpu,
+    step: usize,
+    actual_frame: usize,
+    checkpoint: &RouteCheckpoint,
+    dir: &Path,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    std::fs::create_dir_all(dir)?;
+    let slug = checkpoint_slug(&checkpoint.name);
+    let stem = format!("{:05}_{}", checkpoint.frame, slug);
+    let ppm_path = dir.join(format!("{stem}.ppm"));
+    let txt_path = dir.join(format!("{stem}.txt"));
+
+    dump_framebuffer_ppm(bus, ppm_path.to_string_lossy().as_ref())?;
+
+    let mut f = std::fs::File::create(&txt_path)?;
+    writeln!(f, "checkpoint: {}", checkpoint.name)?;
+    writeln!(f, "target_frame: {}", checkpoint.frame)?;
+    writeln!(f, "actual_frame: {actual_frame}")?;
+    writeln!(f, "step: {step}")?;
+    writeln!(
+        f,
+        "cpu: pc=${:04X} sp=${:04X} a=${:02X} f=${:02X} iff1={}",
+        cpu.pc, cpu.sp, cpu.a, cpu.f, cpu.iff1
+    )?;
+    writeln!(
+        f,
+        "mode: 0770=${:02X} 0772=${:02X} 0773=${:02X} 0774=${:02X} state_000E=${:02X}",
+        bus.ram[0x0770], bus.ram[0x0772], bus.ram[0x0773], bus.ram[0x0774], bus.ram[0x000E]
+    )?;
+    writeln!(
+        f,
+        "player: page=${:02X} x=${:02X} ypage=${:02X} y=${:02X} xspd=${:02X} yspd=${:02X} action=${:02X}",
+        bus.ram[0x006D],
+        bus.ram[0x0086],
+        bus.ram[0x00B5],
+        bus.ram[0x00CE],
+        bus.ram[0x0057],
+        bus.ram[0x009F],
+        bus.ram[0x001D]
+    )?;
+    writeln!(
+        f,
+        "scroll: cam_page=${:02X} cam_x=${:02X} vdp_reg8=${:02X} vdp_reg9=${:02X} nes_scroll_x=${:02X}",
+        bus.ram[0x071A], bus.ram[0x071C], bus.vdp_regs[8], bus.vdp_regs[9], bus.ram[0x0B0C]
+    )?;
+    writeln!(
+        f,
+        "route: area=${:02X} level=${:02X} fetch_timer=${:02X} end_y=${:02X} slide_timer=${:02X}",
+        bus.ram[0x0760], bus.ram[0x075C], bus.ram[0x0757], bus.ram[0x0713], bus.ram[0x0785]
+    )?;
+    writeln!(
+        f,
+        "runtime: trap_marker=${:02X} unresolved_id=${:04X} vbuf_used=${:02X} ppu_addr=${:02X}{:02X} ppu_mask=${:02X}",
+        bus.ram[0x0B1D],
+        ((bus.ram[0x0B1C] as u16) << 8) | bus.ram[0x0B1B] as u16,
+        bus.ram[0x0800],
+        bus.ram[0x0B0F],
+        bus.ram[0x0B10],
+        bus.ram[0x0B09]
+    )?;
+    writeln!(
+        f,
+        "vdp: vram_writes={} cram_writes={} data_writes={} control_writes={} status_reads={} controller_reads={}",
+        bus.vram_writes,
+        bus.cram_writes,
+        bus.vdp_data_writes,
+        bus.vdp_control_writes,
+        bus.vdp_status_reads,
+        bus.controller_reads
+    )?;
+    writeln!(
+        f,
+        "counts: nametable_nonzero={} chr_nonzero={} active_sprites={}",
+        nametable_nonzero_bytes(bus),
+        chr_nonzero_bytes(bus),
+        active_sprite_count(bus)
+    )?;
+    writeln!(f, "framebuffer: {}", ppm_path.display())?;
+
+    println!(
+        "CHECKPOINT {} frame={} actual_frame={} ppm={} state={}",
+        checkpoint.name,
+        checkpoint.frame,
+        actual_frame,
+        ppm_path.display(),
+        txt_path.display()
+    );
+
+    Ok(())
+}
+
+fn nametable_nonzero_bytes(bus: &SmsBus) -> usize {
+    (0..1792).filter(|i| bus.vram[0x3700 + i] != 0).count()
+}
+
+fn chr_nonzero_bytes(bus: &SmsBus) -> usize {
+    (0..0x3700).filter(|i| bus.vram[*i] != 0).count()
+}
+
+fn active_sprite_count(bus: &SmsBus) -> usize {
+    let mut count = 0;
+    for i in 0..64 {
+        if bus.vram[0x3F00 + i] == 0xD0 {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
 /// Render the current VRAM/CRAM state to a 256x224 RGB PPM image
 /// so we can verify what the SMS *would* show without needing mednafen.
 /// Only handles background nametable, no sprites, no scroll.
@@ -2386,4 +2618,63 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
     write!(f, "P6\n{W} {H}\n255\n")?;
     f.write_all(&pixels)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_button_event_and_active_low_buttons() {
+        let (frame, port) = parse_button_event("80:right,a").unwrap();
+        assert_eq!(frame, 80);
+        assert_eq!(port & (1 << 3), 0);
+        assert_eq!(port & (1 << 4), 0);
+        assert_ne!(port & (1 << 5), 0);
+    }
+
+    #[test]
+    fn parses_checkpoint_colon_or_equals() {
+        let checkpoint = parse_checkpoint_spec("123:title-initial").unwrap();
+        assert_eq!(checkpoint.frame, 123);
+        assert_eq!(checkpoint.name, "title-initial");
+
+        let checkpoint = parse_checkpoint_spec("456=1-1 initial").unwrap();
+        assert_eq!(checkpoint.frame, 456);
+        assert_eq!(checkpoint.name, "1-1 initial");
+    }
+
+    #[test]
+    fn checkpoint_slug_is_filesystem_safe() {
+        assert_eq!(checkpoint_slug("Title Initial"), "title_initial");
+        assert_eq!(
+            checkpoint_slug("1-1: flagpole / transition"),
+            "1-1_flagpole_transition"
+        );
+        assert_eq!(checkpoint_slug("!!!"), "checkpoint");
+    }
+
+    #[test]
+    fn loads_checkpoint_script_with_comments_and_blanks() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "trace_sms_checkpoint_test_{}_{}.txt",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(
+            &path,
+            "# comment\n\n80:title\n220:game start # trailing comment\n",
+        )
+        .unwrap();
+
+        let checkpoints = load_checkpoint_script(path.to_str().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(checkpoints.len(), 2);
+        assert_eq!(checkpoints[0].frame, 80);
+        assert_eq!(checkpoints[0].name, "title");
+        assert_eq!(checkpoints[1].frame, 220);
+        assert_eq!(checkpoints[1].name, "game start");
+    }
 }

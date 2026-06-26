@@ -1,0 +1,13 @@
+# SMB stress-target visible checkpoints for the deterministic 1-1 route.
+#
+# Format is generic trace-sms checkpoint data: FRAME:name.
+# Checkpoints produce a PPM framebuffer and a text state summary. This file is
+# regression data for the active SMB profile/stress target, not converter logic.
+
+60:title-before-start
+220:gameplay-start
+720:early-1-1
+1600:mid-1-1
+2705:late-1-1
+4090:flagpole-route-input-end
+4900:post-transition

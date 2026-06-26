@@ -99,6 +99,93 @@ fn script_buttons(frame: usize, script: &str) -> Buttons {
     }
 }
 
+#[derive(Clone)]
+struct ButtonTimeline {
+    builtin: String,
+    events: Vec<(usize, u8)>, // frame -> raw SMS $DC active-low port value
+}
+
+impl ButtonTimeline {
+    fn builtin(name: String) -> Self {
+        Self {
+            builtin: name,
+            events: Vec::new(),
+        }
+    }
+
+    fn from_events(events: Vec<(usize, u8)>) -> Self {
+        Self {
+            builtin: "buttons-script".to_string(),
+            events,
+        }
+    }
+
+    fn sms_dc_at(&self, frame: usize) -> u8 {
+        if self.events.is_empty() {
+            return nes_buttons_to_sms_dc(script_buttons(frame, &self.builtin));
+        }
+        let idx = self
+            .events
+            .partition_point(|(event_frame, _)| *event_frame <= frame);
+        if idx == 0 {
+            0xFF
+        } else {
+            self.events[idx - 1].1
+        }
+    }
+}
+
+fn buttons_to_sms_port_dc(spec: &str) -> Result<u8, String> {
+    let mut port = 0xFFu8;
+    for raw in spec.split(',') {
+        let button = raw.trim().to_ascii_lowercase();
+        if button.is_empty() {
+            continue;
+        }
+        let bit = match button.as_str() {
+            "up" => 0,
+            "down" => 1,
+            "left" => 2,
+            "right" => 3,
+            "a" | "b1" | "button1" | "select" => 4,
+            "b" | "b2" | "button2" | "start" => 5,
+            other => return Err(format!("unknown button entry: {other}")),
+        };
+        port &= !(1 << bit);
+    }
+    Ok(port)
+}
+
+fn parse_button_event(spec: &str) -> Result<(usize, u8), String> {
+    let (frame, buttons) = spec
+        .split_once(':')
+        .or_else(|| spec.split_once('='))
+        .ok_or_else(|| format!("expected FRAME:buttons, got {spec}"))?;
+    let frame = frame
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("invalid frame in button event: {frame}"))?;
+    Ok((frame, buttons_to_sms_port_dc(buttons)?))
+}
+
+fn load_button_script(path: &str) -> Result<Vec<(usize, u8)>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read button script {path}: {err}"))?;
+    let mut events = Vec::new();
+    for (line_idx, raw) in text.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        events.push(
+            parse_button_event(line)
+                .map_err(|err| format!("invalid button script {path}:{}: {err}", line_idx + 1))?,
+        );
+    }
+    events.sort_by_key(|(frame, _)| *frame);
+    Ok(events)
+}
+
 // ---------------------------------------------------------------------------
 // Reference: NES system bus over oracle_6502
 // ---------------------------------------------------------------------------
@@ -121,6 +208,9 @@ struct NesBus {
     buttons: u8,
     joy_reads: u64,
     joy_dbg: u32,
+    watch: Option<Vec<u16>>,
+    watch_log: Vec<(u16, u8, u16)>,
+    last_pc: u16,
 }
 
 impl NesBus {
@@ -138,6 +228,9 @@ impl NesBus {
             buttons: 0,
             joy_reads: 0,
             joy_dbg: 0,
+            watch: None,
+            watch_log: Vec::new(),
+            last_pc: 0,
         }
     }
 
@@ -189,7 +282,10 @@ impl oracle_6502::Bus for NesBus {
                     self.joy_dbg += 1;
                     eprintln!(
                         "    [ref $4016 read] buttons=${:02X} strobe={} shift=${:02X} -> bit {}",
-                        self.buttons, self.strobe as u8, self.ctrl_shift, self.ctrl_shift & 1
+                        self.buttons,
+                        self.strobe as u8,
+                        self.ctrl_shift,
+                        self.ctrl_shift & 1
                     );
                 }
                 let bit = self.ctrl_shift & 1;
@@ -207,7 +303,15 @@ impl oracle_6502::Bus for NesBus {
 
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
-            0x0000..=0x1FFF => self.ram[(addr & 0x07FF) as usize] = value,
+            0x0000..=0x1FFF => {
+                let nes = addr & 0x07FF;
+                self.ram[nes as usize] = value;
+                if let Some(w) = &self.watch {
+                    if w.contains(&nes) {
+                        self.watch_log.push((nes, value, self.last_pc));
+                    }
+                }
+            }
             0x2000..=0x3FFF => {
                 // PPU register writes: model only what affects the
                 // $2005/$2006 write toggle and the NMI-enable bit; the
@@ -254,7 +358,11 @@ const REF_PREROLL_CAP: usize = 2_000_000;
 /// RAM at the moment SMB first enables NMI ($2000 bit 7) — i.e. when
 /// reset-init is essentially done and the game wants frames. From
 /// there each frame fires one NMI.
-fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[u8; 0x800]>) {
+fn run_reference(
+    prg: Vec<u8>,
+    frames: usize,
+    timeline: &ButtonTimeline,
+) -> ([u8; 0x800], Vec<[u8; 0x800]>) {
     use oracle_6502::Cpu;
     let mut cpu = Cpu::new();
     let mut bus = NesBus::new(prg);
@@ -272,7 +380,10 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
         pre += 1;
     }
     let init_snap = bus.ram;
-    eprintln!("  ref pre-roll: {pre} insn, nmi_enabled={}", bus.nmi_enabled);
+    eprintln!(
+        "  ref pre-roll: {pre} insn, nmi_enabled={}",
+        bus.nmi_enabled
+    );
 
     // Mirror the subject runtime's "once NMI has been enabled, keep
     // firing the frame NMI even if SMB later clears $2000 bit 7" latch
@@ -284,6 +395,10 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
     let trace_frame: Option<usize> = std::env::var("FD_TRACE_FRAME")
         .ok()
         .and_then(|s| s.parse().ok());
+    let debug_frame: Option<usize> = std::env::var("FD_DEBUG_FRAME")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let watch_list = parse_watch_list();
     let trace_pcs: &[(u16, &str)] = &[
         (0x8231, "TitleScreenMode"),
         (0x8E04, "JumpEngine"),
@@ -302,7 +417,7 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
     let mut nmi_fires = 0usize;
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for frame in 0..frames {
-        bus.buttons = effective_nes_buttons(frame, script, bus.ram[0x0770]);
+        bus.buttons = effective_nes_buttons(frame, timeline, bus.ram[0x0770]);
         bus.vblank = true;
         bus.sprite0_phase = 0; // new frame: re-arm the sprite-0 hit handshake
         if bus.nmi_enabled {
@@ -313,7 +428,15 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
             nmi_fires += 1;
         }
         let tracing = Some(frame) == trace_frame;
+        let debug_writes = Some(frame) == debug_frame;
+        if debug_writes {
+            bus.watch = Some(watch_list.clone());
+            bus.watch_log.clear();
+        }
         for _ in 0..REF_INSN_PER_FRAME {
+            if debug_writes {
+                bus.last_pc = cpu.pc;
+            }
             if tracing {
                 let pc = cpu.pc;
                 if let Some((_, name)) = trace_pcs.iter().find(|(p, _)| *p == pc) {
@@ -327,9 +450,19 @@ fn run_reference(prg: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec
                 break;
             }
         }
+        if debug_writes {
+            eprintln!("  [ref debug] frame {frame} watched writes (addr <- val @ pc):");
+            for (a, v, pc) in bus.watch_log.iter().take(60) {
+                eprintln!("    ${a:04X} <- ${v:02X} @ pc=${pc:04X}");
+            }
+            bus.watch = None;
+        }
         snaps.push(bus.ram);
     }
-    eprintln!("  ref total $4016 reads: {}, nmi fires: {nmi_fires}", bus.joy_reads);
+    eprintln!(
+        "  ref total $4016 reads: {}, nmi fires: {nmi_fires}",
+        bus.joy_reads
+    );
     (init_snap, snaps)
 }
 
@@ -406,11 +539,11 @@ impl z80_emu::Bus for SmsBus {
     }
     fn in_port(&mut self, port: u8) -> u8 {
         match port & 0xC1 {
-            0x80 => 0x00,       // VDP data port $BE
-            0x81 => 0xFF,       // VDP status/control $BF — ack reads
+            0x80 => 0x00,         // VDP data port $BE
+            0x81 => 0xFF,         // VDP status/control $BF — ack reads
             0xC0 => self.port_dc, // controller port 1 ($DC)
-            0xC1 => 0xFF,       // controller port 2 ($DD)
-            0x40 => 0xFF,       // H/V counter
+            0xC1 => 0xFF,         // controller port 2 ($DD)
+            0x40 => 0xFF,         // H/V counter
             _ => 0xFF,
         }
     }
@@ -430,16 +563,32 @@ fn sms_dc_to_nes(dc: u8, title_mode: bool) -> u8 {
     let pressed = !dc;
     let mut nes = 0u8;
     if title_mode {
-        if pressed & (1 << 4) != 0 { nes |= Buttons::SELECT; }
-        if pressed & (1 << 5) != 0 { nes |= Buttons::START; }
+        if pressed & (1 << 4) != 0 {
+            nes |= Buttons::SELECT;
+        }
+        if pressed & (1 << 5) != 0 {
+            nes |= Buttons::START;
+        }
     } else {
-        if pressed & (1 << 4) != 0 { nes |= Buttons::A; }
-        if pressed & (1 << 5) != 0 { nes |= Buttons::B; }
+        if pressed & (1 << 4) != 0 {
+            nes |= Buttons::A;
+        }
+        if pressed & (1 << 5) != 0 {
+            nes |= Buttons::B;
+        }
     }
-    if pressed & (1 << 0) != 0 { nes |= Buttons::UP; }
-    if pressed & (1 << 1) != 0 { nes |= Buttons::DOWN; }
-    if pressed & (1 << 2) != 0 { nes |= Buttons::LEFT; }
-    if pressed & (1 << 3) != 0 { nes |= Buttons::RIGHT; }
+    if pressed & (1 << 0) != 0 {
+        nes |= Buttons::UP;
+    }
+    if pressed & (1 << 1) != 0 {
+        nes |= Buttons::DOWN;
+    }
+    if pressed & (1 << 2) != 0 {
+        nes |= Buttons::LEFT;
+    }
+    if pressed & (1 << 3) != 0 {
+        nes |= Buttons::RIGHT;
+    }
     nes
 }
 
@@ -447,11 +596,19 @@ fn sms_dc_to_nes(dc: u8, title_mode: bool) -> u8 {
 /// intent round-tripped through the SMS controller mapping, using the
 /// reference's current OperMode so the title/gameplay split matches the
 /// runtime.
-fn effective_nes_buttons(frame: usize, script: &str, oper_mode: u8) -> u8 {
-    sms_dc_to_nes(
-        nes_buttons_to_sms_dc(script_buttons(frame, script)),
-        oper_mode == 0,
-    )
+fn effective_nes_buttons(frame: usize, timeline: &ButtonTimeline, oper_mode: u8) -> u8 {
+    sms_dc_to_nes(timeline.sms_dc_at(frame), oper_mode == 0)
+}
+
+fn parse_watch_list() -> Vec<u16> {
+    std::env::var("FD_WATCH")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .filter_map(|t| u16::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![0x0001])
 }
 
 /// Map NES controller buttons to the SMS $DC port (active-low) the way
@@ -459,12 +616,24 @@ fn effective_nes_buttons(frame: usize, script: &str, oper_mode: u8) -> u8 {
 /// Right, bit4 Button1 (NES A / Select), bit5 Button2 (NES B / Start).
 fn nes_buttons_to_sms_dc(b: Buttons) -> u8 {
     let mut pressed = 0u8; // 1 = pressed (we invert at the end)
-    if b.0 & Buttons::UP != 0 { pressed |= 1 << 0; }
-    if b.0 & Buttons::DOWN != 0 { pressed |= 1 << 1; }
-    if b.0 & Buttons::LEFT != 0 { pressed |= 1 << 2; }
-    if b.0 & Buttons::RIGHT != 0 { pressed |= 1 << 3; }
-    if b.0 & (Buttons::A | Buttons::SELECT) != 0 { pressed |= 1 << 4; }
-    if b.0 & (Buttons::B | Buttons::START) != 0 { pressed |= 1 << 5; }
+    if b.0 & Buttons::UP != 0 {
+        pressed |= 1 << 0;
+    }
+    if b.0 & Buttons::DOWN != 0 {
+        pressed |= 1 << 1;
+    }
+    if b.0 & Buttons::LEFT != 0 {
+        pressed |= 1 << 2;
+    }
+    if b.0 & Buttons::RIGHT != 0 {
+        pressed |= 1 << 3;
+    }
+    if b.0 & (Buttons::A | Buttons::SELECT) != 0 {
+        pressed |= 1 << 4;
+    }
+    if b.0 & (Buttons::B | Buttons::START) != 0 {
+        pressed |= 1 << 5;
+    }
     !pressed // active-low
 }
 
@@ -502,14 +671,28 @@ fn is_excluded(addr: usize) -> bool {
     if std::env::var("FD_EXCLUDE_VRAMBUF").is_ok() && (0x0300..0x0500).contains(&addr) {
         return true;
     }
+    // Optional: exclude SMB audio-engine RAM while SoundEngine is intentionally
+    // stubbed/deferred. The corresponding writer PCs are in the $F3xx-$F7xx
+    // sound engine. Keep this opt-in so audio work can remove the exclusion.
+    if std::env::var("FD_EXCLUDE_AUDIO").is_ok() && is_deferred_audio_addr(addr) {
+        return true;
+    }
     false
+}
+
+fn is_deferred_audio_addr(addr: usize) -> bool {
+    matches!(addr, 0x00F0..=0x00FF | 0x07B0..=0x07C7)
 }
 
 /// Returns (init_snapshot, per_frame_snapshots). Mirrors run_reference:
 /// pre-roll through SMS boot + SMB's translated reset-init until SMB
 /// enables NMI (PPUCTRL shadow $CB08 bit 7), capture init RAM, then
 /// fire one IRQ per frame (gated on the same NMI-enable bit).
-fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[u8; 0x800]>) {
+fn run_subject(
+    rom: Vec<u8>,
+    frames: usize,
+    timeline: &ButtonTimeline,
+) -> ([u8; 0x800], Vec<[u8; 0x800]>) {
     use z80_emu::{Bus, Cpu};
     let mut cpu = Cpu::new();
     let mut bus = SmsBus::new(rom);
@@ -575,14 +758,7 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
         .and_then(|s| s.parse().ok());
     // FD_WATCH=0x0001,0x000E,... — NES addresses to log writes to (with PC)
     // during the debug frame. Defaults to $0001 (the first divergence).
-    let watch_list: Vec<u16> = std::env::var("FD_WATCH")
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .filter_map(|t| u16::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok())
-                .collect()
-        })
-        .unwrap_or_else(|| vec![0x0001]);
+    let watch_list = parse_watch_list();
 
     // FD_MEASURE_NMI=1 — measure the per-frame NMI cost (instructions from
     // IRQ-inject until the stack unwinds back, i.e. the NMI chain returns to
@@ -593,7 +769,7 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
 
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for _frame in 0..frames {
-        bus.port_dc = nes_buttons_to_sms_dc(script_buttons(_frame, script));
+        bus.port_dc = timeline.sms_dc_at(_frame);
         let dbg = Some(_frame) == debug_frame;
         if dbg {
             bus.watch = Some(watch_list.clone());
@@ -653,11 +829,14 @@ fn run_subject(rom: Vec<u8>, frames: usize, script: &str) -> ([u8; 0x800], Vec<[
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let nes_path = PathBuf::from(args.get(1).expect("usage: frame-diff <smb.nes> <out.sms> [--frames N] [--script S]"));
+    let nes_path = PathBuf::from(args.get(1).expect(
+        "usage: frame-diff <smb.nes> <out.sms> [--frames N] [--script S] [--buttons-script path]",
+    ));
     let _sms_path = args.get(2).cloned();
 
     let mut frames = 120usize;
     let mut script = "none".to_string();
+    let mut buttons_script: Option<String> = None;
     let mut ref_only = false;
     let mut i = 3;
     while i < args.len() {
@@ -669,6 +848,10 @@ fn main() {
             "--script" => {
                 i += 1;
                 script = args[i].clone();
+            }
+            "--buttons-script" => {
+                i += 1;
+                buttons_script = Some(args[i].clone());
             }
             "--ref-only" => ref_only = true,
             other => {
@@ -683,8 +866,22 @@ fn main() {
     let image = nes_rom::parse(&nes).expect("parse nes");
     let prg = image.prg.to_vec();
 
-    eprintln!("Reference: running SMB PRG ({} bytes) for {frames} frames, script={script}", prg.len());
-    let (ref_init, ref_snaps) = run_reference(prg, frames, &script);
+    let (timeline, script_desc) = if let Some(path) = buttons_script {
+        let events = load_button_script(&path)
+            .unwrap_or_else(|err| panic!("invalid --buttons-script: {err}"));
+        (
+            ButtonTimeline::from_events(events),
+            format!("buttons-script:{path}"),
+        )
+    } else {
+        (ButtonTimeline::builtin(script.clone()), script.clone())
+    };
+
+    eprintln!(
+        "Reference: running SMB PRG ({} bytes) for {frames} frames, script={script_desc}",
+        prg.len()
+    );
+    let (ref_init, ref_snaps) = run_reference(prg, frames, &timeline);
 
     // Report reference progression of key game-state vars.
     println!("frame | $0770 $0772 $0773 $0772.. (operation/task)");
@@ -696,9 +893,7 @@ fn main() {
         let a73c = snap[0x073C];
         // Print only frames where $0770 or $0772 changed, plus the first few.
         if f < 6 || a770 != last_770 || a772 != last_772 {
-            println!(
-                "  {f:3} | OperMode=${a770:02X} Task=${a772:02X} ScreenRtn=${a73c:02X}"
-            );
+            println!("  {f:3} | OperMode=${a770:02X} Task=${a772:02X} ScreenRtn=${a73c:02X}");
             last_770 = a770;
             last_772 = a772;
         }
@@ -710,8 +905,11 @@ fn main() {
 
     let sms_path = _sms_path.expect("need <out.sms> for subject side");
     let rom = std::fs::read(&sms_path).expect("read sms rom");
-    eprintln!("Subject: running SMS ROM ({} bytes) for {frames} frames", rom.len());
-    let (subj_init, subj_snaps) = run_subject(rom, frames, &script);
+    eprintln!(
+        "Subject: running SMS ROM ({} bytes) for {frames} frames",
+        rom.len()
+    );
+    let (subj_init, subj_snaps) = run_subject(rom, frames, &timeline);
 
     // First, compare the init snapshot (RAM at the NMI-enable point).
     // If reset-init translation is faithful, these match and we move on
@@ -745,10 +943,14 @@ fn main() {
         let addr = usize::from_str_radix(spec.trim_start_matches("0x"), 16).unwrap_or(0x7A7);
         let lo = frames.min(ref_snaps.len()).min(subj_snaps.len());
         eprint!("  [traj ${addr:04X}] ref :");
-        for f in 0..lo { eprint!(" {:02X}", ref_snaps[f][addr]); }
+        for f in 0..lo {
+            eprint!(" {:02X}", ref_snaps[f][addr]);
+        }
         eprintln!();
         eprint!("  [traj ${addr:04X}] subj:");
-        for f in 0..lo { eprint!(" {:02X}", subj_snaps[f][addr]); }
+        for f in 0..lo {
+            eprint!(" {:02X}", subj_snaps[f][addr]);
+        }
         eprintln!();
     }
 
@@ -778,6 +980,8 @@ fn main() {
     // Tally which addresses diverge across ALL frames (to see whether
     // it's one persistent var like the RNG, or spreading corruption).
     let mut addr_hits: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    let mut addr_first: std::collections::BTreeMap<usize, usize> =
+        std::collections::BTreeMap::new();
     let mut diverged_frames = 0usize;
     for f in 0..frames.min(subj_snaps.len()).min(ref_snaps.len()) {
         let r = &ref_snaps[f];
@@ -787,6 +991,7 @@ fn main() {
             if !is_excluded(a) && r[a] != s[a] {
                 diffs.push((a, r[a], s[a]));
                 *addr_hits.entry(a).or_insert(0) += 1;
+                addr_first.entry(a).or_insert(f);
             }
         }
         if diffs.is_empty() {
@@ -795,7 +1000,10 @@ fn main() {
         diverged_frames += 1;
         if first_div.is_none() {
             first_div = Some(f);
-            println!("FIRST DIVERGENCE at frame {f}: {} bytes differ", diffs.len());
+            println!(
+                "FIRST DIVERGENCE at frame {f}: {} bytes differ",
+                diffs.len()
+            );
             println!("  first differing addresses:");
             for (a, rv, sv) in diffs.iter().take(16) {
                 println!("    ${a:04X}: ref=${rv:02X} subj=${sv:02X}");
@@ -807,13 +1015,49 @@ fn main() {
         Some(f) => {
             println!(
                 "\n{diverged_frames}/{frames} frames diverged (first at frame {f}). \
-                 Persistently-diverging addresses (addr: #frames):"
+                 Persistently-diverging addresses (addr: #frames, first frame):"
             );
             let mut hits: Vec<(usize, usize)> = addr_hits.into_iter().collect();
             hits.sort_by(|a, b| b.1.cmp(&a.1));
             for (a, n) in hits.iter().take(30) {
-                println!("    ${a:04X}: {n} frames", a = a, n = n);
+                let first = addr_first.get(a).copied().unwrap_or(0);
+                println!("    ${a:04X}: {n} frames, first={first}", a = a, n = n);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_acceptance_button_event_as_sms_port() {
+        let (frame, port) = parse_button_event("80:right,a").unwrap();
+        assert_eq!(frame, 80);
+        assert_eq!(port & (1 << 3), 0);
+        assert_eq!(port & (1 << 4), 0);
+        assert_ne!(port & (1 << 5), 0);
+    }
+
+    #[test]
+    fn timeline_holds_last_script_event() {
+        let timeline = ButtonTimeline::from_events(vec![
+            (80, buttons_to_sms_port_dc("start").unwrap()),
+            (220, buttons_to_sms_port_dc("right").unwrap()),
+        ]);
+        assert_eq!(timeline.sms_dc_at(79), 0xFF);
+        assert_eq!(timeline.sms_dc_at(80) & (1 << 5), 0);
+        assert_eq!(timeline.sms_dc_at(219) & (1 << 5), 0);
+        assert_eq!(timeline.sms_dc_at(220) & (1 << 3), 0);
+        assert_ne!(timeline.sms_dc_at(220) & (1 << 5), 0);
+    }
+
+    #[test]
+    fn effective_buttons_use_mode_dependent_sms_face_mapping() {
+        let timeline =
+            ButtonTimeline::from_events(vec![(0, buttons_to_sms_port_dc("start").unwrap())]);
+        assert_eq!(effective_nes_buttons(0, &timeline, 0), Buttons::START);
+        assert_eq!(effective_nes_buttons(0, &timeline, 1), Buttons::B);
     }
 }
