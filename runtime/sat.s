@@ -13,7 +13,9 @@
 ;
 ; A sprite is hidden by setting its Y position to $D0.
 ;
-; NES-to-SMS Y coordinate adjustment: SMS_Y = NES_Y + 1, hide if >= $D0.
+; NES-to-SMS Y coordinate adjustment: SMS_Y = NES_Y + 1. NES OAM entries with
+; raw Y >= $CF are off-screen for the SMS visible range and are omitted from the
+; compacted SAT; one $D0 terminator hides the remaining SMS entries.
 ;
 ; ── Horizontal / vertical flip ────────────────────────────────────────────
 ; The SMS Mode 4 SAT has only X and tile-number bytes; there are no per-sprite
@@ -273,7 +275,11 @@ rt_sat_upload:
 
   call rt_sat_resolve
 
-  ; ── Phase 1: 64 Y positions to VRAM $3F00 ────────────────────────────────
+  ; ── Phase 1: compact visible Y positions to VRAM $3F00 ───────────────────
+  ; SMS treats Y=$D0 as an end-of-list terminator, unlike NES OAM where hidden
+  ; sprites can appear anywhere. Scan NES OAM in order, write only visible
+  ; sprites, then emit one terminator. Also test raw NES Y before adding 1 so
+  ; hidden values like $FF do not wrap to SMS Y=$00.
   ld   a, $00
   out  ($bf), a
   ld   a, $3f
@@ -284,19 +290,25 @@ rt_sat_upload:
   ld   b, 64
 _sat_y_loop:
   ld   a, (hl)               ; NES Y
-  inc  a                     ; SMS Y = NES Y + 1
-  cp   $d0
-  jr   c, _sat_y_visible
-  ld   a, $d0                ; hide off-screen
+  cp   $cf                   ; raw $CF..$FF would be SMS $D0..$00/off-screen
+  jr   nc, _sat_y_skip
+  inc  a                     ; visible SMS Y = NES Y + 1
 _sat_y_visible:
   out  ($be), a
+_sat_y_skip:
   inc  hl
   inc  hl
   inc  hl
   inc  hl
   djnz _sat_y_loop
 
-  ; ── Phase 2: 64 (X, resolved tile) pairs to VRAM $3F80 ───────────────────
+  ; End-of-list terminator. If all 64 sprites were visible this writes just past
+  ; the Y table into the unused $3F40 gap, which is harmless; otherwise it hides
+  ; all stale SAT entries after the compacted visible list.
+  ld   a, $d0
+  out  ($be), a
+
+  ; ── Phase 2: compact visible (X, resolved tile) pairs to VRAM $3F80 ───────
   ld   a, $80
   out  ($bf), a
   ld   a, $3f
@@ -307,6 +319,9 @@ _sat_y_visible:
   ld   de, SAT_RESOLVED      ; resolved tile numbers
   ld   b, 64
 _sat_xt_loop:
+  ld   a, (hl)               ; NES Y controls visibility/compaction
+  cp   $cf
+  jr   nc, _sat_xt_skip
   inc  hl                    ; skip Y
   inc  hl                    ; skip tile
   inc  hl                    ; skip attr
@@ -316,6 +331,14 @@ _sat_xt_loop:
   ld   a, (de)               ; resolved SMS tile
   inc  de
   out  ($be), a              ; write tile
+  jr   _sat_xt_next
+_sat_xt_skip:
+  inc  hl                    ; skip Y
+  inc  hl                    ; skip tile
+  inc  hl                    ; skip attr
+  inc  hl                    ; advance to next entry
+  inc  de                    ; skip resolved tile for this hidden sprite
+_sat_xt_next:
   djnz _sat_xt_loop
 
   pop  de
