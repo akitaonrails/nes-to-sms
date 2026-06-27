@@ -7,7 +7,7 @@
 ;   $C801..      sequence of records:
 ;                  [hi_addr, lo_addr, len, data...]
 ;                  On flush: NES nametable byte writes ($2000-$23BF) are
-;                  expanded to SMS nametable entries at $3800+offset*2.
+;                  expanded to 224-line SMS nametable entries at $3700+offset*2.
 ;                  Other records set VRAM write address to (hi<<8 | lo),
 ;                  then write len bytes of data to VDP data port $BE.
 ;
@@ -133,7 +133,7 @@ _vbuf_flush_loop:
 
   ; Fast path for the PPU shim's single-byte nametable writes. NES nametable
   ; bytes live at $2000-$2FFF mirrors and are one byte per tile; SMS name table
-  ; entries live at $3800 and are two bytes per tile.
+  ; entries live at $3700 in 224-line mode and are two bytes per tile.
   ld   a, c
   cp   1
   jp   nz, _vbuf_flush_raw_record

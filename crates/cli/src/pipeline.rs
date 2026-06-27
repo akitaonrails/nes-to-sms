@@ -5,7 +5,7 @@ use std::path::Path;
 
 use analysis::nes_rom_like;
 use lower::LowerOptions;
-use sms_project::{ProjectAssets, ProjectConfig};
+use sms_project::{NesMirroring, ProjectAssets, ProjectConfig};
 use z80_emit::Program;
 
 use crate::Args;
@@ -493,10 +493,20 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // expands SMB's 32 KiB PRG into ~150 KiB of Z80; size the ROM so
     // WLA-DX's linker has room. 304 KiB is comfortable for SMB-sized
     // games plus the PRG/CHR data banks; larger NES titles would need more.
+    let mirroring = match image.header.mirroring {
+        nes_rom::Mirroring::Horizontal => NesMirroring::Horizontal,
+        nes_rom::Mirroring::Vertical => NesMirroring::Vertical,
+        nes_rom::Mirroring::FourScreen => {
+            return Err(Error::Diagnostic(
+                "unsupported NES four-screen nametable mirroring".into(),
+            ));
+        }
+    };
     let cfg = ProjectConfig {
         rom_kib: 304,
         region: 0x4C,
         title: truncate_title(&prof.rom.name),
+        mirroring,
     };
     sms_project::emit_project(&args.out, &build, &project_assets, &cfg, runtime_dir)?;
 

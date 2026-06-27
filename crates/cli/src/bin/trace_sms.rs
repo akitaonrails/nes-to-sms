@@ -2526,6 +2526,11 @@ fn dump_route_checkpoint(
         chr_nonzero_bytes(bus),
         active_sprite_count(bus)
     )?;
+    writeln!(
+        f,
+        "nt_columns_nonzero_cells: {}",
+        format_nametable_column_occupancy(bus)
+    )?;
     writeln!(f, "framebuffer: {}", ppm_path.display())?;
     write_checkpoint_sat_diagnostics(&mut f, bus)?;
 
@@ -2543,6 +2548,23 @@ fn dump_route_checkpoint(
 
 fn nametable_nonzero_bytes(bus: &SmsBus) -> usize {
     (0..1792).filter(|i| bus.vram[0x3700 + i] != 0).count()
+}
+
+fn format_nametable_column_occupancy(bus: &SmsBus) -> String {
+    let mut cols = [0usize; 32];
+    for row in 0..28 {
+        for (col, count) in cols.iter_mut().enumerate() {
+            let off = 0x3700 + (row * 32 + col) * 2;
+            if bus.vram[off] != 0 || bus.vram[off + 1] != 0 {
+                *count += 1;
+            }
+        }
+    }
+    cols.iter()
+        .enumerate()
+        .map(|(col, count)| format!("{col:02}:{count:02}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn chr_nonzero_bytes(bus: &SmsBus) -> usize {

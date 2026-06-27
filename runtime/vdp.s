@@ -46,8 +46,8 @@ _vdp_init_table:
   ;   bit 1 = 0  8×8 sprites (bit 1 = 1 would select 8×16)
   .db 1, $a0
   ; reg 2: $FF — name table base.
-  ;   Bits 3..1 of $FF select name table at VRAM $3800 in Mode 4.
-  ;   (The VDP masks off the don't-care bits internally.)
+  ;   In 224/240-line Mode 4, bits 3..2 select the base plus a $700 offset;
+  ;   $FF therefore selects VRAM $3700. ($3800 is the 192-line interpretation.)
   .db 2, $ff
   ; reg 3: $FF — color table base (unused in Mode 4, set to all-ones by convention).
   .db 3, $ff
