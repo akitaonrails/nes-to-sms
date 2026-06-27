@@ -31,6 +31,7 @@
 ;   $CB11        PPUDATA read buffer
 ;   $CB12        Synthetic sprite-0 phase for PPUSTATUS bit 6
 ;   $CB1A        Translated NMI has been enabled at least once
+;   $CB20-$CB24  Split-scroll scheduler state (see runtime/ppu.s)
 ;   $CB13-$CB1F  13-byte scratch ("temp w")
 ;   $CB1D        Runtime trap marker for trace-sms diagnostics
 ;   Z80 SP lives at $DFFE, grows down — never touches $C100-$C1FF.
@@ -173,6 +174,12 @@ boot_main:
   ld  ($cb12), a            ; sprite-0 phase = clear/not-yet-hit
   ld  ($cb1a), a            ; translated NMI not enabled yet
 
+  ; 9b. Init split-scroll scheduler state.
+  ld  hl, $cb20
+  ld  bc, $0005
+  xor a
+  call mem_fill
+
   ; 10. Clear the VRAM update buffer.
   ld  hl, $c800
   ld  bc, $0100
@@ -269,6 +276,7 @@ irq_handler:
   ; complete without scanline-level NES PPU emulation.
   xor a
   ld  ($cb12), a
+  ld  ($cb20), a            ; clear per-frame split flags; keep last latches
 
   ; NOTE: the VDP flushes (SAT upload, scroll apply, VRAM buffer) run AFTER the
   ; translated NMI below, not before. SMB's NMI is what writes THIS frame's OAM
@@ -343,11 +351,42 @@ _apply_scroll:
   ; larger reg8 shifts the background right (camera left), whereas a
   ; larger NES PPUSCROLL-X moves the camera right. So negate X
   ; (reg8 = -scrollX) — otherwise walking right scrolls backwards.
+  ;
+  ; If the translated frame used a sprite-0 wait and wrote a complete post-hit
+  ; $2005/$2005 pair, use that for the playfield scroll. Otherwise use a
+  ; captured pre-hit pair, then finally the latest live latch. SMS VDP reg0 bit
+  ; 6 keeps the top two tile rows horizontally fixed as a coarse HUD split;
+  ; real line-IRQ split timing is intentionally deferred.
+  ld  a, ($cb20)
+  bit 2, a
+  jr  nz, _apply_scroll_post_x
+  bit 1, a
+  jr  nz, _apply_scroll_pre_x
   ld  a, ($cb0c)
+  jr  _apply_scroll_write_x
+_apply_scroll_pre_x:
+  ld  a, ($cb21)
+  jr  _apply_scroll_write_x
+_apply_scroll_post_x:
+  ld  a, ($cb23)
+_apply_scroll_write_x:
   neg
   ld  b, 8
   call vdp_set_register
+
+  ld  a, ($cb20)
+  bit 2, a
+  jr  nz, _apply_scroll_post_y
+  bit 1, a
+  jr  nz, _apply_scroll_pre_y
   ld  a, ($cb0d)
+  jr  _apply_scroll_write_y
+_apply_scroll_pre_y:
+  ld  a, ($cb22)
+  jr  _apply_scroll_write_y
+_apply_scroll_post_y:
+  ld  a, ($cb24)
+_apply_scroll_write_y:
   ld  b, 9
   call vdp_set_register
   ret

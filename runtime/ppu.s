@@ -10,7 +10,7 @@
 ;   $2006 PPUADDR   (W)   — VRAM address (write twice: hi then lo)
 ;   $2007 PPUDATA   (R/W) — VRAM data
 ;
-; Shadow registers in SMS RAM ($CB08-$CB10):
+; Shadow registers in SMS RAM ($CB08-$CB24):
 ;   $CB08  ppu_ctrl  (shadow of $2000)
 ;   $CB09  ppu_mask  (shadow of $2001)
 ;   $CB0A  oam_addr  (shadow of $2003)
@@ -22,6 +22,13 @@
 ;   $CB10  ppuaddr_lo latch
 ;   $CB11  ppudata read buffer
 ;   $CB12  synthetic sprite-0 phase (0 = before hit, 1 = hit reached)
+;   $CB20  split-scroll flags: bit0 = after sprite-0 hit this frame,
+;                              bit1 = pre-split scroll valid,
+;                              bit2 = post-split scroll valid
+;   $CB21  pre-split scroll X
+;   $CB22  pre-split scroll Y
+;   $CB23  post-split scroll X
+;   $CB24  post-split scroll Y
 ;
 ; VBlank flag at $CB05 (set by irq_handler, cleared when $2002 is read).
 ;
@@ -163,6 +170,9 @@ _ppu_w_scroll:
   ; $2005 PPUSCROLL: double-write.
   ;   First write  (toggle=0): X scroll → $CB0C; toggle becomes 1.
   ;   Second write (toggle=1): Y scroll → $CB0D; toggle becomes 0.
+  ; A complete pair is also captured into the split-scroll scheduler. Pairs
+  ; before PPUSTATUS returns sprite-0 hit are pre-split; pairs after are
+  ; post-split. The last complete pair in each phase wins.
   pop  af
   push af
   push af
@@ -179,6 +189,24 @@ _ppu_w_scroll_y:
   ; Second write = Y scroll.
   pop  af
   ld   ($cb0d), a
+  ld   a, ($cb20)
+  bit  0, a
+  jr   nz, _ppu_w_scroll_capture_post
+  ld   a, ($cb0c)
+  ld   ($cb21), a
+  ld   a, ($cb0d)
+  ld   ($cb22), a
+  ld   hl, $cb20
+  set  1, (hl)
+  jr   _ppu_w_scroll_capture_done
+_ppu_w_scroll_capture_post:
+  ld   a, ($cb0c)
+  ld   ($cb23), a
+  ld   a, ($cb0d)
+  ld   ($cb24), a
+  ld   hl, $cb20
+  set  2, (hl)
+_ppu_w_scroll_capture_done:
   xor  a
   ld   ($cb0b), a
   jp   _ppu_w_done
@@ -485,6 +513,8 @@ _ppu_r_status_sprite0:
   ld   a, ($cb12)
   or   a
   jr   z, _ppu_r_status_arm_sprite0
+  ld   hl, $cb20
+  set  0, (hl)                ; subsequent $2005 pairs are post-sprite-0 hit
   ld   a, c
   or   $40
   jp   _ppu_r_done

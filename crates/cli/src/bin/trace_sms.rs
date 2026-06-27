@@ -2003,12 +2003,17 @@ fn main() {
     );
     let unresolved_id = (bus.read(0xCB1C) as u16) << 8 | bus.read(0xCB1B) as u16;
     println!(
-        "Runtime diagnostics: unresolved_id=${unresolved_id:04X} trap_marker=${:02X} vbuf_used=${:02X} ppu_addr=${:02X}{:02X} ppu_mask=${:02X}",
+        "Runtime diagnostics: unresolved_id=${unresolved_id:04X} trap_marker=${:02X} vbuf_used=${:02X} ppu_addr=${:02X}{:02X} ppu_mask=${:02X} split_flags=${:02X} split_pre=${:02X}:${:02X} split_post=${:02X}:${:02X}",
         bus.read(0xCB1D),
         bus.read(0xC800),
         bus.read(0xCB0F),
         bus.read(0xCB10),
-        bus.read(0xCB09)
+        bus.read(0xCB09),
+        bus.read(0xCB20),
+        bus.read(0xCB21),
+        bus.read(0xCB22),
+        bus.read(0xCB23),
+        bus.read(0xCB24)
     );
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
