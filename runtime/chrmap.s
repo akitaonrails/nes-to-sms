@@ -247,7 +247,8 @@ _bgw_have_s:
 
 ; Map a NES sprite tile to an SMS sprite tile byte.
 ; Entry: A = NES OAM tile byte. Uses PPUCTRL bit 3 ($CB08) to choose NES sprite
-; pattern table 0/1. The generated map is relative to VDP sprite base $2000.
+; pattern table 0/1. Table 0 maps to tile bytes for SMS sprite base $2000;
+; table 1 maps to tile bytes for SMS sprite base $0000.
 ; Exit: A = SMS sprite tile byte. Preserves BC, DE, HL.
 rt_map_sprite_tile:
   push hl
