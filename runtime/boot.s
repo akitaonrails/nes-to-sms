@@ -36,6 +36,9 @@
 ;   $CB1D        Runtime trap marker for trace-sms diagnostics
 ;   Z80 SP lives at $DFFE, grows down — never touches $C100-$C1FF.
 
+.define VDP_R0_BASE            $66   ; Mode 4 + top-row hscroll lock + left blank
+.define VDP_R0_LINE_IRQ_ON     $76   ; VDP_R0_BASE + IE1 line IRQ enable
+
 .bank 0 slot 0
 .org $0000
 
@@ -254,9 +257,13 @@ irq_handler:
   push bc
   push de
 
-  ; Acknowledge VDP frame interrupt by reading the status port.
-  ; Reading $BF clears the frame-interrupt flag inside the VDP.
+  ; Acknowledge the VDP interrupt by reading the status port. Frame and line
+  ; interrupts share the Z80 IM1 vector; status bit 7 identifies frame IRQs.
+  ; Bit 7 clear means a non-frame VDP IRQ; the only one we enable is the
+  ; one-shot line split below.
   in  a, ($bf)
+  bit 7, a
+  jp  z, _irq_line_scroll_split
 
   ; Latch controller state before any translated code reads it.
   call rt_controller_latch
@@ -333,9 +340,9 @@ _irq_call_translated_nmi:
 _irq_skip_translated_nmi:
 
   ; Flush this frame's prepared state to the VDP (see note above): sprites from
-  ; the OAM staging, the latched scroll, and the queued VRAM buffer.
+  ; the OAM staging, the scheduled scroll, and the queued VRAM buffer.
   call rt_sat_upload
-  call _apply_scroll
+  call _apply_frame_scroll
   call vbuf_flush
 
   pop de
@@ -345,49 +352,98 @@ _irq_skip_translated_nmi:
   ei
   ret
 
-_apply_scroll:
+_irq_line_scroll_split:
+  ; Mid-frame line IRQ: switch from the pre/top scroll to the captured post-hit
+  ; playfield scroll, then disable further line IRQs until the next frame IRQ
+  ; explicitly schedules one.
+  call _apply_post_scroll
+  call _disable_line_irq
+
+  pop de
+  pop bc
+  pop hl
+  pop af
+  ei
+  ret
+
+_apply_frame_scroll:
   ; Write latched scroll X to VDP reg 8, scroll Y to VDP reg 9.
   ; The SMS horizontal scroll is the OPPOSITE direction of the NES: a
   ; larger reg8 shifts the background right (camera left), whereas a
   ; larger NES PPUSCROLL-X moves the camera right. So negate X
   ; (reg8 = -scrollX) — otherwise walking right scrolls backwards.
   ;
-  ; If the translated frame used a sprite-0 wait and wrote a complete post-hit
-  ; $2005/$2005 pair, use that for the playfield scroll. Otherwise use a
-  ; captured pre-hit pair, then finally the latest live latch. SMS VDP reg0 bit
-  ; 6 keeps the top two tile rows horizontally fixed as a coarse HUD split;
-  ; real line-IRQ split timing is intentionally deferred.
+  ; Frame IRQ applies the pre/top scroll first. If a complete post-hit pair was
+  ; captured, schedule one SMS line IRQ at NES sprite 0 Y + 8 to switch to the
+  ; post/playfield scroll during active display.
   ld  a, ($cb20)
   bit 2, a
-  jr  nz, _apply_scroll_post_x
+  jr  nz, _apply_frame_split_scroll
+  call _apply_pre_or_live_scroll
+  call _disable_line_irq
+  ret
+
+_apply_frame_split_scroll:
+  call _apply_pre_or_live_scroll
+
+  ; Use NES sprite 0's Y coordinate as the generic split marker. The interrupt
+  ; counter value is approximately the target scanline minus one; sprite0_y+8
+  ; puts the switch just after the 8px marker sprite used by split-screen games.
+  ld  a, ($c900)
+  cp  $c0
+  jr  nc, _disable_line_irq
+  add a, 7
+  ld  b, 10
+  call vdp_set_register
+  call _enable_line_irq
+  ret
+
+_apply_pre_or_live_scroll:
+  ld  a, ($cb20)
   bit 1, a
-  jr  nz, _apply_scroll_pre_x
+  jr  nz, _apply_pre_scroll
   ld  a, ($cb0c)
-  jr  _apply_scroll_write_x
-_apply_scroll_pre_x:
+  ld  c, a
+  ld  a, ($cb0d)
+  jr  _apply_scroll_pair_cx_ay
+_apply_pre_scroll:
   ld  a, ($cb21)
-  jr  _apply_scroll_write_x
-_apply_scroll_post_x:
+  ld  c, a
+  ld  a, ($cb22)
+  jr  _apply_scroll_pair_cx_ay
+
+_apply_post_scroll:
+  ld  a, ($cb20)
+  bit 2, a
+  ret z
   ld  a, ($cb23)
-_apply_scroll_write_x:
+  ld  c, a
+  ld  a, ($cb24)
+  jr  _apply_scroll_pair_cx_ay
+
+_apply_scroll_pair_cx_ay:
+  ; Entry: C = NES scroll X, A = NES scroll Y.
+  ld  e, a
+  ld  a, c
   neg
   ld  b, 8
   call vdp_set_register
-
-  ld  a, ($cb20)
-  bit 2, a
-  jr  nz, _apply_scroll_post_y
-  bit 1, a
-  jr  nz, _apply_scroll_pre_y
-  ld  a, ($cb0d)
-  jr  _apply_scroll_write_y
-_apply_scroll_pre_y:
-  ld  a, ($cb22)
-  jr  _apply_scroll_write_y
-_apply_scroll_post_y:
-  ld  a, ($cb24)
-_apply_scroll_write_y:
+  ld  a, e
   ld  b, 9
+  call vdp_set_register
+  ret
+
+_enable_line_irq:
+  ; VDP reg0 bit 4 enables line interrupts on top of the base display mode.
+  ld  a, VDP_R0_LINE_IRQ_ON
+  ld  b, 0
+  call vdp_set_register
+  ret
+
+_disable_line_irq:
+  ; Restore the base R0 mode with line interrupts disabled.
+  ld  a, VDP_R0_BASE
+  ld  b, 0
   call vdp_set_register
   ret
 

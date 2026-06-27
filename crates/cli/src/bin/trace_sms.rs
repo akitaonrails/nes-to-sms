@@ -27,14 +27,22 @@ struct SmsBus {
     ram: [u8; RAM_SIZE],
     /// Log of (frame, op, port, value).
     io_log: Vec<String>,
-    /// VBlank flag that toggles each "scanline tick" so $2002 polls progress.
-    /// We approximate by toggling bit 7 every 1000 reads of $BF.
+    /// VDP status reads. Real frame/line IRQ kind is supplied through
+    /// `vdp_status_override` when the tracer injects an interrupt; fallback
+    /// toggling keeps non-IRQ polling loops from stalling.
     vdp_status_reads: u32,
+    /// Status byte returned by the next $BF read, used to distinguish injected
+    /// frame IRQs (bit 7 set) from line IRQs (bit 7 clear).
+    vdp_status_override: Option<u8>,
     /// VRAM 16 KiB and CRAM 32 B (for inspection if needed).
     vram: [u8; 0x4000],
     cram: [u8; 0x20],
     /// Last written VDP register values, for framebuffer interpretation.
     vdp_regs: [u8; 16],
+    /// Approximate per-frame line-scroll split for checkpoint rendering:
+    /// (screen line, top/pre reg8, top/pre reg9). After the injected line IRQ
+    /// runs, the live VDP regs hold the bottom/post scroll values.
+    render_scroll_split: Option<(usize, u8, u8)>,
     /// VDP address latch state (toggles between low/high byte).
     vdp_addr_high: u8,
     vdp_addr_low: u8,
@@ -151,9 +159,11 @@ impl SmsBus {
             ram: [0; RAM_SIZE],
             io_log: Vec::new(),
             vdp_status_reads: 0,
+            vdp_status_override: None,
             vram: [0; 0x4000],
             cram: [0; 0x20],
             vdp_regs: [0; 16],
+            render_scroll_split: None,
             vdp_addr_high: 0,
             vdp_addr_low: 0,
             bank_writes: Vec::new(),
@@ -312,6 +322,10 @@ impl Bus for SmsBus {
             // VDP status / control port $BF — return VBlank flag bit toggling.
             0x81 => {
                 self.vdp_status_reads += 1;
+                if let Some(status) = self.vdp_status_override.take() {
+                    self.vdp_addr_latched = false;
+                    return status;
+                }
                 // Make bit 7 toggle every 1000 reads so polling loops advance.
                 let vblank = if (self.vdp_status_reads / 100) & 1 == 0 {
                     0x80
@@ -594,6 +608,7 @@ fn run_search_steps(
             state
                 .bus
                 .write(state.cpu.sp.wrapping_add(1), (state.cpu.pc >> 8) as u8);
+            state.bus.vdp_status_override = Some(0x80);
             state.cpu.pc = 0x0038;
             state.cpu.iff1 = false;
             state.cpu.iff2 = false;
@@ -1281,7 +1296,9 @@ fn main() {
 
     // Inject an IRQ every 60k steps (roughly one "frame" of Z80 work).
     let mut next_irq_at = IRQ_PERIOD;
+    let mut line_irq_at: Option<usize> = None;
     let mut irqs_fired = 0usize;
+    let mut line_irqs_fired = 0usize;
     let mut next_button_event = 0usize;
     let mut next_checkpoint = 0usize;
     let mut checkpoint_dump_failed = false;
@@ -1401,6 +1418,26 @@ fn main() {
             xfer_ring.push(("ret", pc, to));
         }
 
+        if inject_irq && step < next_irq_at && line_irq_at.is_some_and(|at| step >= at) && cpu.iff1
+        {
+            // Simulate a VDP line interrupt. It shares the IM1 vector with the
+            // frame interrupt, but the status byte has bit 7 clear, so the
+            // runtime can distinguish it after reading $BF.
+            cpu.sp = cpu.sp.wrapping_sub(2);
+            bus.write(cpu.sp, (cpu.pc & 0xFF) as u8);
+            bus.write(cpu.sp.wrapping_add(1), (cpu.pc >> 8) as u8);
+            bus.vdp_status_override = Some(0x00);
+            cpu.pc = 0x0038;
+            if first_irq_handler_step.is_none() {
+                first_irq_handler_step = Some(step);
+            }
+            cpu.iff1 = false;
+            cpu.iff2 = false;
+            cpu.halted = false;
+            line_irqs_fired += 1;
+            line_irq_at = None;
+        }
+
         // Right before injecting the next IRQ, snapshot the framebuffer
         // so we can see how the screen evolves frame by frame.
         if inject_irq && step >= next_irq_at && cpu.iff1 {
@@ -1506,9 +1543,12 @@ fn main() {
             if interrupt_at_step.is_none() {
                 interrupt_at_step = Some(step);
             }
+            line_irq_at = None;
+            bus.render_scroll_split = None;
             cpu.sp = cpu.sp.wrapping_sub(2);
             bus.write(cpu.sp, (cpu.pc & 0xFF) as u8);
             bus.write(cpu.sp.wrapping_add(1), (cpu.pc >> 8) as u8);
+            bus.vdp_status_override = Some(0x80);
             cpu.pc = 0x0038;
             if first_irq_handler_step.is_none() {
                 first_irq_handler_step = Some(step);
@@ -1527,6 +1567,19 @@ fn main() {
         match cpu.step(&mut bus) {
             Ok(()) => {
                 taken += 1;
+                if bus.vdp_regs[0] & 0x10 == 0 {
+                    line_irq_at = None;
+                } else if inject_irq && cpu.iff1 && line_irq_at.is_none() {
+                    // R10 is loaded with one less than the target raster line.
+                    // Convert that to a coarse instruction-step delay; this is
+                    // not cycle-accurate, but it lets checkpoint rendering see
+                    // the runtime's one-shot post-split scroll before the next
+                    // frame IRQ snapshot.
+                    let target_line = (bus.vdp_regs[10] as usize + 1).min(223);
+                    bus.render_scroll_split = Some((target_line, bus.vdp_regs[8], bus.vdp_regs[9]));
+                    let line_delay = (bus.vdp_regs[10] as usize + 1).clamp(8, 512);
+                    line_irq_at = Some(step.saturating_add(line_delay));
+                }
             }
             Err(e) => {
                 last_err = Some(e);
@@ -1632,6 +1685,7 @@ fn main() {
     }
     println!("VDP control I/O entries: {}", bus.io_log.len());
     println!("IRQs fired: {irqs_fired}");
+    println!("Line IRQs fired: {line_irqs_fired}");
     println!(
         "Bank mapping: slot0={} slot1={} slot2={}",
         bus.slot_bank[0], bus.slot_bank[1], bus.slot_bank[2]
@@ -2441,7 +2495,23 @@ fn dump_route_checkpoint(
     )?;
     writeln!(
         f,
-        "vdp: vram_writes={} cram_writes={} data_writes={} control_writes={} status_reads={} controller_reads={}",
+        "split_scroll: flags=${:02X} pre=${:02X}:${:02X} post=${:02X}:${:02X} render_split={}",
+        bus.ram[0x0B20],
+        bus.ram[0x0B21],
+        bus.ram[0x0B22],
+        bus.ram[0x0B23],
+        bus.ram[0x0B24],
+        bus.render_scroll_split
+            .map(|(line, top_x, top_y)| format!(
+                "line={line} top_reg8=${top_x:02X} top_reg9=${top_y:02X}"
+            ))
+            .unwrap_or_else(|| "none".to_string())
+    )?;
+    writeln!(
+        f,
+        "vdp: r0=${:02X} r10=${:02X} vram_writes={} cram_writes={} data_writes={} control_writes={} status_reads={} controller_reads={}",
+        bus.vdp_regs[0],
+        bus.vdp_regs[10],
         bus.vram_writes,
         bus.cram_writes,
         bus.vdp_data_writes,
@@ -2491,7 +2561,8 @@ fn active_sprite_count(bus: &SmsBus) -> usize {
 
 /// Render the current VRAM/CRAM state to a 256x224 RGB PPM image
 /// so we can verify what the SMS *would* show without needing mednafen.
-/// Only handles background nametable, no sprites, no scroll.
+/// Handles background nametable, scroll, and a coarse line-scroll split; sprites
+/// are overlaid after the background pass.
 fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
     use std::io::Write;
     const W: usize = 256;
@@ -2507,8 +2578,34 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
         (scale(r), scale(g), scale(bl))
     };
 
-    for row in 0..28 {
-        for col in 0..32 {
+    for screen_y in 0..H {
+        // Split timing and R0 top-row horizontal lock are output-scanline
+        // decisions. Pick the scroll registers for this displayed line first,
+        // then sample the nametable through the inverse scroll transform.
+        let (base_reg8, reg9) =
+            if let Some((split_line, top_reg8, top_reg9)) = bus.render_scroll_split {
+                if screen_y < split_line {
+                    (top_reg8 as usize, top_reg9 as usize)
+                } else {
+                    (bus.vdp_regs[8] as usize, bus.vdp_regs[9] as usize)
+                }
+            } else {
+                (bus.vdp_regs[8] as usize, bus.vdp_regs[9] as usize)
+            };
+        let lock_top = bus.vdp_regs[0] & 0x40 != 0;
+        let reg8 = if lock_top && screen_y < 16 {
+            0
+        } else {
+            base_reg8
+        };
+        let source_y = (screen_y + reg9) % H;
+        let row = source_y / 8;
+        let py = source_y % 8;
+
+        for screen_x in 0..W {
+            let source_x = (screen_x + W - (reg8 % W)) & 0xFF;
+            let col = source_x / 8;
+            let px = source_x % 8;
             let off = 0x3700 + (row * 32 + col) * 2;
             let lo = bus.vram[off];
             let hi = bus.vram[off + 1];
@@ -2518,45 +2615,28 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
             if tile_addr + 32 > 0x4000 {
                 continue;
             }
-            for py in 0..8 {
-                let p0 = bus.vram[tile_addr + py * 4];
-                let p1 = bus.vram[tile_addr + py * 4 + 1];
-                let p2 = bus.vram[tile_addr + py * 4 + 2];
-                let p3 = bus.vram[tile_addr + py * 4 + 3];
-                for px in 0..8 {
-                    let bit = 7 - px;
-                    let c = (((p0 >> bit) & 1) << 0)
-                        | (((p1 >> bit) & 1) << 1)
-                        | (((p2 >> bit) & 1) << 2)
-                        | (((p3 >> bit) & 1) << 3);
-                    let color = bus.cram[palette_offset + c as usize];
-                    let (r, g, b) = cram_to_rgb(color);
-                    // Apply the SMS background scroll so this render matches
-                    // what the hardware/emulator displays: reg8 shifts the bg
-                    // right, reg9 shifts it up (both wrap). SMS VDP reg0 bit 6
-                    // locks horizontal scroll on rows 0-1 (the status bar), so
-                    // honor that the way the VDP does.
-                    let lock_top = bus.vdp_regs[0] & 0x40 != 0;
-                    let reg8 = if lock_top && row < 2 {
-                        0
-                    } else {
-                        bus.vdp_regs[8] as usize
-                    };
-                    let reg9 = bus.vdp_regs[9] as usize;
-                    let sx = (col * 8 + px + reg8) & 0xFF;
-                    let sy = (row * 8 + py + (224 - (reg9 % 224))) % 224;
-                    let pi = (sy * W + sx) * 3;
-                    pixels[pi] = r;
-                    pixels[pi + 1] = g;
-                    pixels[pi + 2] = b;
-                }
-            }
+            let p0 = bus.vram[tile_addr + py * 4];
+            let p1 = bus.vram[tile_addr + py * 4 + 1];
+            let p2 = bus.vram[tile_addr + py * 4 + 2];
+            let p3 = bus.vram[tile_addr + py * 4 + 3];
+            let bit = 7 - px;
+            let c = ((p0 >> bit) & 1)
+                | (((p1 >> bit) & 1) << 1)
+                | (((p2 >> bit) & 1) << 2)
+                | (((p3 >> bit) & 1) << 3);
+            let color = bus.cram[palette_offset + c as usize];
+            let (r, g, b) = cram_to_rgb(color);
+            let pi = (screen_y * W + screen_x) * 3;
+            pixels[pi] = r;
+            pixels[pi + 1] = g;
+            pixels[pi + 2] = b;
         }
     }
     eprintln!(
-        "framebuffer scroll: reg8={} reg9={} | NES scrollX($CB0C)={} cam_lo($071C)={} cam_pg($071A)={} playerX($0086)={} playerPg($006D)={} | bg_variant_pool_next($CA00)={}",
+        "framebuffer scroll: reg8={} reg9={} split={:?} | NES scrollX($CB0C)={} cam_lo($071C)={} cam_pg($071A)={} playerX($0086)={} playerPg($006D)={} | bg_variant_pool_next($CA00)={}",
         bus.vdp_regs[8],
         bus.vdp_regs[9],
+        bus.render_scroll_split,
         bus.ram[0x0B0C],
         bus.ram[0x071C],
         bus.ram[0x071A],
