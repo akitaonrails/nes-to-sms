@@ -2527,6 +2527,7 @@ fn dump_route_checkpoint(
         active_sprite_count(bus)
     )?;
     writeln!(f, "framebuffer: {}", ppm_path.display())?;
+    write_checkpoint_sat_diagnostics(&mut f, bus)?;
 
     println!(
         "CHECKPOINT {} frame={} actual_frame={} ppm={} state={}",
@@ -2557,6 +2558,91 @@ fn active_sprite_count(bus: &SmsBus) -> usize {
         count += 1;
     }
     count
+}
+
+fn sat_terminator_index(bus: &SmsBus) -> Option<usize> {
+    (0..64).find(|i| bus.vram[0x3F00 + i] == 0xD0)
+}
+
+fn sprite_base_addr(bus: &SmsBus) -> usize {
+    if bus.vdp_regs[6] & 0x04 != 0 {
+        0x2000
+    } else {
+        0x0000
+    }
+}
+
+fn vram_nonzero_range(bus: &SmsBus, start: usize, len: usize) -> usize {
+    bus.vram[start..start + len]
+        .iter()
+        .filter(|byte| **byte != 0)
+        .count()
+}
+
+fn write_checkpoint_sat_diagnostics<W: std::io::Write>(
+    f: &mut W,
+    bus: &SmsBus,
+) -> std::io::Result<()> {
+    let active = active_sprite_count(bus);
+    let terminator = sat_terminator_index(bus);
+    let sprite_base = sprite_base_addr(bus);
+    let sprite_8x16 = bus.vdp_regs[1] & 0x02 != 0;
+    let blank167_addr = sprite_base + 167 * 32;
+    let blank167_nonzero = vram_nonzero_range(bus, blank167_addr, 32);
+    let tail_start = terminator.unwrap_or(64);
+    let tail_y_not_d0 = (tail_start..64)
+        .filter(|i| bus.vram[0x3F00 + i] != 0xD0)
+        .count();
+    let tail_xtile_nonzero = (tail_start..64)
+        .filter(|i| bus.vram[0x3F80 + i * 2] != 0 || bus.vram[0x3F80 + i * 2 + 1] != 0)
+        .count();
+
+    writeln!(
+        f,
+        "sat: r1=${:02X} r6=${:02X} ppu_ctrl=${:02X} sprite_base=${:04X} sprite_mode={} terminator={} active={} scratch_next={} blank167_addr=${:04X} blank167_nonzero_bytes={}",
+        bus.vdp_regs[1],
+        bus.vdp_regs[6],
+        bus.ram[0x0B08],
+        sprite_base,
+        if sprite_8x16 { "8x16" } else { "8x8" },
+        terminator
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        active,
+        bus.ram[0x1460],
+        blank167_addr,
+        blank167_nonzero,
+    )?;
+    writeln!(
+        f,
+        "sat_tail: y_not_d0_after_terminator={} xtile_nonzero_after_terminator={}",
+        tail_y_not_d0, tail_xtile_nonzero
+    )?;
+
+    for i in 0..active.min(24) {
+        let y = bus.vram[0x3F00 + i];
+        let x = bus.vram[0x3F80 + i * 2];
+        let tile = bus.vram[0x3F80 + i * 2 + 1];
+        let attr = bus.ram[0x1480 + i];
+        let tile_addr = sprite_base + tile as usize * 32;
+        let tile_nonzero = if tile_addr + 32 <= bus.vram.len() {
+            vram_nonzero_range(bus, tile_addr, 32)
+        } else {
+            0
+        };
+        writeln!(
+            f,
+            "sat_entry[{i:02}]: y=${y:02X} screen_y={} x=${x:02X} tile=${tile:02X} attr=${attr:02X} tile_addr=${tile_addr:04X} tile_nonzero_bytes={} behind_bg={} hflip={} vflip={} pal={}",
+            y.wrapping_add(1),
+            tile_nonzero,
+            attr & 0x20 != 0,
+            attr & 0x40 != 0,
+            attr & 0x80 != 0,
+            attr & 0x03,
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Render the current VRAM/CRAM state to a 256x224 RGB PPM image
@@ -2691,7 +2777,7 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
             let p3 = bus.vram[tile_addr + py * 4 + 3];
             for px in 0..8 {
                 let bit = 7 - px;
-                let c = (((p0 >> bit) & 1) << 0)
+                let c = ((p0 >> bit) & 1)
                     | (((p1 >> bit) & 1) << 1)
                     | (((p2 >> bit) & 1) << 2)
                     | (((p3 >> bit) & 1) << 3);
