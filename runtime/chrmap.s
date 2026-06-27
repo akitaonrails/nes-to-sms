@@ -20,7 +20,9 @@
 ;
 ; RAM:
 ;   $CA00        bg variant pool next-free slot (0-255)
-;   $CA01-$CA05  do_variant scratch (p2, p3, slot, src ptr lo/hi)
+;   $CA01-$CA06  do_variant scratch (p2, p3, slot, src ptr lo/hi, attr S)
+;   $CA07        ring-wrapped flag (0 until slots 64-255 have all been used)
+;   $CA40-$CAFF  reverse map for recycled slots 64-255: slot -> old base tile
 ;   $CC00-$D2FF  nametable shadow — now stores per-cell sub-palette S (0-3)
 ;   $D600-$D9FF  variant cache FC[base*4 + S] -> pool slot ($FF = unassigned)
 
@@ -32,6 +34,8 @@
 .define BGV_SLOT       $ca03
 .define BGV_SRC        $ca04   ; + $ca05
 .define BGV_ATTR_S     $ca06
+.define BGV_RING_WRAPPED $ca07
+.define BGV_REV_BASE   $ca40   ; 192 bytes: base tile for slots 64..255
 
 .section "chrmap" free
 
@@ -135,16 +139,75 @@ _gbv_alloc:
   ; pipe, bush, status bar, ...) so the recurring graphics stay correct all
   ; level; only rarer mid-level-specific tiles ride the ring.
   ld   a, (BGV_POOL_NEXT)
-  ld   (hl), a               ; FC[idx] = slot
   ld   (BGV_SLOT), a
+  push hl                    ; save FC[idx] for the new mapping
+  push bc                    ; keep B=S, C=base for variant generation
+  call _bgv_invalidate_recycled_slot
+  pop  bc
+  pop  hl
+  ld   a, (BGV_SLOT)
+  ld   (hl), a               ; FC[idx] = slot
+  ; Remember which base tile now owns this ring slot. Slots 0-63 are pinned and
+  ; never recycled after wrap, so only slots 64-255 need reverse-map entries.
+  cp   64
+  jr   c, _gbv_remember_done
+  sub  64
+  ld   e, a
+  ld   d, $00
+  ld   hl, BGV_REV_BASE
+  add  hl, de
+  ld   (hl), c
+_gbv_remember_done:
+  ld   a, (BGV_SLOT)
   inc  a
   jr   nz, _gbv_set          ; 255 -> 0 means the ring wrapped
+  ld   a, $01
+  ld   (BGV_RING_WRAPPED), a
   ld   a, 64                 ; wrap back to the start of the ring (pin 0-63)
 _gbv_set:
   ld   (BGV_POOL_NEXT), a
   ld   a, (BGV_SLOT)
   call rt_bg_gen_variant     ; A=slot, B=S, C=base
   ld   a, (BGV_SLOT)
+  ret
+
+; Clear the stale FC[old_base*4+old_S] entry before reusing a ring slot.
+; Without this, a later request for the old (base,S) pair can hit the cache and
+; return a slot whose VRAM pattern has since been regenerated for another tile.
+; Entry: BGV_SLOT = slot being allocated. Clobbers AF, C, DE, HL.
+_bgv_invalidate_recycled_slot:
+  ld   a, (BGV_RING_WRAPPED)
+  or   a
+  ret  z                     ; first pass: reverse map not complete yet
+  ld   a, (BGV_SLOT)
+  cp   64
+  ret  c                     ; pinned slots are never recycled
+  sub  64
+  ld   e, a
+  ld   d, $00
+  ld   hl, BGV_REV_BASE
+  add  hl, de
+  ld   c, (hl)               ; old base tile for this slot
+  ld   l, c
+  ld   h, $00
+  add  hl, hl
+  add  hl, hl                ; old base*4
+  ld   de, BGV_CACHE
+  add  hl, de                ; HL = &FC[old_base*4]
+  ld   a, (BGV_SLOT)
+  ld   e, a                  ; E = reused slot number
+  ld   d, 4                  ; scan old base's four sub-palette entries
+_gbv_inv_loop:
+  ld   a, (hl)
+  cp   e
+  jr   nz, _gbv_inv_next
+  ld   a, $ff
+  ld   (hl), a
+  ret
+_gbv_inv_next:
+  inc  hl
+  dec  d
+  jr   nz, _gbv_inv_loop
   ret
 
 ; ─── _bgv_sub_palette ───────────────────────────────────────────────────────

@@ -219,6 +219,7 @@ boot_main:
   call mem_fill
   xor a
   ld  ($ca00), a            ; bg variant pool next-free slot = 0
+  ld  ($ca07), a            ; bg variant ring has not wrapped yet
 
   ; 12. Enable display and frame interrupts (VDP reg 1).
   ;     %11110000: display on, frame INT enabled, M1=1 (224-line mode),
