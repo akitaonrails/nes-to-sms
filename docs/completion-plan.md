@@ -411,6 +411,15 @@ SMS-native terms.
       **Acceptance:** test sprites display with correct flip and
       palette in Mednafen.
 
+      **Partial outcome:** runtime SAT upload now honors 8x8 sprite priority in
+      trace rendering and generates 8x8 sprite pattern variants for NES OAM
+      palette bits plus H/V flip. Variant scratch is guarded for the `$2000`
+      SMS sprite base and falls back safely when PPUCTRL selects `$0000`; hidden
+      sprites cannot consume visible variant slots. Verified through the SMB
+      1-1 route, frame-diff, workspace tests, clippy, and oracle review. A
+      standalone Mednafen synthetic sprite fixture is still needed before this
+      item is fully closed.
+
 - [ ] **E.10 8x16 sprites.** SMB doesn't use 8x16 for gameplay but
       title and some intros might. Implement: SAT writer handles
       8x16 by emitting two SMS sprites with consecutive tile indices.
@@ -668,6 +677,22 @@ Add discoveries that change priorities here, dated.
 - Next safest work is either external emulator validation of the accepted route
   or a deliberate audio/APU-to-PSG phase. Do not promote the remaining sound
   labels as ordinary gameplay roots before that audio plan exists.
+
+### 2026-06-27 — Sprite variants and Mednafen smoke refreshed
+
+- Committed generic runtime sprite variants for NES OAM palette bits and H/V
+  flip, with safe fallback for `$0000` sprite base and hidden-sprite cache
+  protection. SMB remains a stress target; the runtime logic is attribute- and
+  PPUCTRL-driven rather than SMB-specific.
+- The profile-owned 1-1 route now uses a **301,000,000** step budget after the
+  sprite variant timing change and still passes the no-trap/post-transition RAM
+  checks.
+- External Mednafen smoke was rerun against the workspace ROM (`out/smb/sms.sms`)
+  and passes: Mednafen recognizes it as SMS, Sega mapper, export territory, and
+  a 304KiB generated ROM. The legacy smoke script no longer hard-codes 256KiB.
+- Next safest work is visual equivalence: inspect the refreshed checkpoint frames
+  and/or add a proper golden-frame comparison path before starting the deferred
+  audio phase.
 
 ---
 

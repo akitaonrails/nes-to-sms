@@ -36,7 +36,7 @@ of relying only on final RAM state.
 After generating and assembling `out/smb/sms.sms`, run:
 
 ```sh
-target/release/trace-sms out/smb/sms.sms --steps 300000000 \
+target/release/trace-sms out/smb/sms.sms --steps 301000000 \
   --buttons-script profiles/smb/acceptance/1-1-clear.buttons \
   --checkpoint-script profiles/smb/acceptance/1-1-clear.checkpoints \
   --checkpoint-dir out/smb/checkpoints/1-1-clear \
@@ -70,3 +70,17 @@ FD_EXCLUDE_VRAMBUF=1 FD_EXCLUDE_AUDIO=1 \
 `FD_EXCLUDE_VRAMBUF=1` separates render-buffer phasing from gameplay-state
 drift. `FD_EXCLUDE_AUDIO=1` is intentional while `SoundEngine` is stubbed and
 the `$F3xx-$F7xx` audio phase is deferred.
+
+## External emulator smoke
+
+After assembling `out/smb/sms.sms`, verify that Mednafen recognizes the ROM as
+an SMS/Sega-mapper/export build:
+
+```sh
+docker compose run --rm --workdir /work/poc --user root sms-smoke \
+  bash scripts/smoke_sms.sh ../out/smb/sms.sms
+```
+
+The smoke test intentionally accepts any generated ROM size that is at least
+16KiB and a 16KiB multiple; current workspace builds are larger than the old
+legacy PoC's fixed 256KiB image.

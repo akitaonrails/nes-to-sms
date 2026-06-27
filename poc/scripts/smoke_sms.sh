@@ -38,8 +38,18 @@ if ! grep -q "Using module: sms" "$log"; then
   exit 1
 fi
 
-if ! grep -q "ROM:       256KiB" "$log"; then
-  echo "Mednafen did not recognize the generated ROM as 256KiB. Log: $log" >&2
+rom_kib=""
+if [[ "$(<"$log")" =~ ROM:[[:space:]]+([0-9]+)KiB ]]; then
+  rom_kib="${BASH_REMATCH[1]}"
+fi
+
+if [[ -z "$rom_kib" ]]; then
+  echo "Mednafen did not report a ROM size. Log: $log" >&2
+  exit 1
+fi
+
+if (( rom_kib < 16 || rom_kib % 16 != 0 )); then
+  echo "Mednafen reported an unexpected ROM size (${rom_kib}KiB). Log: $log" >&2
   exit 1
 fi
 
@@ -53,4 +63,4 @@ if ! grep -q "Territory: Export" "$log"; then
   exit 1
 fi
 
-echo "Mednafen SMS smoke completed. Log: $log"
+echo "Mednafen SMS smoke completed (${rom_kib}KiB). Log: $log"
