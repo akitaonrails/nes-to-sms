@@ -162,10 +162,10 @@ pub fn run(args: &Args) -> Result<String, Error> {
         };
         if let Ok(r) = ir::lift_range(image.prg, &opts) {
             for lbl in r.branch_labels.iter().chain(r.external_calls.iter()) {
-                if let Some(hex) = lbl.strip_prefix("L_") {
-                    if let Ok(addr) = u16::from_str_radix(hex, 16) {
-                        all_referenced_pcs.insert(addr);
-                    }
+                if let Some(hex) = lbl.strip_prefix("L_")
+                    && let Ok(addr) = u16::from_str_radix(hex, 16)
+                {
+                    all_referenced_pcs.insert(addr);
                 }
             }
             let has_terminator = r.ops.last().is_some_and(|op| {
@@ -451,7 +451,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
     build.asm = strip_inline_org(&build.asm);
 
     // 8. Convert assets (CHR + a default palette + nametable placeholder).
-    let (chr_4bpp, chr_maps, chr_report) = build_chr_assets(image.chr, &prof.chr_packs);
+    let (chr_4bpp, chr_maps, chr_report) = build_chr_assets(image.chr, &prof.chr_packs)?;
     let palette: [u8; 32] = default_palette();
     // Default name table: all zeros. Real rendering comes from translated
     // PPU $2006/$2007 writes during init/NMI. (Switch this to a tile-
@@ -592,19 +592,24 @@ fn format_label(addr: u16) -> String {
     format!("L_{addr:04X}")
 }
 
-fn build_chr_assets(chr: &[u8], packs: &[profile::ChrPackRange]) -> (Vec<u8>, Vec<u8>, String) {
+fn build_chr_assets(
+    chr: &[u8],
+    packs: &[profile::ChrPackRange],
+) -> Result<(Vec<u8>, Vec<u8>, String), Error> {
     if packs.is_empty() {
         let chr_4bpp = assets::nes_chr_to_sms_4bpp(chr);
         let mut physical = [[None; 256]; 2];
-        for tile in 0..=255usize {
-            physical[0][tile] = Some(tile as u16);
+        for (tile, slot) in physical[0].iter_mut().enumerate() {
+            *slot = Some(tile as u16);
         }
-        for tile in 0..192usize {
-            physical[1][tile] = Some(256 + tile as u16);
+        for (tile, slot) in physical[1].iter_mut().take(192).enumerate() {
+            *slot = Some(256 + tile as u16);
         }
-        let (chr_maps, unmapped) = build_chr_maps(&physical);
+        let (chr_maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp)
+            .map_err(|err| Error::Diagnostic(format!("CHR map generation failed: {err}")))?;
         let report = chr_pack_report(chr, packs, &physical, chr_4bpp.len(), unmapped);
-        return (chr_4bpp, chr_maps, report);
+        let report = append_sprite_fallback_report(report, fallbacks);
+        return Ok((chr_4bpp, chr_maps, report));
     }
 
     let mut chr_4bpp = vec![0u8; 448 * 32];
@@ -621,9 +626,31 @@ fn build_chr_assets(chr: &[u8], packs: &[profile::ChrPackRange]) -> (Vec<u8>, Ve
             physical[usize::from(range.table)][usize::from(tile)] = Some(dest_slot as u16);
         }
     }
-    let (chr_maps, unmapped) = build_chr_maps(&physical);
+    let (chr_maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp)
+        .map_err(|err| Error::Diagnostic(format!("CHR map generation failed: {err}")))?;
     let report = chr_pack_report(chr, packs, &physical, chr_4bpp.len(), unmapped);
-    (chr_4bpp, chr_maps, report)
+    let report = append_sprite_fallback_report(report, fallbacks);
+    Ok((chr_4bpp, chr_maps, report))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SpriteFallbacks {
+    base_2000_rel: Option<u8>,
+    base_0000_rel: Option<u8>,
+}
+
+fn append_sprite_fallback_report(mut report: String, fallbacks: SpriteFallbacks) -> String {
+    report.push_str(&format!(
+        "sprite fallback tile bytes: base $2000 -> {}, base $0000 -> {}\n",
+        format_optional_tile(fallbacks.base_2000_rel),
+        format_optional_tile(fallbacks.base_0000_rel)
+    ));
+    report
+}
+
+fn format_optional_tile(tile: Option<u8>) -> String {
+    tile.map(|tile| format!("${tile:02X}"))
+        .unwrap_or_else(|| "not needed".to_string())
 }
 
 fn chr_pack_report(
@@ -720,7 +747,10 @@ fn format_runs(runs: &[(u8, u8)]) -> String {
         .join(", ")
 }
 
-fn build_chr_maps(physical: &[[Option<u16>; 256]; 2]) -> (Vec<u8>, usize) {
+fn build_chr_maps(
+    physical: &[[Option<u16>; 256]; 2],
+    chr_4bpp: &[u8],
+) -> Result<(Vec<u8>, usize, SpriteFallbacks), String> {
     let mut out = Vec::with_capacity(0x600);
     let mut unmapped = 0usize;
 
@@ -738,15 +768,39 @@ fn build_chr_maps(physical: &[[Option<u16>; 256]; 2]) -> (Vec<u8>, usize) {
         }
     }
 
-    // Unmapped sprite tiles resolve to a reserved blank/transparent slot
-    // instead of slot 0 (a real, non-blank tile). In 224-line mode the name
-    // table sits at $3700 (slot 440); within the valid sprite region 256-439
-    // the profile packs patterns into 256-422, reserves slot 423 as the blank
-    // (unpacked = all-zero = transparent), and keeps 424-439 as runtime flip
-    // scratch. This is how SMB's blank sprite tile $FC -- and any sprite tile
-    // that didn't fit -- end up see-through rather than garbage. Value is
-    // relative to the VDP sprite pattern base (reg6 = $2000): slot 423 -> 167.
-    const BLANK_SPRITE_VALUE: u8 = 167;
+    // Unmapped/unusable sprite tiles must resolve to a transparent tile under
+    // the *active* SMS sprite base. Table 0 is used with VDP sprite base $2000,
+    // so a physical slot in 256..=423 becomes a relative SAT tile byte. Table 1
+    // is used with VDP sprite base $0000, so a physical slot in 0..=255 is
+    // already the SAT tile byte. Keep SMB's established $2000 blank (slot 423 ->
+    // relative 167) when it is transparent, but do not reuse that value for
+    // base $0000 where it would point at physical slot 167.
+    let needs_fallback_2000 = physical[0]
+        .iter()
+        .any(|slot| !matches!(slot, Some(256..=511)));
+    let needs_fallback_0000 = physical[1]
+        .iter()
+        .any(|slot| !matches!(slot, Some(0..=255)));
+    let fallback_2000 =
+        if needs_fallback_2000 {
+            Some(transparent_sprite_fallback_2000(chr_4bpp).ok_or_else(|| {
+                "no transparent sprite fallback tile for SMS base $2000".to_string()
+            })?)
+        } else {
+            None
+        };
+    let fallback_0000 =
+        if needs_fallback_0000 {
+            Some(transparent_sprite_fallback_0000(chr_4bpp).ok_or_else(|| {
+                "no transparent sprite fallback tile for SMS base $0000".to_string()
+            })?)
+        } else {
+            None
+        };
+    let fallbacks = SpriteFallbacks {
+        base_2000_rel: fallback_2000,
+        base_0000_rel: fallback_0000,
+    };
     for (table_idx, table) in physical.iter().take(2).enumerate() {
         for slot in table.iter().take(256) {
             let value = match slot {
@@ -754,11 +808,19 @@ fn build_chr_maps(physical: &[[Option<u16>; 256]; 2]) -> (Vec<u8>, usize) {
                 Some(slot @ 256..=511) if table_idx == 0 => (*slot - 256) as u8,
                 Some(_) => {
                     unmapped += 1;
-                    BLANK_SPRITE_VALUE
+                    if table_idx == 0 {
+                        fallback_2000.expect("fallback required for table 0")
+                    } else {
+                        fallback_0000.expect("fallback required for table 1")
+                    }
                 }
                 None => {
                     unmapped += 1;
-                    BLANK_SPRITE_VALUE
+                    if table_idx == 0 {
+                        fallback_2000.expect("fallback required for table 0")
+                    } else {
+                        fallback_0000.expect("fallback required for table 1")
+                    }
                 }
             };
             out.push(value);
@@ -766,7 +828,28 @@ fn build_chr_maps(physical: &[[Option<u16>; 256]; 2]) -> (Vec<u8>, usize) {
     }
 
     debug_assert_eq!(out.len(), 0x600);
-    (out, unmapped)
+    Ok((out, unmapped, fallbacks))
+}
+
+fn transparent_sprite_fallback_2000(chr_4bpp: &[u8]) -> Option<u8> {
+    if sms_tile_is_transparent(chr_4bpp, 423) {
+        return Some(167);
+    }
+    (256..=423)
+        .find(|slot| sms_tile_is_transparent(chr_4bpp, *slot))
+        .map(|slot| (slot - 256) as u8)
+}
+
+fn transparent_sprite_fallback_0000(chr_4bpp: &[u8]) -> Option<u8> {
+    (0..=255)
+        .find(|slot| sms_tile_is_transparent(chr_4bpp, *slot))
+        .map(|slot| slot as u8)
+}
+
+fn sms_tile_is_transparent(chr_4bpp: &[u8], slot: usize) -> bool {
+    let start = slot * 32;
+    let end = start + 32;
+    end <= chr_4bpp.len() && chr_4bpp[start..end].iter().all(|byte| *byte == 0)
 }
 
 fn copy_converted_chr_tile(chr: &[u8], source_tile: usize, dest: &mut [u8]) {
@@ -921,3 +1004,64 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_far_call",
     "rt_far_jmp",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn physical_maps() -> [[Option<u16>; 256]; 2] {
+        [[None; 256]; 2]
+    }
+
+    fn map_table_to_base_2000(physical: &mut [[Option<u16>; 256]; 2], table: usize) {
+        for (tile, slot) in physical[table].iter_mut().enumerate() {
+            *slot = Some(256 + tile as u16);
+        }
+    }
+
+    fn map_table_to_base_0000(physical: &mut [[Option<u16>; 256]; 2], table: usize) {
+        for (tile, slot) in physical[table].iter_mut().enumerate() {
+            *slot = Some(tile as u16);
+        }
+    }
+
+    #[test]
+    fn sprite_base_2000_fallback_prefers_reserved_blank_167() {
+        let mut physical = physical_maps();
+        map_table_to_base_0000(&mut physical, 1);
+        let chr_4bpp = vec![0u8; 448 * 32];
+
+        let (maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp).unwrap();
+
+        assert_eq!(maps[0x400], 167);
+        assert_eq!(fallbacks.base_2000_rel, Some(167));
+        assert_eq!(fallbacks.base_0000_rel, None);
+        assert_eq!(unmapped, 512);
+    }
+
+    #[test]
+    fn sprite_base_0000_fallback_uses_transparent_base0_tile() {
+        let mut physical = physical_maps();
+        map_table_to_base_2000(&mut physical, 0);
+        let mut chr_4bpp = vec![0xffu8; 512 * 32];
+        chr_4bpp[5 * 32..6 * 32].fill(0);
+
+        let (maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp).unwrap();
+
+        assert_eq!(maps[0x500], 5);
+        assert_eq!(fallbacks.base_2000_rel, None);
+        assert_eq!(fallbacks.base_0000_rel, Some(5));
+        assert_eq!(unmapped, 512);
+    }
+
+    #[test]
+    fn sprite_base_0000_fallback_fails_closed_without_transparent_tile() {
+        let mut physical = physical_maps();
+        map_table_to_base_2000(&mut physical, 0);
+        let chr_4bpp = vec![0xffu8; 512 * 32];
+
+        let err = build_chr_maps(&physical, &chr_4bpp).unwrap_err();
+
+        assert!(err.contains("SMS base $0000"));
+    }
+}
