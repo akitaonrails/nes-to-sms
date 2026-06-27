@@ -2528,10 +2528,10 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
                     let (r, g, b) = cram_to_rgb(color);
                     // Apply the SMS background scroll so this render matches
                     // what the hardware/emulator displays: reg8 shifts the bg
-                    // right, reg9 shifts it up (both wrap). reg0 bit 1 locks
-                    // horizontal scroll on rows 0-1 (the status bar), so honor
-                    // that the way the VDP does.
-                    let lock_top = bus.vdp_regs[0] & 0x02 != 0;
+                    // right, reg9 shifts it up (both wrap). SMS VDP reg0 bit 6
+                    // locks horizontal scroll on rows 0-1 (the status bar), so
+                    // honor that the way the VDP does.
+                    let lock_top = bus.vdp_regs[0] & 0x40 != 0;
                     let reg8 = if lock_top && row < 2 {
                         0
                     } else {
@@ -2550,8 +2550,13 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
     }
     eprintln!(
         "framebuffer scroll: reg8={} reg9={} | NES scrollX($CB0C)={} cam_lo($071C)={} cam_pg($071A)={} playerX($0086)={} playerPg($006D)={} | bg_variant_pool_next($CA00)={}",
-        bus.vdp_regs[8], bus.vdp_regs[9],
-        bus.ram[0x0B0C], bus.ram[0x071C], bus.ram[0x071A], bus.ram[0x0086], bus.ram[0x006D],
+        bus.vdp_regs[8],
+        bus.vdp_regs[9],
+        bus.ram[0x0B0C],
+        bus.ram[0x071C],
+        bus.ram[0x071A],
+        bus.ram[0x0086],
+        bus.ram[0x006D],
         bus.ram[0x0A00]
     );
 

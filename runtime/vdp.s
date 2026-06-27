@@ -33,11 +33,12 @@ _vdp_init_loop:
   jr  _vdp_init_loop
 
 _vdp_init_table:
-  ; reg 0: $26 = %00100110
+  ; reg 0: $66 = %01100110
+  ;   bit 6 = 1  lock horizontal scroll for rows 0-1 (coarse NES HUD/sprite-0 split)
   ;   bit 5 = 1  mode bit M4 (selects Mode 4)
   ;   bit 2 = 1  hide left-column (prevents scroll artifacts)
   ;   bit 1 = 1  mode bit M2
-  .db 0, $26
+  .db 0, $66
   ; reg 1: $A0 = %10100000
   ;   bit 7 = 1  VBlank/frame interrupt enable
   ;   bit 6 = 0  display disabled (enabled after asset load in boot_main)
