@@ -2568,6 +2568,7 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
     const W: usize = 256;
     const H: usize = 224;
     let mut pixels = vec![0u8; W * H * 3];
+    let mut bg_opaque = vec![false; W * H];
 
     // SMS CRAM byte → RGB. Each entry: --BBGGRR (2 bits per channel, 0-3).
     let cram_to_rgb = |b: u8| -> (u8, u8, u8) {
@@ -2624,6 +2625,7 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
                 | (((p1 >> bit) & 1) << 1)
                 | (((p2 >> bit) & 1) << 2)
                 | (((p3 >> bit) & 1) << 3);
+            bg_opaque[screen_y * W + screen_x] = c != 0;
             let color = bus.cram[palette_offset + c as usize];
             let (r, g, b) = cram_to_rgb(color);
             let pi = (screen_y * W + screen_x) * 3;
@@ -2650,14 +2652,22 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
     //   $3F00..$3F3F  64 Y positions (1 byte each). Y==$D0 hides remaining.
     //   $3F80..$3FFF  64 (X, tile_number) pairs (2 bytes each).
     // Sprites use the sprite palette at CRAM[16..32]. Color 0 = transparent.
-    let mut active_sprites = 0;
+    let mut sat_entries = Vec::new();
     for i in 0..64 {
         let y = bus.vram[0x3F00 + i];
         if y == 0xD0 {
             break;
         } // terminator: remaining sprites hidden
+        sat_entries.push(i);
+    }
+    let mut active_sprites = 0;
+    // Lower SAT/OAM indices have higher sprite priority. Draw later entries
+    // first so earlier entries are composited last and remain visible.
+    for i in sat_entries.into_iter().rev() {
+        let y = bus.vram[0x3F00 + i];
         let x = bus.vram[0x3F80 + i * 2];
         let tile = bus.vram[0x3F80 + i * 2 + 1] as usize;
+        let attr = bus.ram[0x1480 + i]; // runtime SAT_ATTRS = $D480
         // SMS sprite Y is the byte value, displayed one line below
         // (y == 0 means line 1). Skip if off-screen.
         let sy_top = y as usize + 1;
@@ -2695,7 +2705,11 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
                 if sx >= W || sy >= H {
                     continue;
                 }
-                let pi = (sy * W + sx) * 3;
+                let pi = sy * W + sx;
+                if attr & 0x20 != 0 && bg_opaque[pi] {
+                    continue;
+                }
+                let pi = pi * 3;
                 pixels[pi] = r;
                 pixels[pi + 1] = g;
                 pixels[pi + 2] = b;

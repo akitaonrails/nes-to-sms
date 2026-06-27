@@ -9,7 +9,8 @@
 ; The staging area in SMS RAM mirrors the NES OAM layout (64 x 4 = 256 bytes
 ; at $C900-$C9FF as written by SMB via $2004 / $4014 DMA):
 ;   Each entry is 4 bytes: [Y, tile, attr, X]
-;   Byte 2 (attr): bit 6 = H-flip, bit 7 = V-flip, bits 1..0 = OAM palette.
+;   Byte 2 (attr): bit 5 = behind-background priority, bit 6 = H-flip,
+;   bit 7 = V-flip, bits 1..0 = OAM palette.
 ;
 ; A sprite is hidden by setting its Y position to $D0.
 ;
@@ -33,6 +34,7 @@
 ;
 ; RAM scratch (free region above the $CC00-$D3FF nametable shadow):
 ;   $D400-$D43F  resolved SMS tile number per sprite (64 bytes)
+;   $D480-$D4BF  compacted OAM attr byte per visible SAT entry (64 bytes)
 ;   $D460        scratch_next (next free flip scratch slot, 0..15)
 ;   $D461        current flip bits ($40 H, $80 V), do_flip temp
 ;   $D462-$D463  current flip source base address, do_flip temp
@@ -50,6 +52,7 @@
 .define SAT_SCRATCH_BASE  168
 .define SAT_SCRATCH_COUNT 16
 .define SAT_RESOLVED      $d400
+.define SAT_ATTRS         $d480
 .define SAT_SCRATCH_NEXT  $d460
 .define SAT_FLIP_BITS     $d461
 .define SAT_FLIP_SRC      $d462
@@ -287,6 +290,7 @@ rt_sat_upload:
   out  ($bf), a
 
   ld   hl, $c900             ; Y is first byte of each 4-byte entry
+  ld   de, SAT_ATTRS         ; compacted attrs mirror visible SAT order
   ld   b, 64
 _sat_y_loop:
   ld   a, (hl)               ; NES Y
@@ -295,6 +299,13 @@ _sat_y_loop:
   inc  a                     ; visible SMS Y = NES Y + 1
 _sat_y_visible:
   out  ($be), a
+  push hl
+  inc  hl                    ; -> tile
+  inc  hl                    ; -> attr
+  ld   a, (hl)
+  ld   (de), a               ; attr for this compacted SAT entry
+  inc  de
+  pop  hl
 _sat_y_skip:
   inc  hl
   inc  hl
