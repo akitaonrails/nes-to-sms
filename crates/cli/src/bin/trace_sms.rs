@@ -433,6 +433,42 @@ fn parse_addr_range(s: &str) -> Option<(u16, u16)> {
     Some((parse_hex_addr(start)?, parse_hex_addr(end)?))
 }
 
+fn parse_wla_symbol_line(line: &str) -> Option<(u16, String)> {
+    let mut parts = line.split_whitespace();
+    let addr = parts.next()?;
+    let label = parts.next()?;
+    let (_bank, addr) = addr.split_once(':')?;
+    let addr = parse_hex_addr(addr)?;
+    Some((addr, label.to_string()))
+}
+
+fn load_wla_symbols(path: &Path) -> HashMap<u16, Vec<String>> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut symbols: HashMap<u16, Vec<String>> = HashMap::new();
+    for line in text.lines() {
+        if let Some((addr, label)) = parse_wla_symbol_line(line) {
+            symbols.entry(addr).or_default().push(label);
+        }
+    }
+    symbols
+}
+
+fn format_symbol_suffix(symbols: &HashMap<u16, Vec<String>>, addr: u16) -> String {
+    let Some(labels) = symbols.get(&addr) else {
+        return String::new();
+    };
+    if labels.is_empty() {
+        return String::new();
+    }
+    let mut shown = labels.iter().take(2).cloned().collect::<Vec<_>>().join("/");
+    if labels.len() > 2 {
+        shown.push_str("/...");
+    }
+    format!(" {shown}")
+}
+
 impl Bus for SmsBus {
     fn read(&mut self, addr: u16) -> u8 {
         match addr {
@@ -1436,6 +1472,7 @@ fn main() {
     }
 
     let rom = std::fs::read(&rom_path).expect("read rom");
+    let symbols = load_wla_symbols(&rom_path.with_extension("sym"));
     let mut bus = SmsBus::new(rom, controller_port_dc);
     let mut cpu = Cpu::new();
     cpu.pc = 0x0000;
@@ -2456,7 +2493,8 @@ fn main() {
     let mut call_sorted: Vec<_> = call_targets.into_iter().collect();
     call_sorted.sort_by(|a, b| b.1.cmp(&a.1));
     for (target, n) in call_sorted.iter().take(20) {
-        println!("  call ${target:04X}: {n} times");
+        let suffix = format_symbol_suffix(&symbols, *target);
+        println!("  call ${target:04X}{suffix}: {n} times");
     }
 
     // Dump SMS framebuffer to PPM if requested by env var SMS_DUMP_PPM.
@@ -3339,6 +3377,26 @@ mod tests {
             "1-1_flagpole_transition"
         );
         assert_eq!(checkpoint_slug("!!!"), "checkpoint");
+    }
+
+    #[test]
+    fn parses_wla_symbol_lines_for_call_labels() {
+        assert_eq!(
+            parse_wla_symbol_line("00:0492 _bgv_sub_palette"),
+            Some((0x0492, "_bgv_sub_palette".to_string()))
+        );
+        assert_eq!(parse_wla_symbol_line("[labels]"), None);
+
+        let mut symbols = HashMap::new();
+        symbols.insert(
+            0x0492,
+            vec!["_bgv_sub_palette".to_string(), "alias".to_string()],
+        );
+        assert_eq!(
+            format_symbol_suffix(&symbols, 0x0492),
+            " _bgv_sub_palette/alias"
+        );
+        assert_eq!(format_symbol_suffix(&symbols, 0x1234), "");
     }
 
     #[test]
