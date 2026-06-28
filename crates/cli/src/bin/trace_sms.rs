@@ -38,6 +38,23 @@ enum ExpectedMirroring {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NtWriteKind {
+    Tile,
+    Attr,
+}
+
+fn nt_ppu_write_kind(ppu_addr: u16) -> Option<NtWriteKind> {
+    if !(0x2000..=0x2FFF).contains(&ppu_addr) {
+        return None;
+    }
+    if (ppu_addr & 0x03FF) >= 0x03C0 {
+        Some(NtWriteKind::Attr)
+    } else {
+        Some(NtWriteKind::Tile)
+    }
+}
+
 impl ExpectedMirroring {
     fn label(self) -> &'static str {
         match self {
@@ -379,6 +396,29 @@ struct RuntimeMaterializerMonitor {
     first_on_vdp: Option<RuntimeMaterializerOffense>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Z80StackWatermark {
+    initial_sp: u16,
+    low_sp: u16,
+}
+
+impl Z80StackWatermark {
+    fn new(initial_sp: u16) -> Self {
+        Self {
+            initial_sp,
+            low_sp: initial_sp,
+        }
+    }
+
+    fn observe(&mut self, sp: u16) {
+        self.low_sp = self.low_sp.min(sp);
+    }
+
+    fn used(self) -> u16 {
+        self.initial_sp.saturating_sub(self.low_sp)
+    }
+}
+
 impl RuntimeMaterializerMonitor {
     fn new(symbols: &HashMap<String, (u8, u16)>) -> Self {
         let hooks = MATERIALIZER_HOOK_SYMBOLS
@@ -534,6 +574,19 @@ struct SmsBus {
     nt_trace_ciram_tile_writes: u32,
     /// Count of trace-observed PPUDATA writes into attribute bytes.
     nt_trace_ciram_attr_writes: u32,
+    nt_raw_tile_writes_on: u32,
+    nt_raw_tile_writes_off: u32,
+    nt_raw_attr_writes_on: u32,
+    nt_raw_attr_writes_off: u32,
+    nt_raw_frame_tile_writes: u32,
+    nt_raw_frame_attr_writes: u32,
+    nt_raw_max_frame_tile_writes: u32,
+    nt_raw_max_frame_attr_writes: u32,
+    nt_raw_max_frame_total_writes: u32,
+    nt_raw_current_burst: u32,
+    nt_raw_max_burst: u32,
+    nt_raw_max_burst_frame: usize,
+    nt_raw_max_burst_step: usize,
     /// Trace-only source-tile view of the current folded SMS nametable. Unlike
     /// SMS VRAM nametable bytes, these are original NES tile IDs, so they are a
     /// safe comparison target for dry source-space projection diagnostics.
@@ -702,6 +755,19 @@ impl SmsBus {
             nt_trace_ciram_writes: 0,
             nt_trace_ciram_tile_writes: 0,
             nt_trace_ciram_attr_writes: 0,
+            nt_raw_tile_writes_on: 0,
+            nt_raw_tile_writes_off: 0,
+            nt_raw_attr_writes_on: 0,
+            nt_raw_attr_writes_off: 0,
+            nt_raw_frame_tile_writes: 0,
+            nt_raw_frame_attr_writes: 0,
+            nt_raw_max_frame_tile_writes: 0,
+            nt_raw_max_frame_attr_writes: 0,
+            nt_raw_max_frame_total_writes: 0,
+            nt_raw_current_burst: 0,
+            nt_raw_max_burst: 0,
+            nt_raw_max_burst_frame: 0,
+            nt_raw_max_burst_step: 0,
             nt_trace_folded_source_tiles: [0; 0x400],
             nt_trace_folded_source_tile_seen: [false; 0x400],
             nt_trace_folded_source_tile_writes: 0,
@@ -785,22 +851,30 @@ impl SmsBus {
         }
     }
 
+    #[cfg(test)]
     fn record_trace_ppu_write_call(&mut self, reg: u8, value: u8) {
+        self.record_trace_ppu_write_call_at(reg, value, 0, 0);
+    }
+
+    fn record_trace_ppu_write_call_at(&mut self, reg: u8, value: u8, step: usize, frame: usize) {
         if reg != 7 {
+            self.nt_raw_current_burst = 0;
             return;
         }
 
         let ppu_addr = ((self.ram[0x0B0F] as u16) << 8) | self.ram[0x0B10] as u16;
-        if !(0x2000..=0x2FFF).contains(&ppu_addr) {
+        let Some(kind) = nt_ppu_write_kind(ppu_addr) else {
+            self.nt_raw_current_burst = 0;
             return;
-        }
+        };
 
         let vertical = nt_ciram_index(ppu_addr, true);
         let horizontal = nt_ciram_index(ppu_addr, false);
         self.nt_trace_ciram_vertical[vertical] = value;
         self.nt_trace_ciram_horizontal[horizontal] = value;
         self.nt_trace_ciram_writes += 1;
-        if (ppu_addr & 0x03FF) >= 0x03C0 {
+        self.record_nt_raw_write_stats(kind, step, frame);
+        if kind == NtWriteKind::Attr {
             self.nt_trace_ciram_attr_writes += 1;
             self.mark_materializer_attr_dirty(ppu_addr);
         } else {
@@ -811,6 +885,39 @@ impl SmsBus {
             self.nt_trace_folded_source_tile_seen[folded_cell] = true;
             self.nt_trace_folded_source_tile_writes += 1;
         }
+    }
+
+    fn record_nt_raw_write_stats(&mut self, kind: NtWriteKind, step: usize, frame: usize) {
+        match (kind, current_render_state(self)) {
+            (NtWriteKind::Tile, RenderState::On) => self.nt_raw_tile_writes_on += 1,
+            (NtWriteKind::Tile, RenderState::Off) => self.nt_raw_tile_writes_off += 1,
+            (NtWriteKind::Attr, RenderState::On) => self.nt_raw_attr_writes_on += 1,
+            (NtWriteKind::Attr, RenderState::Off) => self.nt_raw_attr_writes_off += 1,
+        }
+        match kind {
+            NtWriteKind::Tile => self.nt_raw_frame_tile_writes += 1,
+            NtWriteKind::Attr => self.nt_raw_frame_attr_writes += 1,
+        }
+        self.nt_raw_current_burst += 1;
+        if self.nt_raw_current_burst > self.nt_raw_max_burst {
+            self.nt_raw_max_burst = self.nt_raw_current_burst;
+            self.nt_raw_max_burst_frame = frame;
+            self.nt_raw_max_burst_step = step;
+        }
+    }
+
+    fn finish_nt_raw_frame(&mut self) {
+        let total = self.nt_raw_frame_tile_writes + self.nt_raw_frame_attr_writes;
+        self.nt_raw_max_frame_tile_writes = self
+            .nt_raw_max_frame_tile_writes
+            .max(self.nt_raw_frame_tile_writes);
+        self.nt_raw_max_frame_attr_writes = self
+            .nt_raw_max_frame_attr_writes
+            .max(self.nt_raw_frame_attr_writes);
+        self.nt_raw_max_frame_total_writes = self.nt_raw_max_frame_total_writes.max(total);
+        self.nt_raw_frame_tile_writes = 0;
+        self.nt_raw_frame_attr_writes = 0;
+        self.nt_raw_current_burst = 0;
     }
 
     fn mark_materializer_tile_dirty(&mut self, ppu_addr: u16, reason: u8) {
@@ -2040,6 +2147,7 @@ fn main() {
     let mut cpu = Cpu::new();
     cpu.pc = 0x0000;
     cpu.sp = 0xDFF0;
+    let mut stack_watermark = Z80StackWatermark::new(cpu.sp);
 
     // PC histogram + last-100 ring buffer.
     let mut pc_counts: HashMap<u16, u32> = HashMap::new();
@@ -2095,6 +2203,7 @@ fn main() {
 
     for step in 0..steps {
         bus.watch_step = step;
+        stack_watermark.observe(cpu.sp);
         let pc = cpu.pc;
         bus.watch_pc = pc;
         bus.watch_bank1 = bus.slot_bank[1];
@@ -2118,7 +2227,7 @@ fn main() {
             first_ram_exec_step = Some((step, pc));
         }
         if pc == rt_ppu_write_addr {
-            bus.record_trace_ppu_write_call(cpu.b, cpu.a);
+            bus.record_trace_ppu_write_call_at(cpu.b, cpu.a, step, irqs_fired);
         }
         runtime_materializer_monitor.observe_pc(step, pc, cpu.sp, &bus);
         if log_pcs && step < 200 {
@@ -2357,6 +2466,7 @@ fn main() {
             prev_frame_control_writes = bus.vdp_control_writes;
             prev_frame_line_irqs = line_irqs_fired;
             prev_coarse_scroll = coarse_scroll;
+            bus.finish_nt_raw_frame();
             bus.clear_materializer_dirty();
             if first_fall_snapshot.is_none() && (bus.ram[0x0723] != 0 || bus.ram[0x00B5] >= 0x02) {
                 let recent_reads = bus
@@ -2455,6 +2565,7 @@ fn main() {
         }
     }
 
+    bus.finish_nt_raw_frame();
     println!("=== trace-sms summary ===");
     println!("ROM: {}", rom_path.display());
     println!("steps run: {taken}");
@@ -2989,6 +3100,10 @@ fn main() {
         "{}",
         format_runtime_materializer_hooks(&runtime_materializer_monitor)
     );
+    println!("{}", format_nt_raw_write_stats(&bus));
+    println!("{}", format_nt_raw_frame_stats(&bus));
+    println!("{}", format_nt_raw_shadow_parity(&bus));
+    println!("{}", format_z80_stack_low_water(stack_watermark));
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -3525,6 +3640,9 @@ fn dump_route_checkpoint(
         "{}",
         format_runtime_materializer_hooks(context.runtime_materializer_monitor)
     )?;
+    writeln!(f, "{}", format_nt_raw_write_stats(bus))?;
+    writeln!(f, "{}", format_nt_raw_frame_stats(bus))?;
+    writeln!(f, "{}", format_nt_raw_shadow_parity(bus))?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -4219,6 +4337,48 @@ fn format_runtime_materializer_hooks(monitor: &RuntimeMaterializerMonitor) -> St
         format_runtime_materializer_offense(&monitor.first_on_call),
         format_runtime_materializer_offense(&monitor.first_on_vdp),
         symbols
+    )
+}
+
+fn format_nt_raw_write_stats(bus: &SmsBus) -> String {
+    let total = bus.nt_raw_tile_writes_on
+        + bus.nt_raw_tile_writes_off
+        + bus.nt_raw_attr_writes_on
+        + bus.nt_raw_attr_writes_off;
+    format!(
+        "nt_raw_write_stats=tile_on={} tile_off={} attr_on={} attr_off={} total={}",
+        bus.nt_raw_tile_writes_on,
+        bus.nt_raw_tile_writes_off,
+        bus.nt_raw_attr_writes_on,
+        bus.nt_raw_attr_writes_off,
+        total
+    )
+}
+
+fn format_nt_raw_frame_stats(bus: &SmsBus) -> String {
+    format!(
+        "nt_raw_frame_stats=max_frame_tile={} max_frame_attr={} max_frame_total={} max_burst={} first_burst_frame={} first_burst_step={}",
+        bus.nt_raw_max_frame_tile_writes,
+        bus.nt_raw_max_frame_attr_writes,
+        bus.nt_raw_max_frame_total_writes,
+        bus.nt_raw_max_burst,
+        bus.nt_raw_max_burst_frame,
+        bus.nt_raw_max_burst_step
+    )
+}
+
+fn format_nt_raw_shadow_parity(bus: &SmsBus) -> String {
+    format!(
+        "nt_raw_shadow_parity=unavailable reason=runtime_raw_ciram_missing trace_writes={}",
+        bus.nt_trace_ciram_writes
+    )
+}
+
+fn format_z80_stack_low_water(watermark: Z80StackWatermark) -> String {
+    format!(
+        "z80_stack_low_water=sp=${:04X} used={}",
+        watermark.low_sp,
+        watermark.used()
     )
 }
 
@@ -5299,6 +5459,63 @@ mod tests {
         assert!(line.contains(
             "first_on_vdp=step=21 pc=$2348 symbol=rt_nt_materializer_bulk cb09=$18 vdp_r1=$40"
         ));
+    }
+
+    #[test]
+    fn nt_ppu_write_kind_classifies_tiles_and_attrs_by_page_offset() {
+        assert_eq!(nt_ppu_write_kind(0x2000), Some(NtWriteKind::Tile));
+        assert_eq!(nt_ppu_write_kind(0x23BF), Some(NtWriteKind::Tile));
+        assert_eq!(nt_ppu_write_kind(0x23C0), Some(NtWriteKind::Attr));
+        assert_eq!(nt_ppu_write_kind(0x27FF), Some(NtWriteKind::Attr));
+        assert_eq!(nt_ppu_write_kind(0x2BC0), Some(NtWriteKind::Attr));
+        assert_eq!(nt_ppu_write_kind(0x3000), None);
+    }
+
+    #[test]
+    fn nt_raw_write_stats_split_render_state_and_frames() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B09] = 0x18;
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x00;
+        bus.record_trace_ppu_write_call_at(7, 0x11, 7, 1);
+        bus.ram[0x0B09] = 0x00;
+        bus.ram[0x0B0F] = 0x23;
+        bus.ram[0x0B10] = 0xC0;
+        bus.record_trace_ppu_write_call_at(7, 0x22, 8, 1);
+        bus.finish_nt_raw_frame();
+
+        assert_eq!(
+            format_nt_raw_write_stats(&bus),
+            "nt_raw_write_stats=tile_on=1 tile_off=0 attr_on=0 attr_off=1 total=2"
+        );
+        assert_eq!(
+            format_nt_raw_frame_stats(&bus),
+            "nt_raw_frame_stats=max_frame_tile=1 max_frame_attr=1 max_frame_total=2 max_burst=2 first_burst_frame=1 first_burst_step=8"
+        );
+    }
+
+    #[test]
+    fn raw_shadow_parity_reports_unavailable_trace_source() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.nt_trace_ciram_writes = 3;
+        assert_eq!(
+            format_nt_raw_shadow_parity(&bus),
+            "nt_raw_shadow_parity=unavailable reason=runtime_raw_ciram_missing trace_writes=3"
+        );
+    }
+
+    #[test]
+    fn z80_stack_low_water_tracks_minimum_sp() {
+        let mut watermark = Z80StackWatermark::new(0xDFF0);
+        watermark.observe(0xDFE0);
+        watermark.observe(0xDFF8);
+        watermark.observe(0xDFD0);
+        assert_eq!(watermark.low_sp, 0xDFD0);
+        assert_eq!(watermark.used(), 0x20);
+        assert_eq!(
+            format_z80_stack_low_water(watermark),
+            "z80_stack_low_water=sp=$DFD0 used=32"
+        );
     }
 
     #[test]
