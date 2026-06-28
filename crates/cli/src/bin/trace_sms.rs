@@ -18,7 +18,7 @@ use z80_emu::{Bus, Cpu, StepError};
 const BANK_SIZE: usize = 0x4000;
 const RAM_SIZE: usize = 0x2000;
 const IRQ_PERIOD: usize = 60_000;
-const RT_PPU_WRITE_ADDR: u16 = 0x0068;
+const RT_PPU_WRITE_FALLBACK_ADDR: u16 = 0x0068;
 
 #[derive(Clone)]
 struct SmsBus {
@@ -1513,6 +1513,10 @@ fn main() {
     let sym_path = rom_path.with_extension("sym");
     let symbols = load_wla_symbols(&sym_path);
     let symbol_defs = load_wla_symbol_defs(&sym_path);
+    let rt_ppu_write_addr = symbol_defs
+        .get("rt_ppu_write")
+        .map(|(_, addr)| *addr)
+        .unwrap_or(RT_PPU_WRITE_FALLBACK_ADDR);
     let mut bus = SmsBus::new(rom, controller_port_dc);
     let mut cpu = Cpu::new();
     cpu.pc = 0x0000;
@@ -1591,7 +1595,7 @@ fn main() {
         if first_ram_exec_step.is_none() && pc >= 0xC000 {
             first_ram_exec_step = Some((step, pc));
         }
-        if pc == RT_PPU_WRITE_ADDR {
+        if pc == rt_ppu_write_addr {
             bus.record_trace_ppu_write_call(cpu.b, cpu.a);
         }
         if log_pcs && step < 200 {

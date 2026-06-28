@@ -426,6 +426,39 @@ _bgw_s_no_base_shadow:
   pop  hl
   ret
 
+; ─── rt_write_mapped_bg_tile_s_noshadow ─────────────────────────────────────
+; Write a background nametable entry from an explicit subpalette without
+; touching the per-cell base-slot shadow.
+;   Entry: A = NES tile byte, B = S (0..3), DE = SMS nametable low-byte address.
+;   Preserves BC, DE, HL. Clobbers AF. Leaves data_prg_low mapped in slot 2.
+; Helper-only scaffold for a later CIRAM materializer; current paths still use
+; BGV_BSHADOW so attribute redraw remains route-equivalent.
+rt_write_mapped_bg_tile_s_noshadow:
+  push hl
+  push de
+  push bc
+  call rt_bg_map_base_slot    ; -> A = base slot, preserves B=S and DE=addr
+  ld   c, a                   ; C = base slot, B = explicit S
+  call rt_bg_get_variant      ; -> A = pool slot
+  ld   h, a                   ; keep variant while restoring caller registers
+  pop  bc
+  pop  de
+
+  ; Write the nametable entry. Variant generation may have moved the VDP addr.
+  ld   a, e
+  out  ($bf), a
+  ld   a, d
+  and  $3f
+  or   $40
+  out  ($bf), a
+  ld   a, h
+  out  ($be), a              ; tile low byte = variant slot
+  xor  a
+  out  ($be), a              ; high byte = 0 (palette 0, tile bit 8 = 0)
+
+  pop  hl
+  ret
+
 ; Map a NES sprite tile to an SMS sprite tile byte.
 ; Entry: A = NES OAM tile byte. Uses PPUCTRL bit 3 ($CB08) to choose NES sprite
 ; pattern table 0/1. Table 0 maps to tile bytes for SMS sprite base $2000;
