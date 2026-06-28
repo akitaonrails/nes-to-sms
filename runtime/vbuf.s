@@ -152,6 +152,13 @@ _vbuf_flush_loop:
 _vbuf_flush_nametable_tile:
   ; DE = NES nametable byte. Convert `(DE - $2000) & $03FF` to
   ; SMS `$3700 + offset * 2` (224-line-mode name table base).
+  ; Resolve S from the compact mirrored attribute shadow while DE is still the
+  ; NES PPU tile address. Keep the vbuf source pointer and remaining count on
+  ; the stack because the helper clobbers BC/HL.
+  push hl
+  push bc
+  call rt_nt_attr_s_from_attr_shadow ; A = S, preserves DE, clobbers BC/HL
+  push af                    ; keep S across folded-address calculation
   ld   a, d
   and  $03
   ld   d, a                  ; DE now 0..$03BF
@@ -167,8 +174,14 @@ _vbuf_flush_nametable_tile:
   and  $3f
   or   $40
   out  ($bf), a
+  pop  af                    ; A = S
+  pop  bc                    ; restore remaining byte count / len
+  pop  hl                    ; restore source pointer to tile data byte
+  push bc                    ; keep walker count while B carries explicit S
+  ld   b, a                  ; B = S
   ld   a, (hl)               ; NES tile index
-  call rt_write_mapped_bg_tile
+  call rt_write_mapped_bg_tile_s
+  pop  bc                    ; restore walker count
   inc  hl
   ld   a, b
   dec  a                     ; consumed one data byte
