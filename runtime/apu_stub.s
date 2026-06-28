@@ -1,8 +1,10 @@
 ; apu_stub.s — APU and mapper write stubs for v1.
 ;
-; All APU writes are discarded for v1. They are optionally logged to a
-; ring buffer at $CE00-$CFFF (512 bytes) for debugging. The ring buffer
-; uses a write pointer at $CB1E-$CB1F (16-bit, little-endian).
+; All APU writes are discarded for v1. They can optionally be logged to a
+; ring buffer at $CE00-$CFFF (512 bytes) for debugging, but logging is disabled
+; by default because that RAM range is reserved for future raw nametable/CIRAM
+; shadow work. The ring buffer uses a write pointer at $CB1E-$CB1F (16-bit,
+; little-endian).
 ;
 ; Ring buffer record format (5 bytes):
 ;   [addr_hi, addr_lo, value, frame_lo, sentinel=$AA]
@@ -14,7 +16,7 @@
 ; rt_mapper_write discards all writes (NROM has no mapper registers).
 ; For banked mappers (MMC1, MMC3) a mapper.s module will replace this.
 
-.define APU_LOG_ENABLE 1    ; set to 0 to disable ring-buffer logging
+.define APU_LOG_ENABLE 0    ; keep $CE00-$CFFF free for nametable/CIRAM work
 
 .section "apu_stub" free
 
