@@ -2278,6 +2278,7 @@ fn main() {
     println!("{}", format_nt_trace_ciram_summary(&bus, false));
     println!("{}", format_nt_dry_project_summary(&bus, true));
     println!("{}", format_nt_dry_project_summary(&bus, false));
+    println!("{}", format_nt_folded_s_compact_mismatches(&bus));
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -2745,6 +2746,7 @@ fn dump_route_checkpoint(
     writeln!(f, "{}", format_nt_trace_ciram_summary(bus, false))?;
     writeln!(f, "{}", format_nt_dry_project_summary(bus, true))?;
     writeln!(f, "{}", format_nt_dry_project_summary(bus, false))?;
+    writeln!(f, "{}", format_nt_folded_s_compact_mismatches(bus))?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -2919,6 +2921,43 @@ fn format_nt_dry_project_summary(bus: &SmsBus, vertical_mirroring: bool) -> Stri
         "nt_dry_project_{mode}=diffs:{diffs} rows_28_29:{rows_28_29} folded_writes:{} first={first}",
         bus.nt_trace_folded_source_tile_writes
     )
+}
+
+fn nt_folded_cc_s(bus: &SmsBus, cell: usize) -> u8 {
+    let shadow_addr = 0x0C01 + cell * 2;
+    bus.ram[shadow_addr] & 0x03
+}
+
+fn nt_folded_compact_s(bus: &SmsBus, cell: usize) -> u8 {
+    let byte = bus.ram[0x1300 + cell / 4];
+    (byte >> ((cell & 0x03) * 2)) & 0x03
+}
+
+fn format_nt_folded_s_compact_mismatches(bus: &SmsBus) -> String {
+    let mut total = 0usize;
+    let mut examples = Vec::new();
+    for cell in 0..(32 * 28) {
+        let folded = nt_folded_cc_s(bus, cell);
+        let compact = nt_folded_compact_s(bus, cell);
+        if folded != compact {
+            total += 1;
+            if examples.len() < 8 {
+                let row = cell / 32;
+                let col = cell % 32;
+                examples.push(format!(
+                    "cell={row:02},{col:02} cc={folded} compact={compact}"
+                ));
+            }
+        }
+    }
+    if examples.is_empty() {
+        format!("nt_folded_s_compact_mismatch={total} first=none")
+    } else {
+        format!(
+            "nt_folded_s_compact_mismatch={total} first={}",
+            examples.join(" ")
+        )
+    }
 }
 
 fn format_nametable_column_occupancy(bus: &SmsBus) -> String {
@@ -3454,5 +3493,25 @@ mod tests {
         let projection = nt_dry_project_tile_for_cell(&bus, 0, 0, true);
         assert_eq!(projection.source_row, 28);
         assert!(format_nt_dry_project_summary(&bus, true).contains("rows_28_29:64"));
+    }
+
+    #[test]
+    fn folded_s_compact_diagnostic_compares_cc_shadow_to_bitpack() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+
+        bus.ram[0x0C01] = 2; // cell 0 in active folded $CCxx state.
+        bus.ram[0x1300] = 2; // cell 0 in compact $D300 bitpack.
+        assert_eq!(
+            format_nt_folded_s_compact_mismatches(&bus),
+            "nt_folded_s_compact_mismatch=0 first=none"
+        );
+
+        bus.ram[0x0C03] = 3; // cell 1, but compact still has 0 for bits 2..3.
+        assert_eq!(nt_folded_cc_s(&bus, 1), 3);
+        assert_eq!(nt_folded_compact_s(&bus, 1), 0);
+        assert_eq!(
+            format_nt_folded_s_compact_mismatches(&bus),
+            "nt_folded_s_compact_mismatch=1 first=cell=00,01 cc=3 compact=0"
+        );
     }
 }

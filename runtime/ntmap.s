@@ -1,9 +1,10 @@
 ; ntmap.s — NES nametable/CIRAM address helpers.
 ;
 ; This is a scaffold for the runtime nametable-shadow materializer. It does not
-; write the CIRAM shadow yet because chrmap.s still uses $CC00-$D3FF as folded
-; SMS per-cell subpalette state. Callers may use the helper once that storage
-; collision is removed.
+; write a full CIRAM tile shadow yet because chrmap.s still uses $CC00-$D2FF
+; as the authoritative folded SMS per-cell subpalette state. A compact duplicate
+; lives at $D300-$D3DF as migration scaffolding, but callers may use the full
+; helper only once the folded-shadow storage collision is removed.
 
 .define NT_ATTR_SHADOW $cb80
 

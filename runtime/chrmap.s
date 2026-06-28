@@ -23,7 +23,8 @@
 ;   $CA01-$CA06  do_variant scratch (p2, p3, slot, src ptr lo/hi, attr S)
 ;   $CA07        ring-wrapped flag (0 until slots 64-255 have all been used)
 ;   $CA40-$CAFF  reverse map for recycled slots 64-255: slot -> old base tile
-;   $CC00-$D2FF  nametable shadow — now stores per-cell sub-palette S (0-3)
+;   $CC00-$D2FF  nametable shadow — active per-cell sub-palette S (0-3)
+;   $D300-$D3DF  compact folded SMS sub-palette shadow, 4 cells/byte
 ;   $D600-$D9FF  variant cache FC[base*4 + S] -> pool slot ($FF = unassigned)
 
 .define BGV_CACHE      $d600   ; FC[base*4+S] -> slot, 1024 bytes, $FF=empty
@@ -36,6 +37,7 @@
 .define BGV_ATTR_S     $ca06
 .define BGV_RING_WRAPPED $ca07
 .define BGV_REV_BASE   $ca40   ; 192 bytes: base tile for slots 64..255
+.define BGV_FOLDED_S_COMPACT $d300 ; 896 visible cells × 2 bits = 224 bytes
 
 .section "chrmap" free
 
@@ -499,10 +501,13 @@ rt_redraw_bg_attr_quadrant_s:
   pop  bc
   ret
 
-; Set S for one cell and rewrite its tile to the matching variant.
+; Set S for one visible cell and rewrite its tile to the matching variant.
 ; Entry: DE = nametable high-byte address; S in BGV_ATTR_S. Preserves DE.
 _chrmap_attr_write_one:
   push de
+  ld   a, d
+  cp   $3e
+  jr   nc, _caw_done         ; hidden rows are outside the active $CC00-$D2FF shadow
   ; shadow byte (high-byte addr -> $CCxx). Skip the whole re-resolve if the
   ; sub-palette is unchanged (the usual case while scrolling), so attribute
   ; traffic stays cheap; the tile write keeps the variant correct otherwise.
@@ -518,6 +523,7 @@ _chrmap_attr_write_one:
   cp   c
   jr   z, _caw_done          ; unchanged -> done
   ld   (hl), c               ; store new S
+  call _bgv_compact_s_store_high_addr
   ; base slot for this cell, from the low-byte address (high addr - 1)
   ld   h, d
   ld   l, e
@@ -542,6 +548,100 @@ _chrmap_attr_write_one:
   out  ($be), a              ; high byte = 0
 _caw_done:
   pop  de
+  ret
+
+; Duplicate the folded per-cell sub-palette S into a compact 2-bit-per-cell
+; shadow. This is not read by rendering yet; $CC00 remains authoritative.
+; Entry: DE = SMS nametable high-byte address, C = S (0..3). Only visible
+; $3701..$3DFF cells are mirrored into the compact shadow.
+; Preserves: BC, DE. Clobbers: AF, HL.
+_bgv_compact_s_store_high_addr:
+  push bc
+  push de
+  ld   a, d
+  cp   $37
+  jr   c, _bgv_compact_done
+  cp   $3e
+  jr   nc, _bgv_compact_done
+  ld   a, c
+  and  $03
+  ld   b, a                  ; B = S
+
+  ld   h, d
+  ld   l, e
+  dec  hl                    ; HL = SMS nametable low-byte address
+  ld   de, $c900             ; + $C900 == - $3700 (mod 16-bit)
+  add  hl, de                ; HL = byte offset from $3700
+  srl  h
+  rr   l                     ; HL = cell index (0..895)
+
+  ld   a, l
+  and  $03
+  add  a, a
+  ld   c, a                  ; C = bit shift (0, 2, 4, 6)
+
+  srl  h
+  rr   l
+  srl  h
+  rr   l                     ; HL = cell / 4
+  ld   de, BGV_FOLDED_S_COMPACT
+  add  hl, de                ; HL = compact byte address
+
+  ld   a, c
+  or   a
+  jr   z, _bgv_compact_shift0
+  cp   2
+  jr   z, _bgv_compact_shift2
+  cp   4
+  jr   z, _bgv_compact_shift4
+
+_bgv_compact_shift6:
+  ld   a, b
+  add  a, a
+  add  a, a
+  add  a, a
+  add  a, a
+  add  a, a
+  add  a, a
+  ld   b, a
+  ld   a, (hl)
+  and  $3f
+  or   b
+  ld   (hl), a
+  jr   _bgv_compact_done
+
+_bgv_compact_shift4:
+  ld   a, b
+  add  a, a
+  add  a, a
+  add  a, a
+  add  a, a
+  ld   b, a
+  ld   a, (hl)
+  and  $cf
+  or   b
+  ld   (hl), a
+  jr   _bgv_compact_done
+
+_bgv_compact_shift2:
+  ld   a, b
+  add  a, a
+  add  a, a
+  ld   b, a
+  ld   a, (hl)
+  and  $f3
+  or   b
+  ld   (hl), a
+  jr   _bgv_compact_done
+
+_bgv_compact_shift0:
+  ld   a, (hl)
+  and  $fc
+  or   b
+  ld   (hl), a
+_bgv_compact_done:
+  pop  de
+  pop  bc
   ret
 
 ; Redraw one cell using explicit S and the base-slot shadow only.
