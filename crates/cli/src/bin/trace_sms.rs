@@ -79,6 +79,7 @@ struct SmsBus {
     /// SMS VRAM nametable bytes, these are original NES tile IDs, so they are a
     /// safe comparison target for dry source-space projection diagnostics.
     nt_trace_folded_source_tiles: [u8; 0x400],
+    nt_trace_folded_source_tile_seen: [bool; 0x400],
     /// Count of trace-observed tile writes into the folded source-tile shadow.
     nt_trace_folded_source_tile_writes: u32,
     /// Tile writes where the folded $CC00 subpalette disagrees with the compact
@@ -239,6 +240,7 @@ impl SmsBus {
             nt_trace_ciram_tile_writes: 0,
             nt_trace_ciram_attr_writes: 0,
             nt_trace_folded_source_tiles: [0; 0x400],
+            nt_trace_folded_source_tile_seen: [false; 0x400],
             nt_trace_folded_source_tile_writes: 0,
             nt_explicit_s_mismatch_horizontal: 0,
             nt_explicit_s_mismatch_horizontal_examples: Vec::new(),
@@ -339,6 +341,7 @@ impl SmsBus {
             self.nt_trace_ciram_tile_writes += 1;
             let folded_cell = (ppu_addr.wrapping_sub(0x2000) & 0x03FF) as usize;
             self.nt_trace_folded_source_tiles[folded_cell] = value;
+            self.nt_trace_folded_source_tile_seen[folded_cell] = true;
             self.nt_trace_folded_source_tile_writes += 1;
         }
     }
@@ -442,6 +445,16 @@ fn parse_wla_symbol_line(line: &str) -> Option<(u16, String)> {
     Some((addr, label.to_string()))
 }
 
+fn parse_wla_symbol_definition(line: &str) -> Option<(String, u8, u16)> {
+    let mut parts = line.split_whitespace();
+    let bank_addr = parts.next()?;
+    let label = parts.next()?;
+    let (bank, addr) = bank_addr.split_once(':')?;
+    let bank = u8::from_str_radix(bank, 16).ok()?;
+    let addr = parse_hex_addr(addr)?;
+    Some((label.to_string(), bank, addr))
+}
+
 fn load_wla_symbols(path: &Path) -> HashMap<u16, Vec<String>> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return HashMap::new();
@@ -453,6 +466,31 @@ fn load_wla_symbols(path: &Path) -> HashMap<u16, Vec<String>> {
         }
     }
     symbols
+}
+
+fn load_wla_symbol_defs(path: &Path) -> HashMap<String, (u8, u16)> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut symbols = HashMap::new();
+    for line in text.lines() {
+        if let Some((label, bank, addr)) = parse_wla_symbol_definition(line) {
+            symbols.entry(label).or_insert((bank, addr));
+        }
+    }
+    symbols
+}
+
+fn rom_byte_at_symbol(
+    rom: &[u8],
+    symbols: &HashMap<String, (u8, u16)>,
+    label: &str,
+    offset: usize,
+) -> Option<u8> {
+    let (bank, addr) = *symbols.get(label)?;
+    let slot_offset = usize::from(addr & 0x3FFF);
+    let physical = usize::from(bank) * BANK_SIZE + slot_offset + offset;
+    rom.get(physical).copied()
 }
 
 fn format_symbol_suffix(symbols: &HashMap<u16, Vec<String>>, addr: u16) -> String {
@@ -1472,7 +1510,9 @@ fn main() {
     }
 
     let rom = std::fs::read(&rom_path).expect("read rom");
-    let symbols = load_wla_symbols(&rom_path.with_extension("sym"));
+    let sym_path = rom_path.with_extension("sym");
+    let symbols = load_wla_symbols(&sym_path);
+    let symbol_defs = load_wla_symbol_defs(&sym_path);
     let mut bus = SmsBus::new(rom, controller_port_dc);
     let mut cpu = Cpu::new();
     cpu.pc = 0x0000;
@@ -2316,6 +2356,10 @@ fn main() {
     println!("{}", format_nt_dry_project_summary(&bus, true));
     println!("{}", format_nt_dry_project_summary(&bus, false));
     println!("{}", format_nt_folded_s_compact_mismatches(&bus));
+    println!(
+        "{}",
+        format_bgv_base_shadow_mismatches(&bus, &bus.rom, &symbol_defs)
+    );
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -2998,6 +3042,70 @@ fn format_nt_folded_s_compact_mismatches(bus: &SmsBus) -> String {
     }
 }
 
+fn expected_base_slot_for_tile(
+    rom: &[u8],
+    symbols: &HashMap<String, (u8, u16)>,
+    table1: bool,
+    tile: u8,
+) -> Option<u8> {
+    let label = if table1 {
+        "data_chr_bg_map1"
+    } else {
+        "data_chr_bg_map0"
+    };
+    // The map entries are two-byte records; byte 0 is the base SMS tile slot.
+    rom_byte_at_symbol(rom, symbols, label, usize::from(tile) * 2)
+}
+
+fn format_bgv_base_shadow_mismatches(
+    bus: &SmsBus,
+    rom: &[u8],
+    symbols: &HashMap<String, (u8, u16)>,
+) -> String {
+    let table1 = bus.ram[0x0B08] & 0x10 != 0;
+    let mut compared = 0usize;
+    let mut missing_map = false;
+    let mut total = 0usize;
+    let mut examples = Vec::new();
+
+    for cell in 0..(32 * 28) {
+        if !bus.nt_trace_folded_source_tile_seen[cell] {
+            continue;
+        }
+        let tile = bus.nt_trace_folded_source_tiles[cell];
+        let Some(expected) = expected_base_slot_for_tile(rom, symbols, table1, tile) else {
+            missing_map = true;
+            continue;
+        };
+        compared += 1;
+        let actual = bus.ram[0x1A00 + cell]; // $DA00 + cell
+        if actual != expected {
+            total += 1;
+            if examples.len() < 8 {
+                let row = cell / 32;
+                let col = cell % 32;
+                examples.push(format!(
+                    "cell={row:02},{col:02} tile={tile:02X} shadow={actual:02X} expected={expected:02X}"
+                ));
+            }
+        }
+    }
+
+    if missing_map {
+        return format!(
+            "bgv_base_shadow_mismatch=unavailable compared:{compared} reason=missing_data_chr_bg_map"
+        );
+    }
+    if examples.is_empty() {
+        format!("bgv_base_shadow_mismatch={total} compared:{compared} first=none")
+    } else {
+        format!(
+            "bgv_base_shadow_mismatch={total} compared:{compared} first={}",
+            examples.join(" ")
+        )
+    }
+}
+
 fn format_nametable_column_occupancy(bus: &SmsBus) -> String {
     let mut cols = [0usize; 32];
     for row in 0..28 {
@@ -3385,6 +3493,10 @@ mod tests {
             parse_wla_symbol_line("00:0492 _bgv_sub_palette"),
             Some((0x0492, "_bgv_sub_palette".to_string()))
         );
+        assert_eq!(
+            parse_wla_symbol_definition("11:8000 data_chr_bg_map0"),
+            Some(("data_chr_bg_map0".to_string(), 0x11, 0x8000))
+        );
         assert_eq!(parse_wla_symbol_line("[labels]"), None);
 
         let mut symbols = HashMap::new();
@@ -3397,6 +3509,31 @@ mod tests {
             " _bgv_sub_palette/alias"
         );
         assert_eq!(format_symbol_suffix(&symbols, 0x1234), "");
+    }
+
+    #[test]
+    fn base_shadow_diagnostic_compares_seen_source_tiles() {
+        let mut bus = SmsBus::new(vec![0; 0x4000], 0xFF);
+        let mut symbols = HashMap::new();
+        symbols.insert("data_chr_bg_map0".to_string(), (0, 0x8000));
+        symbols.insert("data_chr_bg_map1".to_string(), (0, 0x8200));
+
+        let mut rom = vec![0; 0x500];
+        rom[0x10] = 0x42; // map0[tile 8].base
+        bus.nt_trace_folded_source_tile_seen[3] = true;
+        bus.nt_trace_folded_source_tiles[3] = 8;
+        bus.ram[0x1A00 + 3] = 0x42;
+
+        assert_eq!(
+            format_bgv_base_shadow_mismatches(&bus, &rom, &symbols),
+            "bgv_base_shadow_mismatch=0 compared:1 first=none"
+        );
+
+        bus.ram[0x1A00 + 3] = 0x24;
+        assert_eq!(
+            format_bgv_base_shadow_mismatches(&bus, &rom, &symbols),
+            "bgv_base_shadow_mismatch=1 compared:1 first=cell=00,03 tile=08 shadow=24 expected=42"
+        );
     }
 
     #[test]
