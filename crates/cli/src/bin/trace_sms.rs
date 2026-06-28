@@ -18,6 +18,7 @@ use z80_emu::{Bus, Cpu, StepError};
 const BANK_SIZE: usize = 0x4000;
 const RAM_SIZE: usize = 0x2000;
 const IRQ_PERIOD: usize = 60_000;
+const RT_PPU_WRITE_ADDR: u16 = 0x0068;
 
 #[derive(Clone)]
 struct SmsBus {
@@ -61,6 +62,19 @@ struct SmsBus {
     controller_reads: u32,
     /// Bitmask of NES nametable pages observed writing each folded SMS cell.
     nt_fold_cell_pages: [u8; 1024],
+    /// Trace-only reconstruction of raw NES CIRAM writes observed at the
+    /// `rt_ppu_write` call boundary, interpreted with vertical mirroring.
+    nt_trace_ciram_vertical: [u8; 0x800],
+    /// Same trace-only raw CIRAM reconstruction, interpreted with horizontal
+    /// mirroring. Keeping both avoids baking SMB's mirroring mode into the
+    /// diagnostic and lets future profiles compare the expected mode.
+    nt_trace_ciram_horizontal: [u8; 0x800],
+    /// Count of trace-observed PPUDATA writes into $2000-$2FFF.
+    nt_trace_ciram_writes: u32,
+    /// Count of trace-observed PPUDATA writes into tile bytes ($2000-$2FBF).
+    nt_trace_ciram_tile_writes: u32,
+    /// Count of trace-observed PPUDATA writes into attribute bytes.
+    nt_trace_ciram_attr_writes: u32,
     /// Tile writes where the folded $CC00 subpalette disagrees with the compact
     /// attribute shadow, interpreted as horizontal NES mirroring.
     nt_explicit_s_mismatch_horizontal: u32,
@@ -213,6 +227,11 @@ impl SmsBus {
             vdp_control_writes: 0,
             controller_reads: 0,
             nt_fold_cell_pages: [0; 1024],
+            nt_trace_ciram_vertical: [0; 0x800],
+            nt_trace_ciram_horizontal: [0; 0x800],
+            nt_trace_ciram_writes: 0,
+            nt_trace_ciram_tile_writes: 0,
+            nt_trace_ciram_attr_writes: 0,
             nt_explicit_s_mismatch_horizontal: 0,
             nt_explicit_s_mismatch_horizontal_examples: Vec::new(),
             nt_explicit_s_mismatch_vertical: 0,
@@ -291,6 +310,28 @@ impl SmsBus {
         }
     }
 
+    fn record_trace_ppu_write_call(&mut self, reg: u8, value: u8) {
+        if reg != 7 {
+            return;
+        }
+
+        let ppu_addr = ((self.ram[0x0B0F] as u16) << 8) | self.ram[0x0B10] as u16;
+        if !(0x2000..=0x2FFF).contains(&ppu_addr) {
+            return;
+        }
+
+        let vertical = nt_ciram_index(ppu_addr, true);
+        let horizontal = nt_ciram_index(ppu_addr, false);
+        self.nt_trace_ciram_vertical[vertical] = value;
+        self.nt_trace_ciram_horizontal[horizontal] = value;
+        self.nt_trace_ciram_writes += 1;
+        if (ppu_addr & 0x03FF) >= 0x03C0 {
+            self.nt_trace_ciram_attr_writes += 1;
+        } else {
+            self.nt_trace_ciram_tile_writes += 1;
+        }
+    }
+
     fn record_nt_explicit_s_mismatch(
         &mut self,
         sms_addr: u16,
@@ -347,12 +388,7 @@ impl SmsBus {
     }
 
     fn nt_attr_shadow_s(&self, ppu_addr: u16, vertical_mirroring: bool) -> (u8, usize, u8) {
-        let raw = ppu_addr - 0x2000;
-        let ciram = if vertical_mirroring {
-            raw & 0x07FF
-        } else {
-            (raw & 0x03FF) | ((raw & 0x0800) >> 1)
-        };
+        let ciram = nt_ciram_index(ppu_addr, vertical_mirroring) as u16;
         let ciram_page = (ciram >> 10) as usize;
         let tile_offset = (ciram & 0x03FF) as usize;
         let coarse_y = tile_offset / 32;
@@ -361,6 +397,15 @@ impl SmsBus {
         let attr_byte = self.ram[0x0B80 + attr_index];
         let shift = ((coarse_y & 0x02) << 1) | (coarse_x & 0x02);
         ((attr_byte >> shift) & 0x03, attr_index, attr_byte)
+    }
+}
+
+fn nt_ciram_index(ppu_addr: u16, vertical_mirroring: bool) -> usize {
+    let raw = ppu_addr.wrapping_sub(0x2000) & 0x0FFF;
+    if vertical_mirroring {
+        (raw & 0x07FF) as usize
+    } else {
+        ((raw & 0x03FF) | ((raw & 0x0800) >> 1)) as usize
     }
 }
 
@@ -1458,6 +1503,9 @@ fn main() {
         if first_ram_exec_step.is_none() && pc >= 0xC000 {
             first_ram_exec_step = Some((step, pc));
         }
+        if pc == RT_PPU_WRITE_ADDR {
+            bus.record_trace_ppu_write_call(cpu.b, cpu.a);
+        }
         if log_pcs && step < 200 {
             eprintln!("step {step:6}  PC=${pc:04X} op=${op:02X}");
         }
@@ -2215,6 +2263,8 @@ fn main() {
         bus.read(0xCB23),
         bus.read(0xCB24)
     );
+    println!("{}", format_nt_trace_ciram_summary(&bus, true));
+    println!("{}", format_nt_trace_ciram_summary(&bus, false));
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -2678,6 +2728,8 @@ fn dump_route_checkpoint(
         nt_attr_shadow_nonzero_bytes(bus),
         format_nt_attr_shadow_first_nonzero(bus)
     )?;
+    writeln!(f, "{}", format_nt_trace_ciram_summary(bus, true))?;
+    writeln!(f, "{}", format_nt_trace_ciram_summary(bus, false))?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -2723,6 +2775,41 @@ fn format_nt_attr_shadow_first_nonzero(bus: &SmsBus) -> String {
     } else {
         entries.join(" ")
     }
+}
+
+fn format_nt_trace_ciram_summary(bus: &SmsBus, vertical_mirroring: bool) -> String {
+    let (mode, ciram) = if vertical_mirroring {
+        ("vertical", &bus.nt_trace_ciram_vertical)
+    } else {
+        ("horizontal", &bus.nt_trace_ciram_horizontal)
+    };
+    let tile_nonzero = (0..2)
+        .flat_map(|page| (0..0x3C0).map(move |i| page * 0x400 + i))
+        .filter(|i| ciram[*i] != 0)
+        .count();
+    let attr_nonzero = (0..2)
+        .flat_map(|page| (0..0x40).map(move |i| page * 0x400 + 0x3C0 + i))
+        .filter(|i| ciram[*i] != 0)
+        .count();
+    let first = ciram
+        .iter()
+        .enumerate()
+        .filter_map(|(i, value)| (*value != 0).then(|| format!("{i:03X}:{value:02X}")))
+        .take(12)
+        .collect::<Vec<_>>();
+    let first = if first.is_empty() {
+        "none".to_string()
+    } else {
+        first.join(" ")
+    };
+    format!(
+        "nt_trace_ciram_{mode}=writes:{} tile_writes:{} attr_writes:{} tile_nonzero:{} attr_nonzero:{} first={first}",
+        bus.nt_trace_ciram_writes,
+        bus.nt_trace_ciram_tile_writes,
+        bus.nt_trace_ciram_attr_writes,
+        tile_nonzero,
+        attr_nonzero
+    )
 }
 
 fn format_nametable_column_occupancy(bus: &SmsBus) -> String {
@@ -3178,5 +3265,45 @@ mod tests {
             format_nt_explicit_s_mismatches(&bus, true),
             "nt_explicit_s_mismatch_vertical=0 first=none"
         );
+    }
+
+    #[test]
+    fn nt_ciram_index_obeys_horizontal_and_vertical_mirroring() {
+        assert_eq!(nt_ciram_index(0x2000, true), 0x000);
+        assert_eq!(nt_ciram_index(0x2400, true), 0x400);
+        assert_eq!(nt_ciram_index(0x2800, true), 0x000);
+        assert_eq!(nt_ciram_index(0x2C00, true), 0x400);
+
+        assert_eq!(nt_ciram_index(0x2000, false), 0x000);
+        assert_eq!(nt_ciram_index(0x2400, false), 0x000);
+        assert_eq!(nt_ciram_index(0x2800, false), 0x400);
+        assert_eq!(nt_ciram_index(0x2C00, false), 0x400);
+    }
+
+    #[test]
+    fn trace_ppu_write_call_reconstructs_raw_ciram_without_runtime_writes() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+
+        bus.ram[0x0B0F] = 0x24;
+        bus.ram[0x0B10] = 0x12;
+        bus.record_trace_ppu_write_call(7, 0xAB);
+
+        assert_eq!(bus.nt_trace_ciram_vertical[0x412], 0xAB);
+        assert_eq!(bus.nt_trace_ciram_horizontal[0x012], 0xAB);
+        assert_eq!(bus.nt_trace_ciram_writes, 1);
+        assert_eq!(bus.nt_trace_ciram_tile_writes, 1);
+        assert_eq!(bus.nt_trace_ciram_attr_writes, 0);
+
+        bus.ram[0x0B0F] = 0x27;
+        bus.ram[0x0B10] = 0xC0;
+        bus.record_trace_ppu_write_call(7, 0x55);
+        bus.record_trace_ppu_write_call(6, 0xFF);
+
+        assert_eq!(bus.nt_trace_ciram_vertical[0x7C0], 0x55);
+        assert_eq!(bus.nt_trace_ciram_horizontal[0x3C0], 0x55);
+        assert_eq!(bus.nt_trace_ciram_writes, 2);
+        assert_eq!(bus.nt_trace_ciram_tile_writes, 1);
+        assert_eq!(bus.nt_trace_ciram_attr_writes, 1);
+        assert!(format_nt_trace_ciram_summary(&bus, false).contains("attr_nonzero:1"));
     }
 }
