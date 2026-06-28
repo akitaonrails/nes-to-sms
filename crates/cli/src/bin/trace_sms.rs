@@ -10,7 +10,7 @@
 //! - Memory: 8 KB SMS RAM at $C000-$DFFF, mirrored at $E000-$FFFF.
 //!   ROM banks live in `rom_banks[bank][offset]`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use z80_emu::{Bus, Cpu, StepError};
@@ -19,6 +19,7 @@ const BANK_SIZE: usize = 0x4000;
 const RAM_SIZE: usize = 0x2000;
 const IRQ_PERIOD: usize = 60_000;
 const RT_PPU_WRITE_FALLBACK_ADDR: u16 = 0x0068;
+const MATERIALIZER_BUDGETS: [usize; 5] = [28, 56, 112, 224, 896];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExpectedMirroring {
@@ -43,6 +44,130 @@ impl ExpectedMirroring {
             Self::Unknown => None,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct MaterializerVisibleCell {
+    key: u16,
+    row: usize,
+    col: usize,
+    ppu_addr: u16,
+    ciram: usize,
+    reason: u8,
+}
+
+#[derive(Clone, Debug)]
+struct MaterializerBacklogCell {
+    key: u16,
+    row: usize,
+    col: usize,
+    ppu_addr: u16,
+    ciram: usize,
+    reason: u8,
+    frame_added: usize,
+}
+
+#[derive(Clone, Debug)]
+struct MaterializerBudgetSim {
+    budget: usize,
+    backlog: VecDeque<MaterializerBacklogCell>,
+    queued: [bool; 32 * 28],
+    max_backlog: usize,
+}
+
+impl MaterializerBudgetSim {
+    fn new(budget: usize) -> Self {
+        Self {
+            budget,
+            backlog: VecDeque::new(),
+            queued: [false; 32 * 28],
+            max_backlog: 0,
+        }
+    }
+
+    fn new_all() -> Vec<Self> {
+        MATERIALIZER_BUDGETS
+            .iter()
+            .copied()
+            .map(Self::new)
+            .collect()
+    }
+
+    fn step(
+        &mut self,
+        frame: usize,
+        workset: &[MaterializerVisibleCell],
+    ) -> MaterializerBudgetStep {
+        let mut added = 0usize;
+        for cell in workset {
+            let key = usize::from(cell.key);
+            if self.queued[key] {
+                continue;
+            }
+            self.queued[key] = true;
+            self.backlog.push_back(MaterializerBacklogCell {
+                key: cell.key,
+                row: cell.row,
+                col: cell.col,
+                ppu_addr: cell.ppu_addr,
+                ciram: cell.ciram,
+                reason: cell.reason,
+                frame_added: frame,
+            });
+            added += 1;
+        }
+        self.max_backlog = self.max_backlog.max(self.backlog.len());
+
+        let mut processed = 0usize;
+        for _ in 0..self.budget {
+            let Some(cell) = self.backlog.pop_front() else {
+                break;
+            };
+            self.queued[usize::from(cell.key)] = false;
+            processed += 1;
+        }
+
+        let oldest_age = self
+            .backlog
+            .front()
+            .map(|cell| frame.saturating_sub(cell.frame_added));
+        let deferred = self.backlog.iter().take(3).cloned().collect();
+        MaterializerBudgetStep {
+            budget: self.budget,
+            added,
+            processed,
+            backlog: self.backlog.len(),
+            max_backlog: self.max_backlog,
+            oldest_age,
+            deferred,
+        }
+    }
+
+    fn snapshot(&self, frame: usize) -> MaterializerBudgetStep {
+        MaterializerBudgetStep {
+            budget: self.budget,
+            added: 0,
+            processed: 0,
+            backlog: self.backlog.len(),
+            max_backlog: self.max_backlog,
+            oldest_age: self
+                .backlog
+                .front()
+                .map(|cell| frame.saturating_sub(cell.frame_added)),
+            deferred: self.backlog.iter().take(3).cloned().collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MaterializerBudgetStep {
+    budget: usize,
+    added: usize,
+    processed: usize,
+    backlog: usize,
+    max_backlog: usize,
+    oldest_age: Option<usize>,
+    deferred: Vec<MaterializerBacklogCell>,
 }
 
 #[derive(Clone)]
@@ -1650,6 +1775,7 @@ fn main() {
     let mut prev_frame_control_writes = 0u32;
     let mut prev_frame_line_irqs = 0usize;
     let mut prev_coarse_scroll = current_coarse_scroll(&bus);
+    let mut materializer_budget_sims = MaterializerBudgetSim::new_all();
     let dump_each_frame_to = std::env::var("SMS_DUMP_EACH_FRAME").ok();
     let stop_on_fall = std::env::var("SMS_STOP_ON_FALL")
         .ok()
@@ -1824,6 +1950,7 @@ fn main() {
                         expected_mirroring,
                         prev_coarse_scroll,
                         curr_coarse_scroll: current_coarse_scroll(&bus),
+                        materializer_budget_sims: &materializer_budget_sims,
                     },
                 ) {
                     eprintln!(
@@ -1857,8 +1984,16 @@ fn main() {
                 prev_coarse_scroll,
                 coarse_scroll,
             );
+            let materializer_budget = step_materializer_budget_sims(
+                &mut materializer_budget_sims,
+                &bus,
+                expected_mirroring,
+                prev_coarse_scroll,
+                coarse_scroll,
+                irqs_fired,
+            );
             eprintln!(
-                "frame {:3}: $0770={:02X} $0772={:02X} $0773={:02X} $0774={:02X} ppos={:02X}:{:02X} spd={:02X} cam={:02X}:{:02X} y={:02X}:{:02X} yspd={:02X} act={:02X} joy={:02X} apage={:02X} bcol={:02X} aobj={:02X} aofs={:02X} alen={:02X}/{:02X}/{:02X} stop={:02X} steps={} vram+={} cram+={} data+={} ctrl+={} line_irq+={} {} {}",
+                "frame {:3}: $0770={:02X} $0772={:02X} $0773={:02X} $0774={:02X} ppos={:02X}:{:02X} spd={:02X} cam={:02X}:{:02X} y={:02X}:{:02X} yspd={:02X} act={:02X} joy={:02X} apage={:02X} bcol={:02X} aobj={:02X} aofs={:02X} alen={:02X}/{:02X}/{:02X} stop={:02X} steps={} vram+={} cram+={} data+={} ctrl+={} line_irq+={} {} {} {}",
                 irqs_fired,
                 bus.ram[0x0770],
                 bus.ram[0x0772],
@@ -1890,6 +2025,7 @@ fn main() {
                 frame_line_irqs,
                 materializer_work,
                 materializer_dirty,
+                materializer_budget,
             );
             prev_frame_step = step;
             prev_frame_vram_writes = bus.vram_writes;
@@ -2494,6 +2630,14 @@ fn main() {
             current_coarse_scroll(&bus),
         )
     );
+    println!(
+        "{}",
+        format_materializer_budget_snapshots(
+            &materializer_budget_sims,
+            expected_mirroring,
+            irqs_fired,
+        )
+    );
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -2861,6 +3005,7 @@ struct CheckpointDumpContext<'a> {
     expected_mirroring: ExpectedMirroring,
     prev_coarse_scroll: (u8, u8),
     curr_coarse_scroll: (u8, u8),
+    materializer_budget_sims: &'a [MaterializerBudgetSim],
 }
 
 fn dump_route_checkpoint(
@@ -2999,6 +3144,15 @@ fn dump_route_checkpoint(
             context.expected_mirroring,
             context.prev_coarse_scroll,
             context.curr_coarse_scroll,
+        )
+    )?;
+    writeln!(
+        f,
+        "{}",
+        format_materializer_budget_snapshots(
+            context.materializer_budget_sims,
+            context.expected_mirroring,
+            actual_frame,
         )
     )?;
     writeln!(
@@ -3304,12 +3458,52 @@ fn materializer_dirty_set(bus: &SmsBus, vertical_mirroring: bool) -> &[u8; 0x800
 }
 
 fn materializer_dirty_reason(bits: u8) -> &'static str {
-    match bits & 0x03 {
+    match bits {
         0x01 => "tile",
         0x02 => "attr",
         0x03 => "tile+attr",
+        0x04 => "enter",
+        0x05 => "enter+tile",
+        0x06 => "enter+attr",
+        0x07 => "enter+tile+attr",
         _ => "unknown",
     }
+}
+
+fn materializer_visible_workset(
+    bus: &SmsBus,
+    expected_mirroring: ExpectedMirroring,
+    prev_coarse: (u8, u8),
+    curr_coarse: (u8, u8),
+) -> Option<Vec<MaterializerVisibleCell>> {
+    let vertical_mirroring = expected_mirroring.vertical_flag()?;
+    let dirty = materializer_dirty_set(bus, vertical_mirroring);
+    let mut cells: Vec<Option<MaterializerVisibleCell>> = vec![None; 32 * 28];
+
+    for row in 0..28 {
+        for col in 0..32 {
+            let projection = nt_dry_project_tile_for_cell(bus, row, col, vertical_mirroring);
+            let ciram = nt_ciram_index(projection.ppu_addr, vertical_mirroring);
+            let mut reason = dirty[ciram] & 0x03;
+            if materializer_is_entering_cell(row, col, prev_coarse, curr_coarse) {
+                reason |= 0x04;
+            }
+            if reason == 0 {
+                continue;
+            }
+            let key = (row * 32 + col) as u16;
+            cells[usize::from(key)] = Some(MaterializerVisibleCell {
+                key,
+                row,
+                col,
+                ppu_addr: projection.ppu_addr,
+                ciram,
+                reason,
+            });
+        }
+    }
+
+    Some(cells.into_iter().flatten().collect())
 }
 
 fn format_nt_materializer_dirty_visible(
@@ -3318,35 +3512,33 @@ fn format_nt_materializer_dirty_visible(
     prev_coarse: (u8, u8),
     curr_coarse: (u8, u8),
 ) -> String {
-    let Some(vertical_mirroring) = expected_mirroring.vertical_flag() else {
+    if expected_mirroring.vertical_flag().is_none() {
         return "nt_materializer_dirty_visible=unavailable expected=unknown reason=missing_or_conflicting_mirroring".to_string();
     };
-    let dirty = materializer_dirty_set(bus, vertical_mirroring);
     let mut total = 0usize;
     let mut dirty_unique = 0usize;
     let mut cols = [0usize; 32];
     let mut rows = [0usize; 28];
     let mut examples = Vec::new();
 
-    for (row, row_count) in rows.iter_mut().enumerate() {
-        for (col, col_count) in cols.iter_mut().enumerate() {
-            let projection = nt_dry_project_tile_for_cell(bus, row, col, vertical_mirroring);
-            let ciram = nt_ciram_index(projection.ppu_addr, vertical_mirroring);
-            let reason = dirty[ciram];
-            if reason == 0 {
-                continue;
-            }
+    if let Some(workset) =
+        materializer_visible_workset(bus, expected_mirroring, prev_coarse, curr_coarse)
+    {
+        for cell in workset.iter().filter(|cell| cell.reason & 0x03 != 0) {
             total += 1;
-            *row_count += 1;
-            *col_count += 1;
-            if !materializer_is_entering_cell(row, col, prev_coarse, curr_coarse) {
+            rows[cell.row] += 1;
+            cols[cell.col] += 1;
+            if cell.reason & 0x04 == 0 {
                 dirty_unique += 1;
             }
             if examples.len() < 8 {
                 examples.push(format!(
-                    "r={row:02},c={col:02} ppu={:04X} ciram={ciram:03X} reason={}",
-                    projection.ppu_addr,
-                    materializer_dirty_reason(reason)
+                    "r={:02},c={:02} ppu={:04X} ciram={:03X} reason={}",
+                    cell.row,
+                    cell.col,
+                    cell.ppu_addr,
+                    cell.ciram,
+                    materializer_dirty_reason(cell.reason & 0x03)
                 ));
             }
         }
@@ -3377,6 +3569,83 @@ fn format_nt_materializer_dirty_visible(
         if cols.is_empty() { "none".to_string() } else { cols.join(" ") },
         if rows.is_empty() { "none".to_string() } else { rows.join(" ") }
     )
+}
+
+fn format_materializer_budget_step(step: &MaterializerBudgetStep) -> String {
+    let age = step
+        .oldest_age
+        .map(|age| age.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let deferred = if step.deferred.is_empty() {
+        "none".to_string()
+    } else {
+        step.deferred
+            .iter()
+            .map(|cell| {
+                format!(
+                    "{:02},{:02}/{}:{:04X}:{:03X}",
+                    cell.row,
+                    cell.col,
+                    materializer_dirty_reason(cell.reason),
+                    cell.ppu_addr,
+                    cell.ciram
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    format!(
+        "mat_budget={} add={} processed={} backlog={} max={} age={} def={}",
+        step.budget, step.added, step.processed, step.backlog, step.max_backlog, age, deferred
+    )
+}
+
+fn format_materializer_budget_steps(steps: &[MaterializerBudgetStep]) -> String {
+    if steps.is_empty() {
+        "nt_materializer_budget=unavailable expected=unknown reason=missing_or_conflicting_mirroring"
+            .to_string()
+    } else {
+        steps
+            .iter()
+            .map(format_materializer_budget_step)
+            .collect::<Vec<_>>()
+            .join(" ; ")
+    }
+}
+
+fn step_materializer_budget_sims(
+    sims: &mut [MaterializerBudgetSim],
+    bus: &SmsBus,
+    expected_mirroring: ExpectedMirroring,
+    prev_coarse: (u8, u8),
+    curr_coarse: (u8, u8),
+    frame: usize,
+) -> String {
+    let Some(workset) =
+        materializer_visible_workset(bus, expected_mirroring, prev_coarse, curr_coarse)
+    else {
+        return format_materializer_budget_steps(&[]);
+    };
+    let steps = sims
+        .iter_mut()
+        .map(|sim| sim.step(frame, &workset))
+        .collect::<Vec<_>>();
+    format_materializer_budget_steps(&steps)
+}
+
+fn format_materializer_budget_snapshots(
+    sims: &[MaterializerBudgetSim],
+    expected_mirroring: ExpectedMirroring,
+    frame: usize,
+) -> String {
+    if expected_mirroring.vertical_flag().is_none() {
+        return format_materializer_budget_steps(&[]);
+    }
+    let steps = sims
+        .iter()
+        .map(|sim| sim.snapshot(frame))
+        .collect::<Vec<_>>();
+    format_materializer_budget_steps(&steps)
 }
 
 fn nt_folded_cc_s(bus: &SmsBus, cell: usize) -> u8 {
@@ -4245,6 +4514,83 @@ mod tests {
             (1, 0),
         )
         .contains("entering=28 dirty_unique=0 combined=28/896"));
+    }
+
+    #[test]
+    fn materializer_budget_dedupes_entering_and_dirty_cells() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x1F; // visible row 0, entering col 31 for dx=1
+        bus.record_trace_ppu_write_call(7, 0x44);
+
+        let workset =
+            materializer_visible_workset(&bus, ExpectedMirroring::Vertical, (0, 0), (1, 0))
+                .unwrap();
+        assert_eq!(workset.len(), 28); // one entering column, dirty cell overlaps it
+        assert_eq!(workset.iter().filter(|cell| cell.key == 31).count(), 1);
+
+        let mut sim = MaterializerBudgetSim::new(28);
+        let step = sim.step(1, &workset);
+        assert_eq!(step.added, 28);
+        assert_eq!(step.processed, 28);
+        assert_eq!(step.backlog, 0);
+    }
+
+    #[test]
+    fn materializer_budget_backlog_persists_and_drains() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x00;
+        bus.record_trace_ppu_write_call(7, 0x11);
+        bus.ram[0x0B10] = 0x01;
+        bus.record_trace_ppu_write_call(7, 0x22);
+
+        let workset =
+            materializer_visible_workset(&bus, ExpectedMirroring::Vertical, (0, 0), (0, 0))
+                .unwrap();
+        let mut sim = MaterializerBudgetSim::new(1);
+        let first = sim.step(10, &workset);
+        assert_eq!(
+            (
+                first.added,
+                first.processed,
+                first.backlog,
+                first.max_backlog
+            ),
+            (2, 1, 1, 2)
+        );
+        assert_eq!(first.oldest_age, Some(0));
+
+        bus.clear_materializer_dirty();
+        let empty = materializer_visible_workset(&bus, ExpectedMirroring::Vertical, (0, 0), (0, 0))
+            .unwrap();
+        let second = sim.step(11, &empty);
+        assert_eq!(
+            (
+                second.added,
+                second.processed,
+                second.backlog,
+                second.max_backlog
+            ),
+            (0, 1, 0, 2)
+        );
+    }
+
+    #[test]
+    fn materializer_budget_reports_unknown_mirroring() {
+        let mut sims = MaterializerBudgetSim::new_all();
+        let bus = SmsBus::new(Vec::new(), 0xFF);
+        assert_eq!(
+            step_materializer_budget_sims(
+                &mut sims,
+                &bus,
+                ExpectedMirroring::Unknown,
+                (0, 0),
+                (0, 0),
+                0,
+            ),
+            "nt_materializer_budget=unavailable expected=unknown reason=missing_or_conflicting_mirroring"
+        );
     }
 
     #[test]
