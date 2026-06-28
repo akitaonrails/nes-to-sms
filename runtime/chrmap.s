@@ -308,6 +308,82 @@ _bgw_have_s:
   pop  hl
   ret
 
+; ─── rt_write_mapped_bg_tile_s ──────────────────────────────────────────────
+; Helper-only explicit-subpalette variant of rt_write_mapped_bg_tile.
+; Entry: A = NES tile byte, B = S (0..3), DE = SMS nametable low-byte address.
+; Resolves the (base slot, S) variant without consulting folded per-cell
+; palette state. Still records the base slot in BGV_BSHADOW for folded SMS
+; cells in the nametable range $3700-$3EFF so later explicit-S redraw helpers
+; can re-resolve the cell.
+; Preserves BC, DE, HL. Clobbers AF. Leaves data_prg_low mapped in slot 2.
+; Scaffold only: current hot paths still call rt_write_mapped_bg_tile.
+rt_write_mapped_bg_tile_s:
+  push hl
+  push de
+  push bc
+  ld   ($cb13), a            ; temporary save NES tile byte
+  ld   a, b
+  and  $03
+  ld   ($cb16), a            ; explicit S
+  ld   a, ($cb13)
+  ld   c, a
+  ld   ($cb17), de           ; SMS nametable low-byte address
+
+  ; base slot from the BG map
+  ld   a, :data_chr_maps
+  ld   ($ffff), a
+  ld   a, ($cb08)
+  bit  4, a
+  jr   nz, _bgw_s_table1
+  ld   de, data_chr_bg_map0
+  jr   _bgw_s_map_ready
+_bgw_s_table1:
+  ld   de, data_chr_bg_map1
+_bgw_s_map_ready:
+  ld   l, c
+  ld   h, $00
+  add  hl, hl
+  add  hl, de
+  ld   a, (hl)               ; base slot (bg tiles are 0-255)
+  ld   c, a                  ; C = base slot
+  ld   a, :data_prg_low
+  ld   ($ffff), a
+
+  ; In nametable range: record the base slot for this folded SMS cell.
+  ld   hl, ($cb17)
+  ld   a, h
+  cp   $37
+  jr   c, _bgw_s_no_base_shadow
+  cp   $3f
+  jr   nc, _bgw_s_no_base_shadow
+  push bc                    ; save base slot (C)
+  call _bgv_base_addr        ; HL(low addr) -> base-shadow addr
+  pop  bc
+  ld   (hl), c               ; base-shadow[cell] = base slot
+_bgw_s_no_base_shadow:
+  ld   a, ($cb16)
+  ld   b, a                  ; B = explicit S
+  call rt_bg_get_variant     ; -> A = pool slot
+  ld   c, a                  ; C = variant slot
+
+  ; write the nametable entry (re-set the address: gen may have moved it)
+  ld   hl, ($cb17)
+  ld   a, l
+  out  ($bf), a
+  ld   a, h
+  and  $3f
+  or   $40
+  out  ($bf), a
+  ld   a, c
+  out  ($be), a              ; tile low byte = variant slot
+  xor  a
+  out  ($be), a              ; high byte = 0 (palette 0, tile bit 8 = 0)
+
+  pop  bc
+  pop  de
+  pop  hl
+  ret
+
 ; Map a NES sprite tile to an SMS sprite tile byte.
 ; Entry: A = NES OAM tile byte. Uses PPUCTRL bit 3 ($CB08) to choose NES sprite
 ; pattern table 0/1. Table 0 maps to tile bytes for SMS sprite base $2000;
@@ -394,6 +470,35 @@ rt_write_bg_attr_quadrant:
   pop  bc
   ret
 
+; Expensive helper-only explicit-subpalette redraw for one NES attribute-table
+; quadrant. This does not update folded per-cell palette state; it uses the
+; existing BGV_BSHADOW base-slot bytes to redraw the four covered cells by
+; resolving each with explicit S. It is scaffold for later materializer work and
+; is not called by current hot paths.
+; Entry: A = S (0..3), DE = SMS nametable high-byte address for top-left tile.
+; Preserves BC and DE. Clobbers AF, HL.
+rt_redraw_bg_attr_quadrant_s:
+  push bc
+  push de
+  and  $03
+  ld   (BGV_ATTR_S), a       ; explicit S for this quadrant
+  call _chrmap_attr_write_one_s
+  ld   a, e
+  add  a, 2
+  ld   e, a
+  call _chrmap_attr_write_one_s
+  ld   a, e
+  add  a, 62                 ; next row, same column
+  ld   e, a
+  call _chrmap_attr_write_one_s
+  ld   a, e
+  add  a, 2
+  ld   e, a
+  call _chrmap_attr_write_one_s
+  pop  de
+  pop  bc
+  ret
+
 ; Set S for one cell and rewrite its tile to the matching variant.
 ; Entry: DE = nametable high-byte address; S in BGV_ATTR_S. Preserves DE.
 _chrmap_attr_write_one:
@@ -436,6 +541,34 @@ _chrmap_attr_write_one:
   xor  a
   out  ($be), a              ; high byte = 0
 _caw_done:
+  pop  de
+  ret
+
+; Redraw one cell using explicit S and the base-slot shadow only.
+; Entry: DE = nametable high-byte address; S in BGV_ATTR_S. Preserves DE.
+_chrmap_attr_write_one_s:
+  push de
+  ld   h, d
+  ld   l, e
+  dec  hl                    ; HL = NT low-byte address
+  push hl                    ; save for the VDP write
+  call _bgv_base_addr        ; HL -> base-shadow addr
+  ld   c, (hl)               ; C = base slot
+  ld   a, (BGV_ATTR_S)
+  ld   b, a                  ; B = explicit S
+  call rt_bg_get_variant     ; -> A = variant slot
+  ld   c, a
+  pop  hl                    ; HL = NT low-byte address
+  ld   a, l
+  out  ($bf), a
+  ld   a, h
+  and  $3f
+  or   $40
+  out  ($bf), a
+  ld   a, c
+  out  ($be), a              ; tile low byte = variant slot
+  xor  a
+  out  ($be), a              ; high byte = 0
   pop  de
   ret
 
