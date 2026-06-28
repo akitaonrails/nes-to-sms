@@ -75,6 +75,12 @@ struct SmsBus {
     nt_trace_ciram_tile_writes: u32,
     /// Count of trace-observed PPUDATA writes into attribute bytes.
     nt_trace_ciram_attr_writes: u32,
+    /// Trace-only source-tile view of the current folded SMS nametable. Unlike
+    /// SMS VRAM nametable bytes, these are original NES tile IDs, so they are a
+    /// safe comparison target for dry source-space projection diagnostics.
+    nt_trace_folded_source_tiles: [u8; 0x400],
+    /// Count of trace-observed tile writes into the folded source-tile shadow.
+    nt_trace_folded_source_tile_writes: u32,
     /// Tile writes where the folded $CC00 subpalette disagrees with the compact
     /// attribute shadow, interpreted as horizontal NES mirroring.
     nt_explicit_s_mismatch_horizontal: u32,
@@ -232,6 +238,8 @@ impl SmsBus {
             nt_trace_ciram_writes: 0,
             nt_trace_ciram_tile_writes: 0,
             nt_trace_ciram_attr_writes: 0,
+            nt_trace_folded_source_tiles: [0; 0x400],
+            nt_trace_folded_source_tile_writes: 0,
             nt_explicit_s_mismatch_horizontal: 0,
             nt_explicit_s_mismatch_horizontal_examples: Vec::new(),
             nt_explicit_s_mismatch_vertical: 0,
@@ -329,6 +337,9 @@ impl SmsBus {
             self.nt_trace_ciram_attr_writes += 1;
         } else {
             self.nt_trace_ciram_tile_writes += 1;
+            let folded_cell = (ppu_addr.wrapping_sub(0x2000) & 0x03FF) as usize;
+            self.nt_trace_folded_source_tiles[folded_cell] = value;
+            self.nt_trace_folded_source_tile_writes += 1;
         }
     }
 
@@ -2265,6 +2276,8 @@ fn main() {
     );
     println!("{}", format_nt_trace_ciram_summary(&bus, true));
     println!("{}", format_nt_trace_ciram_summary(&bus, false));
+    println!("{}", format_nt_dry_project_summary(&bus, true));
+    println!("{}", format_nt_dry_project_summary(&bus, false));
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -2730,6 +2743,8 @@ fn dump_route_checkpoint(
     )?;
     writeln!(f, "{}", format_nt_trace_ciram_summary(bus, true))?;
     writeln!(f, "{}", format_nt_trace_ciram_summary(bus, false))?;
+    writeln!(f, "{}", format_nt_dry_project_summary(bus, true))?;
+    writeln!(f, "{}", format_nt_dry_project_summary(bus, false))?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -2809,6 +2824,100 @@ fn format_nt_trace_ciram_summary(bus: &SmsBus, vertical_mirroring: bool) -> Stri
         bus.nt_trace_ciram_attr_writes,
         tile_nonzero,
         attr_nonzero
+    )
+}
+
+fn nt_trace_ciram(bus: &SmsBus, vertical_mirroring: bool) -> &[u8; 0x800] {
+    if vertical_mirroring {
+        &bus.nt_trace_ciram_vertical
+    } else {
+        &bus.nt_trace_ciram_horizontal
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NtDryProjection {
+    dry_tile: u8,
+    folded_tile: u8,
+    ppu_addr: u16,
+    source_row: usize,
+    source_col: usize,
+}
+
+fn nt_dry_project_tile_for_cell(
+    bus: &SmsBus,
+    row: usize,
+    col: usize,
+    vertical_mirroring: bool,
+) -> NtDryProjection {
+    let scroll_x = bus.ram[0x0B0C] as usize;
+    let scroll_y = bus.ram[0x0B0D] as usize;
+    let ppu_ctrl = bus.ram[0x0B08];
+    let x = col + scroll_x / 8;
+    let y = row + scroll_y / 8;
+    let nt_x = (ppu_ctrl & 0x01) as usize;
+    let nt_y = ((ppu_ctrl >> 1) & 0x01) as usize;
+    let page_x = nt_x + x / 32;
+    let page_y = nt_y + y / 30;
+    let nt_page = (page_y & 1) * 2 + (page_x & 1);
+    let source_row = y % 30;
+    let source_col = x % 32;
+    let ppu_offset = nt_page * 0x400 + source_row * 32 + source_col;
+    let ppu_addr = 0x2000 + ppu_offset as u16;
+    let ciram = nt_trace_ciram(bus, vertical_mirroring);
+    let dry_tile = ciram[nt_ciram_index(ppu_addr, vertical_mirroring)];
+    let folded_cell = source_row * 32 + source_col;
+    let folded_tile = bus.nt_trace_folded_source_tiles[folded_cell];
+    NtDryProjection {
+        dry_tile,
+        folded_tile,
+        ppu_addr,
+        source_row,
+        source_col,
+    }
+}
+
+fn format_nt_dry_project_summary(bus: &SmsBus, vertical_mirroring: bool) -> String {
+    let mode = if vertical_mirroring {
+        "vertical"
+    } else {
+        "horizontal"
+    };
+    let mut diffs = 0usize;
+    let mut rows_28_29 = 0usize;
+    let mut examples = Vec::new();
+
+    // Dry/approximate source-space projection: compare what a page-aware
+    // materializer would read from reconstructed CIRAM against the trace-only
+    // folded source-tile shadow that approximates today's SMS nametable source.
+    // Do not compare against SMS VRAM tile bytes; those are generated variant
+    // slots, not NES tile identities.
+    for row in 0..28 {
+        for col in 0..32 {
+            let projection = nt_dry_project_tile_for_cell(bus, row, col, vertical_mirroring);
+            if projection.source_row >= 28 {
+                rows_28_29 += 1;
+            }
+            if projection.dry_tile != projection.folded_tile {
+                diffs += 1;
+                if examples.len() < 8 {
+                    examples.push(format!(
+                        "r={row:02},c={col:02} dry={:02X} folded={:02X} ppu={:04X}",
+                        projection.dry_tile, projection.folded_tile, projection.ppu_addr
+                    ));
+                }
+            }
+        }
+    }
+
+    let first = if examples.is_empty() {
+        "none".to_string()
+    } else {
+        examples.join(" ")
+    };
+    format!(
+        "nt_dry_project_{mode}=diffs:{diffs} rows_28_29:{rows_28_29} folded_writes:{} first={first}",
+        bus.nt_trace_folded_source_tile_writes
     )
 }
 
@@ -3293,6 +3402,8 @@ mod tests {
         assert_eq!(bus.nt_trace_ciram_writes, 1);
         assert_eq!(bus.nt_trace_ciram_tile_writes, 1);
         assert_eq!(bus.nt_trace_ciram_attr_writes, 0);
+        assert_eq!(bus.nt_trace_folded_source_tiles[0x012], 0xAB);
+        assert_eq!(bus.nt_trace_folded_source_tile_writes, 1);
 
         bus.ram[0x0B0F] = 0x27;
         bus.ram[0x0B10] = 0xC0;
@@ -3304,6 +3415,44 @@ mod tests {
         assert_eq!(bus.nt_trace_ciram_writes, 2);
         assert_eq!(bus.nt_trace_ciram_tile_writes, 1);
         assert_eq!(bus.nt_trace_ciram_attr_writes, 1);
+        assert_eq!(bus.nt_trace_folded_source_tile_writes, 1);
         assert!(format_nt_trace_ciram_summary(&bus, false).contains("attr_nonzero:1"));
+    }
+
+    #[test]
+    fn dry_project_compares_ciram_projection_to_folded_source_tiles() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+
+        bus.ram[0x0B08] = 0x01; // base nametable page 1 ($2400)
+        bus.nt_trace_ciram_vertical[0x400] = 0x44;
+        bus.nt_trace_ciram_horizontal[0x000] = 0x33;
+        bus.nt_trace_folded_source_tiles[0x000] = 0x22;
+        bus.nt_trace_folded_source_tile_writes = 1;
+
+        let vertical = nt_dry_project_tile_for_cell(&bus, 0, 0, true);
+        assert_eq!(vertical.ppu_addr, 0x2400);
+        assert_eq!(vertical.source_row, 0);
+        assert_eq!(vertical.source_col, 0);
+        assert_eq!(vertical.dry_tile, 0x44);
+        assert_eq!(vertical.folded_tile, 0x22);
+
+        let horizontal = nt_dry_project_tile_for_cell(&bus, 0, 0, false);
+        assert_eq!(horizontal.ppu_addr, 0x2400);
+        assert_eq!(horizontal.dry_tile, 0x33);
+        assert_eq!(horizontal.folded_tile, 0x22);
+
+        assert!(format_nt_dry_project_summary(&bus, true).contains(
+            "nt_dry_project_vertical=diffs:1 rows_28_29:0 folded_writes:1 first=r=00,c=00 dry=44 folded=22 ppu=2400"
+        ));
+    }
+
+    #[test]
+    fn dry_project_reports_when_scroll_y_uses_hidden_nes_rows() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B0D] = 224; // 28 coarse rows
+
+        let projection = nt_dry_project_tile_for_cell(&bus, 0, 0, true);
+        assert_eq!(projection.source_row, 28);
+        assert!(format_nt_dry_project_summary(&bus, true).contains("rows_28_29:64"));
     }
 }
