@@ -107,6 +107,10 @@ struct SmsBus {
     nt_trace_folded_source_tile_seen: [bool; 0x400],
     /// Count of trace-observed tile writes into the folded source-tile shadow.
     nt_trace_folded_source_tile_writes: u32,
+    /// Trace-only materializer dirty tile sets, indexed by mirrored CIRAM tile
+    /// byte. Bit 0 = direct tile write, bit 1 = attribute write covering cell.
+    nt_materializer_dirty_vertical: [u8; 0x800],
+    nt_materializer_dirty_horizontal: [u8; 0x800],
     /// Tile writes where the folded $CC00 subpalette disagrees with the compact
     /// attribute shadow, interpreted as horizontal NES mirroring.
     nt_explicit_s_mismatch_horizontal: u32,
@@ -267,6 +271,8 @@ impl SmsBus {
             nt_trace_folded_source_tiles: [0; 0x400],
             nt_trace_folded_source_tile_seen: [false; 0x400],
             nt_trace_folded_source_tile_writes: 0,
+            nt_materializer_dirty_vertical: [0; 0x800],
+            nt_materializer_dirty_horizontal: [0; 0x800],
             nt_explicit_s_mismatch_horizontal: 0,
             nt_explicit_s_mismatch_horizontal_examples: Vec::new(),
             nt_explicit_s_mismatch_vertical: 0,
@@ -362,13 +368,46 @@ impl SmsBus {
         self.nt_trace_ciram_writes += 1;
         if (ppu_addr & 0x03FF) >= 0x03C0 {
             self.nt_trace_ciram_attr_writes += 1;
+            self.mark_materializer_attr_dirty(ppu_addr);
         } else {
             self.nt_trace_ciram_tile_writes += 1;
+            self.mark_materializer_tile_dirty(ppu_addr, 0x01);
             let folded_cell = (ppu_addr.wrapping_sub(0x2000) & 0x03FF) as usize;
             self.nt_trace_folded_source_tiles[folded_cell] = value;
             self.nt_trace_folded_source_tile_seen[folded_cell] = true;
             self.nt_trace_folded_source_tile_writes += 1;
         }
+    }
+
+    fn mark_materializer_tile_dirty(&mut self, ppu_addr: u16, reason: u8) {
+        if !(0x2000..=0x2FBF).contains(&ppu_addr) || (ppu_addr & 0x03FF) >= 0x03C0 {
+            return;
+        }
+        let vertical = nt_ciram_index(ppu_addr, true);
+        let horizontal = nt_ciram_index(ppu_addr, false);
+        self.nt_materializer_dirty_vertical[vertical] |= reason;
+        self.nt_materializer_dirty_horizontal[horizontal] |= reason;
+    }
+
+    fn mark_materializer_attr_dirty(&mut self, ppu_addr: u16) {
+        if !(0x2000..=0x2FFF).contains(&ppu_addr) || (ppu_addr & 0x03FF) < 0x03C0 {
+            return;
+        }
+        let page_base = ppu_addr & !0x03FF;
+        let attr = usize::from((ppu_addr & 0x003F) as u8);
+        let base_row = (attr / 8) * 4;
+        let base_col = (attr & 7) * 4;
+        for row in base_row..(base_row + 4) {
+            for col in base_col..(base_col + 4) {
+                let tile_addr = page_base + (row * 32 + col) as u16;
+                self.mark_materializer_tile_dirty(tile_addr, 0x02);
+            }
+        }
+    }
+
+    fn clear_materializer_dirty(&mut self) {
+        self.nt_materializer_dirty_vertical.fill(0);
+        self.nt_materializer_dirty_horizontal.fill(0);
     }
 
     fn record_nt_explicit_s_mismatch(
@@ -1783,6 +1822,8 @@ fn main() {
                         dir: &checkpoint_dir,
                         symbols: &symbol_defs,
                         expected_mirroring,
+                        prev_coarse_scroll,
+                        curr_coarse_scroll: current_coarse_scroll(&bus),
                     },
                 ) {
                     eprintln!(
@@ -1810,8 +1851,14 @@ fn main() {
             let coarse_scroll = current_coarse_scroll(&bus);
             let materializer_work =
                 format_materializer_work_estimate(prev_coarse_scroll, coarse_scroll);
+            let materializer_dirty = format_nt_materializer_dirty_visible(
+                &bus,
+                expected_mirroring,
+                prev_coarse_scroll,
+                coarse_scroll,
+            );
             eprintln!(
-                "frame {:3}: $0770={:02X} $0772={:02X} $0773={:02X} $0774={:02X} ppos={:02X}:{:02X} spd={:02X} cam={:02X}:{:02X} y={:02X}:{:02X} yspd={:02X} act={:02X} joy={:02X} apage={:02X} bcol={:02X} aobj={:02X} aofs={:02X} alen={:02X}/{:02X}/{:02X} stop={:02X} steps={} vram+={} cram+={} data+={} ctrl+={} line_irq+={} {}",
+                "frame {:3}: $0770={:02X} $0772={:02X} $0773={:02X} $0774={:02X} ppos={:02X}:{:02X} spd={:02X} cam={:02X}:{:02X} y={:02X}:{:02X} yspd={:02X} act={:02X} joy={:02X} apage={:02X} bcol={:02X} aobj={:02X} aofs={:02X} alen={:02X}/{:02X}/{:02X} stop={:02X} steps={} vram+={} cram+={} data+={} ctrl+={} line_irq+={} {} {}",
                 irqs_fired,
                 bus.ram[0x0770],
                 bus.ram[0x0772],
@@ -1842,6 +1889,7 @@ fn main() {
                 frame_control_writes,
                 frame_line_irqs,
                 materializer_work,
+                materializer_dirty,
             );
             prev_frame_step = step;
             prev_frame_vram_writes = bus.vram_writes;
@@ -1850,6 +1898,7 @@ fn main() {
             prev_frame_control_writes = bus.vdp_control_writes;
             prev_frame_line_irqs = line_irqs_fired;
             prev_coarse_scroll = coarse_scroll;
+            bus.clear_materializer_dirty();
             if first_fall_snapshot.is_none() && (bus.ram[0x0723] != 0 || bus.ram[0x00B5] >= 0x02) {
                 let recent_reads = bus
                     .watch_read_log
@@ -2436,6 +2485,15 @@ fn main() {
         "{}",
         format_nt_materializer_expected_delta(&bus, expected_mirroring)
     );
+    println!(
+        "{}",
+        format_nt_materializer_dirty_visible(
+            &bus,
+            expected_mirroring,
+            prev_coarse_scroll,
+            current_coarse_scroll(&bus),
+        )
+    );
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -2801,6 +2859,8 @@ struct CheckpointDumpContext<'a> {
     dir: &'a Path,
     symbols: &'a HashMap<String, (u8, u16)>,
     expected_mirroring: ExpectedMirroring,
+    prev_coarse_scroll: (u8, u8),
+    curr_coarse_scroll: (u8, u8),
 }
 
 fn dump_route_checkpoint(
@@ -2930,6 +2990,16 @@ fn dump_route_checkpoint(
         f,
         "{}",
         format_nt_materializer_expected_delta(bus, context.expected_mirroring)
+    )?;
+    writeln!(
+        f,
+        "{}",
+        format_nt_materializer_dirty_visible(
+            bus,
+            context.expected_mirroring,
+            context.prev_coarse_scroll,
+            context.curr_coarse_scroll,
+        )
     )?;
     writeln!(
         f,
@@ -3188,12 +3258,124 @@ fn coarse_delta(prev: u8, curr: u8, modulus: i16) -> i16 {
 fn format_materializer_work_estimate(prev: (u8, u8), curr: (u8, u8)) -> String {
     let dx = coarse_delta(prev.0, curr.0, 32);
     let dy = coarse_delta(prev.1, curr.1, 32);
-    let entering_cols = usize::from(dx.unsigned_abs()).min(32);
-    let entering_rows = usize::from(dy.unsigned_abs()).min(28);
-    let work = entering_cols * 28 + entering_rows * (32usize.saturating_sub(entering_cols));
+    let work = materializer_entering_work(prev, curr);
     format!(
         "mat_c={},{} d={},{} work={work}/896",
         curr.0, curr.1, dx, dy
+    )
+}
+
+fn materializer_entering_work(prev: (u8, u8), curr: (u8, u8)) -> usize {
+    let dx = coarse_delta(prev.0, curr.0, 32);
+    let dy = coarse_delta(prev.1, curr.1, 32);
+    let entering_cols = usize::from(dx.unsigned_abs()).min(32);
+    let entering_rows = usize::from(dy.unsigned_abs()).min(28);
+    entering_cols * 28 + entering_rows * (32usize.saturating_sub(entering_cols))
+}
+
+fn materializer_is_entering_cell(row: usize, col: usize, prev: (u8, u8), curr: (u8, u8)) -> bool {
+    let dx = coarse_delta(prev.0, curr.0, 32);
+    let dy = coarse_delta(prev.1, curr.1, 32);
+    let entering_cols = usize::from(dx.unsigned_abs()).min(32);
+    let entering_rows = usize::from(dy.unsigned_abs()).min(28);
+    let entering_col = if dx > 0 {
+        col >= 32usize.saturating_sub(entering_cols)
+    } else if dx < 0 {
+        col < entering_cols
+    } else {
+        false
+    };
+    let entering_row = if dy > 0 {
+        row >= 28usize.saturating_sub(entering_rows)
+    } else if dy < 0 {
+        row < entering_rows
+    } else {
+        false
+    };
+    entering_col || entering_row
+}
+
+fn materializer_dirty_set(bus: &SmsBus, vertical_mirroring: bool) -> &[u8; 0x800] {
+    if vertical_mirroring {
+        &bus.nt_materializer_dirty_vertical
+    } else {
+        &bus.nt_materializer_dirty_horizontal
+    }
+}
+
+fn materializer_dirty_reason(bits: u8) -> &'static str {
+    match bits & 0x03 {
+        0x01 => "tile",
+        0x02 => "attr",
+        0x03 => "tile+attr",
+        _ => "unknown",
+    }
+}
+
+fn format_nt_materializer_dirty_visible(
+    bus: &SmsBus,
+    expected_mirroring: ExpectedMirroring,
+    prev_coarse: (u8, u8),
+    curr_coarse: (u8, u8),
+) -> String {
+    let Some(vertical_mirroring) = expected_mirroring.vertical_flag() else {
+        return "nt_materializer_dirty_visible=unavailable expected=unknown reason=missing_or_conflicting_mirroring".to_string();
+    };
+    let dirty = materializer_dirty_set(bus, vertical_mirroring);
+    let mut total = 0usize;
+    let mut dirty_unique = 0usize;
+    let mut cols = [0usize; 32];
+    let mut rows = [0usize; 28];
+    let mut examples = Vec::new();
+
+    for (row, row_count) in rows.iter_mut().enumerate() {
+        for (col, col_count) in cols.iter_mut().enumerate() {
+            let projection = nt_dry_project_tile_for_cell(bus, row, col, vertical_mirroring);
+            let ciram = nt_ciram_index(projection.ppu_addr, vertical_mirroring);
+            let reason = dirty[ciram];
+            if reason == 0 {
+                continue;
+            }
+            total += 1;
+            *row_count += 1;
+            *col_count += 1;
+            if !materializer_is_entering_cell(row, col, prev_coarse, curr_coarse) {
+                dirty_unique += 1;
+            }
+            if examples.len() < 8 {
+                examples.push(format!(
+                    "r={row:02},c={col:02} ppu={:04X} ciram={ciram:03X} reason={}",
+                    projection.ppu_addr,
+                    materializer_dirty_reason(reason)
+                ));
+            }
+        }
+    }
+
+    let cols = cols
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count != 0)
+        .map(|(col, count)| format!("{col:02}:{count}"))
+        .collect::<Vec<_>>();
+    let rows = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count != 0)
+        .map(|(row, count)| format!("{row:02}:{count}"))
+        .collect::<Vec<_>>();
+    let entering = materializer_entering_work(prev_coarse, curr_coarse);
+    let combined = entering + dirty_unique;
+    let first = if examples.is_empty() {
+        "none".to_string()
+    } else {
+        examples.join(" ")
+    };
+    format!(
+        "nt_materializer_dirty_visible={total} expected={} cols={} rows={} entering={entering} dirty_unique={dirty_unique} combined={combined}/896 first={first}",
+        expected_mirroring.label(),
+        if cols.is_empty() { "none".to_string() } else { cols.join(" ") },
+        if rows.is_empty() { "none".to_string() } else { rows.join(" ") }
     )
 }
 
@@ -3997,6 +4179,72 @@ mod tests {
             format_materializer_work_estimate((31, 0), (0, 1)),
             "mat_c=0,1 d=1,1 work=59/896"
         );
+    }
+
+    #[test]
+    fn materializer_dirty_visible_tracks_tile_writes() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x03;
+        bus.record_trace_ppu_write_call(7, 0x44);
+
+        assert_eq!(
+            format_nt_materializer_dirty_visible(
+                &bus,
+                ExpectedMirroring::Vertical,
+                (0, 0),
+                (0, 0),
+            ),
+            "nt_materializer_dirty_visible=1 expected=vertical cols=03:1 rows=00:1 entering=0 dirty_unique=1 combined=1/896 first=r=00,c=03 ppu=2003 ciram=003 reason=tile"
+        );
+        bus.clear_materializer_dirty();
+        assert!(format_nt_materializer_dirty_visible(
+            &bus,
+            ExpectedMirroring::Vertical,
+            (0, 0),
+            (0, 0),
+        )
+        .contains("nt_materializer_dirty_visible=0"));
+    }
+
+    #[test]
+    fn materializer_dirty_visible_tracks_attr_4x4_blocks() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B0F] = 0x23;
+        bus.ram[0x0B10] = 0xC0;
+        bus.record_trace_ppu_write_call(7, 0xFF);
+
+        let summary =
+            format_nt_materializer_dirty_visible(&bus, ExpectedMirroring::Vertical, (0, 0), (0, 0));
+        assert!(summary.contains("nt_materializer_dirty_visible=16"));
+        assert!(summary.contains("cols=00:4 01:4 02:4 03:4"));
+        assert!(summary.contains("rows=00:4 01:4 02:4 03:4"));
+        assert!(summary.contains("reason=attr"));
+    }
+
+    #[test]
+    fn materializer_dirty_visible_handles_unknown_and_entering_overlap() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x1F;
+        bus.record_trace_ppu_write_call(7, 0x44);
+
+        assert_eq!(
+            format_nt_materializer_dirty_visible(
+                &bus,
+                ExpectedMirroring::Unknown,
+                (0, 0),
+                (0, 0),
+            ),
+            "nt_materializer_dirty_visible=unavailable expected=unknown reason=missing_or_conflicting_mirroring"
+        );
+        assert!(format_nt_materializer_dirty_visible(
+            &bus,
+            ExpectedMirroring::Vertical,
+            (0, 0),
+            (1, 0),
+        )
+        .contains("entering=28 dirty_unique=0 combined=28/896"));
     }
 
     #[test]
