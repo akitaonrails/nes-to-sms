@@ -20,6 +20,31 @@ const RAM_SIZE: usize = 0x2000;
 const IRQ_PERIOD: usize = 60_000;
 const RT_PPU_WRITE_FALLBACK_ADDR: u16 = 0x0068;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpectedMirroring {
+    Vertical,
+    Horizontal,
+    Unknown,
+}
+
+impl ExpectedMirroring {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Vertical => "vertical",
+            Self::Horizontal => "horizontal",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn vertical_flag(self) -> Option<bool> {
+        match self {
+            Self::Vertical => Some(true),
+            Self::Horizontal => Some(false),
+            Self::Unknown => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SmsBus {
     rom: Vec<u8>,
@@ -479,6 +504,19 @@ fn load_wla_symbol_defs(path: &Path) -> HashMap<String, (u8, u16)> {
         }
     }
     symbols
+}
+
+fn detect_expected_mirroring(asm_path: &Path) -> ExpectedMirroring {
+    let Ok(text) = std::fs::read_to_string(asm_path) else {
+        return ExpectedMirroring::Unknown;
+    };
+    let vertical = text.contains("NES_MIRRORING_VERTICAL");
+    let horizontal = text.contains("NES_MIRRORING_HORIZONTAL");
+    match (vertical, horizontal) {
+        (true, false) => ExpectedMirroring::Vertical,
+        (false, true) => ExpectedMirroring::Horizontal,
+        _ => ExpectedMirroring::Unknown,
+    }
 }
 
 fn rom_byte_at_symbol(
@@ -1513,10 +1551,17 @@ fn main() {
     let sym_path = rom_path.with_extension("sym");
     let symbols = load_wla_symbols(&sym_path);
     let symbol_defs = load_wla_symbol_defs(&sym_path);
-    let rt_ppu_write_addr = symbol_defs
-        .get("rt_ppu_write")
-        .map(|(_, addr)| *addr)
-        .unwrap_or(RT_PPU_WRITE_FALLBACK_ADDR);
+    let asm_path = rom_path.with_extension("asm");
+    let expected_mirroring = detect_expected_mirroring(&asm_path);
+    let rt_ppu_write_addr = if let Some((_, addr)) = symbol_defs.get("rt_ppu_write") {
+        *addr
+    } else {
+        eprintln!(
+            "WARN: rt_ppu_write symbol missing in {}; using fallback ${RT_PPU_WRITE_FALLBACK_ADDR:04X}",
+            sym_path.display()
+        );
+        RT_PPU_WRITE_FALLBACK_ADDR
+    };
     let mut bus = SmsBus::new(rom, controller_port_dc);
     let mut cpu = Cpu::new();
     cpu.pc = 0x0000;
@@ -1565,6 +1610,7 @@ fn main() {
     let mut prev_frame_data_writes = 0u32;
     let mut prev_frame_control_writes = 0u32;
     let mut prev_frame_line_irqs = 0usize;
+    let mut prev_coarse_scroll = current_coarse_scroll(&bus);
     let dump_each_frame_to = std::env::var("SMS_DUMP_EACH_FRAME").ok();
     let stop_on_fall = std::env::var("SMS_STOP_ON_FALL")
         .ok()
@@ -1733,8 +1779,11 @@ fn main() {
                     step,
                     irqs_fired,
                     checkpoint,
-                    &checkpoint_dir,
-                    &symbol_defs,
+                    CheckpointDumpContext {
+                        dir: &checkpoint_dir,
+                        symbols: &symbol_defs,
+                        expected_mirroring,
+                    },
                 ) {
                     eprintln!(
                         "checkpoint dump failed for {} at frame {}: {err}",
@@ -1758,8 +1807,11 @@ fn main() {
                 .vdp_control_writes
                 .saturating_sub(prev_frame_control_writes);
             let frame_line_irqs = line_irqs_fired.saturating_sub(prev_frame_line_irqs);
+            let coarse_scroll = current_coarse_scroll(&bus);
+            let materializer_work =
+                format_materializer_work_estimate(prev_coarse_scroll, coarse_scroll);
             eprintln!(
-                "frame {:3}: $0770={:02X} $0772={:02X} $0773={:02X} $0774={:02X} ppos={:02X}:{:02X} spd={:02X} cam={:02X}:{:02X} y={:02X}:{:02X} yspd={:02X} act={:02X} joy={:02X} apage={:02X} bcol={:02X} aobj={:02X} aofs={:02X} alen={:02X}/{:02X}/{:02X} stop={:02X} steps={} vram+={} cram+={} data+={} ctrl+={} line_irq+={}",
+                "frame {:3}: $0770={:02X} $0772={:02X} $0773={:02X} $0774={:02X} ppos={:02X}:{:02X} spd={:02X} cam={:02X}:{:02X} y={:02X}:{:02X} yspd={:02X} act={:02X} joy={:02X} apage={:02X} bcol={:02X} aobj={:02X} aofs={:02X} alen={:02X}/{:02X}/{:02X} stop={:02X} steps={} vram+={} cram+={} data+={} ctrl+={} line_irq+={} {}",
                 irqs_fired,
                 bus.ram[0x0770],
                 bus.ram[0x0772],
@@ -1789,6 +1841,7 @@ fn main() {
                 frame_data_writes,
                 frame_control_writes,
                 frame_line_irqs,
+                materializer_work,
             );
             prev_frame_step = step;
             prev_frame_vram_writes = bus.vram_writes;
@@ -1796,6 +1849,7 @@ fn main() {
             prev_frame_data_writes = bus.vdp_data_writes;
             prev_frame_control_writes = bus.vdp_control_writes;
             prev_frame_line_irqs = line_irqs_fired;
+            prev_coarse_scroll = coarse_scroll;
             if first_fall_snapshot.is_none() && (bus.ram[0x0723] != 0 || bus.ram[0x00B5] >= 0x02) {
                 let recent_reads = bus
                     .watch_read_log
@@ -2378,6 +2432,10 @@ fn main() {
         "{}",
         format_bgv_base_from_dry_ciram_mismatches(&bus, &bus.rom, &symbol_defs, false)
     );
+    println!(
+        "{}",
+        format_nt_materializer_expected_delta(&bus, expected_mirroring)
+    );
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -2739,22 +2797,27 @@ fn print_fall_snapshot(snapshot: &FallSnapshot) {
     );
 }
 
+struct CheckpointDumpContext<'a> {
+    dir: &'a Path,
+    symbols: &'a HashMap<String, (u8, u16)>,
+    expected_mirroring: ExpectedMirroring,
+}
+
 fn dump_route_checkpoint(
     bus: &SmsBus,
     cpu: &Cpu,
     step: usize,
     actual_frame: usize,
     checkpoint: &RouteCheckpoint,
-    dir: &Path,
-    symbols: &HashMap<String, (u8, u16)>,
+    context: CheckpointDumpContext<'_>,
 ) -> std::io::Result<()> {
     use std::io::Write;
 
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(context.dir)?;
     let slug = checkpoint_slug(&checkpoint.name);
     let stem = format!("{:05}_{}", checkpoint.frame, slug);
-    let ppm_path = dir.join(format!("{stem}.ppm"));
-    let txt_path = dir.join(format!("{stem}.txt"));
+    let ppm_path = context.dir.join(format!("{stem}.ppm"));
+    let txt_path = context.dir.join(format!("{stem}.txt"));
 
     dump_framebuffer_ppm(bus, ppm_path.to_string_lossy().as_ref())?;
 
@@ -2851,17 +2914,22 @@ fn dump_route_checkpoint(
     writeln!(
         f,
         "{}",
-        format_bgv_base_shadow_mismatches(bus, &bus.rom, symbols)
+        format_bgv_base_shadow_mismatches(bus, &bus.rom, context.symbols)
     )?;
     writeln!(
         f,
         "{}",
-        format_bgv_base_from_dry_ciram_mismatches(bus, &bus.rom, symbols, true)
+        format_bgv_base_from_dry_ciram_mismatches(bus, &bus.rom, context.symbols, true)
     )?;
     writeln!(
         f,
         "{}",
-        format_bgv_base_from_dry_ciram_mismatches(bus, &bus.rom, symbols, false)
+        format_bgv_base_from_dry_ciram_mismatches(bus, &bus.rom, context.symbols, false)
+    )?;
+    writeln!(
+        f,
+        "{}",
+        format_nt_materializer_expected_delta(bus, context.expected_mirroring)
     )?;
     writeln!(
         f,
@@ -3036,6 +3104,96 @@ fn format_nt_dry_project_summary(bus: &SmsBus, vertical_mirroring: bool) -> Stri
     format!(
         "nt_dry_project_{mode}=diffs:{diffs} rows_28_29:{rows_28_29} folded_writes:{} first={first}",
         bus.nt_trace_folded_source_tile_writes
+    )
+}
+
+fn format_nt_materializer_expected_delta(
+    bus: &SmsBus,
+    expected_mirroring: ExpectedMirroring,
+) -> String {
+    let Some(vertical_mirroring) = expected_mirroring.vertical_flag() else {
+        return "nt_materializer_expected=unknown diffs=unavailable reason=missing_or_conflicting_mirroring".to_string();
+    };
+
+    let mut diffs = 0usize;
+    let mut cols = [0usize; 32];
+    let mut rows = [0usize; 28];
+    let mut examples = Vec::new();
+
+    for (row, row_count) in rows.iter_mut().enumerate() {
+        for (col, col_count) in cols.iter_mut().enumerate() {
+            let projection = nt_dry_project_tile_for_cell(bus, row, col, vertical_mirroring);
+            if projection.dry_tile != projection.folded_tile {
+                diffs += 1;
+                *row_count += 1;
+                *col_count += 1;
+                if examples.len() < 8 {
+                    examples.push(format!(
+                        "r={row:02},c={col:02} dry={:02X} folded={:02X} ppu={:04X}",
+                        projection.dry_tile, projection.folded_tile, projection.ppu_addr
+                    ));
+                }
+            }
+        }
+    }
+
+    let cols = cols
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count != 0)
+        .map(|(col, count)| format!("{col:02}:{count}"))
+        .collect::<Vec<_>>();
+    let rows = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count != 0)
+        .map(|(row, count)| format!("{row:02}:{count}"))
+        .collect::<Vec<_>>();
+    let first = if examples.is_empty() {
+        "none".to_string()
+    } else {
+        examples.join(" ")
+    };
+    format!(
+        "nt_materializer_expected={} diffs={diffs} cols={} rows={} first={first}",
+        expected_mirroring.label(),
+        if cols.is_empty() {
+            "none".to_string()
+        } else {
+            cols.join(" ")
+        },
+        if rows.is_empty() {
+            "none".to_string()
+        } else {
+            rows.join(" ")
+        }
+    )
+}
+
+fn current_coarse_scroll(bus: &SmsBus) -> (u8, u8) {
+    (bus.ram[0x0B0C] / 8, bus.ram[0x0B0D] / 8)
+}
+
+fn coarse_delta(prev: u8, curr: u8, modulus: i16) -> i16 {
+    let mut delta = i16::from(curr) - i16::from(prev);
+    let half = modulus / 2;
+    if delta > half {
+        delta -= modulus;
+    } else if delta < -half {
+        delta += modulus;
+    }
+    delta
+}
+
+fn format_materializer_work_estimate(prev: (u8, u8), curr: (u8, u8)) -> String {
+    let dx = coarse_delta(prev.0, curr.0, 32);
+    let dy = coarse_delta(prev.1, curr.1, 32);
+    let entering_cols = usize::from(dx.unsigned_abs()).min(32);
+    let entering_rows = usize::from(dy.unsigned_abs()).min(28);
+    let work = entering_cols * 28 + entering_rows * (32usize.saturating_sub(entering_cols));
+    format!(
+        "mat_c={},{} d={},{} work={work}/896",
+        curr.0, curr.1, dx, dy
     )
 }
 
@@ -3493,7 +3651,8 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
         let y = bus.vram[0x3F00 + i];
         let x = bus.vram[0x3F80 + i * 2];
         let tile = bus.vram[0x3F80 + i * 2 + 1] as usize;
-        let attr = bus.ram[0x1480 + i]; // runtime SAT_ATTRS = $D480
+        // runtime SAT_ATTRS = $D480
+        let attr = bus.ram[0x1480 + i];
         // SMS sprite Y is the byte value, displayed one line below
         // (y == 0 means line 1). Skip if off-screen.
         let sy_top = y as usize + 1;
@@ -3808,6 +3967,36 @@ mod tests {
         let projection = nt_dry_project_tile_for_cell(&bus, 0, 0, true);
         assert_eq!(projection.source_row, 28);
         assert!(format_nt_dry_project_summary(&bus, true).contains("rows_28_29:64"));
+    }
+
+    #[test]
+    fn materializer_expected_delta_groups_by_rows_and_columns() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.nt_trace_ciram_vertical[0] = 0x11;
+        bus.nt_trace_ciram_vertical[1] = 0x22;
+        bus.nt_trace_folded_source_tiles[0] = 0x10;
+        bus.nt_trace_folded_source_tiles[1] = 0x22;
+
+        assert_eq!(
+            format_nt_materializer_expected_delta(&bus, ExpectedMirroring::Vertical),
+            "nt_materializer_expected=vertical diffs=1 cols=00:1 rows=00:1 first=r=00,c=00 dry=11 folded=10 ppu=2000"
+        );
+        assert_eq!(
+            format_nt_materializer_expected_delta(&bus, ExpectedMirroring::Unknown),
+            "nt_materializer_expected=unknown diffs=unavailable reason=missing_or_conflicting_mirroring"
+        );
+    }
+
+    #[test]
+    fn materializer_work_estimate_formats_coarse_scroll_delta() {
+        assert_eq!(
+            format_materializer_work_estimate((11, 0), (12, 0)),
+            "mat_c=12,0 d=1,0 work=28/896"
+        );
+        assert_eq!(
+            format_materializer_work_estimate((31, 0), (0, 1)),
+            "mat_c=0,1 d=1,1 work=59/896"
+        );
     }
 
     #[test]
