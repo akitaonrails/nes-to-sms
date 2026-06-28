@@ -61,6 +61,13 @@ struct SmsBus {
     controller_reads: u32,
     /// Bitmask of NES nametable pages observed writing each folded SMS cell.
     nt_fold_cell_pages: [u8; 1024],
+    /// Tile writes where the folded $CC00 subpalette disagrees with the compact
+    /// attribute shadow, interpreted as horizontal NES mirroring.
+    nt_explicit_s_mismatch_horizontal: u32,
+    nt_explicit_s_mismatch_horizontal_examples: Vec<NtExplicitSExample>,
+    /// Same diagnostic, interpreted as vertical NES mirroring.
+    nt_explicit_s_mismatch_vertical: u32,
+    nt_explicit_s_mismatch_vertical_examples: Vec<NtExplicitSExample>,
     /// Raw SMS port $DC value for controller 1. Active-low; default $FF = released.
     controller_port_dc: u8,
     /// Log of every mapper write (port, value). Lets the trace report
@@ -111,6 +118,16 @@ struct WatchWrite {
     yspeed: u8,
     eb: u8,
     vertical_force: u8,
+}
+
+#[derive(Clone, Debug)]
+struct NtExplicitSExample {
+    ppu_addr: u16,
+    sms_addr: u16,
+    folded_s: u8,
+    explicit_s: u8,
+    attr_index: usize,
+    attr_byte: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -196,6 +213,10 @@ impl SmsBus {
             vdp_control_writes: 0,
             controller_reads: 0,
             nt_fold_cell_pages: [0; 1024],
+            nt_explicit_s_mismatch_horizontal: 0,
+            nt_explicit_s_mismatch_horizontal_examples: Vec::new(),
+            nt_explicit_s_mismatch_vertical: 0,
+            nt_explicit_s_mismatch_vertical_examples: Vec::new(),
             controller_port_dc,
         }
     }
@@ -263,6 +284,83 @@ impl SmsBus {
             let page = ((ppu_addr - 0x2000) >> 10) as u8;
             self.nt_fold_cell_pages[cell] |= 1 << page;
         }
+
+        if masked & 1 == 0 {
+            self.record_nt_explicit_s_mismatch(masked, ppu_addr, false);
+            self.record_nt_explicit_s_mismatch(masked, ppu_addr, true);
+        }
+    }
+
+    fn record_nt_explicit_s_mismatch(
+        &mut self,
+        sms_addr: u16,
+        ppu_addr: u16,
+        vertical_mirroring: bool,
+    ) {
+        let Some(folded_s) = self.nt_folded_shadow_s(sms_addr) else {
+            return;
+        };
+        let (explicit_s, attr_index, attr_byte) =
+            self.nt_attr_shadow_s(ppu_addr, vertical_mirroring);
+        if folded_s == explicit_s {
+            return;
+        }
+
+        let example = NtExplicitSExample {
+            ppu_addr,
+            sms_addr,
+            folded_s,
+            explicit_s,
+            attr_index,
+            attr_byte,
+        };
+
+        let (count, examples) = if vertical_mirroring {
+            (
+                &mut self.nt_explicit_s_mismatch_vertical,
+                &mut self.nt_explicit_s_mismatch_vertical_examples,
+            )
+        } else {
+            (
+                &mut self.nt_explicit_s_mismatch_horizontal,
+                &mut self.nt_explicit_s_mismatch_horizontal_examples,
+            )
+        };
+        *count += 1;
+        if examples.len() < 6 {
+            examples.push(example);
+        }
+    }
+
+    fn nt_folded_shadow_s(&self, sms_addr: u16) -> Option<u8> {
+        let masked = sms_addr & 0x3FFF;
+        if !(0x3700..=0x3EFF).contains(&masked) {
+            return None;
+        }
+
+        // Runtime _bgv_sub_palette maps the SMS high-byte nametable address to
+        // folded shadow storage by adding $9500: $3701 -> $CC01.
+        let shadow_addr = (masked | 1).wrapping_add(0x9500);
+        (0xC000..=0xDFFF)
+            .contains(&shadow_addr)
+            .then(|| self.ram[(shadow_addr - 0xC000) as usize] & 0x03)
+    }
+
+    fn nt_attr_shadow_s(&self, ppu_addr: u16, vertical_mirroring: bool) -> (u8, usize, u8) {
+        let raw = ppu_addr - 0x2000;
+        let ciram = if vertical_mirroring {
+            raw & 0x07FF
+        } else {
+            (raw & 0x03FF) | ((raw & 0x0800) >> 1)
+        };
+        let ciram_page = (ciram >> 10) as usize;
+        let tile_offset = (ciram & 0x03FF) as usize;
+        let coarse_y = tile_offset / 32;
+        let coarse_x = tile_offset % 32;
+        let attr_index = ciram_page * 64 + (coarse_y / 4) * 8 + coarse_x / 4;
+        let attr_byte = self.ram[0x0B80 + attr_index];
+        let shift = ((coarse_y & 0x02) << 1) | (coarse_x & 0x02);
+        ((attr_byte >> shift) & 0x03, attr_index, attr_byte)
     }
 }
 
@@ -2560,6 +2658,8 @@ fn dump_route_checkpoint(
         format_nametable_column_occupancy(bus)
     )?;
     writeln!(f, "{}", format_nt_fold_collisions(bus))?;
+    writeln!(f, "{}", format_nt_explicit_s_mismatches(bus, false))?;
+    writeln!(f, "{}", format_nt_explicit_s_mismatches(bus, true))?;
     writeln!(f, "framebuffer: {}", ppm_path.display())?;
     write_checkpoint_sat_diagnostics(&mut f, bus)?;
 
@@ -2641,6 +2741,43 @@ fn format_nt_fold_collisions(bus: &SmsBus) -> String {
         format!("nt_fold_collisions={total} first=none")
     } else {
         format!("nt_fold_collisions={total} first={}", examples.join(" "))
+    }
+}
+
+fn format_nt_explicit_s_mismatches(bus: &SmsBus, vertical_mirroring: bool) -> String {
+    let (mode, total, examples) = if vertical_mirroring {
+        (
+            "vertical",
+            bus.nt_explicit_s_mismatch_vertical,
+            &bus.nt_explicit_s_mismatch_vertical_examples,
+        )
+    } else {
+        (
+            "horizontal",
+            bus.nt_explicit_s_mismatch_horizontal,
+            &bus.nt_explicit_s_mismatch_horizontal_examples,
+        )
+    };
+
+    if examples.is_empty() {
+        format!("nt_explicit_s_mismatch_{mode}={total} first=none")
+    } else {
+        let examples = examples
+            .iter()
+            .map(|example| {
+                format!(
+                    "ppu=${:04X} sms=${:04X} folded={} explicit={} attr={:02X}:{:02X}",
+                    example.ppu_addr,
+                    example.sms_addr,
+                    example.folded_s,
+                    example.explicit_s,
+                    example.attr_index,
+                    example.attr_byte
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("nt_explicit_s_mismatch_{mode}={total} first={examples}")
     }
 }
 
@@ -2988,6 +3125,32 @@ mod tests {
         assert_eq!(
             format_nt_fold_collisions(&bus),
             "nt_fold_collisions=1 first=cell=00,00 pages=0,1"
+        );
+    }
+
+    #[test]
+    fn explicit_s_mismatch_diagnostic_compares_attr_shadow() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+
+        // Folded rendering would read $CC01 for SMS cell $3700 and use S=0.
+        bus.ram[0x0C01] = 0;
+        // Under horizontal mirroring, NES $2400 aliases physical CIRAM page 0,
+        // whose first attribute byte selects S=2 for the top-left quadrant.
+        bus.ram[0x0B80] = 0b0000_0010;
+        bus.ram[0x0B0F] = 0x24;
+        bus.ram[0x0B10] = 0x00;
+
+        bus.record_nt_fold_write(0x3700);
+
+        assert_eq!(bus.nt_explicit_s_mismatch_horizontal, 1);
+        assert_eq!(bus.nt_explicit_s_mismatch_vertical, 0);
+        assert_eq!(
+            format_nt_explicit_s_mismatches(&bus, false),
+            "nt_explicit_s_mismatch_horizontal=1 first=ppu=$2400 sms=$3700 folded=0 explicit=2 attr=00:02"
+        );
+        assert_eq!(
+            format_nt_explicit_s_mismatches(&bus, true),
+            "nt_explicit_s_mismatch_vertical=0 first=none"
         );
     }
 }
