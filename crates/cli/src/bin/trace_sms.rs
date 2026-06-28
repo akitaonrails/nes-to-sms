@@ -59,6 +59,8 @@ struct SmsBus {
     vdp_control_writes: u32,
     /// Total number of controller port reads.
     controller_reads: u32,
+    /// Bitmask of NES nametable pages observed writing each folded SMS cell.
+    nt_fold_cell_pages: [u8; 1024],
     /// Raw SMS port $DC value for controller 1. Active-low; default $FF = released.
     controller_port_dc: u8,
     /// Log of every mapper write (port, value). Lets the trace report
@@ -193,6 +195,7 @@ impl SmsBus {
             vdp_data_writes: 0,
             vdp_control_writes: 0,
             controller_reads: 0,
+            nt_fold_cell_pages: [0; 1024],
             controller_port_dc,
         }
     }
@@ -241,6 +244,24 @@ impl SmsBus {
             yspeed: self.ram[0x009F],
             eb: self.ram[0x00EB],
             vertical_force: self.ram[0x070E],
+        }
+    }
+
+    fn record_nt_fold_write(&mut self, vram_addr: u16) {
+        let masked = vram_addr & 0x3FFF;
+        if !(0x3700..=0x3EFF).contains(&masked) {
+            return;
+        }
+
+        let ppu_addr = ((self.ram[0x0B0F] as u16) << 8) | self.ram[0x0B10] as u16;
+        if !(0x2000..=0x2FBF).contains(&ppu_addr) || (ppu_addr & 0x03FF) >= 0x03C0 {
+            return;
+        }
+
+        let cell = ((masked - 0x3700) / 2) as usize;
+        if cell < self.nt_fold_cell_pages.len() {
+            let page = ((ppu_addr - 0x2000) >> 10) as u8;
+            self.nt_fold_cell_pages[cell] |= 1 << page;
         }
     }
 }
@@ -360,6 +381,7 @@ impl Bus for SmsBus {
                         let masked = (addr & 0x3FFF) as usize;
                         self.vram[masked] = value;
                         self.vram_writes += 1;
+                        self.record_nt_fold_write(addr);
                     }
                     3 => {
                         let masked = (addr & 0x1F) as usize;
@@ -2537,6 +2559,7 @@ fn dump_route_checkpoint(
         "nt_columns_nonzero_cells: {}",
         format_nametable_column_occupancy(bus)
     )?;
+    writeln!(f, "{}", format_nt_fold_collisions(bus))?;
     writeln!(f, "framebuffer: {}", ppm_path.display())?;
     write_checkpoint_sat_diagnostics(&mut f, bus)?;
 
@@ -2591,6 +2614,34 @@ fn format_nametable_column_occupancy(bus: &SmsBus) -> String {
         .map(|(col, count)| format!("{col:02}:{count:02}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn format_nt_fold_collisions(bus: &SmsBus) -> String {
+    let mut examples = Vec::new();
+    let mut total = 0usize;
+
+    for (cell, pages) in bus.nt_fold_cell_pages.iter().copied().enumerate() {
+        if pages.count_ones() <= 1 {
+            continue;
+        }
+        total += 1;
+        if examples.len() < 6 {
+            let row = cell / 32;
+            let col = cell % 32;
+            let pages = (0..4)
+                .filter(|page| pages & (1u8 << *page) != 0)
+                .map(|page| page.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            examples.push(format!("cell={row:02},{col:02} pages={pages}"));
+        }
+    }
+
+    if examples.is_empty() {
+        format!("nt_fold_collisions={total} first=none")
+    } else {
+        format!("nt_fold_collisions={total} first={}", examples.join(" "))
+    }
 }
 
 fn chr_nonzero_bytes(bus: &SmsBus) -> usize {
@@ -2914,5 +2965,29 @@ mod tests {
         assert_eq!(checkpoints[0].name, "title");
         assert_eq!(checkpoints[1].frame, 220);
         assert_eq!(checkpoints[1].name, "game start");
+    }
+
+    #[test]
+    fn nt_fold_collision_diagnostic_tracks_tile_pages_only() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x00;
+        bus.record_nt_fold_write(0x3700);
+
+        bus.ram[0x0B0F] = 0x24;
+        bus.ram[0x0B10] = 0x00;
+        bus.record_nt_fold_write(0x3701);
+
+        bus.ram[0x0B0F] = 0x23;
+        bus.ram[0x0B10] = 0xC0;
+        bus.record_nt_fold_write(0x3702);
+
+        assert_eq!(bus.nt_fold_cell_pages[0], 0b0011);
+        assert_eq!(bus.nt_fold_cell_pages[1], 0);
+        assert_eq!(
+            format_nt_fold_collisions(&bus),
+            "nt_fold_collisions=1 first=cell=00,00 pages=0,1"
+        );
     }
 }

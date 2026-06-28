@@ -196,6 +196,8 @@ _vbuf_flush_attribute_byte:
   ld   a, b
   ld   ($cb16), a            ; remaining byte count before consuming attr data
   ld   ($cb17), hl           ; source pointer to attr data byte
+  ld   a, ($cb15)
+  call rt_nt_write_attr_shadow ; mirror queued attr write; preserves DE, clobbers AF/HL
   ld   a, e
   sub  $c0
   ld   ($cb19), a            ; attr offset 0..63
