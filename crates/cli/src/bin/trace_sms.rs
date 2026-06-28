@@ -1422,6 +1422,12 @@ fn main() {
     let mut next_button_event = 0usize;
     let mut next_checkpoint = 0usize;
     let mut checkpoint_dump_failed = false;
+    let mut prev_frame_step = 0usize;
+    let mut prev_frame_vram_writes = 0u32;
+    let mut prev_frame_cram_writes = 0u32;
+    let mut prev_frame_data_writes = 0u32;
+    let mut prev_frame_control_writes = 0u32;
+    let mut prev_frame_line_irqs = 0usize;
     let dump_each_frame_to = std::env::var("SMS_DUMP_EACH_FRAME").ok();
     let stop_on_fall = std::env::var("SMS_STOP_ON_FALL")
         .ok()
@@ -1598,8 +1604,16 @@ fn main() {
             // $071A/$071C camera page/X, $06FC saved joypad bits.
             // $B5/$CE player Y page/position, $9F player Y speed, $1D
             // player action/state.
+            let frame_steps = step.saturating_sub(prev_frame_step);
+            let frame_vram_writes = bus.vram_writes.saturating_sub(prev_frame_vram_writes);
+            let frame_cram_writes = bus.cram_writes.saturating_sub(prev_frame_cram_writes);
+            let frame_data_writes = bus.vdp_data_writes.saturating_sub(prev_frame_data_writes);
+            let frame_control_writes = bus
+                .vdp_control_writes
+                .saturating_sub(prev_frame_control_writes);
+            let frame_line_irqs = line_irqs_fired.saturating_sub(prev_frame_line_irqs);
             eprintln!(
-                "frame {:3}: $0770={:02X} $0772={:02X} $0773={:02X} $0774={:02X} ppos={:02X}:{:02X} spd={:02X} cam={:02X}:{:02X} y={:02X}:{:02X} yspd={:02X} act={:02X} joy={:02X} apage={:02X} bcol={:02X} aobj={:02X} aofs={:02X} alen={:02X}/{:02X}/{:02X} stop={:02X}",
+                "frame {:3}: $0770={:02X} $0772={:02X} $0773={:02X} $0774={:02X} ppos={:02X}:{:02X} spd={:02X} cam={:02X}:{:02X} y={:02X}:{:02X} yspd={:02X} act={:02X} joy={:02X} apage={:02X} bcol={:02X} aobj={:02X} aofs={:02X} alen={:02X}/{:02X}/{:02X} stop={:02X} steps={} vram+={} cram+={} data+={} ctrl+={} line_irq+={}",
                 irqs_fired,
                 bus.ram[0x0770],
                 bus.ram[0x0772],
@@ -1623,7 +1637,19 @@ fn main() {
                 bus.ram[0x0731],
                 bus.ram[0x0732],
                 bus.ram[0x0723],
+                frame_steps,
+                frame_vram_writes,
+                frame_cram_writes,
+                frame_data_writes,
+                frame_control_writes,
+                frame_line_irqs,
             );
+            prev_frame_step = step;
+            prev_frame_vram_writes = bus.vram_writes;
+            prev_frame_cram_writes = bus.cram_writes;
+            prev_frame_data_writes = bus.vdp_data_writes;
+            prev_frame_control_writes = bus.vdp_control_writes;
+            prev_frame_line_irqs = line_irqs_fired;
             if first_fall_snapshot.is_none() && (bus.ram[0x0723] != 0 || bus.ram[0x00B5] >= 0x02) {
                 let recent_reads = bus
                     .watch_read_log
