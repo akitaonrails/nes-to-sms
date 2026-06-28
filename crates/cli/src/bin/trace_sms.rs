@@ -20,6 +20,16 @@ const RAM_SIZE: usize = 0x2000;
 const IRQ_PERIOD: usize = 60_000;
 const RT_PPU_WRITE_FALLBACK_ADDR: u16 = 0x0068;
 const MATERIALIZER_BUDGETS: [usize; 5] = [28, 56, 112, 224, 896];
+// Trace-only acceptance hooks for future runtime nametable materializers. These
+// symbols do not exist yet in normal builds; diagnostics report unavailable
+// until one is present in the generated WLA symbol file.
+const MATERIALIZER_HOOK_SYMBOLS: &[&str] = &[
+    "rt_nt_materialize_render_off",
+    "rt_nt_materializer_render_off",
+    "rt_materialize_render_off",
+    "rt_nt_materialize_bulk",
+    "rt_nt_materializer_bulk",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExpectedMirroring {
@@ -334,6 +344,139 @@ struct MaterializerPolicyStep {
     max_age: usize,
     stale_visible_frames: usize,
     deferred: Vec<MaterializerPendingCell>,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeMaterializerHook {
+    name: String,
+    addr: u16,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeMaterializerOffense {
+    step: usize,
+    pc: u16,
+    symbol: String,
+    cb09: u8,
+    vdp_reg1: u8,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveMaterializerHook {
+    name: String,
+    entry_sp: u16,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeMaterializerMonitor {
+    hooks: Vec<RuntimeMaterializerHook>,
+    active: Option<ActiveMaterializerHook>,
+    calls_on: u32,
+    calls_off: u32,
+    vdp_writes_on: u32,
+    vdp_writes_off: u32,
+    first_on_call: Option<RuntimeMaterializerOffense>,
+    first_on_vdp: Option<RuntimeMaterializerOffense>,
+}
+
+impl RuntimeMaterializerMonitor {
+    fn new(symbols: &HashMap<String, (u8, u16)>) -> Self {
+        let hooks = MATERIALIZER_HOOK_SYMBOLS
+            .iter()
+            .filter_map(|name| {
+                symbols.get(*name).map(|(_, addr)| RuntimeMaterializerHook {
+                    name: (*name).to_string(),
+                    addr: *addr,
+                })
+            })
+            .collect();
+        Self {
+            hooks,
+            active: None,
+            calls_on: 0,
+            calls_off: 0,
+            vdp_writes_on: 0,
+            vdp_writes_off: 0,
+            first_on_call: None,
+            first_on_vdp: None,
+        }
+    }
+
+    fn observe_pc(&mut self, step: usize, pc: u16, sp: u16, bus: &SmsBus) {
+        let Some(hook) = self.hooks.iter().find(|hook| hook.addr == pc).cloned() else {
+            return;
+        };
+        let render = current_render_state(bus);
+        match render {
+            RenderState::On => {
+                self.calls_on += 1;
+                if self.first_on_call.is_none() {
+                    self.first_on_call =
+                        Some(RuntimeMaterializerOffense::new(step, pc, &hook.name, bus));
+                }
+            }
+            RenderState::Off => self.calls_off += 1,
+        }
+        self.active = Some(ActiveMaterializerHook {
+            name: hook.name,
+            entry_sp: sp,
+        });
+    }
+
+    fn observe_vdp_writes(
+        &mut self,
+        step: usize,
+        pc: u16,
+        bus: &SmsBus,
+        writes: u32,
+        render: RenderState,
+    ) {
+        if writes == 0 || self.active.is_none() {
+            return;
+        }
+        match render {
+            RenderState::On => {
+                self.vdp_writes_on = self.vdp_writes_on.saturating_add(writes);
+                if self.first_on_vdp.is_none() {
+                    let symbol = self
+                        .active
+                        .as_ref()
+                        .map(|active| active.name.as_str())
+                        .unwrap_or("unknown");
+                    self.first_on_vdp =
+                        Some(RuntimeMaterializerOffense::new(step, pc, symbol, bus));
+                }
+            }
+            RenderState::Off => {
+                self.vdp_writes_off = self.vdp_writes_off.saturating_add(writes);
+            }
+        }
+    }
+
+    fn observe_after_step(&mut self, op: u8, sp_after: u16) {
+        if op != 0xC9 {
+            return;
+        }
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| sp_after > active.entry_sp)
+        {
+            self.active = None;
+        }
+    }
+}
+
+impl RuntimeMaterializerOffense {
+    fn new(step: usize, pc: u16, symbol: &str, bus: &SmsBus) -> Self {
+        Self {
+            step,
+            pc,
+            symbol: symbol.to_string(),
+            cb09: bus.ram[0x0B09],
+            vdp_reg1: bus.vdp_regs[1],
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1883,6 +2026,7 @@ fn main() {
     let symbol_defs = load_wla_symbol_defs(&sym_path);
     let asm_path = rom_path.with_extension("asm");
     let expected_mirroring = detect_expected_mirroring(&asm_path);
+    let mut runtime_materializer_monitor = RuntimeMaterializerMonitor::new(&symbol_defs);
     let rt_ppu_write_addr = if let Some((_, addr)) = symbol_defs.get("rt_ppu_write") {
         *addr
     } else {
@@ -1976,6 +2120,7 @@ fn main() {
         if pc == rt_ppu_write_addr {
             bus.record_trace_ppu_write_call(cpu.b, cpu.a);
         }
+        runtime_materializer_monitor.observe_pc(step, pc, cpu.sp, &bus);
         if log_pcs && step < 200 {
             eprintln!("step {step:6}  PC=${pc:04X} op=${op:02X}");
         }
@@ -2119,6 +2264,7 @@ fn main() {
                         curr_coarse_scroll: current_coarse_scroll(&bus),
                         materializer_budget_sims: &materializer_budget_sims,
                         materializer_policy_sims: &materializer_policy_sims,
+                        runtime_materializer_monitor: &runtime_materializer_monitor,
                     },
                 ) {
                     eprintln!(
@@ -2272,9 +2418,22 @@ fn main() {
             // halted but no IRQ pending — endless halt. Stop.
             break;
         }
+        let materializer_render_before = current_render_state(&bus);
+        let materializer_vdp_writes_before = bus.vdp_data_writes;
         match cpu.step(&mut bus) {
             Ok(()) => {
                 taken += 1;
+                let materializer_vdp_writes = bus
+                    .vdp_data_writes
+                    .saturating_sub(materializer_vdp_writes_before);
+                runtime_materializer_monitor.observe_vdp_writes(
+                    step,
+                    pc,
+                    &bus,
+                    materializer_vdp_writes,
+                    materializer_render_before,
+                );
+                runtime_materializer_monitor.observe_after_step(op, cpu.sp);
                 if bus.vdp_regs[0] & 0x10 == 0 {
                     line_irq_at = None;
                 } else if inject_irq && cpu.iff1 && line_irq_at.is_none() {
@@ -2826,6 +2985,10 @@ fn main() {
             current_render_state(&bus),
         )
     );
+    println!(
+        "{}",
+        format_runtime_materializer_hooks(&runtime_materializer_monitor)
+    );
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -3195,6 +3358,7 @@ struct CheckpointDumpContext<'a> {
     curr_coarse_scroll: (u8, u8),
     materializer_budget_sims: &'a [MaterializerBudgetSim],
     materializer_policy_sims: &'a [MaterializerPolicySim],
+    runtime_materializer_monitor: &'a RuntimeMaterializerMonitor,
 }
 
 fn dump_route_checkpoint(
@@ -3355,6 +3519,11 @@ fn dump_route_checkpoint(
             context.curr_coarse_scroll,
             current_render_state(bus),
         )
+    )?;
+    writeln!(
+        f,
+        "{}",
+        format_runtime_materializer_hooks(context.runtime_materializer_monitor)
     )?;
     writeln!(
         f,
@@ -4017,6 +4186,40 @@ fn format_materializer_policy_snapshots(
         .map(|sim| sim.snapshot(0, render_state))
         .collect::<Vec<_>>();
     format_materializer_policy_steps(&steps, bus, expected_mirroring, prev_coarse, curr_coarse)
+}
+
+fn format_runtime_materializer_offense(offense: &Option<RuntimeMaterializerOffense>) -> String {
+    offense
+        .as_ref()
+        .map(|offense| {
+            format!(
+                "step={} pc=${:04X} symbol={} cb09=${:02X} vdp_r1=${:02X}",
+                offense.step, offense.pc, offense.symbol, offense.cb09, offense.vdp_reg1
+            )
+        })
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn format_runtime_materializer_hooks(monitor: &RuntimeMaterializerMonitor) -> String {
+    if monitor.hooks.is_empty() {
+        return "mat_runtime_hooks=unavailable symbols=none".to_string();
+    }
+    let symbols = monitor
+        .hooks
+        .iter()
+        .map(|hook| format!("{}:${:04X}", hook.name, hook.addr))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "mat_runtime_hooks=calls_on={} calls_off={} vdp_writes_on={} vdp_writes_off={} first_on_call={} first_on_vdp={} symbols={}",
+        monitor.calls_on,
+        monitor.calls_off,
+        monitor.vdp_writes_on,
+        monitor.vdp_writes_off,
+        format_runtime_materializer_offense(&monitor.first_on_call),
+        format_runtime_materializer_offense(&monitor.first_on_vdp),
+        symbols
+    )
 }
 
 fn nt_folded_cc_s(bus: &SmsBus, cell: usize) -> u8 {
@@ -5050,6 +5253,52 @@ mod tests {
             ),
             "nt_materializer_sched=unavailable expected=unknown reason=missing_or_conflicting_mirroring"
         );
+    }
+
+    #[test]
+    fn runtime_materializer_hooks_report_unavailable_without_symbols() {
+        let monitor = RuntimeMaterializerMonitor::new(&HashMap::new());
+        assert_eq!(
+            format_runtime_materializer_hooks(&monitor),
+            "mat_runtime_hooks=unavailable symbols=none"
+        );
+    }
+
+    #[test]
+    fn runtime_materializer_hooks_count_render_on_and_off_calls() {
+        let mut symbols = HashMap::new();
+        symbols.insert("rt_nt_materialize_render_off".to_string(), (0, 0x1234));
+        let mut monitor = RuntimeMaterializerMonitor::new(&symbols);
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+
+        bus.ram[0x0B09] = 0x00;
+        monitor.observe_pc(10, 0x1234, 0xDFF0, &bus);
+        bus.ram[0x0B09] = 0x18;
+        bus.vdp_regs[1] = 0x40;
+        monitor.observe_pc(11, 0x1234, 0xDFEE, &bus);
+
+        let line = format_runtime_materializer_hooks(&monitor);
+        assert!(line.contains("calls_on=1 calls_off=1"));
+        assert!(line.contains("first_on_call=step=11 pc=$1234 symbol=rt_nt_materialize_render_off cb09=$18 vdp_r1=$40"));
+    }
+
+    #[test]
+    fn runtime_materializer_hooks_report_render_on_vdp_writes() {
+        let mut symbols = HashMap::new();
+        symbols.insert("rt_nt_materializer_bulk".to_string(), (0, 0x2345));
+        let mut monitor = RuntimeMaterializerMonitor::new(&symbols);
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B09] = 0x18;
+        bus.vdp_regs[1] = 0x40;
+
+        monitor.observe_pc(20, 0x2345, 0xDFF0, &bus);
+        monitor.observe_vdp_writes(21, 0x2348, &bus, 3, RenderState::On);
+
+        let line = format_runtime_materializer_hooks(&monitor);
+        assert!(line.contains("vdp_writes_on=3 vdp_writes_off=0"));
+        assert!(line.contains(
+            "first_on_vdp=step=21 pc=$2348 symbol=rt_nt_materializer_bulk cb09=$18 vdp_r1=$40"
+        ));
     }
 
     #[test]
