@@ -290,8 +290,10 @@ _vbuf_attr_base_tl:
 
 _vbuf_attr_write_quadrant:
   ; Input: A = NES palette selector 0..3, DE = high-byte address of the
-  ; quadrant's top-left SMS tile. Writes a 2x2 tile high-byte block.
-  jp   rt_write_bg_attr_quadrant
+  ; quadrant's top-left SMS tile. Redraws the covered 2x2 folded SMS cells
+  ; from the base-shadow using explicit S, without reading/writing the folded
+  ; $CC00 subpalette state.
+  jp   rt_redraw_bg_attr_quadrant_s
 
 _vbuf_flush_raw_record:
   ; Set VDP VRAM write address to (D<<8 | E) = DE.
