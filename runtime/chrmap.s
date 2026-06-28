@@ -219,10 +219,15 @@ _gbv_inv_next:
 _bgv_sub_palette:
   inc  hl                    ; -> high-byte address
   ld   a, h
+  cp   $3e
+  jr   nc, _bgv_sub_palette_s0 ; hidden rows are outside the active shadow
   add  a, $95                ; $37xx -> $CCxx shadow
   ld   h, a
   ld   a, (hl)
   and  $03
+  ret
+_bgv_sub_palette_s0:
+  xor  a
   ret
 
 ; ─── _bgv_base_addr ─────────────────────────────────────────────────────────
