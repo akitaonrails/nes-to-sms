@@ -1723,9 +1723,15 @@ fn main() {
                 && irqs_fired >= checkpoints[next_checkpoint].frame
             {
                 let checkpoint = &checkpoints[next_checkpoint];
-                if let Err(err) =
-                    dump_route_checkpoint(&bus, &cpu, step, irqs_fired, checkpoint, &checkpoint_dir)
-                {
+                if let Err(err) = dump_route_checkpoint(
+                    &bus,
+                    &cpu,
+                    step,
+                    irqs_fired,
+                    checkpoint,
+                    &checkpoint_dir,
+                    &symbol_defs,
+                ) {
                     eprintln!(
                         "checkpoint dump failed for {} at frame {}: {err}",
                         checkpoint.name, checkpoint.frame
@@ -2360,6 +2366,14 @@ fn main() {
         "{}",
         format_bgv_base_shadow_mismatches(&bus, &bus.rom, &symbol_defs)
     );
+    println!(
+        "{}",
+        format_bgv_base_from_dry_ciram_mismatches(&bus, &bus.rom, &symbol_defs, true)
+    );
+    println!(
+        "{}",
+        format_bgv_base_from_dry_ciram_mismatches(&bus, &bus.rom, &symbol_defs, false)
+    );
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -2728,6 +2742,7 @@ fn dump_route_checkpoint(
     actual_frame: usize,
     checkpoint: &RouteCheckpoint,
     dir: &Path,
+    symbols: &HashMap<String, (u8, u16)>,
 ) -> std::io::Result<()> {
     use std::io::Write;
 
@@ -2829,6 +2844,21 @@ fn dump_route_checkpoint(
     writeln!(f, "{}", format_nt_dry_project_summary(bus, true))?;
     writeln!(f, "{}", format_nt_dry_project_summary(bus, false))?;
     writeln!(f, "{}", format_nt_folded_s_compact_mismatches(bus))?;
+    writeln!(
+        f,
+        "{}",
+        format_bgv_base_shadow_mismatches(bus, &bus.rom, symbols)
+    )?;
+    writeln!(
+        f,
+        "{}",
+        format_bgv_base_from_dry_ciram_mismatches(bus, &bus.rom, symbols, true)
+    )?;
+    writeln!(
+        f,
+        "{}",
+        format_bgv_base_from_dry_ciram_mismatches(bus, &bus.rom, symbols, false)
+    )?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -3101,6 +3131,69 @@ fn format_bgv_base_shadow_mismatches(
     } else {
         format!(
             "bgv_base_shadow_mismatch={total} compared:{compared} first={}",
+            examples.join(" ")
+        )
+    }
+}
+
+fn format_bgv_base_from_dry_ciram_mismatches(
+    bus: &SmsBus,
+    rom: &[u8],
+    symbols: &HashMap<String, (u8, u16)>,
+    vertical_mirroring: bool,
+) -> String {
+    let mode = if vertical_mirroring {
+        "vertical"
+    } else {
+        "horizontal"
+    };
+    let table1 = bus.ram[0x0B08] & 0x10 != 0;
+    let mut compared = 0usize;
+    let mut rows_28_29 = 0usize;
+    let mut missing_map = false;
+    let mut total = 0usize;
+    let mut examples = Vec::new();
+
+    for row in 0..28 {
+        for col in 0..32 {
+            let cell = row * 32 + col;
+            let projection = nt_dry_project_tile_for_cell(bus, row, col, vertical_mirroring);
+            if projection.source_row >= 28 {
+                rows_28_29 += 1;
+            }
+
+            let Some(expected) =
+                expected_base_slot_for_tile(rom, symbols, table1, projection.dry_tile)
+            else {
+                missing_map = true;
+                continue;
+            };
+            compared += 1;
+            let actual = bus.ram[0x1A00 + cell]; // $DA00 + visible cell
+            if actual != expected {
+                total += 1;
+                if examples.len() < 8 {
+                    examples.push(format!(
+                        "cell={row:02},{col:02} ppu={:04X} dry_tile={:02X} shadow={actual:02X} expected={expected:02X}",
+                        projection.ppu_addr, projection.dry_tile
+                    ));
+                }
+            }
+        }
+    }
+
+    if missing_map {
+        return format!(
+            "bgv_base_dry_ciram_{mode}_mismatch=unavailable compared:{compared} rows_28_29:{rows_28_29} reason=missing_data_chr_bg_map"
+        );
+    }
+    if examples.is_empty() {
+        format!(
+            "bgv_base_dry_ciram_{mode}_mismatch={total} compared:{compared} rows_28_29:{rows_28_29} first=none"
+        )
+    } else {
+        format!(
+            "bgv_base_dry_ciram_{mode}_mismatch={total} compared:{compared} rows_28_29:{rows_28_29} first={}",
             examples.join(" ")
         )
     }
@@ -3533,6 +3626,29 @@ mod tests {
         assert_eq!(
             format_bgv_base_shadow_mismatches(&bus, &rom, &symbols),
             "bgv_base_shadow_mismatch=1 compared:1 first=cell=00,03 tile=08 shadow=24 expected=42"
+        );
+    }
+
+    #[test]
+    fn dry_ciram_base_shadow_diagnostic_compares_projected_tiles() {
+        let mut bus = SmsBus::new(vec![0; 0x4000], 0xFF);
+        let mut symbols = HashMap::new();
+        symbols.insert("data_chr_bg_map0".to_string(), (0, 0x8000));
+        symbols.insert("data_chr_bg_map1".to_string(), (0, 0x8200));
+
+        let mut rom = vec![0; 0x500];
+        rom[0x10] = 0x42; // map0[tile 8].base
+        bus.nt_trace_ciram_vertical[3] = 8;
+        bus.ram[0x1A00 + 3] = 0x24;
+
+        assert_eq!(
+            format_bgv_base_from_dry_ciram_mismatches(&bus, &rom, &symbols, true),
+            "bgv_base_dry_ciram_vertical_mismatch=1 compared:896 rows_28_29:0 first=cell=00,03 ppu=2003 dry_tile=08 shadow=24 expected=42"
+        );
+
+        assert_eq!(
+            format_bgv_base_from_dry_ciram_mismatches(&bus, &rom, &HashMap::new(), false),
+            "bgv_base_dry_ciram_horizontal_mismatch=unavailable compared:0 rows_28_29:0 reason=missing_data_chr_bg_map"
         );
     }
 
