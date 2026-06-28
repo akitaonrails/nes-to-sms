@@ -170,6 +170,172 @@ struct MaterializerBudgetStep {
     deferred: Vec<MaterializerBacklogCell>,
 }
 
+#[derive(Clone, Debug)]
+struct MaterializerPendingCell {
+    key: u16,
+    first_seen: usize,
+    last_reason: u8,
+}
+
+#[derive(Clone, Debug)]
+struct MaterializerPolicySim {
+    budget: usize,
+    pending: VecDeque<MaterializerPendingCell>,
+    queued: [bool; 32 * 28],
+    max_after_backlog: usize,
+    max_age: usize,
+    stale_visible_frames: usize,
+}
+
+impl MaterializerPolicySim {
+    fn new(budget: usize) -> Self {
+        Self {
+            budget,
+            pending: VecDeque::new(),
+            queued: [false; 32 * 28],
+            max_after_backlog: 0,
+            max_age: 0,
+            stale_visible_frames: 0,
+        }
+    }
+
+    fn new_all() -> Vec<Self> {
+        MATERIALIZER_BUDGETS
+            .iter()
+            .copied()
+            .map(Self::new)
+            .collect()
+    }
+
+    fn step(
+        &mut self,
+        frame: usize,
+        workset: &[MaterializerVisibleCell],
+        render_state: RenderState,
+    ) -> MaterializerPolicyStep {
+        let mut added = 0usize;
+        for cell in workset {
+            let key = usize::from(cell.key);
+            if self.queued[key] {
+                if let Some(pending) = self
+                    .pending
+                    .iter_mut()
+                    .find(|pending| pending.key == cell.key)
+                {
+                    pending.last_reason |= cell.reason;
+                }
+                continue;
+            }
+            self.queued[key] = true;
+            self.pending.push_back(MaterializerPendingCell {
+                key: cell.key,
+                first_seen: frame,
+                last_reason: cell.reason,
+            });
+            added += 1;
+        }
+
+        let before = self.pending.len();
+        let mut process_order = Vec::new();
+        let mut selected = [false; 32 * 28];
+        for cell in workset {
+            let key = usize::from(cell.key);
+            if self.queued[key] && !selected[key] {
+                selected[key] = true;
+                process_order.push(cell.key);
+            }
+        }
+        for pending in &self.pending {
+            let key = usize::from(pending.key);
+            if !selected[key] {
+                selected[key] = true;
+                process_order.push(pending.key);
+            }
+        }
+
+        let mut processed = 0usize;
+        for key in process_order.into_iter().take(self.budget) {
+            if let Some(pos) = self.pending.iter().position(|pending| pending.key == key) {
+                self.pending.remove(pos);
+                self.queued[usize::from(key)] = false;
+                processed += 1;
+            }
+        }
+
+        // Conservative visible-staleness counter: count frames where rendering
+        // is enabled and pending visible cells remain after this budget's
+        // processing slice. Render-off frames are not counted as visible stale.
+        if render_state == RenderState::On && !self.pending.is_empty() {
+            self.stale_visible_frames += 1;
+        }
+        let oldest_age = self
+            .pending
+            .iter()
+            .map(|pending| frame.saturating_sub(pending.first_seen))
+            .max();
+        if let Some(age) = oldest_age {
+            self.max_age = self.max_age.max(age);
+        }
+        self.max_after_backlog = self.max_after_backlog.max(self.pending.len());
+        MaterializerPolicyStep {
+            budget: self.budget,
+            render_state,
+            added,
+            processed,
+            before,
+            after: self.pending.len(),
+            max_after: self.max_after_backlog,
+            max_age: self.max_age,
+            stale_visible_frames: self.stale_visible_frames,
+            deferred: self.pending.iter().take(3).cloned().collect(),
+        }
+    }
+
+    fn snapshot(&self, _frame: usize, render_state: RenderState) -> MaterializerPolicyStep {
+        MaterializerPolicyStep {
+            budget: self.budget,
+            render_state,
+            added: 0,
+            processed: 0,
+            before: self.pending.len(),
+            after: self.pending.len(),
+            max_after: self.max_after_backlog,
+            max_age: self.max_age,
+            stale_visible_frames: self.stale_visible_frames,
+            deferred: self.pending.iter().take(3).cloned().collect(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenderState {
+    On,
+    Off,
+}
+
+impl RenderState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MaterializerPolicyStep {
+    budget: usize,
+    render_state: RenderState,
+    added: usize,
+    processed: usize,
+    before: usize,
+    after: usize,
+    max_after: usize,
+    max_age: usize,
+    stale_visible_frames: usize,
+    deferred: Vec<MaterializerPendingCell>,
+}
+
 #[derive(Clone)]
 struct SmsBus {
     rom: Vec<u8>,
@@ -1776,6 +1942,7 @@ fn main() {
     let mut prev_frame_line_irqs = 0usize;
     let mut prev_coarse_scroll = current_coarse_scroll(&bus);
     let mut materializer_budget_sims = MaterializerBudgetSim::new_all();
+    let mut materializer_policy_sims = MaterializerPolicySim::new_all();
     let dump_each_frame_to = std::env::var("SMS_DUMP_EACH_FRAME").ok();
     let stop_on_fall = std::env::var("SMS_STOP_ON_FALL")
         .ok()
@@ -1951,6 +2118,7 @@ fn main() {
                         prev_coarse_scroll,
                         curr_coarse_scroll: current_coarse_scroll(&bus),
                         materializer_budget_sims: &materializer_budget_sims,
+                        materializer_policy_sims: &materializer_policy_sims,
                     },
                 ) {
                     eprintln!(
@@ -1992,8 +2160,16 @@ fn main() {
                 coarse_scroll,
                 irqs_fired,
             );
+            let materializer_policy = step_materializer_policy_sims(
+                &mut materializer_policy_sims,
+                &bus,
+                expected_mirroring,
+                prev_coarse_scroll,
+                coarse_scroll,
+                irqs_fired,
+            );
             eprintln!(
-                "frame {:3}: $0770={:02X} $0772={:02X} $0773={:02X} $0774={:02X} ppos={:02X}:{:02X} spd={:02X} cam={:02X}:{:02X} y={:02X}:{:02X} yspd={:02X} act={:02X} joy={:02X} apage={:02X} bcol={:02X} aobj={:02X} aofs={:02X} alen={:02X}/{:02X}/{:02X} stop={:02X} steps={} vram+={} cram+={} data+={} ctrl+={} line_irq+={} {} {} {}",
+                "frame {:3}: $0770={:02X} $0772={:02X} $0773={:02X} $0774={:02X} ppos={:02X}:{:02X} spd={:02X} cam={:02X}:{:02X} y={:02X}:{:02X} yspd={:02X} act={:02X} joy={:02X} apage={:02X} bcol={:02X} aobj={:02X} aofs={:02X} alen={:02X}/{:02X}/{:02X} stop={:02X} steps={} vram+={} cram+={} data+={} ctrl+={} line_irq+={} {} {} {} {}",
                 irqs_fired,
                 bus.ram[0x0770],
                 bus.ram[0x0772],
@@ -2026,6 +2202,7 @@ fn main() {
                 materializer_work,
                 materializer_dirty,
                 materializer_budget,
+                materializer_policy,
             );
             prev_frame_step = step;
             prev_frame_vram_writes = bus.vram_writes;
@@ -2638,6 +2815,17 @@ fn main() {
             irqs_fired,
         )
     );
+    println!(
+        "{}",
+        format_materializer_policy_snapshots(
+            &materializer_policy_sims,
+            &bus,
+            expected_mirroring,
+            prev_coarse_scroll,
+            current_coarse_scroll(&bus),
+            current_render_state(&bus),
+        )
+    );
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
         let b = bus.ram[i];
@@ -3006,6 +3194,7 @@ struct CheckpointDumpContext<'a> {
     prev_coarse_scroll: (u8, u8),
     curr_coarse_scroll: (u8, u8),
     materializer_budget_sims: &'a [MaterializerBudgetSim],
+    materializer_policy_sims: &'a [MaterializerPolicySim],
 }
 
 fn dump_route_checkpoint(
@@ -3153,6 +3342,18 @@ fn dump_route_checkpoint(
             context.materializer_budget_sims,
             context.expected_mirroring,
             actual_frame,
+        )
+    )?;
+    writeln!(
+        f,
+        "{}",
+        format_materializer_policy_snapshots(
+            context.materializer_policy_sims,
+            bus,
+            context.expected_mirroring,
+            context.prev_coarse_scroll,
+            context.curr_coarse_scroll,
+            current_render_state(bus),
         )
     )?;
     writeln!(
@@ -3459,6 +3660,7 @@ fn materializer_dirty_set(bus: &SmsBus, vertical_mirroring: bool) -> &[u8; 0x800
 
 fn materializer_dirty_reason(bits: u8) -> &'static str {
     match bits {
+        0x00 => "clean",
         0x01 => "tile",
         0x02 => "attr",
         0x03 => "tile+attr",
@@ -3504,6 +3706,33 @@ fn materializer_visible_workset(
     }
 
     Some(cells.into_iter().flatten().collect())
+}
+
+fn materializer_prioritized_workset(
+    bus: &SmsBus,
+    expected_mirroring: ExpectedMirroring,
+    prev_coarse: (u8, u8),
+    curr_coarse: (u8, u8),
+) -> Option<Vec<MaterializerVisibleCell>> {
+    let mut entering = Vec::new();
+    let mut dirty = Vec::new();
+    for cell in materializer_visible_workset(bus, expected_mirroring, prev_coarse, curr_coarse)? {
+        if cell.reason & 0x04 != 0 {
+            entering.push(cell);
+        } else {
+            dirty.push(cell);
+        }
+    }
+    entering.extend(dirty);
+    Some(entering)
+}
+
+fn current_render_state(bus: &SmsBus) -> RenderState {
+    if bus.ram[0x0B09] & 0x18 != 0 {
+        RenderState::On
+    } else {
+        RenderState::Off
+    }
 }
 
 fn format_nt_materializer_dirty_visible(
@@ -3646,6 +3875,148 @@ fn format_materializer_budget_snapshots(
         .map(|sim| sim.snapshot(frame))
         .collect::<Vec<_>>();
     format_materializer_budget_steps(&steps)
+}
+
+fn policy_cell_description(
+    pending: &MaterializerPendingCell,
+    bus: &SmsBus,
+    expected_mirroring: ExpectedMirroring,
+    prev_coarse: (u8, u8),
+    curr_coarse: (u8, u8),
+) -> String {
+    let row = usize::from(pending.key) / 32;
+    let col = usize::from(pending.key) % 32;
+    let Some(vertical_mirroring) = expected_mirroring.vertical_flag() else {
+        return format!(
+            "{row:02},{col:02}/{}:unknown",
+            materializer_dirty_reason(pending.last_reason)
+        );
+    };
+    let projection = nt_dry_project_tile_for_cell(bus, row, col, vertical_mirroring);
+    let ciram = nt_ciram_index(projection.ppu_addr, vertical_mirroring);
+    let mut reason = materializer_dirty_set(bus, vertical_mirroring)[ciram] & 0x03;
+    if materializer_is_entering_cell(row, col, prev_coarse, curr_coarse) {
+        reason |= 0x04;
+    }
+    if reason == 0 {
+        reason = pending.last_reason;
+    }
+    format!(
+        "{row:02},{col:02}/{}:{:04X}:{ciram:03X}",
+        materializer_dirty_reason(reason),
+        projection.ppu_addr
+    )
+}
+
+fn format_materializer_policy_step(
+    step: &MaterializerPolicyStep,
+    bus: &SmsBus,
+    expected_mirroring: ExpectedMirroring,
+    prev_coarse: (u8, u8),
+    curr_coarse: (u8, u8),
+) -> String {
+    let deferred = if step.deferred.is_empty() {
+        "none".to_string()
+    } else {
+        step.deferred
+            .iter()
+            .map(|pending| {
+                policy_cell_description(pending, bus, expected_mirroring, prev_coarse, curr_coarse)
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+    format!(
+        "mat_sched_budget={} render={} add={} processed={} before={} after={} max_after={} max_age={} stale_frames={} def={}",
+        step.budget,
+        step.render_state.label(),
+        step.added,
+        step.processed,
+        step.before,
+        step.after,
+        step.max_after,
+        step.max_age,
+        step.stale_visible_frames,
+        deferred
+    )
+}
+
+fn format_materializer_policy_steps(
+    steps: &[MaterializerPolicyStep],
+    bus: &SmsBus,
+    expected_mirroring: ExpectedMirroring,
+    prev_coarse: (u8, u8),
+    curr_coarse: (u8, u8),
+) -> String {
+    if steps.is_empty() {
+        "nt_materializer_sched=unavailable expected=unknown reason=missing_or_conflicting_mirroring"
+            .to_string()
+    } else {
+        steps
+            .iter()
+            .map(|step| {
+                format_materializer_policy_step(
+                    step,
+                    bus,
+                    expected_mirroring,
+                    prev_coarse,
+                    curr_coarse,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ; ")
+    }
+}
+
+fn step_materializer_policy_sims(
+    sims: &mut [MaterializerPolicySim],
+    bus: &SmsBus,
+    expected_mirroring: ExpectedMirroring,
+    prev_coarse: (u8, u8),
+    curr_coarse: (u8, u8),
+    frame: usize,
+) -> String {
+    let Some(workset) =
+        materializer_prioritized_workset(bus, expected_mirroring, prev_coarse, curr_coarse)
+    else {
+        return format_materializer_policy_steps(
+            &[],
+            bus,
+            expected_mirroring,
+            prev_coarse,
+            curr_coarse,
+        );
+    };
+    let render_state = current_render_state(bus);
+    let steps = sims
+        .iter_mut()
+        .map(|sim| sim.step(frame, &workset, render_state))
+        .collect::<Vec<_>>();
+    format_materializer_policy_steps(&steps, bus, expected_mirroring, prev_coarse, curr_coarse)
+}
+
+fn format_materializer_policy_snapshots(
+    sims: &[MaterializerPolicySim],
+    bus: &SmsBus,
+    expected_mirroring: ExpectedMirroring,
+    prev_coarse: (u8, u8),
+    curr_coarse: (u8, u8),
+    render_state: RenderState,
+) -> String {
+    if expected_mirroring.vertical_flag().is_none() {
+        return format_materializer_policy_steps(
+            &[],
+            bus,
+            expected_mirroring,
+            prev_coarse,
+            curr_coarse,
+        );
+    }
+    let steps = sims
+        .iter()
+        .map(|sim| sim.snapshot(0, render_state))
+        .collect::<Vec<_>>();
+    format_materializer_policy_steps(&steps, bus, expected_mirroring, prev_coarse, curr_coarse)
 }
 
 fn nt_folded_cc_s(bus: &SmsBus, cell: usize) -> u8 {
@@ -4590,6 +4961,94 @@ mod tests {
                 0,
             ),
             "nt_materializer_budget=unavailable expected=unknown reason=missing_or_conflicting_mirroring"
+        );
+    }
+
+    #[test]
+    fn materializer_policy_prioritizes_entering_before_dirty() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x00;
+        bus.record_trace_ppu_write_call(7, 0x11);
+
+        let workset =
+            materializer_prioritized_workset(&bus, ExpectedMirroring::Vertical, (0, 0), (1, 0))
+                .unwrap();
+        assert_eq!(workset[0].key, 31); // entering right edge comes before dirty cell 0
+        assert!(workset
+            .iter()
+            .any(|cell| cell.key == 0 && cell.reason & 0x01 != 0));
+    }
+
+    #[test]
+    fn materializer_policy_recomputes_pending_payload_from_latest_state() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        let mut sim = MaterializerPolicySim::new(0);
+
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x00;
+        bus.record_trace_ppu_write_call(7, 0x11);
+        let first =
+            materializer_prioritized_workset(&bus, ExpectedMirroring::Vertical, (0, 0), (0, 0))
+                .unwrap();
+        sim.step(0, &first, RenderState::On);
+
+        bus.clear_materializer_dirty();
+        bus.ram[0x0B0C] = 8; // visible cell 0 now projects to NES $2001
+        let step = sim.snapshot(1, RenderState::On);
+        let rendered = format_materializer_policy_step(
+            &step,
+            &bus,
+            ExpectedMirroring::Vertical,
+            (1, 0),
+            (1, 0),
+        );
+        assert!(rendered.contains("00,00/tile:2001:001"));
+        assert!(!rendered.contains("00,00/tile:2000:000"));
+    }
+
+    #[test]
+    fn materializer_policy_tracks_max_after_backlog_and_age() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        let mut sim = MaterializerPolicySim::new(0);
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x00;
+        bus.record_trace_ppu_write_call(7, 0x11);
+        let workset =
+            materializer_prioritized_workset(&bus, ExpectedMirroring::Vertical, (0, 0), (0, 0))
+                .unwrap();
+        let first = sim.step(5, &workset, RenderState::On);
+        assert_eq!(
+            (first.before, first.after, first.max_after, first.max_age),
+            (1, 1, 1, 0)
+        );
+        assert_eq!(first.stale_visible_frames, 1);
+
+        let second = sim.step(8, &workset, RenderState::Off);
+        assert_eq!(second.after, 1);
+        assert_eq!(second.max_after, 1);
+        assert_eq!(second.max_age, 3);
+        assert_eq!(second.stale_visible_frames, 1);
+
+        let third = sim.step(9, &workset, RenderState::On);
+        assert_eq!(third.max_age, 4);
+        assert_eq!(third.stale_visible_frames, 2);
+    }
+
+    #[test]
+    fn materializer_policy_reports_unknown_mirroring() {
+        let mut sims = MaterializerPolicySim::new_all();
+        let bus = SmsBus::new(Vec::new(), 0xFF);
+        assert_eq!(
+            step_materializer_policy_sims(
+                &mut sims,
+                &bus,
+                ExpectedMirroring::Unknown,
+                (0, 0),
+                (0, 0),
+                0,
+            ),
+            "nt_materializer_sched=unavailable expected=unknown reason=missing_or_conflicting_mirroring"
         );
     }
 
