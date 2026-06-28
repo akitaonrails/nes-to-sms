@@ -212,6 +212,41 @@ _gbv_inv_next:
   jr   nz, _gbv_inv_loop
   ret
 
+; ─── rt_bg_map_base_slot ─────────────────────────────────────────────────────
+; Map a NES background tile byte through the active BG CHR map.
+;   Entry: A = NES bg tile byte.
+;   Exit:  A = mapped SMS base slot.
+;   Preserves BC, DE, HL. Clobbers AF. Leaves data_prg_low mapped in slot 2.
+; Helper-only scaffold for a later CIRAM materializer; current rendering paths
+; still use their inlined lookups and BGV_BSHADOW.
+rt_bg_map_base_slot:
+  push hl
+  push de
+  push bc
+  ld   c, a
+  ld   a, :data_chr_maps
+  ld   ($ffff), a
+  ld   a, ($cb08)
+  bit  4, a
+  jr   nz, _bg_map_base_slot_table1
+  ld   de, data_chr_bg_map0
+  jr   _bg_map_base_slot_ready
+_bg_map_base_slot_table1:
+  ld   de, data_chr_bg_map1
+_bg_map_base_slot_ready:
+  ld   l, c
+  ld   h, $00
+  add  hl, hl
+  add  hl, de
+  ld   c, (hl)                ; byte 0 of two-byte map record = base slot
+  ld   a, :data_prg_low
+  ld   ($ffff), a
+  ld   a, c
+  pop  bc
+  pop  de
+  pop  hl
+  ret
+
 ; ─── _bgv_sub_palette ───────────────────────────────────────────────────────
 ; Read the per-cell sub-palette S (0-3) from the nametable shadow.
 ;   Entry: HL = SMS nametable low-byte address ($3700-$3EFE).
