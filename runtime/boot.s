@@ -32,6 +32,7 @@
 ;   $CB12        Synthetic sprite-0 phase for PPUSTATUS bit 6
 ;   $CB1A        Translated NMI has been enabled at least once
 ;   $CB20-$CB24  Split-scroll scheduler state (see runtime/ppu.s)
+;   $CB80-$CBFF  Raw mirrored NES attribute shadow (2 CIRAM pages × 64 bytes)
 ;   $CB13-$CB1F  13-byte scratch ("temp w")
 ;   $CB1D        Runtime trap marker for trace-sms diagnostics
 ;   Z80 SP lives at $DFFE, grows down — never touches $C100-$C1FF.
@@ -195,7 +196,15 @@ boot_main:
   ld  a, $d0                ; Y=$D0 hides sprites below the visible area
   call mem_fill
 
-  ; 11b. Clear SMS nametable high-byte shadow. Runtime attribute writes update
+  ; 11b. Clear raw mirrored NES attribute shadow (2 CIRAM pages × 64 bytes).
+  ; This is scaffolding for later mirroring-aware materialization; current
+  ; folded rendering still uses the SMS nametable high-byte shadow below.
+  ld  hl, $cb80
+  ld  bc, $0080
+  xor a
+  call mem_fill
+
+  ; 11c. Clear SMS nametable high-byte shadow. Runtime attribute writes update
   ; this shadow so they can preserve profile-mapped CHR tile high bits without
   ; reading back from buffered VDP VRAM.
   ld  hl, $cc00
@@ -203,11 +212,11 @@ boot_main:
   xor a
   call mem_fill
 
-  ; 11c. Build the horizontal-flip byte LUT (software sprite flipping; the SMS
+  ; 11d. Build the horizontal-flip byte LUT (software sprite flipping; the SMS
   ; VDP has no per-sprite flip bit). See runtime/sat.s.
   call rt_build_hflip_lut
 
-  ; 11d. Init the background sub-palette variant cache to "unassigned" ($FF)
+  ; 11e. Init the background sub-palette variant cache to "unassigned" ($FF)
   ; and reset the variant pool allocator. See runtime/chrmap.s.
   ld  hl, $d600
   ld  bc, $0400             ; 1024 cache entries

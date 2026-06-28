@@ -372,6 +372,7 @@ _ppudata_direct_attribute:
   ; each tile's CHR remap high bit through the nametable shadow.
   pop  af
   ld   ($cb15), a            ; attr byte
+  call rt_nt_write_attr_shadow ; preserves DE; current folded rendering unchanged
   ld   a, e
   sub  $c0
   ld   ($cb19), a            ; attr offset 0..63

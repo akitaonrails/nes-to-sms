@@ -2528,6 +2528,12 @@ fn dump_route_checkpoint(
     )?;
     writeln!(
         f,
+        "nt_attr_shadow_nonzero={} first_nonzero={}",
+        nt_attr_shadow_nonzero_bytes(bus),
+        format_nt_attr_shadow_first_nonzero(bus)
+    )?;
+    writeln!(
+        f,
         "nt_columns_nonzero_cells: {}",
         format_nametable_column_occupancy(bus)
     )?;
@@ -2548,6 +2554,26 @@ fn dump_route_checkpoint(
 
 fn nametable_nonzero_bytes(bus: &SmsBus) -> usize {
     (0..1792).filter(|i| bus.vram[0x3700 + i] != 0).count()
+}
+
+fn nt_attr_shadow_nonzero_bytes(bus: &SmsBus) -> usize {
+    // Runtime $CB80-$CBFF maps to SMS RAM offset $0B80-$0BFF.
+    (0..0x80).filter(|i| bus.ram[0x0B80 + i] != 0).count()
+}
+
+fn format_nt_attr_shadow_first_nonzero(bus: &SmsBus) -> String {
+    let entries = (0..0x80)
+        .filter_map(|i| {
+            let value = bus.ram[0x0B80 + i];
+            (value != 0).then(|| format!("{:02X}:{value:02X}", i))
+        })
+        .take(12)
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        "none".to_string()
+    } else {
+        entries.join(" ")
+    }
 }
 
 fn format_nametable_column_occupancy(bus: &SmsBus) -> String {
