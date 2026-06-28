@@ -123,11 +123,24 @@ $C200-$C7FF   NES RAM mirror ($0200-$07FF)
 $C800-$C8FF   VRAM update buffer (size TBD; double-buffered)
 $C900-$CAFF   Sprite attribute staging (192 bytes: 64 sprites * 3)
 $CB00-$CBFF   Translated runtime state (frame counter, shadow flags, etc.)
-$CC00-$DFFF   Free / future use
+$CC00-$D2FF   Folded SMS per-cell subpalette shadow (temporary)
+$D300-$D3DF   Compact folded subpalette mirror (temporary)
+$D600-$D9FF   BG variant cache
+$DA00-$DD7F   BG base-slot shadow
+$DD80-$DFFD   Native Z80 stack headroom / no-go for persistent shadows
 ```
 
 The Z80 SP lives at `$DFFE` and grows down. Native Z80 stack and emulated
 6502 stack are separate.
+
+Full raw NES CIRAM source-of-truth needs 2 KiB (`$CC00-$D3FF`), including
+1920 tile bytes plus the 128 compact attribute bytes already mirrored at
+`$CB80-$CBFF`. That storage does not fit in current internal RAM without
+reclaiming existing folded rendering shadows. The eventual candidate remains
+`$CC00-$D3FF` as raw CIRAM, but it is blocked until folded-S/BG-shadow
+dependencies are replaced. `$DD80-$DFFD` is reserved for stack headroom even
+when traces show unused space; folded-visible repaint is skipped because it
+does not establish raw CIRAM as source-of-truth.
 
 ### SMS ROM bank plan
 

@@ -3103,6 +3103,7 @@ fn main() {
     println!("{}", format_nt_raw_write_stats(&bus));
     println!("{}", format_nt_raw_frame_stats(&bus));
     println!("{}", format_nt_raw_shadow_parity(&bus));
+    println!("{}", format_raw_ciram_storage_decision());
     println!("{}", format_z80_stack_low_water(stack_watermark));
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
@@ -3643,6 +3644,7 @@ fn dump_route_checkpoint(
     writeln!(f, "{}", format_nt_raw_write_stats(bus))?;
     writeln!(f, "{}", format_nt_raw_frame_stats(bus))?;
     writeln!(f, "{}", format_nt_raw_shadow_parity(bus))?;
+    writeln!(f, "{}", format_raw_ciram_storage_decision())?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -4372,6 +4374,10 @@ fn format_nt_raw_shadow_parity(bus: &SmsBus) -> String {
         "nt_raw_shadow_parity=unavailable reason=runtime_raw_ciram_missing trace_writes={}",
         bus.nt_trace_ciram_writes
     )
+}
+
+fn format_raw_ciram_storage_decision() -> &'static str {
+    "raw_ciram_storage=blocked reason=no_internal_ram_without_reclaim required_tile_bytes=1920 attr_bytes_existing=128 candidate=$CC00-$D3FF blocked_by=folded_s_reclaim_required stack_candidate=$DD80-$DFFD:no_go"
 }
 
 fn format_z80_stack_low_water(watermark: Z80StackWatermark) -> String {
@@ -5501,6 +5507,14 @@ mod tests {
         assert_eq!(
             format_nt_raw_shadow_parity(&bus),
             "nt_raw_shadow_parity=unavailable reason=runtime_raw_ciram_missing trace_writes=3"
+        );
+    }
+
+    #[test]
+    fn raw_ciram_storage_decision_reports_blocked_reclaim_requirement() {
+        assert_eq!(
+            format_raw_ciram_storage_decision(),
+            "raw_ciram_storage=blocked reason=no_internal_ram_without_reclaim required_tile_bytes=1920 attr_bytes_existing=128 candidate=$CC00-$D3FF blocked_by=folded_s_reclaim_required stack_candidate=$DD80-$DFFD:no_go"
         );
     }
 
