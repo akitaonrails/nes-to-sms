@@ -11,7 +11,7 @@
 ;   $C800-$C8FF  VRAM update buffer
 ;   $C900-$C9FF  Sprite attribute staging (Y at $C900, X/tile at $C940)
 ;   $CC00-$D2FF  SMS visible nametable high-byte shadow ($3700-$3DFF + $9500)
-;   $D300-$D3DF  Compact folded SMS subpalette shadow (896 cells × 2 bits)
+;   $D300-$D3DF  Retired compact folded S mirror; reserved for migration
 ;   $CB00        Shadow X
 ;   $CB01        Shadow Y
 ;   $CB02        Shadow S (init $FD)
@@ -213,19 +213,11 @@ boot_main:
   xor a
   call mem_fill
 
-  ; 11d. Clear compact folded SMS subpalette shadow. This duplicates the active
-  ; $CC00 folded state in a future-friendly dense form; $CC00 remains
-  ; authoritative for rendering in this phase.
-  ld  hl, $d300
-  ld  bc, $00e0
-  xor a
-  call mem_fill
-
-  ; 11e. Build the horizontal-flip byte LUT (software sprite flipping; the SMS
+  ; 11d. Build the horizontal-flip byte LUT (software sprite flipping; the SMS
   ; VDP has no per-sprite flip bit). See runtime/sat.s.
   call rt_build_hflip_lut
 
-  ; 11f. Init the background sub-palette variant cache to "unassigned" ($FF)
+  ; 11e. Init the background sub-palette variant cache to "unassigned" ($FF)
   ; and reset the variant pool allocator. See runtime/chrmap.s.
   ld  hl, $d600
   ld  bc, $0400             ; 1024 cache entries

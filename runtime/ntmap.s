@@ -2,9 +2,9 @@
 ;
 ; This is a scaffold for the runtime nametable-shadow materializer. It does not
 ; write a full CIRAM tile shadow yet because chrmap.s still uses $CC00-$D2FF
-; as the authoritative folded SMS per-cell subpalette state. A compact duplicate
-; lives at $D300-$D3DF as migration scaffolding, but callers may use the full
-; helper only once the folded-shadow storage collision is removed.
+; as the authoritative folded SMS per-cell subpalette state. The old compact
+; $D300-$D3DF duplicate has been retired; callers may use the full helper only
+; once the folded-shadow storage collision is removed.
 
 .define NT_ATTR_SHADOW $cb80
 

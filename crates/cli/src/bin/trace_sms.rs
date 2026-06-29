@@ -680,6 +680,7 @@ struct SmsBus {
     ram_migration_frame_accesses: [u32; 3],
     ram_migration_max_frame_accesses: [u32; 3],
     ram_migration_pc_counts: [HashMap<u16, u32>; 6],
+    nt_folded_s_compact_available: bool,
     d300_compact_store_range: Option<(u16, u16)>,
     d300_pending_read: Option<D300PendingRead>,
     d300_true_reads: u32,
@@ -874,6 +875,7 @@ impl SmsBus {
             ram_migration_frame_accesses: [0; 3],
             ram_migration_max_frame_accesses: [0; 3],
             ram_migration_pc_counts: std::array::from_fn(|_| HashMap::new()),
+            nt_folded_s_compact_available: true,
             d300_compact_store_range: None,
             d300_pending_read: None,
             d300_true_reads: 0,
@@ -2405,6 +2407,7 @@ fn main() {
     };
     let mut bus = SmsBus::new(rom, controller_port_dc);
     bus.d300_compact_store_range = d300_compact_store_range(&symbol_defs);
+    bus.nt_folded_s_compact_available = bus.d300_compact_store_range.is_some();
     let mut cpu = Cpu::new();
     cpu.pc = 0x0000;
     cpu.sp = 0xDFF0;
@@ -4696,6 +4699,11 @@ fn nt_folded_compact_s(bus: &SmsBus, cell: usize) -> u8 {
 }
 
 fn format_nt_folded_s_compact_mismatches(bus: &SmsBus) -> String {
+    if !bus.nt_folded_s_compact_available {
+        return "nt_folded_s_compact_mismatch=unavailable reason=compact_shadow_retired"
+            .to_string();
+    }
+
     let mut total = 0usize;
     let mut examples = Vec::new();
     for cell in 0..(32 * 28) {
@@ -6312,6 +6320,17 @@ mod tests {
         assert_eq!(
             format_nt_folded_s_compact_mismatches(&bus),
             "nt_folded_s_compact_mismatch=1 first=cell=00,01 cc=3 compact=0"
+        );
+    }
+
+    #[test]
+    fn folded_s_compact_diagnostic_reports_retired_shadow() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.nt_folded_s_compact_available = false;
+
+        assert_eq!(
+            format_nt_folded_s_compact_mismatches(&bus),
+            "nt_folded_s_compact_mismatch=unavailable reason=compact_shadow_retired"
         );
     }
 }
