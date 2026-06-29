@@ -367,13 +367,42 @@ SMS-native terms.
 
       **Acceptance:** horizontal scrolling in 1-1 works in Mednafen.
 
-- [ ] **E.5 PPU ADDR/DATA ($2006/$2007).** Currently $2006 latches
-      VRAM addr and $2007 queues to the VRAM update buffer.
-      Verify: address auto-increment (1 or 32 per write, controlled
-      by $2000 bit 2), wrap behavior, attribute-table writes.
+- [ ] **E.5 PPU ADDR/DATA ($2006/$2007) raw-CIRAM source.** Currently
+      `$2006` latches VRAM addr and `$2007` feeds the folded SMS projection.
+      The long-term fix is still a real mirrored NES CIRAM source-of-truth plus
+      a materializer into SMS nametable space, but internal-RAM reclaim is now
+      deferred. `$CC00-$D2FF` has no unknown users, yet route diagnostics prove
+      it is still blocked by true folded-S consumers (`_bgv_sub_palette`) and
+      folded attribute maintenance. `$D300-$D3FF` is clean dirty-metadata space
+      only, and `$DD80-$DFFD` remains stack no-go.
 
-      **Acceptance:** writing a known nametable pattern via $2006/$2007
-      produces the expected SMS name-table state.
+      **E.5a Raw-CIRAM storage backend.** Add a generic storage backend for at
+      least 2 KiB of raw NES CIRAM outside the currently allocated internal RAM,
+      likely cartridge/external RAM for v1. Do not reclaim `$CC00/$DA00` as part
+      of this step.
+
+      **Acceptance:** runtime helpers and `trace-sms` can read/write the chosen
+      raw-CIRAM backend; SMB route remains green; docs state the emulator /
+      hardware assumption; no folded-rendering behavior changes.
+
+      **E.5b Raw-shadow parity.** Mirror `$2007` nametable tile and attribute
+      writes into the raw-CIRAM backend while preserving the existing folded
+      renderer as the visible authority.
+
+      **Acceptance:** `nt_raw_shadow_parity=0` against trace-reconstructed
+      CIRAM, route gate remains green, folded rendering diagnostics are
+      unchanged, and no active-display materializer dependency is introduced.
+
+      **E.5c Render-off-only materializer.** Project raw CIRAM into SMS
+      nametable space only while NES rendering is off. Use `$D300-$D3FF` for
+      dirty metadata when runtime dirty tracking is introduced. Active-display
+      materialization remains blocked until stale-frame and cycle/VDP budgets
+      are proven safe.
+
+      **Acceptance:** route gate remains green; diagnostics prove no render-on
+      materializer work; checkpoints after title/start are drained; vertical
+      CIRAM projection mismatch improves at relevant checkpoints; framebuffer /
+      checkpoint visuals are no worse.
 
 - [ ] **E.6 OAM ($2003/$2004) and OAM DMA ($4014).** OAM addr/data
       register interface plus DMA. Currently runtime accepts $2003 to

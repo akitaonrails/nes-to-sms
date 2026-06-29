@@ -133,17 +133,24 @@ $DD80-$DFFD   Native Z80 stack headroom / no-go for persistent shadows
 The Z80 SP lives at `$DFFE` and grows down. Native Z80 stack and emulated
 6502 stack are separate.
 
-Full raw NES CIRAM source-of-truth needs 2 KiB (`$CC00-$D3FF`), including
-1920 tile bytes plus the 128 compact attribute bytes already mirrored at
-`$CB80-$CBFF`. That storage does not fit in current internal RAM without
-reclaiming existing folded rendering shadows. The eventual candidate remains
-`$CC00-$D3FF` as raw CIRAM, but it is blocked until folded-S/BG-shadow
-dependencies are replaced. The retired `$D300-$D3FF` block is trace-clean and
-large enough for dirty metadata only: `$D300-$D3EF` can hold a 1920-bit raw
-tile dirty bitmap, while `$D3F0-$D3FF` can hold a 128-bit raw attribute dirty
-bitmap. It is not a raw tile source. `$DD80-$DFFD` is reserved for stack
-headroom even when traces show unused space; folded-visible repaint is skipped
-because it does not establish raw CIRAM as source-of-truth.
+Full raw NES CIRAM source-of-truth needs 2 KiB (`$CC00-$D3FF` if stored in
+internal RAM), including 1920 tile bytes plus the 128 compact attribute bytes
+already mirrored at `$CB80-$CBFF`. That storage does not fit in current
+internal RAM without reclaiming existing folded rendering shadows. The eventual
+internal-RAM candidate remains `$CC00-$D3FF`, but it is blocked until folded-S /
+BG-shadow dependencies are replaced. For v1, raw CIRAM storage is allowed to
+use a generic external/cartridge-RAM backend instead of making internal-RAM
+reclaim a prerequisite. This keeps the pipeline generic while breaking the
+current deadlock: first prove raw-CIRAM parity in a separate storage backend,
+then materialize from it, and only later optimize storage back into internal RAM
+if needed.
+
+The retired `$D300-$D3FF` block is trace-clean and large enough for dirty
+metadata only: `$D300-$D3EF` can hold a 1920-bit raw tile dirty bitmap, while
+`$D3F0-$D3FF` can hold a 128-bit raw attribute dirty bitmap. It is not a raw
+tile source. `$DD80-$DFFD` is reserved for stack headroom even when traces show
+unused space; folded-visible repaint is skipped because it does not establish
+raw CIRAM as source-of-truth.
 
 ### SMS ROM bank plan
 
