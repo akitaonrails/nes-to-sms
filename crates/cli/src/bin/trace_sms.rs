@@ -3058,11 +3058,19 @@ fn main() {
     );
     println!(
         "{}",
+        format_bgv_recompute_folded(&bus, &bus.rom, &symbol_defs)
+    );
+    println!(
+        "{}",
         format_bgv_base_from_dry_ciram_mismatches(&bus, &bus.rom, &symbol_defs, true)
     );
     println!(
         "{}",
         format_bgv_base_from_dry_ciram_mismatches(&bus, &bus.rom, &symbol_defs, false)
+    );
+    println!(
+        "{}",
+        format_bgv_recompute_ciram(&bus, &bus.rom, &symbol_defs, expected_mirroring)
     );
     println!(
         "{}",
@@ -3593,12 +3601,22 @@ fn dump_route_checkpoint(
     writeln!(
         f,
         "{}",
+        format_bgv_recompute_folded(bus, &bus.rom, context.symbols)
+    )?;
+    writeln!(
+        f,
+        "{}",
         format_bgv_base_from_dry_ciram_mismatches(bus, &bus.rom, context.symbols, true)
     )?;
     writeln!(
         f,
         "{}",
         format_bgv_base_from_dry_ciram_mismatches(bus, &bus.rom, context.symbols, false)
+    )?;
+    writeln!(
+        f,
+        "{}",
+        format_bgv_recompute_ciram(bus, &bus.rom, context.symbols, context.expected_mirroring)
     )?;
     writeln!(
         f,
@@ -4440,6 +4458,149 @@ fn expected_base_slot_for_tile(
     rom_byte_at_symbol(rom, symbols, label, usize::from(tile) * 2)
 }
 
+#[derive(Debug, Clone)]
+struct BgvRecomputeStats {
+    compared: usize,
+    mismatches: usize,
+    missing_map: bool,
+    first_mismatch: Option<String>,
+}
+
+fn bgv_recompute_status(stats: &BgvRecomputeStats, blocked_status: &'static str) -> &'static str {
+    if stats.missing_map || stats.compared == 0 {
+        "unavailable"
+    } else if stats.mismatches == 0 {
+        "ready"
+    } else {
+        blocked_status
+    }
+}
+
+fn bgv_recompute_from_folded_stats(
+    bus: &SmsBus,
+    rom: &[u8],
+    symbols: &HashMap<String, (u8, u16)>,
+) -> BgvRecomputeStats {
+    let table1 = bus.ram[0x0B08] & 0x10 != 0;
+    let mut stats = BgvRecomputeStats {
+        compared: 0,
+        mismatches: 0,
+        missing_map: false,
+        first_mismatch: None,
+    };
+    for cell in 0..(32 * 28) {
+        if !bus.nt_trace_folded_source_tile_seen[cell] {
+            continue;
+        }
+        let tile = bus.nt_trace_folded_source_tiles[cell];
+        let Some(expected) = expected_base_slot_for_tile(rom, symbols, table1, tile) else {
+            stats.missing_map = true;
+            continue;
+        };
+        stats.compared += 1;
+        let actual = bus.ram[0x1A00 + cell];
+        if actual != expected {
+            stats.mismatches += 1;
+            if stats.first_mismatch.is_none() {
+                let row = cell / 32;
+                let col = cell % 32;
+                stats.first_mismatch = Some(format!(
+                    "cell={row:02},{col:02} tile={tile:02X} shadow={actual:02X} expected={expected:02X}"
+                ));
+            }
+        }
+    }
+    stats
+}
+
+fn format_bgv_recompute_folded(
+    bus: &SmsBus,
+    rom: &[u8],
+    symbols: &HashMap<String, (u8, u16)>,
+) -> String {
+    let stats = bgv_recompute_from_folded_stats(bus, rom, symbols);
+    let status = bgv_recompute_status(&stats, "blocked");
+    let reason = if stats.missing_map {
+        " reason=missing_data_chr_bg_map"
+    } else if stats.compared == 0 {
+        " reason=no_folded_source_tiles_seen"
+    } else {
+        ""
+    };
+    format!(
+        "bgv_recompute_folded=status={status} mismatches={} compared={} first={} runtime_reclaim=blocked_by_raw_source_missing{reason}",
+        stats.mismatches,
+        stats.compared,
+        stats.first_mismatch.unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn bgv_recompute_from_ciram_stats(
+    bus: &SmsBus,
+    rom: &[u8],
+    symbols: &HashMap<String, (u8, u16)>,
+    vertical_mirroring: bool,
+) -> BgvRecomputeStats {
+    let table1 = bus.ram[0x0B08] & 0x10 != 0;
+    let mut stats = BgvRecomputeStats {
+        compared: 0,
+        mismatches: 0,
+        missing_map: false,
+        first_mismatch: None,
+    };
+    for row in 0..28 {
+        for col in 0..32 {
+            let cell = row * 32 + col;
+            let projection = nt_dry_project_tile_for_cell(bus, row, col, vertical_mirroring);
+            let Some(expected) =
+                expected_base_slot_for_tile(rom, symbols, table1, projection.dry_tile)
+            else {
+                stats.missing_map = true;
+                continue;
+            };
+            stats.compared += 1;
+            let actual = bus.ram[0x1A00 + cell];
+            if actual != expected {
+                stats.mismatches += 1;
+                if stats.first_mismatch.is_none() {
+                    stats.first_mismatch = Some(format!(
+                        "cell={row:02},{col:02} ppu={:04X} dry_tile={:02X} shadow={actual:02X} expected={expected:02X}",
+                        projection.ppu_addr, projection.dry_tile
+                    ));
+                }
+            }
+        }
+    }
+    stats
+}
+
+fn format_bgv_recompute_ciram(
+    bus: &SmsBus,
+    rom: &[u8],
+    symbols: &HashMap<String, (u8, u16)>,
+    expected_mirroring: ExpectedMirroring,
+) -> String {
+    let Some(vertical_mirroring) = expected_mirroring.vertical_flag() else {
+        return "bgv_recompute_ciram=status=unavailable expected=unknown mismatches=0 compared=0 first=none reason=missing_or_conflicting_mirroring runtime_reclaim=blocked_by_raw_source_missing".to_string();
+    };
+    let stats = bgv_recompute_from_ciram_stats(bus, rom, symbols, vertical_mirroring);
+    let status = bgv_recompute_status(&stats, "blocked_by_folded_projection_bug");
+    let reason = if stats.missing_map {
+        " reason=missing_data_chr_bg_map"
+    } else if stats.compared == 0 {
+        " reason=no_ciram_projection_compared"
+    } else {
+        ""
+    };
+    format!(
+        "bgv_recompute_ciram=status={status} expected={} mismatches={} compared={} first={} runtime_reclaim=blocked_by_raw_source_missing{reason}",
+        expected_mirroring.label(),
+        stats.mismatches,
+        stats.compared,
+        stats.first_mismatch.unwrap_or_else(|| "none".to_string())
+    )
+}
+
 fn format_bgv_base_shadow_mismatches(
     bus: &SmsBus,
     rom: &[u8],
@@ -5003,6 +5164,58 @@ mod tests {
         assert_eq!(
             format_bgv_base_from_dry_ciram_mismatches(&bus, &rom, &HashMap::new(), false),
             "bgv_base_dry_ciram_horizontal_mismatch=unavailable compared:0 rows_28_29:0 reason=missing_data_chr_bg_map"
+        );
+    }
+
+    #[test]
+    fn bgv_recompute_folded_reports_ready_when_shadow_matches() {
+        let mut bus = SmsBus::new(vec![0; 0x4000], 0xFF);
+        let mut symbols = HashMap::new();
+        symbols.insert("data_chr_bg_map0".to_string(), (0, 0x8000));
+        let mut rom = vec![0; 0x100];
+        rom[0x10] = 0x42; // map0[tile 8].base
+        bus.nt_trace_folded_source_tile_seen[3] = true;
+        bus.nt_trace_folded_source_tiles[3] = 8;
+        bus.ram[0x1A00 + 3] = 0x42;
+
+        assert_eq!(
+            format_bgv_recompute_folded(&bus, &rom, &symbols),
+            "bgv_recompute_folded=status=ready mismatches=0 compared=1 first=none runtime_reclaim=blocked_by_raw_source_missing"
+        );
+    }
+
+    #[test]
+    fn bgv_recompute_folded_reports_blocked_on_mismatch() {
+        let mut bus = SmsBus::new(vec![0; 0x4000], 0xFF);
+        let mut symbols = HashMap::new();
+        symbols.insert("data_chr_bg_map0".to_string(), (0, 0x8000));
+        let mut rom = vec![0; 0x100];
+        rom[0x10] = 0x42;
+        bus.nt_trace_folded_source_tile_seen[3] = true;
+        bus.nt_trace_folded_source_tiles[3] = 8;
+        bus.ram[0x1A00 + 3] = 0x24;
+
+        assert_eq!(
+            format_bgv_recompute_folded(&bus, &rom, &symbols),
+            "bgv_recompute_folded=status=blocked mismatches=1 compared=1 first=cell=00,03 tile=08 shadow=24 expected=42 runtime_reclaim=blocked_by_raw_source_missing"
+        );
+    }
+
+    #[test]
+    fn bgv_recompute_ciram_reports_blocked_status_and_unknown_unavailable() {
+        let mut bus = SmsBus::new(vec![0; 0x4000], 0xFF);
+        let mut symbols = HashMap::new();
+        symbols.insert("data_chr_bg_map0".to_string(), (0, 0x8000));
+        let mut rom = vec![0; 0x100];
+        rom[0x10] = 0x42;
+        bus.nt_trace_ciram_vertical[3] = 8;
+        bus.ram[0x1A00 + 3] = 0x24;
+
+        assert!(format_bgv_recompute_ciram(&bus, &rom, &symbols, ExpectedMirroring::Vertical)
+            .contains("bgv_recompute_ciram=status=blocked_by_folded_projection_bug expected=vertical mismatches=1 compared=896 first=cell=00,03 ppu=2003 dry_tile=08 shadow=24 expected=42 runtime_reclaim=blocked_by_raw_source_missing"));
+        assert_eq!(
+            format_bgv_recompute_ciram(&bus, &rom, &symbols, ExpectedMirroring::Unknown),
+            "bgv_recompute_ciram=status=unavailable expected=unknown mismatches=0 compared=0 first=none reason=missing_or_conflicting_mirroring runtime_reclaim=blocked_by_raw_source_missing"
         );
     }
 
