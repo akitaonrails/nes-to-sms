@@ -403,6 +403,16 @@ SMS-native terms.
       CIRAM, route gate remains green, folded rendering diagnostics are
       unchanged, and no active-display materializer dependency is introduced.
 
+      **Rejected direct-hot-path attempt:** calling the SRAM write helper from
+      both direct `$2007` nametable tile and attribute paths produced perfect
+      raw parity (`nt_raw_shadow_parity=0`, `trace_writes=31839`,
+      `backend_writes=33887`) but failed the canonical route with final RAM
+      `$0760=$00`, `$075C=$00`, `$000E=$08`. Treat this as timing/gameplay
+      evidence: do not retry per-write slot-2 SRAM enable/write/disable on the
+      hot path unchanged. The next E.5b design must avoid per-byte hot-path
+      mapper toggles, batch work into render-off/load windows, or use a cheaper
+      staging scheme before committing behavior.
+
       **E.5c Render-off-only materializer.** Project raw CIRAM into SMS
       nametable space only while NES rendering is off. Use `$D300-$D3FF` for
       dirty metadata when runtime dirty tracking is introduced. Active-display
