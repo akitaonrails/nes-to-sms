@@ -423,6 +423,15 @@ SMS-native terms.
       this enqueue-every-write design unchanged; even internal staging on the
       `$2007` hot path is too expensive for the accepted route.
 
+      **Current decision:** pause E.5b runtime raw-CIRAM capture. Two distinct
+      `$2007` interception designs produced the same gameplay-state regression,
+      so further per-write capture is now considered a loop. Raw CIRAM remains
+      the correct architecture, but the next fastest v1 step is a visual /
+      human-playability audit of the current green build. Only return to runtime
+      capture if that audit proves nametable/source correctness is the v1
+      blocker, and then prefer producer-level bulk upload capture rather than
+      `$2007` hot-path interception.
+
       **E.5c Render-off-only materializer.** Project raw CIRAM into SMS
       nametable space only while NES rendering is off. Use `$D300-$D3FF` for
       dirty metadata when runtime dirty tracking is introduced. Active-display
