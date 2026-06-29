@@ -4,8 +4,10 @@
 ; write a full CIRAM tile shadow yet because chrmap.s still uses $CC00-$D2FF
 ; as the authoritative folded SMS per-cell subpalette state. The old compact
 ; $D300-$D3DF duplicate has been retired, and trace diagnostics currently
-; reserve $D300-$D3FF only as metadata space. Callers may use the full helper
-; only once the folded-shadow storage collision is removed.
+; reserve $D300-$D3FF only as dirty metadata space: $D300-$D3EF can hold a
+; 1920-bit tile-dirty bitmap, and $D3F0-$D3FF can hold a 128-bit attr-dirty
+; bitmap. Callers may use the full helper only once the folded-shadow storage
+; collision is removed.
 
 .define NT_ATTR_SHADOW $cb80
 

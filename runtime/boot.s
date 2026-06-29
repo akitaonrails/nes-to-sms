@@ -11,7 +11,7 @@
 ;   $C800-$C8FF  VRAM update buffer
 ;   $C900-$C9FF  Sprite attribute staging (Y at $C900, X/tile at $C940)
 ;   $CC00-$D2FF  SMS visible nametable high-byte shadow ($3700-$3DFF + $9500)
-;   $D300-$D3FF  Clean 256-byte metadata-only reserve; not source-of-truth
+;   $D300-$D3FF  Clean metadata reserve: 240 tile-dirty bits + 16 attr bits
 ;   $CB00        Shadow X
 ;   $CB01        Shadow Y
 ;   $CB02        Shadow S (init $FD)

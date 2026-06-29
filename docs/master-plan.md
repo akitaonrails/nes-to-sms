@@ -124,7 +124,7 @@ $C800-$C8FF   VRAM update buffer (size TBD; double-buffered)
 $C900-$CAFF   Sprite attribute staging (192 bytes: 64 sprites * 3)
 $CB00-$CBFF   Translated runtime state (frame counter, shadow flags, etc.)
 $CC00-$D2FF   Folded SMS per-cell subpalette shadow (temporary)
-$D300-$D3FF   Clean 256-byte metadata-only reserve; not source-of-truth
+$D300-$D3FF   Clean dirty-metadata reserve: 240 tile bits + 16 attr bits
 $D600-$D9FF   BG variant cache
 $DA00-$DD7F   BG base-slot shadow
 $DD80-$DFFD   Native Z80 stack headroom / no-go for persistent shadows
@@ -139,10 +139,11 @@ Full raw NES CIRAM source-of-truth needs 2 KiB (`$CC00-$D3FF`), including
 reclaiming existing folded rendering shadows. The eventual candidate remains
 `$CC00-$D3FF` as raw CIRAM, but it is blocked until folded-S/BG-shadow
 dependencies are replaced. The retired `$D300-$D3FF` block is trace-clean and
-large enough for metadata/bitmaps only, not a raw tile source. `$DD80-$DFFD`
-is reserved for stack headroom even when traces show unused space;
-folded-visible repaint is skipped because it does not establish raw CIRAM as
-source-of-truth.
+large enough for dirty metadata only: `$D300-$D3EF` can hold a 1920-bit raw
+tile dirty bitmap, while `$D3F0-$D3FF` can hold a 128-bit raw attribute dirty
+bitmap. It is not a raw tile source. `$DD80-$DFFD` is reserved for stack
+headroom even when traces show unused space; folded-visible repaint is skipped
+because it does not establish raw CIRAM as source-of-truth.
 
 ### SMS ROM bank plan
 

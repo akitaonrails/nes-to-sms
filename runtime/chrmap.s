@@ -24,7 +24,7 @@
 ;   $CA07        ring-wrapped flag (0 until slots 64-255 have all been used)
 ;   $CA40-$CAFF  reverse map for recycled slots 64-255: slot -> old base tile
 ;   $CC00-$D2FF  nametable shadow — active per-cell sub-palette S (0-3)
-;   $D300-$D3FF  clean 256-byte metadata-only reserve; not source-of-truth
+;   $D300-$D3FF  clean metadata reserve: 240 tile-dirty bits + 16 attr bits
 ;   $D600-$D9FF  variant cache FC[base*4 + S] -> pool slot ($FF = unassigned)
 
 .define BGV_CACHE      $d600   ; FC[base*4+S] -> slot, 1024 bytes, $FF=empty
