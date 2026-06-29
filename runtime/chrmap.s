@@ -459,6 +459,21 @@ rt_write_mapped_bg_tile_s_noshadow:
   pop  hl
   ret
 
+; ─── rt_redraw_bg_cell_tile_s_noshadow ──────────────────────────────────────
+; Helper-only scaffold for a future DA00-free attribute/materializer redraw.
+; Redraw one SMS nametable cell from an explicit NES tile byte and subpalette
+; without reading/writing BGV_BSHADOW, folded $CC00 state, or compact $D300
+; state. Intentionally uncalled by current runtime paths.
+;   Entry: A = NES tile byte, B = S (0..3), DE = SMS nametable high-byte address.
+;          The corresponding tile low-byte address is DE-1.
+;   Preserves BC, DE, HL. Clobbers AF. Leaves data_prg_low mapped in slot 2.
+rt_redraw_bg_cell_tile_s_noshadow:
+  push de
+  dec  de                    ; high-byte addr -> low-byte tile addr
+  call rt_write_mapped_bg_tile_s_noshadow
+  pop  de
+  ret
+
 ; Map a NES sprite tile to an SMS sprite tile byte.
 ; Entry: A = NES OAM tile byte. Uses PPUCTRL bit 3 ($CB08) to choose NES sprite
 ; pattern table 0/1. Table 0 maps to tile bytes for SMS sprite base $2000;
