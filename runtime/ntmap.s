@@ -10,6 +10,7 @@
 ; collision is removed.
 
 .define NT_ATTR_SHADOW $cb80
+.define RAW_CIRAM_BYTES $0800
 
 .section "ntmap" free
 
@@ -58,6 +59,79 @@ rt_nt_ppuaddr_to_ciram:
   ld   h, a
   ld   l, e
   ret
+.endif
+
+.ifdef RAW_CIRAM_BACKEND_SRAM
+
+; Convert a NES PPU nametable address to the raw-CIRAM SRAM backend pointer.
+;
+; Backend: standard Sega mapper SRAM bank 0 in slot 2, reserving
+; RAW_CIRAM_SRAM_BASE..RAW_CIRAM_SRAM_BASE+$07FF ($8000-$87FF by default).
+;
+; Entry: DE = NES PPU address $2000-$2FFF.
+; Exit:  HL = RAW_CIRAM_SRAM_BASE + mirrored CIRAM offset.
+; Preserves: DE.
+; Clobbers: AF, HL.
+rt_nt_ppuaddr_to_raw_ciram_sram:
+  call rt_nt_ppuaddr_to_ciram   ; HL = $CC00 + mirrored CIRAM offset
+  ld   a, h
+  sub  $4c                      ; $CC00 -> $8000, preserving 0..$07FF offset
+  ld   h, a
+  ret
+
+; Enable standard Sega mapper SRAM bank 0 in slot 2 ($8000-$BFFF).
+; Preserves: BC, DE, HL. Clobbers: AF.
+rt_raw_ciram_sram_enable:
+  ld   a, RAW_CIRAM_SRAM_CTRL
+  ld   ($fffc), a
+  ret
+
+; Restore slot 2 to ROM visibility. The $FFFF bank latch is preserved by the
+; mapper, so disabling SRAM reveals whichever slot-2 ROM bank was active.
+; Preserves: BC, DE, HL. Clobbers: AF.
+rt_raw_ciram_sram_disable:
+  xor  a
+  ld   ($fffc), a
+  ret
+
+; Clear the 2 KiB raw-CIRAM SRAM area. Intended for boot-time initialization;
+; must only run from code outside slot 2 because $8000-$BFFF is RAM while
+; enabled.
+; Preserves: DE. Clobbers: AF, BC, HL.
+rt_raw_ciram_sram_clear:
+  call rt_raw_ciram_sram_enable
+  ld   hl, RAW_CIRAM_SRAM_BASE
+  ld   bc, RAW_CIRAM_BYTES
+  xor  a
+  call mem_fill
+  jp   rt_raw_ciram_sram_disable
+
+; Write one raw NES CIRAM byte into the SRAM backend.
+; Entry: DE = NES PPU nametable/attribute address, A = byte.
+; Preserves: DE. Clobbers: AF, HL.
+rt_raw_ciram_sram_write:
+  push af
+  call rt_nt_ppuaddr_to_raw_ciram_sram
+  call rt_raw_ciram_sram_enable
+  pop  af
+  ld   (hl), a
+  jp   rt_raw_ciram_sram_disable
+
+; Read one raw NES CIRAM byte from the SRAM backend.
+; Entry: DE = NES PPU nametable/attribute address.
+; Exit:  A = byte.
+; Preserves: BC, DE, HL. Clobbers: AF.
+rt_raw_ciram_sram_read:
+  push hl
+  call rt_nt_ppuaddr_to_raw_ciram_sram
+  call rt_raw_ciram_sram_enable
+  ld   a, (hl)
+  push af
+  call rt_raw_ciram_sram_disable
+  pop  af
+  pop  hl
+  ret
+
 .endif
 
 ; Map a NES PPU attribute-table address to the compact mirrored attribute

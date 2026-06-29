@@ -97,6 +97,16 @@ reset_entry:
 .section "boot_main" free
 
 boot_main:
+  ; Initialize standard Sega mapper registers explicitly. This keeps emulators
+  ; on the Sega mapper path before any optional slot-2 SRAM use.
+  xor a
+  ld  ($fffc), a              ; slot-2 SRAM disabled, no bank shift
+  ld  ($fffd), a              ; slot 0 bank 0
+  ld  a, $01
+  ld  ($fffe), a              ; slot 1 bank 1 until translated_reset remap
+  ld  a, $02
+  ld  ($ffff), a              ; slot 2 bank 2 until asset/data remaps
+
   ; 1. Init VDP to Mode 4 defaults.
   call vdp_init
 
@@ -149,6 +159,13 @@ boot_main:
   ; as $805A/$806D/$8080 to be readable at their original addresses.
   ld  a, :data_prg_low
   ld  ($ffff), a
+
+.ifdef RAW_CIRAM_BACKEND_SRAM
+  ; 6b. Clear external raw-CIRAM SRAM backend ($8000-$87FF in slot-2 SRAM
+  ; bank 0). Rendering is still driven by the folded internal shadows; this is
+  ; only storage scaffolding for later parity/materializer phases.
+  call rt_raw_ciram_sram_clear
+.endif
 
   ; 7. Init emulated 6502 CPU state.
   xor a

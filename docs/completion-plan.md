@@ -385,6 +385,16 @@ SMS-native terms.
       raw-CIRAM backend; SMB route remains green; docs state the emulator /
       hardware assumption; no folded-rendering behavior changes.
 
+      **Outcome:** standard Sega mapper SRAM bank 0 in slot 2 is now the v1 raw
+      CIRAM backend scaffold. Generated SMS projects emit
+      `RAW_CIRAM_BACKEND_SRAM` / `$8000` / `$08` defines; boot initializes the
+      Sega mapper registers and clears `$8000-$87FF` while SRAM is enabled;
+      `runtime/ntmap.s` exposes unused read/write helpers; and `trace-sms`
+      emulates `$FFFC` slot-2 SRAM mapping with two 16 KiB banks. The canonical
+      route remains green and reports `raw_ciram_backend=sram_slot2 ...
+      writes=2048 ciram_nonzero=0`, proving backend clear without visual
+      behavior changes.
+
       **E.5b Raw-shadow parity.** Mirror `$2007` nametable tile and attribute
       writes into the raw-CIRAM backend while preserving the existing folded
       renderer as the visible authority.

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use analysis::nes_rom_like;
 use lower::LowerOptions;
-use sms_project::{NesMirroring, ProjectAssets, ProjectConfig};
+use sms_project::{NesMirroring, ProjectAssets, ProjectConfig, RawCiramBackend};
 use z80_emit::Program;
 
 use crate::Args;
@@ -507,6 +507,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
         region: 0x4C,
         title: truncate_title(&prof.rom.name),
         mirroring,
+        raw_ciram_backend: RawCiramBackend::SramSlot2,
     };
     sms_project::emit_project(&args.out, &build, &project_assets, &cfg, runtime_dir)?;
 

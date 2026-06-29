@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use z80_emu::{Bus, Cpu, StepError};
 
 const BANK_SIZE: usize = 0x4000;
+const CART_RAM_SIZE: usize = 0x8000;
 const RAM_SIZE: usize = 0x2000;
 const IRQ_PERIOD: usize = 60_000;
 const RT_PPU_WRITE_FALLBACK_ADDR: u16 = 0x0068;
@@ -612,6 +613,13 @@ struct SmsBus {
     rom: Vec<u8>,
     /// Current bank mapped into each slot. slot[0] = bank for $0000-$3FFF, etc.
     slot_bank: [u8; 3],
+    /// Standard Sega mapper control register ($FFFC).
+    mapper_control: u8,
+    /// Standard Sega mapper SRAM: two 16 KiB banks, mapped into slot 2 when
+    /// mapper_control bit 3 is set.
+    cart_ram: [u8; CART_RAM_SIZE],
+    cart_ram_reads: u32,
+    cart_ram_writes: u32,
     ram: [u8; RAM_SIZE],
     /// Log of (frame, op, port, value).
     io_log: Vec<String>,
@@ -848,6 +856,10 @@ impl SmsBus {
         Self {
             rom,
             slot_bank: [0, 1, 2],
+            mapper_control: 0,
+            cart_ram: [0; CART_RAM_SIZE],
+            cart_ram_reads: 0,
+            cart_ram_writes: 0,
             ram: [0; RAM_SIZE],
             io_log: Vec::new(),
             vdp_status_reads: 0,
@@ -967,6 +979,18 @@ impl SmsBus {
     fn rom_byte(&self, bank: u8, offset: u16) -> u8 {
         let i = bank as usize * BANK_SIZE + offset as usize;
         *self.rom.get(i).unwrap_or(&0xFF)
+    }
+
+    fn slot2_cart_ram_offset(&self, addr: u16) -> Option<usize> {
+        if !(0x8000..=0xBFFF).contains(&addr) || self.mapper_control & 0x08 == 0 {
+            return None;
+        }
+        let bank_base = if self.mapper_control & 0x04 != 0 {
+            BANK_SIZE
+        } else {
+            0
+        };
+        Some(bank_base + usize::from(addr - 0x8000))
     }
 
     fn watches_read(&self, addr: u16) -> bool {
@@ -1640,7 +1664,14 @@ impl Bus for SmsBus {
             0x0000..=0x03FF => self.rom_byte(0, addr), // first 1 KB always bank 0
             0x0400..=0x3FFF => self.rom_byte(self.slot_bank[0], addr),
             0x4000..=0x7FFF => self.rom_byte(self.slot_bank[1], addr - 0x4000),
-            0x8000..=0xBFFF => self.rom_byte(self.slot_bank[2], addr - 0x8000),
+            0x8000..=0xBFFF => {
+                if let Some(offset) = self.slot2_cart_ram_offset(addr) {
+                    self.cart_ram_reads += 1;
+                    self.cart_ram[offset]
+                } else {
+                    self.rom_byte(self.slot_bank[2], addr - 0x8000)
+                }
+            }
             0xC000..=0xDFFF => {
                 let value = self.ram[(addr - 0xC000) as usize];
                 self.record_ram_migration_access(addr, RamMigrationAccessKind::Read);
@@ -1657,7 +1688,7 @@ impl Bus for SmsBus {
                 }
                 value
             } // mirror
-            0xFFFC => 0x00, // bank-mapping control, returns 0
+            0xFFFC => self.mapper_control,
             0xFFFD => self.slot_bank[0],
             0xFFFE => self.slot_bank[1],
             0xFFFF => self.slot_bank[2],
@@ -1666,7 +1697,11 @@ impl Bus for SmsBus {
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
             0x0000..=0xBFFF => {
-                // Writes to ROM area are ignored (real SMS hardware).
+                if let Some(offset) = self.slot2_cart_ram_offset(addr) {
+                    self.cart_ram[offset] = value;
+                    self.cart_ram_writes += 1;
+                }
+                // Other writes to ROM area are ignored (real SMS hardware).
             }
             0xC000..=0xDFFF => {
                 self.ram[(addr - 0xC000) as usize] = value;
@@ -1680,6 +1715,7 @@ impl Bus for SmsBus {
                 self.record_ram_migration_access(addr - 0x2000, RamMigrationAccessKind::Write);
             }
             0xFFFC => {
+                self.mapper_control = value;
                 self.io_log.push(format!("mapper ctrl=${value:02X}"));
                 self.bank_writes.push((0xFFFC, value));
             }
@@ -3638,6 +3674,7 @@ fn main() {
     println!("{}", format_nt_raw_frame_stats(&bus));
     println!("{}", format_nt_raw_shadow_parity(&bus));
     println!("{}", format_raw_ciram_storage_decision());
+    println!("{}", format_raw_ciram_backend(&bus));
     println!("{}", format_bgv_recompute_runtime_cost(&bus));
     println!("{}", format_ram_migration_access(&bus));
     println!("{}", format_ram_migration_dependency(&bus));
@@ -4197,6 +4234,7 @@ fn dump_route_checkpoint(
     writeln!(f, "{}", format_nt_raw_frame_stats(bus))?;
     writeln!(f, "{}", format_nt_raw_shadow_parity(bus))?;
     writeln!(f, "{}", format_raw_ciram_storage_decision())?;
+    writeln!(f, "{}", format_raw_ciram_backend(bus))?;
     writeln!(f, "{}", format_bgv_recompute_runtime_cost(bus))?;
     writeln!(f, "{}", format_ram_migration_access(bus))?;
     writeln!(f, "{}", format_ram_migration_dependency(bus))?;
@@ -4946,6 +4984,20 @@ fn format_nt_raw_shadow_parity(bus: &SmsBus) -> String {
 
 fn format_raw_ciram_storage_decision() -> &'static str {
     "raw_ciram_storage=blocked reason=no_internal_ram_without_reclaim required_tile_bytes=1920 attr_bytes_existing=128 candidate=$CC00-$D3FF blocked_by=folded_s_reclaim_required stack_candidate=$DD80-$DFFD:no_go"
+}
+
+fn format_raw_ciram_backend(bus: &SmsBus) -> String {
+    let ciram_nonzero = bus.cart_ram[..0x0800]
+        .iter()
+        .filter(|value| **value != 0)
+        .count();
+    format!(
+        "raw_ciram_backend=sram_slot2 base=$8000 size=2048 mapper_ctrl=${:02X} reads={} writes={} ciram_nonzero={} caveat=standard_sega_mapper_sram_scaffold",
+        bus.mapper_control,
+        bus.cart_ram_reads,
+        bus.cart_ram_writes,
+        ciram_nonzero
+    )
 }
 
 fn format_z80_stack_low_water(watermark: Z80StackWatermark) -> String {
@@ -6919,6 +6971,41 @@ mod tests {
         assert_eq!(
             format_nt_raw_shadow_parity(&bus),
             "nt_raw_shadow_parity=unavailable reason=runtime_raw_ciram_missing trace_writes=3"
+        );
+    }
+
+    #[test]
+    fn sega_mapper_slot2_sram_maps_two_banks() {
+        let mut rom = vec![0xFF; BANK_SIZE * 4];
+        rom[BANK_SIZE * 2] = 0x22;
+        let mut bus = SmsBus::new(rom, 0xFF);
+        assert_eq!(bus.read(0x8000), 0x22);
+
+        bus.write(0xFFFC, 0x08);
+        bus.write(0x8000, 0x34);
+        assert_eq!(bus.read(0x8000), 0x34);
+
+        bus.write(0xFFFC, 0x0C);
+        assert_eq!(bus.read(0x8000), 0x00);
+        bus.write(0x8000, 0x56);
+        assert_eq!(bus.read(0x8000), 0x56);
+
+        bus.write(0xFFFC, 0x08);
+        assert_eq!(bus.read(0x8000), 0x34);
+        bus.write(0xFFFC, 0x00);
+        assert_eq!(bus.read(0x8000), 0x22);
+    }
+
+    #[test]
+    fn raw_ciram_backend_reports_slot2_sram_activity() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.write(0xFFFC, 0x08);
+        bus.write(0x8001, 0x77);
+        let _ = bus.read(0x8001);
+
+        assert_eq!(
+            format_raw_ciram_backend(&bus),
+            "raw_ciram_backend=sram_slot2 base=$8000 size=2048 mapper_ctrl=$08 reads=1 writes=1 ciram_nonzero=1 caveat=standard_sega_mapper_sram_scaffold"
         );
     }
 
