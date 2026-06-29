@@ -44,6 +44,55 @@ enum NtWriteKind {
     Attr,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RamMigrationRange {
+    CcFoldedS,
+    D300CompactS,
+    Da00BgvBase,
+}
+
+impl RamMigrationRange {
+    fn index(self) -> usize {
+        match self {
+            Self::CcFoldedS => 0,
+            Self::D300CompactS => 1,
+            Self::Da00BgvBase => 2,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::CcFoldedS => "cc",
+            Self::D300CompactS => "d300",
+            Self::Da00BgvBase => "da00",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RamMigrationAccessKind {
+    Read,
+    Write,
+}
+
+impl RamMigrationAccessKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Read => "r",
+            Self::Write => "w",
+        }
+    }
+}
+
+fn ram_migration_range_for_physical_addr(addr: u16) -> Option<RamMigrationRange> {
+    match addr {
+        0xCC00..=0xD2FF => Some(RamMigrationRange::CcFoldedS),
+        0xD300..=0xD3DF => Some(RamMigrationRange::D300CompactS),
+        0xDA00..=0xDD7F => Some(RamMigrationRange::Da00BgvBase),
+        _ => None,
+    }
+}
+
 fn nt_ppu_write_kind(ppu_addr: u16) -> Option<NtWriteKind> {
     if !(0x2000..=0x2FFF).contains(&ppu_addr) {
         return None;
@@ -620,6 +669,10 @@ struct SmsBus {
     nt_explicit_s_mismatch_vertical_examples: Vec<NtExplicitSExample>,
     /// Raw SMS port $DC value for controller 1. Active-low; default $FF = released.
     controller_port_dc: u8,
+    ram_migration_counts: [[u32; 4]; 3],
+    ram_migration_frame_accesses: [u32; 3],
+    ram_migration_max_frame_accesses: [u32; 3],
+    ram_migration_pc_counts: [HashMap<u16, u32>; 6],
     /// Log of every mapper write (port, value). Lets the trace report
     /// when a translated routine surprises us by re-banking a slot.
     bank_writes: Vec<(u16, u8)>,
@@ -804,6 +857,10 @@ impl SmsBus {
             nt_explicit_s_mismatch_vertical: 0,
             nt_explicit_s_mismatch_vertical_examples: Vec::new(),
             controller_port_dc,
+            ram_migration_counts: [[0; 4]; 3],
+            ram_migration_frame_accesses: [0; 3],
+            ram_migration_max_frame_accesses: [0; 3],
+            ram_migration_pc_counts: std::array::from_fn(|_| HashMap::new()),
         }
     }
     fn rom_byte(&self, bank: u8, offset: u16) -> u8 {
@@ -851,6 +908,37 @@ impl SmsBus {
             yspeed: self.ram[0x009F],
             eb: self.ram[0x00EB],
             vertical_force: self.ram[0x070E],
+        }
+    }
+
+    fn record_ram_migration_access(&mut self, physical_addr: u16, kind: RamMigrationAccessKind) {
+        let Some(range) = ram_migration_range_for_physical_addr(physical_addr) else {
+            return;
+        };
+        let range_idx = range.index();
+        let count_idx = match (kind, current_render_state(self)) {
+            (RamMigrationAccessKind::Read, RenderState::On) => 0,
+            (RamMigrationAccessKind::Read, RenderState::Off) => 1,
+            (RamMigrationAccessKind::Write, RenderState::On) => 2,
+            (RamMigrationAccessKind::Write, RenderState::Off) => 3,
+        };
+        self.ram_migration_counts[range_idx][count_idx] += 1;
+        self.ram_migration_frame_accesses[range_idx] += 1;
+        let pc_idx = range_idx * 2
+            + match kind {
+                RamMigrationAccessKind::Read => 0,
+                RamMigrationAccessKind::Write => 1,
+            };
+        *self.ram_migration_pc_counts[pc_idx]
+            .entry(self.watch_pc)
+            .or_insert(0) += 1;
+    }
+
+    fn finish_ram_migration_frame(&mut self) {
+        for i in 0..3 {
+            self.ram_migration_max_frame_accesses[i] =
+                self.ram_migration_max_frame_accesses[i].max(self.ram_migration_frame_accesses[i]);
+            self.ram_migration_frame_accesses[i] = 0;
         }
     }
 
@@ -1214,6 +1302,7 @@ impl Bus for SmsBus {
             0x8000..=0xBFFF => self.rom_byte(self.slot_bank[2], addr - 0x8000),
             0xC000..=0xDFFF => {
                 let value = self.ram[(addr - 0xC000) as usize];
+                self.record_ram_migration_access(addr, RamMigrationAccessKind::Read);
                 if self.watches_read(addr) {
                     self.watch_read_log.push(self.watch_entry(addr, value));
                 }
@@ -1221,6 +1310,7 @@ impl Bus for SmsBus {
             }
             0xE000..=0xFFFB => {
                 let value = self.ram[(addr - 0xE000) as usize];
+                self.record_ram_migration_access(addr - 0x2000, RamMigrationAccessKind::Read);
                 if self.watches_read(addr) {
                     self.watch_read_log.push(self.watch_entry(addr, value));
                 }
@@ -1239,11 +1329,15 @@ impl Bus for SmsBus {
             }
             0xC000..=0xDFFF => {
                 self.ram[(addr - 0xC000) as usize] = value;
+                self.record_ram_migration_access(addr, RamMigrationAccessKind::Write);
                 if self.watches_write(addr) {
                     self.watch_log.push(self.watch_entry(addr, value));
                 }
             }
-            0xE000..=0xFFFB => self.ram[(addr - 0xE000) as usize] = value,
+            0xE000..=0xFFFB => {
+                self.ram[(addr - 0xE000) as usize] = value;
+                self.record_ram_migration_access(addr - 0x2000, RamMigrationAccessKind::Write);
+            }
             0xFFFC => {
                 self.io_log.push(format!("mapper ctrl=${value:02X}"));
                 self.bank_writes.push((0xFFFC, value));
@@ -2548,6 +2642,7 @@ fn main() {
             prev_coarse_scroll = coarse_scroll;
             bus.finish_nt_raw_frame();
             bus.finish_bgv_runtime_recompute_frame();
+            bus.finish_ram_migration_frame();
             bus.clear_materializer_dirty();
             if first_fall_snapshot.is_none() && (bus.ram[0x0723] != 0 || bus.ram[0x00B5] >= 0x02) {
                 let recent_reads = bus
@@ -2648,6 +2743,7 @@ fn main() {
 
     bus.finish_nt_raw_frame();
     bus.finish_bgv_runtime_recompute_frame();
+    bus.finish_ram_migration_frame();
     println!("=== trace-sms summary ===");
     println!("ROM: {}", rom_path.display());
     println!("steps run: {taken}");
@@ -3195,6 +3291,7 @@ fn main() {
     println!("{}", format_nt_raw_shadow_parity(&bus));
     println!("{}", format_raw_ciram_storage_decision());
     println!("{}", format_bgv_recompute_runtime_cost(&bus));
+    println!("{}", format_ram_migration_access(&bus));
     println!("{}", format_z80_stack_low_water(stack_watermark));
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
@@ -3747,6 +3844,7 @@ fn dump_route_checkpoint(
     writeln!(f, "{}", format_nt_raw_shadow_parity(bus))?;
     writeln!(f, "{}", format_raw_ciram_storage_decision())?;
     writeln!(f, "{}", format_bgv_recompute_runtime_cost(bus))?;
+    writeln!(f, "{}", format_ram_migration_access(bus))?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -4712,6 +4810,69 @@ fn format_bgv_recompute_runtime_cost(bus: &SmsBus) -> String {
         bus.bgv_runtime_max_burst_frame,
         bus.bgv_runtime_max_burst_step,
         observed_render
+    )
+}
+
+fn format_ram_migration_top(bus: &SmsBus) -> String {
+    let mut parts = Vec::new();
+    for range in [
+        RamMigrationRange::CcFoldedS,
+        RamMigrationRange::D300CompactS,
+        RamMigrationRange::Da00BgvBase,
+    ] {
+        for kind in [RamMigrationAccessKind::Read, RamMigrationAccessKind::Write] {
+            let idx = range.index() * 2
+                + match kind {
+                    RamMigrationAccessKind::Read => 0,
+                    RamMigrationAccessKind::Write => 1,
+                };
+            let mut entries = bus.ram_migration_pc_counts[idx]
+                .iter()
+                .map(|(pc, count)| (*pc, *count))
+                .collect::<Vec<_>>();
+            entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let tops = entries
+                .into_iter()
+                .take(3)
+                .map(|(pc, count)| format!("${pc:04X}:{count}"))
+                .collect::<Vec<_>>();
+            parts.push(format!(
+                "{}_{}:{}",
+                range.label(),
+                kind.label(),
+                if tops.is_empty() {
+                    "none".to_string()
+                } else {
+                    tops.join("|")
+                }
+            ));
+        }
+    }
+    parts.join(",")
+}
+
+fn format_ram_migration_access(bus: &SmsBus) -> String {
+    let cc = bus.ram_migration_counts[RamMigrationRange::CcFoldedS.index()];
+    let d300 = bus.ram_migration_counts[RamMigrationRange::D300CompactS.index()];
+    let da00 = bus.ram_migration_counts[RamMigrationRange::Da00BgvBase.index()];
+    format!(
+        "ram_migration_access=cc_reads_on={} cc_reads_off={} cc_writes_on={} cc_writes_off={} d300_reads_on={} d300_reads_off={} d300_writes_on={} d300_writes_off={} da00_reads_on={} da00_reads_off={} da00_writes_on={} da00_writes_off={} max_frame_cc={} max_frame_d300={} max_frame_da00={} top={} caveat=trace_only_internal_ram_accesses",
+        cc[0],
+        cc[1],
+        cc[2],
+        cc[3],
+        d300[0],
+        d300[1],
+        d300[2],
+        d300[3],
+        da00[0],
+        da00[1],
+        da00[2],
+        da00[3],
+        bus.ram_migration_max_frame_accesses[RamMigrationRange::CcFoldedS.index()],
+        bus.ram_migration_max_frame_accesses[RamMigrationRange::D300CompactS.index()],
+        bus.ram_migration_max_frame_accesses[RamMigrationRange::Da00BgvBase.index()],
+        format_ram_migration_top(bus)
     )
 }
 
@@ -5859,6 +6020,53 @@ mod tests {
             "da00_reclaim=blocked_by_missing_runtime_source tile_shadow_on=0 tile_shadow_off=1"
         ));
         assert!(format_bgv_recompute_runtime_cost(&bus).contains("observed_render=all_off"));
+    }
+
+    #[test]
+    fn ram_migration_range_classifies_shadow_addresses() {
+        assert_eq!(
+            ram_migration_range_for_physical_addr(0xCC00),
+            Some(RamMigrationRange::CcFoldedS)
+        );
+        assert_eq!(
+            ram_migration_range_for_physical_addr(0xD2FF),
+            Some(RamMigrationRange::CcFoldedS)
+        );
+        assert_eq!(
+            ram_migration_range_for_physical_addr(0xD300),
+            Some(RamMigrationRange::D300CompactS)
+        );
+        assert_eq!(
+            ram_migration_range_for_physical_addr(0xDA00),
+            Some(RamMigrationRange::Da00BgvBase)
+        );
+        assert_eq!(ram_migration_range_for_physical_addr(0xDD80), None);
+    }
+
+    #[test]
+    fn ram_migration_access_splits_render_state_and_top_pcs() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.watch_pc = 0x1111;
+        bus.ram[0x0B09] = 0x18;
+        bus.write(0xCC01, 0x02);
+        let _ = bus.read(0xCC01);
+        bus.watch_pc = 0x2222;
+        bus.ram[0x0B09] = 0x00;
+        let _ = bus.read(0xF300); // mirror of $D300
+        bus.write(0xFA00, 0x42); // mirror of $DA00
+        bus.finish_ram_migration_frame();
+
+        let line = format_ram_migration_access(&bus);
+        assert!(line.contains("cc_reads_on=1 cc_reads_off=0 cc_writes_on=1 cc_writes_off=0"));
+        assert!(line.contains("d300_reads_on=0 d300_reads_off=1"));
+        assert!(
+            line.contains("da00_reads_on=0 da00_reads_off=0 da00_writes_on=0 da00_writes_off=1")
+        );
+        assert!(line.contains("max_frame_cc=2 max_frame_d300=1 max_frame_da00=1"));
+        assert!(line.contains("cc_r:$1111:1"));
+        assert!(line.contains("cc_w:$1111:1"));
+        assert!(line.contains("d300_r:$2222:1"));
+        assert!(line.contains("da00_w:$2222:1"));
     }
 
     #[test]
