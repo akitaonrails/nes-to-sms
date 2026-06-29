@@ -451,6 +451,13 @@ struct Z80StackWatermark {
     low_sp: u16,
 }
 
+#[derive(Clone, Debug)]
+struct D300PendingRead {
+    addr: u16,
+    pc: u16,
+    render_state: RenderState,
+}
+
 impl Z80StackWatermark {
     fn new(initial_sp: u16) -> Self {
         Self {
@@ -673,6 +680,12 @@ struct SmsBus {
     ram_migration_frame_accesses: [u32; 3],
     ram_migration_max_frame_accesses: [u32; 3],
     ram_migration_pc_counts: [HashMap<u16, u32>; 6],
+    d300_compact_store_range: Option<(u16, u16)>,
+    d300_pending_read: Option<D300PendingRead>,
+    d300_true_reads: u32,
+    d300_rmw_reads: u32,
+    d300_true_read_pc_counts: HashMap<u16, u32>,
+    d300_rmw_read_pc_counts: HashMap<u16, u32>,
     /// Log of every mapper write (port, value). Lets the trace report
     /// when a translated routine surprises us by re-banking a slot.
     bank_writes: Vec<(u16, u8)>,
@@ -861,6 +874,12 @@ impl SmsBus {
             ram_migration_frame_accesses: [0; 3],
             ram_migration_max_frame_accesses: [0; 3],
             ram_migration_pc_counts: std::array::from_fn(|_| HashMap::new()),
+            d300_compact_store_range: None,
+            d300_pending_read: None,
+            d300_true_reads: 0,
+            d300_rmw_reads: 0,
+            d300_true_read_pc_counts: HashMap::new(),
+            d300_rmw_read_pc_counts: HashMap::new(),
         }
     }
     fn rom_byte(&self, bank: u8, offset: u16) -> u8 {
@@ -913,6 +932,9 @@ impl SmsBus {
 
     fn record_ram_migration_access(&mut self, physical_addr: u16, kind: RamMigrationAccessKind) {
         let Some(range) = ram_migration_range_for_physical_addr(physical_addr) else {
+            if !self.is_compact_store_pc(self.watch_pc) {
+                self.flush_d300_pending_true_read();
+            }
             return;
         };
         let range_idx = range.index();
@@ -932,9 +954,63 @@ impl SmsBus {
         *self.ram_migration_pc_counts[pc_idx]
             .entry(self.watch_pc)
             .or_insert(0) += 1;
+
+        if range == RamMigrationRange::D300CompactS {
+            self.record_d300_dependency_access(physical_addr, kind);
+        } else {
+            if !self.is_compact_store_pc(self.watch_pc) {
+                self.flush_d300_pending_true_read();
+            }
+        }
+    }
+
+    fn is_compact_store_pc(&self, pc: u16) -> bool {
+        self.d300_compact_store_range
+            .is_some_and(|(start, end)| (start..=end).contains(&pc))
+    }
+
+    fn record_d300_dependency_access(&mut self, addr: u16, kind: RamMigrationAccessKind) {
+        match kind {
+            RamMigrationAccessKind::Read => {
+                self.flush_d300_pending_true_read();
+                if self.is_compact_store_pc(self.watch_pc) {
+                    self.d300_pending_read = Some(D300PendingRead {
+                        addr,
+                        pc: self.watch_pc,
+                        render_state: current_render_state(self),
+                    });
+                } else {
+                    self.record_d300_true_read(self.watch_pc);
+                }
+            }
+            RamMigrationAccessKind::Write => {
+                if self.d300_pending_read.as_ref().is_some_and(|pending| {
+                    pending.addr == addr && self.is_compact_store_pc(self.watch_pc)
+                }) {
+                    let pending = self.d300_pending_read.take().expect("pending read");
+                    self.d300_rmw_reads += 1;
+                    *self.d300_rmw_read_pc_counts.entry(pending.pc).or_insert(0) += 1;
+                    let _ = pending.render_state;
+                } else {
+                    self.flush_d300_pending_true_read();
+                }
+            }
+        }
+    }
+
+    fn record_d300_true_read(&mut self, pc: u16) {
+        self.d300_true_reads += 1;
+        *self.d300_true_read_pc_counts.entry(pc).or_insert(0) += 1;
+    }
+
+    fn flush_d300_pending_true_read(&mut self) {
+        if let Some(pending) = self.d300_pending_read.take() {
+            self.record_d300_true_read(pending.pc);
+        }
     }
 
     fn finish_ram_migration_frame(&mut self) {
+        self.flush_d300_pending_true_read();
         for i in 0..3 {
             self.ram_migration_max_frame_accesses[i] =
                 self.ram_migration_max_frame_accesses[i].max(self.ram_migration_frame_accesses[i]);
@@ -1265,6 +1341,16 @@ fn detect_expected_mirroring(asm_path: &Path) -> ExpectedMirroring {
         (false, true) => ExpectedMirroring::Horizontal,
         _ => ExpectedMirroring::Unknown,
     }
+}
+
+fn d300_compact_store_range(symbols: &HashMap<String, (u8, u16)>) -> Option<(u16, u16)> {
+    let (_, start) = *symbols.get("_bgv_compact_s_store_high_addr")?;
+    let end = symbols
+        .get("_bgv_compact_done")
+        .map(|(_, addr)| *addr)
+        .filter(|end| *end >= start)
+        .unwrap_or(start);
+    Some((start, end))
 }
 
 fn rom_byte_at_symbol(
@@ -2318,6 +2404,7 @@ fn main() {
         RT_PPU_WRITE_FALLBACK_ADDR
     };
     let mut bus = SmsBus::new(rom, controller_port_dc);
+    bus.d300_compact_store_range = d300_compact_store_range(&symbol_defs);
     let mut cpu = Cpu::new();
     cpu.pc = 0x0000;
     cpu.sp = 0xDFF0;
@@ -3292,6 +3379,7 @@ fn main() {
     println!("{}", format_raw_ciram_storage_decision());
     println!("{}", format_bgv_recompute_runtime_cost(&bus));
     println!("{}", format_ram_migration_access(&bus));
+    println!("{}", format_ram_migration_dependency(&bus));
     println!("{}", format_z80_stack_low_water(stack_watermark));
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
@@ -3845,6 +3933,7 @@ fn dump_route_checkpoint(
     writeln!(f, "{}", format_raw_ciram_storage_decision())?;
     writeln!(f, "{}", format_bgv_recompute_runtime_cost(bus))?;
     writeln!(f, "{}", format_ram_migration_access(bus))?;
+    writeln!(f, "{}", format_ram_migration_dependency(bus))?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -4284,8 +4373,16 @@ fn format_nt_materializer_dirty_visible(
     format!(
         "nt_materializer_dirty_visible={total} expected={} cols={} rows={} entering={entering} dirty_unique={dirty_unique} combined={combined}/896 first={first}",
         expected_mirroring.label(),
-        if cols.is_empty() { "none".to_string() } else { cols.join(" ") },
-        if rows.is_empty() { "none".to_string() } else { rows.join(" ") }
+        if cols.is_empty() {
+            "none".to_string()
+        } else {
+            cols.join(" ")
+        },
+        if rows.is_empty() {
+            "none".to_string()
+        } else {
+            rows.join(" ")
+        }
     )
 }
 
@@ -4851,6 +4948,24 @@ fn format_ram_migration_top(bus: &SmsBus) -> String {
     parts.join(",")
 }
 
+fn format_pc_count_top(map: &HashMap<u16, u32>) -> String {
+    let mut entries = map
+        .iter()
+        .map(|(pc, count)| (*pc, *count))
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let tops = entries
+        .into_iter()
+        .take(3)
+        .map(|(pc, count)| format!("${pc:04X}:{count}"))
+        .collect::<Vec<_>>();
+    if tops.is_empty() {
+        "none".to_string()
+    } else {
+        tops.join("|")
+    }
+}
+
 fn format_ram_migration_access(bus: &SmsBus) -> String {
     let cc = bus.ram_migration_counts[RamMigrationRange::CcFoldedS.index()];
     let d300 = bus.ram_migration_counts[RamMigrationRange::D300CompactS.index()];
@@ -4873,6 +4988,33 @@ fn format_ram_migration_access(bus: &SmsBus) -> String {
         bus.ram_migration_max_frame_accesses[RamMigrationRange::D300CompactS.index()],
         bus.ram_migration_max_frame_accesses[RamMigrationRange::Da00BgvBase.index()],
         format_ram_migration_top(bus)
+    )
+}
+
+fn format_ram_migration_dependency(bus: &SmsBus) -> String {
+    let d300 = bus.ram_migration_counts[RamMigrationRange::D300CompactS.index()];
+    let reclaim = if bus.d300_true_reads == 0 {
+        "ready_if_no_true_consumers"
+    } else {
+        "blocked_by_true_consumers"
+    };
+    let write_top_idx = RamMigrationRange::D300CompactS.index() * 2 + 1;
+    format!(
+        "ram_migration_dependency=d300_true_reads={} d300_rmw_reads={} d300_writes={} d300_reads_on={} d300_reads_off={} d300_writes_on={} d300_writes_off={} d300_read_top={} d300_write_top={} d300_rmw_top={} d300_true_top={} d300_reclaim={} caveat=trace_only_dependency_classifier",
+        bus.d300_true_reads,
+        bus.d300_rmw_reads,
+        d300[2] + d300[3],
+        d300[0],
+        d300[1],
+        d300[2],
+        d300[3],
+        format_pc_count_top(
+            &bus.ram_migration_pc_counts[RamMigrationRange::D300CompactS.index() * 2]
+        ),
+        format_pc_count_top(&bus.ram_migration_pc_counts[write_top_idx]),
+        format_pc_count_top(&bus.d300_rmw_read_pc_counts),
+        format_pc_count_top(&bus.d300_true_read_pc_counts),
+        reclaim
     )
 }
 
@@ -5686,12 +5828,7 @@ mod tests {
         bus.record_trace_ppu_write_call(7, 0x44);
 
         assert_eq!(
-            format_nt_materializer_dirty_visible(
-                &bus,
-                ExpectedMirroring::Vertical,
-                (0, 0),
-                (0, 0),
-            ),
+            format_nt_materializer_dirty_visible(&bus, ExpectedMirroring::Vertical, (0, 0), (0, 0),),
             "nt_materializer_dirty_visible=1 expected=vertical cols=03:1 rows=00:1 entering=0 dirty_unique=1 combined=1/896 first=r=00,c=03 ppu=2003 ciram=003 reason=tile"
         );
         bus.clear_materializer_dirty();
@@ -5727,12 +5864,7 @@ mod tests {
         bus.record_trace_ppu_write_call(7, 0x44);
 
         assert_eq!(
-            format_nt_materializer_dirty_visible(
-                &bus,
-                ExpectedMirroring::Unknown,
-                (0, 0),
-                (0, 0),
-            ),
+            format_nt_materializer_dirty_visible(&bus, ExpectedMirroring::Unknown, (0, 0), (0, 0),),
             "nt_materializer_dirty_visible=unavailable expected=unknown reason=missing_or_conflicting_mirroring"
         );
         assert!(format_nt_materializer_dirty_visible(
@@ -5832,9 +5964,11 @@ mod tests {
             materializer_prioritized_workset(&bus, ExpectedMirroring::Vertical, (0, 0), (1, 0))
                 .unwrap();
         assert_eq!(workset[0].key, 31); // entering right edge comes before dirty cell 0
-        assert!(workset
-            .iter()
-            .any(|cell| cell.key == 0 && cell.reason & 0x01 != 0));
+        assert!(
+            workset
+                .iter()
+                .any(|cell| cell.key == 0 && cell.reason & 0x01 != 0)
+        );
     }
 
     #[test]
@@ -5933,7 +6067,9 @@ mod tests {
 
         let line = format_runtime_materializer_hooks(&monitor);
         assert!(line.contains("calls_on=1 calls_off=1"));
-        assert!(line.contains("first_on_call=step=11 pc=$1234 symbol=rt_nt_materialize_render_off cb09=$18 vdp_r1=$40"));
+        assert!(line.contains(
+            "first_on_call=step=11 pc=$1234 symbol=rt_nt_materialize_render_off cb09=$18 vdp_r1=$40"
+        ));
     }
 
     #[test]
@@ -6067,6 +6203,64 @@ mod tests {
         assert!(line.contains("cc_w:$1111:1"));
         assert!(line.contains("d300_r:$2222:1"));
         assert!(line.contains("da00_w:$2222:1"));
+    }
+
+    #[test]
+    fn ram_migration_dependency_classifies_true_and_rmw_d300_reads() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.d300_compact_store_range = Some((0x4000, 0x4010));
+
+        bus.watch_pc = 0x4004;
+        bus.ram[0x0B09] = 0x18;
+        let _ = bus.read(0xD300);
+        bus.write(0xD300, 0x01);
+
+        bus.watch_pc = 0x5000;
+        bus.ram[0x0B09] = 0x00;
+        let _ = bus.read(0xD301);
+        bus.finish_ram_migration_frame();
+
+        let line = format_ram_migration_dependency(&bus);
+        assert!(line.contains("d300_true_reads=1 d300_rmw_reads=1 d300_writes=1"));
+        assert!(line.contains("d300_reads_on=1 d300_reads_off=1"));
+        assert!(line.contains("d300_writes_on=1 d300_writes_off=0"));
+        assert!(line.contains("d300_rmw_top=$4004:1"));
+        assert!(line.contains("d300_true_top=$5000:1"));
+        assert!(line.contains("d300_reclaim=blocked_by_true_consumers"));
+    }
+
+    #[test]
+    fn ram_migration_dependency_reports_ready_when_only_rmw_reads() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.d300_compact_store_range = Some((0x4000, 0x4010));
+        bus.watch_pc = 0x4004;
+        let _ = bus.read(0xD300);
+        bus.write(0xD300, 0x01);
+
+        assert!(
+            format_ram_migration_dependency(&bus)
+                .contains("d300_reclaim=ready_if_no_true_consumers")
+        );
+    }
+
+    #[test]
+    fn ram_migration_dependency_keeps_pending_read_across_trace_stack_peek() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.d300_compact_store_range = Some((0x4000, 0x4010));
+        bus.watch_pc = 0x4004;
+        let _ = bus.read(0xD300);
+
+        // The main trace loop peeks at the stack between instructions while
+        // leaving watch_pc set to the next compact-store helper PC. That
+        // non-shadow RAM read must not turn the compact read into a false
+        // true-consumer classification.
+        bus.watch_pc = 0x4008;
+        let _ = bus.read(0xDFF0);
+        bus.write(0xD300, 0x01);
+
+        let line = format_ram_migration_dependency(&bus);
+        assert!(line.contains("d300_true_reads=0 d300_rmw_reads=1"));
+        assert!(line.contains("d300_reclaim=ready_if_no_true_consumers"));
     }
 
     #[test]
