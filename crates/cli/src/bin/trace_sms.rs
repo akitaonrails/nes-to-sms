@@ -733,6 +733,16 @@ struct SmsBus {
     d300_rmw_read_pc_counts: HashMap<u16, u32>,
     d3xx_storage_counts: [[u32; 4]; 2],
     d3xx_storage_pc_counts: [HashMap<u16, u32>; 4],
+    cc_subpal_range: Option<(u16, u16)>,
+    cc_attr_write_range: Option<(u16, u16)>,
+    cc_init_clear_range: Option<(u16, u16)>,
+    cc_folded_s_counts: [[u32; 2]; 6],
+    cc_folded_s_frame_reads: u32,
+    cc_folded_s_frame_writes: u32,
+    cc_folded_s_max_frame_reads: u32,
+    cc_folded_s_max_frame_writes: u32,
+    cc_folded_s_read_pc_counts: HashMap<u16, u32>,
+    cc_folded_s_write_pc_counts: HashMap<u16, u32>,
     /// Log of every mapper write (port, value). Lets the trace report
     /// when a translated routine surprises us by re-banking a slot.
     bank_writes: Vec<(u16, u8)>,
@@ -942,6 +952,16 @@ impl SmsBus {
             d300_rmw_read_pc_counts: HashMap::new(),
             d3xx_storage_counts: [[0; 4]; 2],
             d3xx_storage_pc_counts: std::array::from_fn(|_| HashMap::new()),
+            cc_subpal_range: None,
+            cc_attr_write_range: None,
+            cc_init_clear_range: None,
+            cc_folded_s_counts: [[0; 2]; 6],
+            cc_folded_s_frame_reads: 0,
+            cc_folded_s_frame_writes: 0,
+            cc_folded_s_max_frame_reads: 0,
+            cc_folded_s_max_frame_writes: 0,
+            cc_folded_s_read_pc_counts: HashMap::new(),
+            cc_folded_s_write_pc_counts: HashMap::new(),
         }
     }
     fn rom_byte(&self, bank: u8, offset: u16) -> u8 {
@@ -1018,6 +1038,10 @@ impl SmsBus {
             .entry(self.watch_pc)
             .or_insert(0) += 1;
 
+        if range == RamMigrationRange::CcFoldedS {
+            self.record_cc_folded_s_dependency_access(kind);
+        }
+
         if range == RamMigrationRange::D300CompactS {
             self.record_d300_dependency_access(physical_addr, kind);
         } else {
@@ -1046,6 +1070,48 @@ impl SmsBus {
         *self.d3xx_storage_pc_counts[pc_idx]
             .entry(self.watch_pc)
             .or_insert(0) += 1;
+    }
+
+    fn record_cc_folded_s_dependency_access(&mut self, kind: RamMigrationAccessKind) {
+        let render_idx = match current_render_state(self) {
+            RenderState::On => 0,
+            RenderState::Off => 1,
+        };
+        let pc = self.watch_pc;
+        let count_idx = match kind {
+            RamMigrationAccessKind::Read if self.is_cc_subpal_pc(pc) => 0,
+            RamMigrationAccessKind::Read if self.is_cc_attr_write_pc(pc) => 1,
+            RamMigrationAccessKind::Write if self.is_cc_attr_write_pc(pc) => 2,
+            RamMigrationAccessKind::Write if self.is_cc_init_clear_pc(pc) => 3,
+            RamMigrationAccessKind::Read => 4,
+            RamMigrationAccessKind::Write => 5,
+        };
+        self.cc_folded_s_counts[count_idx][render_idx] += 1;
+        match kind {
+            RamMigrationAccessKind::Read => {
+                self.cc_folded_s_frame_reads += 1;
+                *self.cc_folded_s_read_pc_counts.entry(pc).or_insert(0) += 1;
+            }
+            RamMigrationAccessKind::Write => {
+                self.cc_folded_s_frame_writes += 1;
+                *self.cc_folded_s_write_pc_counts.entry(pc).or_insert(0) += 1;
+            }
+        }
+    }
+
+    fn is_cc_subpal_pc(&self, pc: u16) -> bool {
+        self.cc_subpal_range
+            .is_some_and(|(start, end)| (start..=end).contains(&pc))
+    }
+
+    fn is_cc_attr_write_pc(&self, pc: u16) -> bool {
+        self.cc_attr_write_range
+            .is_some_and(|(start, end)| (start..=end).contains(&pc))
+    }
+
+    fn is_cc_init_clear_pc(&self, pc: u16) -> bool {
+        self.cc_init_clear_range
+            .is_some_and(|(start, end)| (start..=end).contains(&pc))
     }
 
     fn is_compact_store_pc(&self, pc: u16) -> bool {
@@ -1100,6 +1166,14 @@ impl SmsBus {
                 self.ram_migration_max_frame_accesses[i].max(self.ram_migration_frame_accesses[i]);
             self.ram_migration_frame_accesses[i] = 0;
         }
+        self.cc_folded_s_max_frame_reads = self
+            .cc_folded_s_max_frame_reads
+            .max(self.cc_folded_s_frame_reads);
+        self.cc_folded_s_max_frame_writes = self
+            .cc_folded_s_max_frame_writes
+            .max(self.cc_folded_s_frame_writes);
+        self.cc_folded_s_frame_reads = 0;
+        self.cc_folded_s_frame_writes = 0;
     }
 
     fn record_nt_fold_write(&mut self, vram_addr: u16) {
@@ -1500,6 +1574,38 @@ fn d300_compact_store_range(symbols: &HashMap<String, (u8, u16)>) -> Option<(u16
         .filter(|end| *end >= start)
         .unwrap_or(start);
     Some((start, end))
+}
+
+fn symbol_range_exclusive_end(
+    symbols: &HashMap<String, (u8, u16)>,
+    start_label: &str,
+    end_label: &str,
+) -> Option<(u16, u16)> {
+    let (_, start) = *symbols.get(start_label)?;
+    let (_, end_exclusive) = *symbols.get(end_label)?;
+    if end_exclusive <= start {
+        return None;
+    }
+    Some((start, end_exclusive.saturating_sub(1)))
+}
+
+fn cc_subpal_range(symbols: &HashMap<String, (u8, u16)>) -> Option<(u16, u16)> {
+    symbol_range_exclusive_end(symbols, "_bgv_sub_palette", "_bgv_base_addr")
+}
+
+fn cc_attr_write_range(symbols: &HashMap<String, (u8, u16)>) -> Option<(u16, u16)> {
+    let (_, start) = *symbols.get("_chrmap_attr_write_one")?;
+    let (_, end) = *symbols.get("_caw_done")?;
+    if end < start {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn cc_init_clear_range(symbols: &HashMap<String, (u8, u16)>) -> Option<(u16, u16)> {
+    let (_, start) = *symbols.get("mem_fill")?;
+    let (_, loop_pc) = *symbols.get("_mem_fill_loop")?;
+    Some((start.min(loop_pc), start.max(loop_pc)))
 }
 
 fn rom_byte_at_symbol(
@@ -2555,6 +2661,9 @@ fn main() {
     let mut bus = SmsBus::new(rom, controller_port_dc);
     bus.d300_compact_store_range = d300_compact_store_range(&symbol_defs);
     bus.nt_folded_s_compact_available = bus.d300_compact_store_range.is_some();
+    bus.cc_subpal_range = cc_subpal_range(&symbol_defs);
+    bus.cc_attr_write_range = cc_attr_write_range(&symbol_defs);
+    bus.cc_init_clear_range = cc_init_clear_range(&symbol_defs);
     let mut cpu = Cpu::new();
     cpu.pc = 0x0000;
     cpu.sp = 0xDFF0;
@@ -3532,6 +3641,7 @@ fn main() {
     println!("{}", format_bgv_recompute_runtime_cost(&bus));
     println!("{}", format_ram_migration_access(&bus));
     println!("{}", format_ram_migration_dependency(&bus));
+    println!("{}", format_cc_folded_s_dependency(&bus));
     println!("{}", format_d3xx_storage_candidate(&bus));
     println!("{}", format_d3xx_dirty_bitmap_candidate(&bus));
     println!("{}", format_d3xx_full_dirty_bitmap_candidate(&bus));
@@ -4090,6 +4200,7 @@ fn dump_route_checkpoint(
     writeln!(f, "{}", format_bgv_recompute_runtime_cost(bus))?;
     writeln!(f, "{}", format_ram_migration_access(bus))?;
     writeln!(f, "{}", format_ram_migration_dependency(bus))?;
+    writeln!(f, "{}", format_cc_folded_s_dependency(bus))?;
     writeln!(f, "{}", format_d3xx_storage_candidate(bus))?;
     writeln!(f, "{}", format_d3xx_dirty_bitmap_candidate(bus))?;
     writeln!(f, "{}", format_d3xx_full_dirty_bitmap_candidate(bus))?;
@@ -5263,6 +5374,44 @@ fn format_d3xx_dirty_runtime_cost(bus: &SmsBus) -> String {
         bus.nt_raw_max_burst_frame,
         bus.nt_raw_max_burst_step,
         render_observed,
+    )
+}
+
+fn format_cc_folded_s_dependency(bus: &SmsBus) -> String {
+    let subpal = bus.cc_folded_s_counts[0];
+    let attr_compare = bus.cc_folded_s_counts[1];
+    let attr_writes = bus.cc_folded_s_counts[2];
+    let init_clear_writes = bus.cc_folded_s_counts[3];
+    let other_reads = bus.cc_folded_s_counts[4];
+    let other_writes = bus.cc_folded_s_counts[5];
+    let other_total = other_reads[0] + other_reads[1] + other_writes[0] + other_writes[1];
+    let subpal_total = subpal[0] + subpal[1];
+    let reclaim = if other_total != 0 {
+        "blocked_by_other_accesses"
+    } else if subpal_total != 0 {
+        "blocked_by_true_consumers"
+    } else {
+        "candidate_after_replacement_source"
+    };
+    format!(
+        "cc_folded_s_dependency=subpal_reads_on={} subpal_reads_off={} attr_compare_reads_on={} attr_compare_reads_off={} attr_writes_on={} attr_writes_off={} init_clear_writes_on={} init_clear_writes_off={} other_reads_on={} other_reads_off={} other_writes_on={} other_writes_off={} max_frame_reads={} max_frame_writes={} read_top={} write_top={} cc_reclaim={} caveat=trace_only_dependency_classifier",
+        subpal[0],
+        subpal[1],
+        attr_compare[0],
+        attr_compare[1],
+        attr_writes[0],
+        attr_writes[1],
+        init_clear_writes[0],
+        init_clear_writes[1],
+        other_reads[0],
+        other_reads[1],
+        other_writes[0],
+        other_writes[1],
+        bus.cc_folded_s_max_frame_reads.max(bus.cc_folded_s_frame_reads),
+        bus.cc_folded_s_max_frame_writes.max(bus.cc_folded_s_frame_writes),
+        format_pc_count_top(&bus.cc_folded_s_read_pc_counts),
+        format_pc_count_top(&bus.cc_folded_s_write_pc_counts),
+        reclaim
     )
 }
 
@@ -6599,6 +6748,77 @@ mod tests {
         assert!(line.contains("d3e0_d3ff_reads=0 d3e0_d3ff_writes=0"));
         assert!(line.contains("top=d300_r:none,d300_w:$4567:1,d3e0_r:none,d3e0_w:none"));
         assert!(line.contains("status=blocked_by_d300_d3df_access"));
+    }
+
+    #[test]
+    fn cc_folded_s_dependency_classifies_known_ranges() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.cc_subpal_range = Some((0x2000, 0x200F));
+        bus.cc_attr_write_range = Some((0x3000, 0x301F));
+
+        bus.ram[0x0B09] = 0x18;
+        bus.watch_pc = 0x2004;
+        let _ = bus.read(0xCC00);
+        bus.watch_pc = 0x3008;
+        let _ = bus.read(0xCC01);
+        bus.write(0xCC01, 0x01);
+
+        bus.ram[0x0B09] = 0x00;
+        bus.watch_pc = 0x4000;
+        let _ = bus.read(0xEC02);
+        bus.write(0xEC02, 0x02);
+        bus.finish_ram_migration_frame();
+
+        let line = format_cc_folded_s_dependency(&bus);
+        assert!(line.contains("subpal_reads_on=1 subpal_reads_off=0"));
+        assert!(line.contains("attr_compare_reads_on=1 attr_compare_reads_off=0"));
+        assert!(line.contains("attr_writes_on=1 attr_writes_off=0"));
+        assert!(line.contains("other_reads_on=0 other_reads_off=1"));
+        assert!(line.contains("other_writes_on=0 other_writes_off=1"));
+        assert!(line.contains("max_frame_reads=3 max_frame_writes=2"));
+        assert!(line.contains("read_top=$2004:1|$3008:1|$4000:1"));
+        assert!(line.contains("write_top=$3008:1|$4000:1"));
+        assert!(line.contains("cc_reclaim=blocked_by_other_accesses"));
+    }
+
+    #[test]
+    fn cc_folded_s_dependency_reports_true_consumer_blocker() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.cc_subpal_range = Some((0x2000, 0x200F));
+        bus.watch_pc = 0x2004;
+        let _ = bus.read(0xCC00);
+
+        let line = format_cc_folded_s_dependency(&bus);
+        assert!(line.contains("subpal_reads_off=1"));
+        assert!(line.contains("cc_reclaim=blocked_by_true_consumers"));
+    }
+
+    #[test]
+    fn cc_folded_s_dependency_reports_candidate_for_maintenance_only() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.cc_attr_write_range = Some((0x3000, 0x301F));
+        bus.watch_pc = 0x3008;
+        let _ = bus.read(0xCC01);
+        bus.write(0xCC01, 0x01);
+
+        let line = format_cc_folded_s_dependency(&bus);
+        assert!(line.contains("attr_compare_reads_off=1"));
+        assert!(line.contains("attr_writes_off=1"));
+        assert!(line.contains("cc_reclaim=candidate_after_replacement_source"));
+    }
+
+    #[test]
+    fn cc_folded_s_dependency_classifies_init_clear_as_non_blocking() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.cc_init_clear_range = Some((0x5000, 0x500F));
+
+        bus.watch_pc = 0x5004;
+        bus.write(0xCC00, 0x00);
+
+        let line = format_cc_folded_s_dependency(&bus);
+        assert!(line.contains("init_clear_writes_off=1"));
+        assert!(line.contains("other_writes_off=0"));
+        assert!(line.contains("cc_reclaim=candidate_after_replacement_source"));
     }
 
     #[test]
