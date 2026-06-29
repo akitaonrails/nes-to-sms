@@ -24,7 +24,7 @@
 ;   $CA07        ring-wrapped flag (0 until slots 64-255 have all been used)
 ;   $CA40-$CAFF  reverse map for recycled slots 64-255: slot -> old base tile
 ;   $CC00-$D2FF  nametable shadow — active per-cell sub-palette S (0-3)
-;   $D300-$D3DF  retired compact folded S mirror; reserved for future migration
+;   $D300-$D3FF  clean 256-byte metadata-only reserve; not source-of-truth
 ;   $D600-$D9FF  variant cache FC[base*4 + S] -> pool slot ($FF = unassigned)
 
 .define BGV_CACHE      $d600   ; FC[base*4+S] -> slot, 1024 bytes, $FF=empty
@@ -461,8 +461,8 @@ rt_write_mapped_bg_tile_s_noshadow:
 ; ─── rt_redraw_bg_cell_tile_s_noshadow ──────────────────────────────────────
 ; Helper-only scaffold for a future DA00-free attribute/materializer redraw.
 ; Redraw one SMS nametable cell from an explicit NES tile byte and subpalette
-; without reading/writing BGV_BSHADOW, folded $CC00 state, or compact $D300
-; state. Intentionally uncalled by current runtime paths.
+; without reading/writing BGV_BSHADOW, folded $CC00 state, or the $D300-$D3FF
+; metadata reserve. Intentionally uncalled by current runtime paths.
 ;   Entry: A = NES tile byte, B = S (0..3), DE = SMS nametable high-byte address.
 ;          The corresponding tile low-byte address is DE-1.
 ;   Preserves BC, DE, HL. Clobbers AF. Leaves data_prg_low mapped in slot 2.

@@ -39,7 +39,8 @@
 ; $0000 and could corrupt unrelated VRAM). A future base-aware allocator can
 ; reserve a safe $0000-base scratch window and re-enable variants there.
 ;
-; RAM scratch (free region above the $CC00-$D3FF nametable shadow):
+; RAM scratch (free region above folded $CC00-$D2FF state and $D300-$D3FF
+; metadata reserve):
 ;   $D400-$D43F  resolved SMS tile number per sprite (64 bytes)
 ;   $D440-$D44F  variant cache mapped-tile keys (16 bytes)
 ;   $D450-$D45F  variant cache attr keys (attr & $C3, 16 bytes)
