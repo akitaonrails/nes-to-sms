@@ -413,6 +413,16 @@ SMS-native terms.
       mapper toggles, batch work into render-off/load windows, or use a cheaper
       staging scheme before committing behavior.
 
+      **Rejected D3xx staging-queue attempt:** using `$D300-$D3FE` as 85
+      3-byte records plus `$D3FF` count, enqueueing every direct `$2007`
+      nametable/attribute write, and flushing batches to SRAM while PPUMASK was
+      off still failed the canonical route (`$0760/$075C/$000E = $00/$00/$08`).
+      It reduced mapper toggles to 466 enable/disable pairs but introduced
+      heavy internal-RAM queue traffic (`~87k` D3xx reads/writes), left 48 queued
+      records, and parity was not clean (`nt_raw_shadow_parity=7`). Do not retry
+      this enqueue-every-write design unchanged; even internal staging on the
+      `$2007` hot path is too expensive for the accepted route.
+
       **E.5c Render-off-only materializer.** Project raw CIRAM into SMS
       nametable space only while NES rendering is off. Use `$D300-$D3FF` for
       dirty metadata when runtime dirty tracking is introduced. Active-display
