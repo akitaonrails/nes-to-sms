@@ -19,6 +19,7 @@ const BANK_SIZE: usize = 0x4000;
 const RAM_SIZE: usize = 0x2000;
 const IRQ_PERIOD: usize = 60_000;
 const RT_PPU_WRITE_FALLBACK_ADDR: u16 = 0x0068;
+const D3XX_TILE_DIRTY_BITMAP_BYTES: usize = 240;
 const MATERIALIZER_BUDGETS: [usize; 5] = [28, 56, 112, 224, 896];
 // Trace-only acceptance hooks for future runtime nametable materializers. These
 // symbols do not exist yet in normal builds; diagnostics report unavailable
@@ -697,6 +698,12 @@ struct SmsBus {
     /// byte. Bit 0 = direct tile write, bit 1 = attribute write covering cell.
     nt_materializer_dirty_vertical: [u8; 0x800],
     nt_materializer_dirty_horizontal: [u8; 0x800],
+    d3xx_tile_dirty_bitmap_vertical: [u8; D3XX_TILE_DIRTY_BITMAP_BYTES],
+    d3xx_tile_dirty_bitmap_horizontal: [u8; D3XX_TILE_DIRTY_BITMAP_BYTES],
+    d3xx_tile_dirty_frame_vertical: [u8; D3XX_TILE_DIRTY_BITMAP_BYTES],
+    d3xx_tile_dirty_frame_horizontal: [u8; D3XX_TILE_DIRTY_BITMAP_BYTES],
+    d3xx_tile_dirty_max_frame_vertical_bits: u32,
+    d3xx_tile_dirty_max_frame_horizontal_bits: u32,
     /// Tile writes where the folded $CC00 subpalette disagrees with the compact
     /// attribute shadow, interpreted as horizontal NES mirroring.
     nt_explicit_s_mismatch_horizontal: u32,
@@ -898,6 +905,12 @@ impl SmsBus {
             nt_trace_folded_source_tile_writes: 0,
             nt_materializer_dirty_vertical: [0; 0x800],
             nt_materializer_dirty_horizontal: [0; 0x800],
+            d3xx_tile_dirty_bitmap_vertical: [0; D3XX_TILE_DIRTY_BITMAP_BYTES],
+            d3xx_tile_dirty_bitmap_horizontal: [0; D3XX_TILE_DIRTY_BITMAP_BYTES],
+            d3xx_tile_dirty_frame_vertical: [0; D3XX_TILE_DIRTY_BITMAP_BYTES],
+            d3xx_tile_dirty_frame_horizontal: [0; D3XX_TILE_DIRTY_BITMAP_BYTES],
+            d3xx_tile_dirty_max_frame_vertical_bits: 0,
+            d3xx_tile_dirty_max_frame_horizontal_bits: 0,
             nt_explicit_s_mismatch_horizontal: 0,
             nt_explicit_s_mismatch_horizontal_examples: Vec::new(),
             nt_explicit_s_mismatch_vertical: 0,
@@ -1131,6 +1144,7 @@ impl SmsBus {
         } else {
             self.nt_trace_ciram_tile_writes += 1;
             self.mark_materializer_tile_dirty(ppu_addr, 0x01);
+            self.record_d3xx_tile_dirty_candidate(vertical, horizontal);
             let folded_cell = (ppu_addr.wrapping_sub(0x2000) & 0x03FF) as usize;
             self.nt_trace_folded_source_tiles[folded_cell] = value;
             self.nt_trace_folded_source_tile_seen[folded_cell] = true;
@@ -1230,6 +1244,39 @@ impl SmsBus {
         let horizontal = nt_ciram_index(ppu_addr, false);
         self.nt_materializer_dirty_vertical[vertical] |= reason;
         self.nt_materializer_dirty_horizontal[horizontal] |= reason;
+    }
+
+    fn d3xx_tile_dirty_bit(ciram: usize) -> Option<usize> {
+        let page = ciram / 0x400;
+        let offset = ciram & 0x03FF;
+        if page >= 2 || offset >= 0x03C0 {
+            return None;
+        }
+        Some(page * 0x03C0 + offset)
+    }
+
+    fn set_d3xx_tile_dirty_bit(bitmap: &mut [u8; D3XX_TILE_DIRTY_BITMAP_BYTES], ciram: usize) {
+        if let Some(bit) = Self::d3xx_tile_dirty_bit(ciram) {
+            bitmap[bit / 8] |= 1 << (bit & 7);
+        }
+    }
+
+    fn record_d3xx_tile_dirty_candidate(&mut self, vertical: usize, horizontal: usize) {
+        Self::set_d3xx_tile_dirty_bit(&mut self.d3xx_tile_dirty_bitmap_vertical, vertical);
+        Self::set_d3xx_tile_dirty_bit(&mut self.d3xx_tile_dirty_bitmap_horizontal, horizontal);
+        Self::set_d3xx_tile_dirty_bit(&mut self.d3xx_tile_dirty_frame_vertical, vertical);
+        Self::set_d3xx_tile_dirty_bit(&mut self.d3xx_tile_dirty_frame_horizontal, horizontal);
+    }
+
+    fn finish_d3xx_tile_dirty_frame(&mut self) {
+        self.d3xx_tile_dirty_max_frame_vertical_bits = self
+            .d3xx_tile_dirty_max_frame_vertical_bits
+            .max(bitmap_count_bits(&self.d3xx_tile_dirty_frame_vertical));
+        self.d3xx_tile_dirty_max_frame_horizontal_bits = self
+            .d3xx_tile_dirty_max_frame_horizontal_bits
+            .max(bitmap_count_bits(&self.d3xx_tile_dirty_frame_horizontal));
+        self.d3xx_tile_dirty_frame_vertical = [0; D3XX_TILE_DIRTY_BITMAP_BYTES];
+        self.d3xx_tile_dirty_frame_horizontal = [0; D3XX_TILE_DIRTY_BITMAP_BYTES];
     }
 
     fn mark_materializer_attr_dirty(&mut self, ppu_addr: u16) {
@@ -2788,6 +2835,7 @@ fn main() {
             prev_coarse_scroll = coarse_scroll;
             bus.finish_nt_raw_frame();
             bus.finish_bgv_runtime_recompute_frame();
+            bus.finish_d3xx_tile_dirty_frame();
             bus.finish_ram_migration_frame();
             bus.clear_materializer_dirty();
             if first_fall_snapshot.is_none() && (bus.ram[0x0723] != 0 || bus.ram[0x00B5] >= 0x02) {
@@ -2889,6 +2937,7 @@ fn main() {
 
     bus.finish_nt_raw_frame();
     bus.finish_bgv_runtime_recompute_frame();
+    bus.finish_d3xx_tile_dirty_frame();
     bus.finish_ram_migration_frame();
     println!("=== trace-sms summary ===");
     println!("ROM: {}", rom_path.display());
@@ -3440,6 +3489,7 @@ fn main() {
     println!("{}", format_ram_migration_access(&bus));
     println!("{}", format_ram_migration_dependency(&bus));
     println!("{}", format_d3xx_storage_candidate(&bus));
+    println!("{}", format_d3xx_dirty_bitmap_candidate(&bus));
     println!("{}", format_z80_stack_low_water(stack_watermark));
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
@@ -3995,6 +4045,7 @@ fn dump_route_checkpoint(
     writeln!(f, "{}", format_ram_migration_access(bus))?;
     writeln!(f, "{}", format_ram_migration_dependency(bus))?;
     writeln!(f, "{}", format_d3xx_storage_candidate(bus))?;
+    writeln!(f, "{}", format_d3xx_dirty_bitmap_candidate(bus))?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -5032,6 +5083,14 @@ fn format_pc_count_top(map: &HashMap<u16, u32>) -> String {
     }
 }
 
+fn bitmap_count_bits(bitmap: &[u8; D3XX_TILE_DIRTY_BITMAP_BYTES]) -> u32 {
+    bitmap.iter().map(|byte| byte.count_ones()).sum()
+}
+
+fn bitmap_count_nonzero_bytes(bitmap: &[u8; D3XX_TILE_DIRTY_BITMAP_BYTES]) -> usize {
+    bitmap.iter().filter(|byte| **byte != 0).count()
+}
+
 fn format_d3xx_storage_top(bus: &SmsBus) -> String {
     let mut parts = Vec::new();
     for range in [D3xxStorageRange::D300D3df, D3xxStorageRange::D3e0D3ff] {
@@ -5085,6 +5144,23 @@ fn format_d3xx_storage_candidate(bus: &SmsBus) -> String {
         dirty_bitmap_fit,
         available,
         status
+    )
+}
+
+fn format_d3xx_dirty_bitmap_candidate(bus: &SmsBus) -> String {
+    let vertical_bits = bitmap_count_bits(&bus.d3xx_tile_dirty_bitmap_vertical);
+    let horizontal_bits = bitmap_count_bits(&bus.d3xx_tile_dirty_bitmap_horizontal);
+    let vertical_bytes = bitmap_count_nonzero_bytes(&bus.d3xx_tile_dirty_bitmap_vertical);
+    let horizontal_bytes = bitmap_count_nonzero_bytes(&bus.d3xx_tile_dirty_bitmap_horizontal);
+    format!(
+        "d3xx_dirty_bitmap_candidate=layout=$D300-$D3EF bytes_required={} bytes_available=256 spare=$D3F0-$D3FF vertical_bits={} horizontal_bits={} vertical_bytes={} horizontal_bytes={} max_frame_vertical_bits={} max_frame_horizontal_bits={} attr_dirty=not_represented raw_tile_shadow=fits:no status=fits_metadata_only caveat=trace_only_no_runtime_writes",
+        D3XX_TILE_DIRTY_BITMAP_BYTES,
+        vertical_bits,
+        horizontal_bits,
+        vertical_bytes,
+        horizontal_bytes,
+        bus.d3xx_tile_dirty_max_frame_vertical_bits,
+        bus.d3xx_tile_dirty_max_frame_horizontal_bits,
     )
 }
 
@@ -6421,6 +6497,44 @@ mod tests {
         assert!(line.contains("d3e0_d3ff_reads=0 d3e0_d3ff_writes=0"));
         assert!(line.contains("top=d300_r:none,d300_w:$4567:1,d3e0_r:none,d3e0_w:none"));
         assert!(line.contains("status=blocked_by_d300_d3df_access"));
+    }
+
+    #[test]
+    fn d3xx_dirty_bitmap_candidate_reports_clean_bitmap() {
+        let bus = SmsBus::new(Vec::new(), 0xFF);
+
+        assert_eq!(
+            format_d3xx_dirty_bitmap_candidate(&bus),
+            "d3xx_dirty_bitmap_candidate=layout=$D300-$D3EF bytes_required=240 bytes_available=256 spare=$D3F0-$D3FF vertical_bits=0 horizontal_bits=0 vertical_bytes=0 horizontal_bytes=0 max_frame_vertical_bits=0 max_frame_horizontal_bits=0 attr_dirty=not_represented raw_tile_shadow=fits:no status=fits_metadata_only caveat=trace_only_no_runtime_writes"
+        );
+    }
+
+    #[test]
+    fn d3xx_dirty_bitmap_candidate_tracks_unique_tile_dirty_bits() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x00;
+        bus.record_trace_ppu_write_call(7, 0x12);
+        bus.record_trace_ppu_write_call(7, 0x34);
+        bus.finish_d3xx_tile_dirty_frame();
+
+        let line = format_d3xx_dirty_bitmap_candidate(&bus);
+        assert!(line.contains("vertical_bits=1 horizontal_bits=1"));
+        assert!(line.contains("vertical_bytes=1 horizontal_bytes=1"));
+        assert!(line.contains("max_frame_vertical_bits=1 max_frame_horizontal_bits=1"));
+    }
+
+    #[test]
+    fn d3xx_dirty_bitmap_candidate_ignores_attr_writes() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B0F] = 0x23;
+        bus.ram[0x0B10] = 0xC0;
+        bus.record_trace_ppu_write_call(7, 0xFF);
+        bus.finish_d3xx_tile_dirty_frame();
+
+        let line = format_d3xx_dirty_bitmap_candidate(&bus);
+        assert!(line.contains("vertical_bits=0 horizontal_bits=0"));
+        assert!(line.contains("attr_dirty=not_represented"));
     }
 
     #[test]
