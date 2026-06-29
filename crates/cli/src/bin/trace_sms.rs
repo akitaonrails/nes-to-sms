@@ -587,6 +587,19 @@ struct SmsBus {
     nt_raw_max_burst: u32,
     nt_raw_max_burst_frame: usize,
     nt_raw_max_burst_step: usize,
+    bgv_runtime_tile_shadow_writes_on: u32,
+    bgv_runtime_tile_shadow_writes_off: u32,
+    bgv_runtime_attr_recompute_cells_on: u32,
+    bgv_runtime_attr_recompute_cells_off: u32,
+    bgv_runtime_frame_tile_shadow_writes: u32,
+    bgv_runtime_frame_attr_recompute_cells: u32,
+    bgv_runtime_max_frame_tile_shadow_writes: u32,
+    bgv_runtime_max_frame_attr_recompute_cells: u32,
+    bgv_runtime_max_frame_pressure: u32,
+    bgv_runtime_current_burst_pressure: u32,
+    bgv_runtime_max_burst_pressure: u32,
+    bgv_runtime_max_burst_frame: usize,
+    bgv_runtime_max_burst_step: usize,
     /// Trace-only source-tile view of the current folded SMS nametable. Unlike
     /// SMS VRAM nametable bytes, these are original NES tile IDs, so they are a
     /// safe comparison target for dry source-space projection diagnostics.
@@ -768,6 +781,19 @@ impl SmsBus {
             nt_raw_max_burst: 0,
             nt_raw_max_burst_frame: 0,
             nt_raw_max_burst_step: 0,
+            bgv_runtime_tile_shadow_writes_on: 0,
+            bgv_runtime_tile_shadow_writes_off: 0,
+            bgv_runtime_attr_recompute_cells_on: 0,
+            bgv_runtime_attr_recompute_cells_off: 0,
+            bgv_runtime_frame_tile_shadow_writes: 0,
+            bgv_runtime_frame_attr_recompute_cells: 0,
+            bgv_runtime_max_frame_tile_shadow_writes: 0,
+            bgv_runtime_max_frame_attr_recompute_cells: 0,
+            bgv_runtime_max_frame_pressure: 0,
+            bgv_runtime_current_burst_pressure: 0,
+            bgv_runtime_max_burst_pressure: 0,
+            bgv_runtime_max_burst_frame: 0,
+            bgv_runtime_max_burst_step: 0,
             nt_trace_folded_source_tiles: [0; 0x400],
             nt_trace_folded_source_tile_seen: [false; 0x400],
             nt_trace_folded_source_tile_writes: 0,
@@ -859,12 +885,14 @@ impl SmsBus {
     fn record_trace_ppu_write_call_at(&mut self, reg: u8, value: u8, step: usize, frame: usize) {
         if reg != 7 {
             self.nt_raw_current_burst = 0;
+            self.bgv_runtime_current_burst_pressure = 0;
             return;
         }
 
         let ppu_addr = ((self.ram[0x0B0F] as u16) << 8) | self.ram[0x0B10] as u16;
         let Some(kind) = nt_ppu_write_kind(ppu_addr) else {
             self.nt_raw_current_burst = 0;
+            self.bgv_runtime_current_burst_pressure = 0;
             return;
         };
 
@@ -874,6 +902,7 @@ impl SmsBus {
         self.nt_trace_ciram_horizontal[horizontal] = value;
         self.nt_trace_ciram_writes += 1;
         self.record_nt_raw_write_stats(kind, step, frame);
+        self.record_bgv_runtime_recompute_pressure(kind, step, frame);
         if kind == NtWriteKind::Attr {
             self.nt_trace_ciram_attr_writes += 1;
             self.mark_materializer_attr_dirty(ppu_addr);
@@ -918,6 +947,57 @@ impl SmsBus {
         self.nt_raw_frame_tile_writes = 0;
         self.nt_raw_frame_attr_writes = 0;
         self.nt_raw_current_burst = 0;
+    }
+
+    fn record_bgv_runtime_recompute_pressure(
+        &mut self,
+        kind: NtWriteKind,
+        step: usize,
+        frame: usize,
+    ) {
+        let pressure = match kind {
+            // One byte a hypothetical folded runtime tile source shadow would
+            // maintain for each folded nametable tile write.
+            NtWriteKind::Tile => 1,
+            // One NES attr byte covers a 4x4 tile block; without BGV_BSHADOW,
+            // each covered cell would need source-tile -> CHR-map base lookup.
+            NtWriteKind::Attr => 16,
+        };
+        match (kind, current_render_state(self)) {
+            (NtWriteKind::Tile, RenderState::On) => self.bgv_runtime_tile_shadow_writes_on += 1,
+            (NtWriteKind::Tile, RenderState::Off) => self.bgv_runtime_tile_shadow_writes_off += 1,
+            (NtWriteKind::Attr, RenderState::On) => {
+                self.bgv_runtime_attr_recompute_cells_on += pressure
+            }
+            (NtWriteKind::Attr, RenderState::Off) => {
+                self.bgv_runtime_attr_recompute_cells_off += pressure
+            }
+        }
+        match kind {
+            NtWriteKind::Tile => self.bgv_runtime_frame_tile_shadow_writes += 1,
+            NtWriteKind::Attr => self.bgv_runtime_frame_attr_recompute_cells += pressure,
+        }
+        self.bgv_runtime_current_burst_pressure += pressure;
+        if self.bgv_runtime_current_burst_pressure > self.bgv_runtime_max_burst_pressure {
+            self.bgv_runtime_max_burst_pressure = self.bgv_runtime_current_burst_pressure;
+            self.bgv_runtime_max_burst_frame = frame;
+            self.bgv_runtime_max_burst_step = step;
+        }
+    }
+
+    fn finish_bgv_runtime_recompute_frame(&mut self) {
+        let total =
+            self.bgv_runtime_frame_tile_shadow_writes + self.bgv_runtime_frame_attr_recompute_cells;
+        self.bgv_runtime_max_frame_tile_shadow_writes = self
+            .bgv_runtime_max_frame_tile_shadow_writes
+            .max(self.bgv_runtime_frame_tile_shadow_writes);
+        self.bgv_runtime_max_frame_attr_recompute_cells = self
+            .bgv_runtime_max_frame_attr_recompute_cells
+            .max(self.bgv_runtime_frame_attr_recompute_cells);
+        self.bgv_runtime_max_frame_pressure = self.bgv_runtime_max_frame_pressure.max(total);
+        self.bgv_runtime_frame_tile_shadow_writes = 0;
+        self.bgv_runtime_frame_attr_recompute_cells = 0;
+        self.bgv_runtime_current_burst_pressure = 0;
     }
 
     fn mark_materializer_tile_dirty(&mut self, ppu_addr: u16, reason: u8) {
@@ -2467,6 +2547,7 @@ fn main() {
             prev_frame_line_irqs = line_irqs_fired;
             prev_coarse_scroll = coarse_scroll;
             bus.finish_nt_raw_frame();
+            bus.finish_bgv_runtime_recompute_frame();
             bus.clear_materializer_dirty();
             if first_fall_snapshot.is_none() && (bus.ram[0x0723] != 0 || bus.ram[0x00B5] >= 0x02) {
                 let recent_reads = bus
@@ -2566,6 +2647,7 @@ fn main() {
     }
 
     bus.finish_nt_raw_frame();
+    bus.finish_bgv_runtime_recompute_frame();
     println!("=== trace-sms summary ===");
     println!("ROM: {}", rom_path.display());
     println!("steps run: {taken}");
@@ -3112,6 +3194,7 @@ fn main() {
     println!("{}", format_nt_raw_frame_stats(&bus));
     println!("{}", format_nt_raw_shadow_parity(&bus));
     println!("{}", format_raw_ciram_storage_decision());
+    println!("{}", format_bgv_recompute_runtime_cost(&bus));
     println!("{}", format_z80_stack_low_water(stack_watermark));
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
@@ -3663,6 +3746,7 @@ fn dump_route_checkpoint(
     writeln!(f, "{}", format_nt_raw_frame_stats(bus))?;
     writeln!(f, "{}", format_nt_raw_shadow_parity(bus))?;
     writeln!(f, "{}", format_raw_ciram_storage_decision())?;
+    writeln!(f, "{}", format_bgv_recompute_runtime_cost(bus))?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -4598,6 +4682,36 @@ fn format_bgv_recompute_ciram(
         stats.mismatches,
         stats.compared,
         stats.first_mismatch.unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn format_bgv_recompute_runtime_cost(bus: &SmsBus) -> String {
+    let tile_total = bus.bgv_runtime_tile_shadow_writes_on + bus.bgv_runtime_tile_shadow_writes_off;
+    let attr_cells_total =
+        bus.bgv_runtime_attr_recompute_cells_on + bus.bgv_runtime_attr_recompute_cells_off;
+    let observed_render = if bus.bgv_runtime_tile_shadow_writes_on == 0
+        && bus.bgv_runtime_attr_recompute_cells_on == 0
+        && (tile_total != 0 || attr_cells_total != 0)
+    {
+        "all_off"
+    } else if tile_total == 0 && attr_cells_total == 0 {
+        "none"
+    } else {
+        "mixed_or_on"
+    };
+    format!(
+        "bgv_recompute_runtime_cost=da00_reclaim=blocked_by_missing_runtime_source tile_shadow_on={} tile_shadow_off={} attr_recompute_cells_on={} attr_recompute_cells_off={} max_frame_tile_shadow={} max_frame_attr_cells={} max_frame_pressure={} max_burst_pressure={} first_burst_frame={} first_burst_step={} observed_render={} caveat=trace_only_no_runtime_source",
+        bus.bgv_runtime_tile_shadow_writes_on,
+        bus.bgv_runtime_tile_shadow_writes_off,
+        bus.bgv_runtime_attr_recompute_cells_on,
+        bus.bgv_runtime_attr_recompute_cells_off,
+        bus.bgv_runtime_max_frame_tile_shadow_writes,
+        bus.bgv_runtime_max_frame_attr_recompute_cells,
+        bus.bgv_runtime_max_frame_pressure,
+        bus.bgv_runtime_max_burst_pressure,
+        bus.bgv_runtime_max_burst_frame,
+        bus.bgv_runtime_max_burst_step,
+        observed_render
     )
 }
 
@@ -5711,6 +5825,40 @@ mod tests {
             format_nt_raw_frame_stats(&bus),
             "nt_raw_frame_stats=max_frame_tile=1 max_frame_attr=1 max_frame_total=2 max_burst=2 first_burst_frame=1 first_burst_step=8"
         );
+    }
+
+    #[test]
+    fn bgv_recompute_runtime_cost_reports_blocked_render_split_pressure() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B09] = 0x18;
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x00;
+        bus.record_trace_ppu_write_call_at(7, 0x11, 7, 1);
+        bus.ram[0x0B09] = 0x00;
+        bus.ram[0x0B0F] = 0x23;
+        bus.ram[0x0B10] = 0xC0;
+        bus.record_trace_ppu_write_call_at(7, 0x22, 8, 1);
+        bus.finish_bgv_runtime_recompute_frame();
+
+        assert_eq!(
+            format_bgv_recompute_runtime_cost(&bus),
+            "bgv_recompute_runtime_cost=da00_reclaim=blocked_by_missing_runtime_source tile_shadow_on=1 tile_shadow_off=0 attr_recompute_cells_on=0 attr_recompute_cells_off=16 max_frame_tile_shadow=1 max_frame_attr_cells=16 max_frame_pressure=17 max_burst_pressure=17 first_burst_frame=1 first_burst_step=8 observed_render=mixed_or_on caveat=trace_only_no_runtime_source"
+        );
+    }
+
+    #[test]
+    fn bgv_recompute_runtime_cost_observes_all_off_only_as_observation() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B09] = 0x00;
+        bus.ram[0x0B0F] = 0x20;
+        bus.ram[0x0B10] = 0x00;
+        bus.record_trace_ppu_write_call_at(7, 0x11, 1, 0);
+        bus.finish_bgv_runtime_recompute_frame();
+
+        assert!(format_bgv_recompute_runtime_cost(&bus).contains(
+            "da00_reclaim=blocked_by_missing_runtime_source tile_shadow_on=0 tile_shadow_off=1"
+        ));
+        assert!(format_bgv_recompute_runtime_cost(&bus).contains("observed_render=all_off"));
     }
 
     #[test]
