@@ -3535,6 +3535,7 @@ fn main() {
     println!("{}", format_d3xx_storage_candidate(&bus));
     println!("{}", format_d3xx_dirty_bitmap_candidate(&bus));
     println!("{}", format_d3xx_full_dirty_bitmap_candidate(&bus));
+    println!("{}", format_d3xx_dirty_runtime_cost(&bus));
     println!("{}", format_z80_stack_low_water(stack_watermark));
     println!("NES zero page $00-$0F:");
     for i in 0..16 {
@@ -4092,6 +4093,7 @@ fn dump_route_checkpoint(
     writeln!(f, "{}", format_d3xx_storage_candidate(bus))?;
     writeln!(f, "{}", format_d3xx_dirty_bitmap_candidate(bus))?;
     writeln!(f, "{}", format_d3xx_full_dirty_bitmap_candidate(bus))?;
+    writeln!(f, "{}", format_d3xx_dirty_runtime_cost(bus))?;
     writeln!(
         f,
         "nt_columns_nonzero_cells: {}",
@@ -5232,6 +5234,35 @@ fn format_d3xx_full_dirty_bitmap_candidate(bus: &SmsBus) -> String {
         bus.d3xx_tile_dirty_max_frame_horizontal_bits,
         bus.d3xx_attr_dirty_max_frame_vertical_bits,
         bus.d3xx_attr_dirty_max_frame_horizontal_bits,
+    )
+}
+
+fn format_d3xx_dirty_runtime_cost(bus: &SmsBus) -> String {
+    let tile_on = bus.nt_raw_tile_writes_on;
+    let tile_off = bus.nt_raw_tile_writes_off;
+    let attr_on = bus.nt_raw_attr_writes_on;
+    let attr_off = bus.nt_raw_attr_writes_off;
+    let on = tile_on + attr_on;
+    let off = tile_off + attr_off;
+    let render_observed = match (on != 0, off != 0) {
+        (false, false) => "none",
+        (true, false) => "all_on",
+        (false, true) => "all_off",
+        (true, true) => "mixed",
+    };
+    format!(
+        "d3xx_dirty_runtime_cost=runtime_marking=blocked_until_raw_source tile_ops_on={} tile_ops_off={} attr_ops_on={} attr_ops_off={} max_frame_tile_ops={} max_frame_attr_ops={} max_frame_total_ops={} max_burst_ops={} first_burst_frame={} first_burst_step={} render_observed={} caveat=trace_only_no_runtime_writes",
+        tile_on,
+        tile_off,
+        attr_on,
+        attr_off,
+        bus.nt_raw_max_frame_tile_writes,
+        bus.nt_raw_max_frame_attr_writes,
+        bus.nt_raw_max_frame_total_writes,
+        bus.nt_raw_max_burst,
+        bus.nt_raw_max_burst_frame,
+        bus.nt_raw_max_burst_step,
+        render_observed,
     )
 }
 
@@ -6631,6 +6662,34 @@ mod tests {
         assert!(line.contains("vertical_attr_bits=1 horizontal_attr_bits=1"));
         assert!(line.contains("vertical_bytes=1 horizontal_bytes=1"));
         assert!(line.contains("max_frame_vertical_attr_bits=1 max_frame_horizontal_attr_bits=1"));
+    }
+
+    #[test]
+    fn d3xx_dirty_runtime_cost_reports_empty_state() {
+        let bus = SmsBus::new(Vec::new(), 0xFF);
+
+        assert_eq!(
+            format_d3xx_dirty_runtime_cost(&bus),
+            "d3xx_dirty_runtime_cost=runtime_marking=blocked_until_raw_source tile_ops_on=0 tile_ops_off=0 attr_ops_on=0 attr_ops_off=0 max_frame_tile_ops=0 max_frame_attr_ops=0 max_frame_total_ops=0 max_burst_ops=0 first_burst_frame=0 first_burst_step=0 render_observed=none caveat=trace_only_no_runtime_writes"
+        );
+    }
+
+    #[test]
+    fn d3xx_dirty_runtime_cost_splits_render_state() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.ram[0x0B09] = 0x18;
+        bus.record_nt_raw_write_stats(NtWriteKind::Tile, 7, 3);
+        bus.finish_nt_raw_frame();
+
+        bus.ram[0x0B09] = 0x00;
+        bus.record_nt_raw_write_stats(NtWriteKind::Attr, 11, 4);
+        bus.finish_nt_raw_frame();
+
+        let line = format_d3xx_dirty_runtime_cost(&bus);
+        assert!(line.contains("tile_ops_on=1 tile_ops_off=0"));
+        assert!(line.contains("attr_ops_on=0 attr_ops_off=1"));
+        assert!(line.contains("max_frame_tile_ops=1 max_frame_attr_ops=1 max_frame_total_ops=1"));
+        assert!(line.contains("render_observed=mixed"));
     }
 
     #[test]
