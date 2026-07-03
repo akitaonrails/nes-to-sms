@@ -5747,6 +5747,100 @@ fn vram_nonzero_range(bus: &SmsBus, start: usize, len: usize) -> usize {
         .count()
 }
 
+#[derive(Clone, Copy, Debug)]
+struct VisibleOamSprite {
+    oam_index: usize,
+    raw_y: u8,
+    source_tile: u8,
+    attr: u8,
+    x: u8,
+}
+
+fn visible_oam_sprites(bus: &SmsBus) -> Vec<VisibleOamSprite> {
+    let mut sprites = Vec::new();
+    for oam_index in 0..64 {
+        let base = 0x0900 + oam_index * 4; // $C900 OAM staging, RAM-indexed
+        let raw_y = bus.ram[base];
+        if raw_y >= 0xCF {
+            continue;
+        }
+        sprites.push(VisibleOamSprite {
+            oam_index,
+            raw_y,
+            source_tile: bus.ram[base + 1],
+            attr: bus.ram[base + 2],
+            x: bus.ram[base + 3],
+        });
+    }
+    sprites
+}
+
+fn format_sprite_fallback_demand(bus: &SmsBus, active: usize, sprite_base: usize) -> String {
+    const SAT_BLANK_REL: u8 = 0xA7;
+    let visible = visible_oam_sprites(bus);
+    let table = if bus.ram[0x0B08] & 0x08 != 0 { 1 } else { 0 };
+    let mut fallback_entries = Vec::new();
+    let mut unique = [false; 256];
+    let mut unique_count = 0usize;
+    let mut known_blank_count = 0usize;
+
+    for sat_index in 0..active.min(64) {
+        let resolved = bus.vram[0x3F80 + sat_index * 2 + 1];
+        if resolved != SAT_BLANK_REL {
+            continue;
+        }
+        let Some(source) = visible.get(sat_index) else {
+            continue;
+        };
+        if !unique[usize::from(source.source_tile)] {
+            unique[usize::from(source.source_tile)] = true;
+            unique_count += 1;
+        }
+        if source.source_tile == 0xFC {
+            known_blank_count += 1;
+        }
+        if fallback_entries.len() < 10 {
+            fallback_entries.push(format!(
+                "sat={sat_index:02} oam={:02} src=${:02X} attr=${:02X} x=${:02X} y=${:02X}",
+                source.oam_index, source.source_tile, source.attr, source.x, source.raw_y
+            ));
+        }
+    }
+
+    let total = fallback_entries.len();
+    let fallback_total = (0..active.min(64))
+        .filter(|sat_index| bus.vram[0x3F80 + sat_index * 2 + 1] == SAT_BLANK_REL)
+        .count();
+    let first = if fallback_entries.is_empty() {
+        "none".to_string()
+    } else {
+        fallback_entries.join(" ")
+    };
+    let unique_src = unique
+        .iter()
+        .enumerate()
+        .filter_map(|(tile, seen)| seen.then_some(format!("${tile:02X}")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let unique_src = if unique_src.is_empty() {
+        "none".to_string()
+    } else {
+        unique_src
+    };
+    format!(
+        "sprite_fallback_demand=active_visible={} unique_src_count={} unique_src={} known_blank_fc={} table={} sprite_base=${:04X} fallback_tile=${:02X} reported={} first={}",
+        fallback_total,
+        unique_count,
+        unique_src,
+        known_blank_count,
+        table,
+        sprite_base,
+        SAT_BLANK_REL,
+        total,
+        first
+    )
+}
+
 fn write_checkpoint_sat_diagnostics<W: std::io::Write>(
     f: &mut W,
     bus: &SmsBus,
@@ -5786,6 +5880,7 @@ fn write_checkpoint_sat_diagnostics<W: std::io::Write>(
         "sat_tail: y_not_d0_after_terminator={} xtile_nonzero_after_terminator={}",
         tail_y_not_d0, tail_xtile_nonzero
     )?;
+    writeln!(f, "{}", format_sprite_fallback_demand(bus, active, sprite_base))?;
 
     for i in 0..active.min(24) {
         let y = bus.vram[0x3F00 + i];
@@ -5822,7 +5917,7 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
     const W: usize = 256;
     const H: usize = 224;
     let mut pixels = vec![0u8; W * H * 3];
-    let mut bg_opaque = vec![false; W * H];
+    let mut bg_priority = vec![false; W * H];
 
     // SMS CRAM byte → RGB. Each entry: --BBGGRR (2 bits per channel, 0-3).
     let cram_to_rgb = |b: u8| -> (u8, u8, u8) {
@@ -5879,7 +5974,10 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
                 | (((p1 >> bit) & 1) << 1)
                 | (((p2 >> bit) & 1) << 2)
                 | (((p3 >> bit) & 1) << 3);
-            bg_opaque[screen_y * W + screen_x] = c != 0;
+            // SMS sprite/background priority is controlled by the nametable
+            // priority bit, not by the staged NES OAM behind-background bit.
+            // Color 0 remains transparent and must not mask sprites.
+            bg_priority[screen_y * W + screen_x] = hi & 0x10 != 0 && c != 0;
             let color = bus.cram[palette_offset + c as usize];
             let (r, g, b) = cram_to_rgb(color);
             let pi = (screen_y * W + screen_x) * 3;
@@ -5921,8 +6019,6 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
         let y = bus.vram[0x3F00 + i];
         let x = bus.vram[0x3F80 + i * 2];
         let tile = bus.vram[0x3F80 + i * 2 + 1] as usize;
-        // runtime SAT_ATTRS = $D480
-        let attr = bus.ram[0x1480 + i];
         // SMS sprite Y is the byte value, displayed one line below
         // (y == 0 means line 1). Skip if off-screen.
         let sy_top = y as usize + 1;
@@ -5961,7 +6057,7 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
                     continue;
                 }
                 let pi = sy * W + sx;
-                if attr & 0x20 != 0 && bg_opaque[pi] {
+                if bg_priority[pi] {
                     continue;
                 }
                 let pi = pi * 3;

@@ -35,6 +35,27 @@ it still remains far from a complete game translation.
   equivalence, second-emulator validation, and full game completion remain
   open.
 
+### 2026-06-29 Snapshot
+
+- The current green build has been visually audited against the generated
+  `out/smb/checkpoints/1-1-clear/*.ppm` route checkpoints.
+- No blocker was seen for scripted World 1-1 clear readability: the status bar
+  split is stable, 1-1 terrain and the flagpole/castle are recognizable, and the
+  post-route RAM checks still indicate transition into 1-2.
+- Remaining visible v1 polish is concentrated in generic sprite/background
+  behavior: Mario can be partly swallowed/tinted by bushes, and small stale
+  sprite fragments appear in mid/late-route checkpoints.
+- This does not prove broad game parity or manual end-to-end playability. 1-2
+  visuals are still wrong after transition, audio is deferred, and raw-CIRAM /
+  materializer parity remains post-v1 unless broader level coverage becomes the
+  active target.
+- A trace-renderer priority fix improved the refreshed checkpoint PPMs: Mario is
+  now readable around bush areas and 1-1 route landmarks are clearer. Runtime
+  SAT-tail clearing remains rejected for v1 because the added VDP work missed
+  the accepted 301M-step checkpoint budget; post-terminator SAT bytes are ignored
+  by SMS rendering. Remaining visible polish is the 01600 floating fragment and
+  title/menu clutter.
+
 ## What We Have
 
 ### ROM and Asset Extraction

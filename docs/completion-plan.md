@@ -432,6 +432,31 @@ SMS-native terms.
       blocker, and then prefer producer-level bulk upload capture rather than
       `$2007` hot-path interception.
 
+      **Visual audit result:** current checkpoint frames show no visual blocker
+      for the scripted World 1-1 clear route. The status bar split is stable,
+      1-1 terrain/columns are recognizable enough for v1 route play, and the
+      flagpole/castle checkpoint is readable. Keep E.5b paused for v1 unless a
+      broader-level requirement makes raw nametable correctness the active
+      blocker. Treat raw-CIRAM/materializer parity and the post-transition 1-2
+      visual state as post-v1/v2 work, not as blockers to claiming the current
+      1-1 route.
+
+      **Next v1 visual priority:** fix generic sprite/BG compositing and stale
+      SAT/OAM artifacts. The clearest remaining in-level defects are Mario being
+      partly swallowed/tinted by bushes at mid/late 1-1 checkpoints and small
+      floating sprite fragments near mid-1-1 and the flag/castle area. Title
+      menu clutter is also visible but lower priority than in-level readability.
+
+      **Follow-up outcome:** the checkpoint PPM renderer now models SMS BG
+      priority from nametable high-byte bit `$10` instead of applying NES OAM
+      behind-background bit `$20` directly. The refreshed audit shows Mario is
+      readable around the bush checkpoints and overall 1-1 route readability is
+      improved. Runtime SAT-tail clearing was tried and reverted because the
+      extra VDP writes missed the accepted 301M-step checkpoint budget; tail
+      bytes after the SMS `$D0` terminator remain ignored by real rendering and
+      by the trace PPM renderer. Remaining should-fix polish: the small 01600
+      floating fragment, title/menu clutter, and any true SMS priority edge cases.
+
       **E.5c Render-off-only materializer.** Project raw CIRAM into SMS
       nametable space only while NES rendering is off. Use `$D300-$D3FF` for
       dirty metadata when runtime dirty tracking is introduced. Active-display
@@ -761,6 +786,27 @@ Add discoveries that change priorities here, dated.
 - Next safest work is visual equivalence: inspect the refreshed checkpoint frames
   and/or add a proper golden-frame comparison path before starting the deferred
   audio phase.
+
+### 2026-06-29 — Current green build visual audit
+
+- Audited the refreshed `out/smb/checkpoints/1-1-clear/*.ppm` and matching text
+  checkpoint artifacts for the current green route after pausing raw-CIRAM
+  capture.
+- No visual blocker was found for scripted World 1-1 clear human-readability:
+  the HUD/split is stable, route state stays live, 1-1 terrain/columns are
+  readable, and the flagpole/castle checkpoint is recognizable.
+- The most visible v1 polish targets are generic rendering/runtime issues:
+  Mario/background compositing around bushes and small stale/floating sprite
+  fragments. Title-screen menu clutter is lower priority.
+- Keep E.5b raw-CIRAM runtime capture paused for v1. The materializer/raw-CIRAM
+  mismatch class and incorrect post-transition 1-2 visuals remain important but
+  are post-v1 unless the target expands beyond a World 1-1 clear route.
+- Follow-up trace-renderer priority fix improved the gameplay checkpoint PPMs:
+  Mario is now readable around bush areas and 1-1 route landmarks remain clear.
+  SAT-tail runtime clearing was rejected because it missed the 301M-step
+  checkpoint budget; post-terminator SAT bytes are diagnostic noise, not a visual
+  blocker. Remaining visual should-fix items are the 01600 floating fragment and
+  title/menu clutter.
 
 ---
 
