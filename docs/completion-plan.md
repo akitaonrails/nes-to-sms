@@ -808,6 +808,24 @@ Add discoveries that change priorities here, dated.
   blocker. Remaining visual should-fix items are the 01600 floating fragment and
   title/menu clutter.
 
+### 2026-07-03 — Full-project audit and re-prioritization
+
+- Full audit recorded in [`audit-2026-07-03.md`](audit-2026-07-03.md). The
+  entire green baseline was re-executed from scratch, not read from docs:
+  374 workspace tests, 631/631 lift+lower, WLA-DX assembly, and the 1-1-clear
+  acceptance route all pass.
+- Architecture verdict: keep. No rewrite; the profile-driven static
+  recompilation + runtime shim + layered differential validation design is
+  working and engine crates remain game-agnostic (comments-only SMB mentions).
+- **Biggest v1 risk identified: real-emulator timing.** `trace-sms` fires the
+  frame IRQ every 60,000 Z80 *instructions*; real SMS hardware affords
+  ~59,736 *cycles* ≈ 8-10K instructions per frame. The accepted route runs
+  with ~6-8× more CPU per frame than Mednafen will provide. Next work is
+  therefore re-ordered: (1) Mednafen-in-the-loop verification (Phase G),
+  (2) per-frame cost measurement in `trace-sms` + performance burn-down by
+  defect class, (3) v1 visual polish, (4) audio Phase F, (5) CDL-based
+  genericity proof with a second NROM game.
+
 ---
 
 ## Recently fixed (this turn)

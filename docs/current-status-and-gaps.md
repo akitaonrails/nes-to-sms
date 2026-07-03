@@ -56,6 +56,20 @@ it still remains far from a complete game translation.
   by SMS rendering. Remaining visible polish is the 01600 floating fragment and
   title/menu clutter.
 
+### 2026-07-03 Snapshot
+
+- Full-project audit completed; see [`audit-2026-07-03.md`](audit-2026-07-03.md).
+  The green baseline was independently re-verified end to end: 374 workspace
+  tests pass, generation reports 631/631 routines with 0 failures and 22
+  deferred sound labels, WLA-DX assembles a 304 KiB ROM, and the 1-1-clear
+  acceptance route passes all no-trap and post-transition RAM checks.
+- Architecture verdict: keep. Engine crates contain no game-specific logic;
+  all SMB facts live in the profile/runtime.
+- Newly named top risk: the acceptance route runs under a synthetic 60,000
+  instructions-per-frame budget, ~6-8× what real SMS hardware provides. Real
+  Mednafen playability at speed is not yet demonstrated; measurement and a
+  performance burn-down are the next work items, ahead of audio.
+
 ## What We Have
 
 ### ROM and Asset Extraction
