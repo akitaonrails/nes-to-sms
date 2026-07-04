@@ -303,6 +303,23 @@ fn emit_stxy_mem(
             program.ld_a_abs(shadow_addr);
             program.ld_hl_ptr_a();
         }
+        (AddrExpr::Const(a), MemRegion::ApuIo) => {
+            // STX/STY to an APU register routes through the APU shim like
+            // STA does (SMB's Dump_Squ1_Regs is `STY $4001 / STX $4000`;
+            // these were silently dropped before, muting whole channels).
+            program.ld_a_abs(shadow_addr);
+            if *a == 0x4016 {
+                program.call(runtime_symbols::CONTROLLER_STROBE);
+            } else {
+                program.ld_hl_imm(*a);
+                program.call(runtime_symbols::APU_WRITE);
+            }
+        }
+        (AddrExpr::Const(a), MemRegion::PpuReg | MemRegion::PpuMirror) => {
+            program.ld_a_abs(shadow_addr);
+            program.ld_b_imm((*a & 7) as u8);
+            program.call(runtime_symbols::PPU_WRITE);
+        }
         _ => {
             program.comment("WARN: unresolved STX/STY addressing mode");
         }

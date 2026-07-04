@@ -850,10 +850,14 @@ fn lift_insn(
                                 value: ValueSrc::A,
                             }];
                         }
-                        vec![Op::ApuWrite {
-                            reg: base,
-                            value: ValueSrc::A,
-                        }]
+                        // Indexed APU store (e.g. SMB's `STA $4002,X` with
+                        // X = channel offset): keep the address expression —
+                        // folding to the base register silently redirected
+                        // square-2/triangle/noise writes onto square 1. The
+                        // lowered indexed store goes through
+                        // rt_write_indexed, which forwards $4000-$4017
+                        // targets to the APU shim at runtime.
+                        vec![Op::StaMem { addr, region }]
                     }
                     MemRegion::Mapper | MemRegion::PrgRam => {
                         if let Some(ca) = addr.const_addr() {

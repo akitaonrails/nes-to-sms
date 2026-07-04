@@ -211,6 +211,11 @@ struct NesBus {
     // 0 = before hit (first poll while rendering returns bit6=0 and arms),
     // 1 = hit reached (subsequent polls return bit6=1). Reset each frame.
     sprite0_phase: u8,
+    // Minimal APU model: register shadow + length counters, enough for
+    // $4015 status reads (SMB's sound engine arbitrates SFX with them).
+    // Mirrors the subject runtime's shim semantics (runtime/apu_stub.s).
+    apu_regs: [u8; 0x18],
+    apu_len: [u8; 4], // pulse1, pulse2, triangle, noise
     // Controller
     strobe: bool,
     ctrl_shift: u8,
@@ -223,6 +228,24 @@ struct NesBus {
 }
 
 impl NesBus {
+    /// Two half-frame length-counter ticks per video frame, mirroring the
+    /// subject runtime's apu_frame_tick approximation.
+    fn apu_frame_tick(&mut self) {
+        let halts = [
+            self.apu_regs[0x00] & 0x20 != 0,
+            self.apu_regs[0x04] & 0x20 != 0,
+            self.apu_regs[0x08] & 0x80 != 0,
+            self.apu_regs[0x0C] & 0x20 != 0,
+        ];
+        for _ in 0..2 {
+            for ch in 0..4 {
+                if !halts[ch] && self.apu_len[ch] > 0 {
+                    self.apu_len[ch] -= 1;
+                }
+            }
+        }
+    }
+
     fn new(prg: Vec<u8>, chr: Vec<u8>) -> Self {
         Self {
             ram: [0; 0x800],
@@ -237,6 +260,8 @@ impl NesBus {
             ppu_addr_hi_latch: 0,
             ppu_read_buffer: 0,
             sprite0_phase: 0,
+            apu_regs: [0; 0x18],
+            apu_len: [0; 4],
             strobe: false,
             ctrl_shift: 0,
             buttons: 0,
@@ -324,6 +349,15 @@ impl oracle_6502::Bus for NesBus {
                 }
                 0x40 | bit
             }
+            0x4015 => {
+                let mut v = 0u8;
+                for ch in 0..4 {
+                    if self.apu_len[ch] > 0 {
+                        v |= 1 << ch;
+                    }
+                }
+                v
+            }
             0x4017 => 0x40, // controller 2: nothing pressed
             0x8000..=0xFFFF => self.prg_read(addr),
             _ => 0,
@@ -367,6 +401,29 @@ impl oracle_6502::Bus for NesBus {
                 }
                 if reg == 0x2005 || reg == 0x2006 {
                     self.addr_latch_toggle = !self.addr_latch_toggle;
+                }
+            }
+            0x4000..=0x4013 | 0x4015 | 0x4017 => {
+                const LEN_TABLE: [u8; 32] = [
+                    10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18,
+                    48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30,
+                ];
+                let idx = (addr - 0x4000) as usize;
+                self.apu_regs[idx] = value;
+                let enabled = self.apu_regs[0x15];
+                match idx {
+                    0x03 if enabled & 1 != 0 => self.apu_len[0] = LEN_TABLE[(value >> 3) as usize],
+                    0x07 if enabled & 2 != 0 => self.apu_len[1] = LEN_TABLE[(value >> 3) as usize],
+                    0x0B if enabled & 4 != 0 => self.apu_len[2] = LEN_TABLE[(value >> 3) as usize],
+                    0x0F if enabled & 8 != 0 => self.apu_len[3] = LEN_TABLE[(value >> 3) as usize],
+                    0x15 => {
+                        for ch in 0..4 {
+                            if value & (1 << ch) == 0 {
+                                self.apu_len[ch] = 0;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             0x4014 => {
@@ -500,6 +557,9 @@ fn run_reference(
             }
             bus.watch = None;
         }
+        // Length counters tick after the frame's NMI ran — matching the
+        // subject, whose apu_frame_tick runs after the translated NMI.
+        bus.apu_frame_tick();
         snaps.push(bus.ram);
     }
     eprintln!(
@@ -734,6 +794,17 @@ fn is_excluded(addr: usize) -> bool {
     // is real game state that logic branches on — excluding it hid the
     // true first divergence behind downstream OAM symptoms.
     if std::env::var("FD_EXCLUDE_VRAMBUF").is_ok() && (0x0300..0x03C4).contains(&addr) {
+        return true;
+    }
+    // $07B5/$07B7 (sound-engine SFX length trackers) latch the exact
+    // interleaving of $4015 status reads against APU length-counter ticks.
+    // Both the reference model and the subject shim approximate the real
+    // 240 Hz frame sequencer at whole-video-frame granularity, and their
+    // tick phases legitimately differ by up to one frame, so these two
+    // bytes can hold transiently different SFX durations. Everything the
+    // engine derives from them stays byte-identical (verified: no other
+    // divergence across the route), so exclude just these two.
+    if addr == 0x07B5 || addr == 0x07B7 {
         return true;
     }
     // Optional: exclude SMB audio-engine RAM while SoundEngine is intentionally

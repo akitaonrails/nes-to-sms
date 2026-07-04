@@ -257,7 +257,53 @@ rt_write_indexed:
   ld   b, 0
   add  hl, bc
   pop  bc
+  ; Hardware windows must not be written as plain memory: indexed stores
+  ; like SMB's `STA $4000,X` (X = channel offset) target APU registers,
+  ; and `STA $2000,X` targets PPU registers. Forward them to the shims;
+  ; plain-memory writes fall through.
+  ld   a, h
+  cp   $40
+  jr   z, _wi_maybe_apu
+  cp   $20
+  jr   c, _wi_plain
+  cp   $40
+  jr   c, _wi_ppu           ; $2000-$3FFF: PPU register mirrors
+_wi_plain:
   ld   (hl), c              ; write value
+  ld   a, c                 ; STA leaves the 6502 accumulator intact: the
+                            ; range checks above clobbered A, restore it
+                            ; (returning the address byte in A corrupted
+                            ; every store that followed an indexed store)
+  pop  hl
+  ret
+_wi_maybe_apu:
+  ld   a, l
+  cp   $18
+  jr   nc, _wi_plain        ; $4018+: not an APU register
+  cp   $16
+  jr   z, _wi_strobe
+  push bc
+  ld   a, c
+  call rt_apu_write         ; A = value, HL = $40xx (preserves A)
+  pop  bc
+  pop  hl
+  ret
+_wi_strobe:
+  push bc
+  ld   a, c
+  call rt_controller_strobe
+  pop  bc
+  pop  hl
+  ret
+_wi_ppu:
+  push bc
+  ld   a, l
+  and  $07
+  ld   b, a
+  ld   a, c
+  call rt_ppu_write         ; A = value, B = register index
+  ld   a, c                 ; body may clobber A; restore the accumulator
+  pop  bc
   pop  hl
   ret
 
@@ -345,6 +391,16 @@ rt_write_zp_ptr_y:
   ld   h, 0
   add  hl, de
   ex   de, hl               ; DE = effective NES address
+  ; Hardware windows: forward APU/PPU targets to the shims (see
+  ; rt_write_indexed).
+  ld   a, d
+  cp   $40
+  jr   z, _wzy_maybe_apu
+  cp   $20
+  jr   c, _wzy_plain
+  cp   $40
+  jr   c, _wzy_ppu
+_wzy_plain:
   call _dispatch_remap_de
   ld   h, d
   ld   l, e
@@ -354,5 +410,38 @@ rt_write_zp_ptr_y:
   pop  de
   pop  hl
   ret
+
+_wzy_maybe_apu:
+  ld   a, e
+  cp   $18
+  jr   nc, _wzy_plain
+  cp   $16
+  jr   z, _wzy_strobe
+  ld   h, d
+  ld   l, e
+  pop  af
+  call rt_apu_write
+  pop  bc
+  pop  de
+  pop  hl
+  ret
+_wzy_strobe:
+  pop  af
+  call rt_controller_strobe
+  pop  bc
+  pop  de
+  pop  hl
+  ret
+_wzy_ppu:
+  ld   a, e
+  and  $07
+  ld   b, a
+  pop  af
+  call rt_ppu_write
+  pop  bc
+  pop  de
+  pop  hl
+  ret
+
 
 .ends

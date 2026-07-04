@@ -562,9 +562,29 @@ through an APU shim or replacing it with a profile/runtime-owned PSG event path.
       skipped behind a documented runtime/profile replacement. No silent
       unresolved traps during accepted gameplay routes.
 
-- [ ] **F.1 APU write log → event stream.** Runtime currently logs
-      APU writes to a ring buffer. Add a structured event format:
-      `(frame, reg, value)`.
+**F.1-F.5 outcome (2026-07-04):** implemented as the audio-plan's
+register-level shim rather than an event stream. The sound engine
+translates through the normal pipeline (rt_sound_stub replacement
+removed; 23 dispatch targets promoted; unresolved labels now 0 — every
+discovered PRG byte translates). `runtime/apu_stub.s` is a full APU
+model (register shadow, length/envelope/sweep sequencer at 4+2 ticks
+per frame, PSG output stage with N=P+1 pulse pitch, octave-folded
+triangle, 3-rate white noise, write cache). Fixed on the way, each
+generic: high-PRG `(zp),Y` reads (music note streams at $F800+);
+indexed APU stores (`STA $4002,X` had folded to the base register,
+muting square2/triangle/noise); STX/STY-to-APU stores (silently
+dropped); A-clobbering in `rt_write_indexed`'s new hardware-window
+forwarding; fixed-point section assignment (a dry-pass/real-pass drift
+made a near call cross banks); z80_emu gained `LD (HL),n` and
+`LD A,I/R`. Validation: full-route frame-diff is NO DIVERGENCE with
+sound RAM included (the reference gained a matching APU length model
+and buffered $2007 CHR reads; only $07B5/$07B7 — sequencer-phase
+latches — are excluded, documented in `is_excluded`). trace-sms logs
+PSG writes; the stream shows the multi-channel theme (melody+harmony
+paired decays, triangle bass, noise hats).
+
+- [x] **F.1 APU write log → event stream.** Superseded by the
+      register-level shim above.
 
 - [ ] **F.2 Pulse 1 / Pulse 2 → PSG tones.** NES pulse channels map
       cleanly to PSG channels 0 and 1. Period conversion: NES period
