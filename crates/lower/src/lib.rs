@@ -1599,27 +1599,52 @@ pub fn lower_routine(
     // ops, it is immediately followed by ≥1 BranchIf reading flags it sets
     // (per `map`), and those flags are dead after the run (so skipping the
     // shadow-P write is sound). Helper: returns the run end if fusable.
-    let scan_run =
-        |i: usize, map: fn(&ir::Cond) -> Option<Z80Cond>, dead_mask: u8| -> Option<usize> {
-            let mut j = i + 1;
-            let mut saw_branch = false;
-            while j < ops_slice.len() {
-                match &ops_slice[j] {
-                    Op::Source { .. } => j += 1,
-                    Op::BranchIf { cond, .. } if map(cond).is_some() => {
-                        saw_branch = true;
-                        j += 1;
+    // In-routine label positions, for checking flag liveness at the taken
+    // path of each fused branch (not just the fall-through).
+    let label_index: std::collections::HashMap<&str, usize> = ops_slice
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, op)| match op {
+            Op::Label(name) => Some((name.as_str(), idx)),
+            _ => None,
+        })
+        .collect();
+    let scan_run = |i: usize,
+                    map: fn(&ir::Cond) -> Option<Z80Cond>,
+                    dead_mask: u8|
+     -> Option<usize> {
+        let mut j = i + 1;
+        let mut saw_branch = false;
+        while j < ops_slice.len() {
+            match &ops_slice[j] {
+                Op::Source { .. } => j += 1,
+                Op::BranchIf { cond, target } if map(cond).is_some() => {
+                    // The taken path continues with the producer's flags
+                    // intact. If the target is outside this routine, or
+                    // the flags are live there, eliding the shadow write
+                    // is unsound (e.g. SMB's PlayerInjuryBlink: `CMP
+                    // #$F0; BCS t; ...; t: BNE` — the target's BNE reads
+                    // the CMP's Z while the fall-through overwrites it).
+                    match label_index.get(target.as_str()) {
+                        Some(&t) => {
+                            if flags_live_after(ops_slice, t, dead_mask, opts.routine_flag_reads) {
+                                return None;
+                            }
+                        }
+                        None => return None,
                     }
-                    _ => break,
+                    saw_branch = true;
+                    j += 1;
                 }
+                _ => break,
             }
-            if saw_branch && !flags_live_after(ops_slice, j - 1, dead_mask, opts.routine_flag_reads)
-            {
-                Some(j)
-            } else {
-                None
-            }
-        };
+        }
+        if saw_branch && !flags_live_after(ops_slice, j - 1, dead_mask, opts.routine_flag_reads) {
+            Some(j)
+        } else {
+            None
+        }
+    };
 
     // `fuse_cmp_end`/`fuse_nz_end`: producer index → run end (exclusive).
     // CMP fuses to a native `cp`; LDA fuses to the load + `or a`. Both
@@ -2935,27 +2960,39 @@ mod tests {
     // native `cp $10` + native `jp z` (no rt_cmp_a, no shadow-P bit test).
     #[test]
     fn cmp_beq_fuses_to_native() {
+        // Fusable: both the fall-through AND the branch's taken path
+        // overwrite N/Z/C before any read or routine exit.
         let build = lower_and_finish(vec![
             Op::CmpImm(0x10),
             Op::BranchIf {
                 cond: Cond::Zero,
                 target: "L_x".into(),
             },
-            Op::CmpImm(0x20), // writes N/Z/C, reads none -> kills first cmp's flags
-            Op::BranchIf {
-                cond: Cond::NotZero,
-                target: "L_x".into(),
-            },
+            Op::CmpImm(0x30), // kills flags on the fall-through
             Op::Label("L_x".into()),
+            Op::CmpImm(0x20), // kills flags on the taken path
             Op::Rts,
         ]);
         // native cp $10 = FE 10
         assert!(build.bytes.windows(2).any(|w| w == [0xFE, 0x10]));
         // fused branch is a native jp z
         assert!(build.asm.contains("jp z,L_x"));
-        // the second compare (flags live across the following Rts) still
-        // falls back to the helper.
+
+        // NOT fusable: the taken path reaches RTS with the CMP's flags
+        // intact — 6502 code returns results in flags (SMB's
+        // BlockBumpedChk/PlayerInjuryBlink), so the shadow write stays.
+        let build = lower_and_finish(vec![
+            Op::CmpImm(0x10),
+            Op::BranchIf {
+                cond: Cond::Zero,
+                target: "L_r".into(),
+            },
+            Op::CmpImm(0x30),
+            Op::Label("L_r".into()),
+            Op::Rts,
+        ]);
         assert!(build.asm.contains("call rt_cmp_a"));
+        assert!(!build.bytes.windows(2).any(|w| w == [0xFE, 0x10]));
     }
 
     #[test]

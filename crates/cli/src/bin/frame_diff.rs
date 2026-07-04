@@ -197,7 +197,16 @@ struct NesBus {
     vblank: bool,
     addr_latch_toggle: bool,
     nmi_enabled: bool, // $2000 bit 7
+    ppu_ctrl: u8,      // $2000 (bit 2 = VRAM address increment 1/32)
     ppu_mask: u8,      // $2001 (rendering-enable bits 3/4)
+    // $2006/$2007 VRAM access: SMB's DrawTitleScreen reads its title
+    // layout from CHR ROM through buffered PPUDATA reads, so the
+    // reference must model the address latch, the 1-byte read buffer,
+    // and the post-access increment.
+    chr: Vec<u8>,
+    ppu_addr: u16,
+    ppu_addr_hi_latch: u8,
+    ppu_read_buffer: u8,
     // Synthetic sprite-0 hit phase, mirroring the subject runtime's $CB12:
     // 0 = before hit (first poll while rendering returns bit6=0 and arms),
     // 1 = hit reached (subsequent polls return bit6=1). Reset each frame.
@@ -214,14 +223,19 @@ struct NesBus {
 }
 
 impl NesBus {
-    fn new(prg: Vec<u8>) -> Self {
+    fn new(prg: Vec<u8>, chr: Vec<u8>) -> Self {
         Self {
             ram: [0; 0x800],
             prg,
             vblank: false,
             addr_latch_toggle: false,
             nmi_enabled: false,
+            ppu_ctrl: 0,
             ppu_mask: 0,
+            chr,
+            ppu_addr: 0,
+            ppu_addr_hi_latch: 0,
+            ppu_read_buffer: 0,
             sprite0_phase: 0,
             strobe: false,
             ctrl_shift: 0,
@@ -270,8 +284,23 @@ impl oracle_6502::Bus for NesBus {
                         self.addr_latch_toggle = false;
                         v
                     }
-                    // $2004 OAM data read, $2007 VRAM read: not needed by SMB
-                    // game logic for state evolution; return 0.
+                    0x2007 => {
+                        // Buffered PPUDATA read: returns the buffer, then
+                        // refills it from the current VRAM address. CHR
+                        // ROM ($0000-$1FFF) is the only backing store the
+                        // reference models; nametable reads return 0.
+                        let ret = self.ppu_read_buffer;
+                        let a = (self.ppu_addr & 0x3FFF) as usize;
+                        self.ppu_read_buffer = if a < 0x2000 {
+                            *self.chr.get(a).unwrap_or(&0)
+                        } else {
+                            0
+                        };
+                        let inc = if self.ppu_ctrl & 0x04 != 0 { 32 } else { 1 };
+                        self.ppu_addr = self.ppu_addr.wrapping_add(inc);
+                        ret
+                    }
+                    // $2004 OAM data read: not needed by SMB game logic.
                     _ => 0,
                 }
             }
@@ -319,9 +348,22 @@ impl oracle_6502::Bus for NesBus {
                 let reg = 0x2000 + (addr & 7);
                 if reg == 0x2000 {
                     self.nmi_enabled = value & 0x80 != 0;
+                    self.ppu_ctrl = value;
                 }
                 if reg == 0x2001 {
                     self.ppu_mask = value; // rendering-enable bits for sprite-0 synth
+                }
+                if reg == 0x2006 {
+                    if !self.addr_latch_toggle {
+                        self.ppu_addr_hi_latch = value;
+                    } else {
+                        self.ppu_addr = ((self.ppu_addr_hi_latch as u16) << 8) | value as u16;
+                    }
+                }
+                if reg == 0x2007 {
+                    // Writes advance the VRAM address like reads do.
+                    let inc = if self.ppu_ctrl & 0x04 != 0 { 32 } else { 1 };
+                    self.ppu_addr = self.ppu_addr.wrapping_add(inc);
                 }
                 if reg == 0x2005 || reg == 0x2006 {
                     self.addr_latch_toggle = !self.addr_latch_toggle;
@@ -360,12 +402,13 @@ const REF_PREROLL_CAP: usize = 2_000_000;
 /// there each frame fires one NMI.
 fn run_reference(
     prg: Vec<u8>,
+    chr: Vec<u8>,
     frames: usize,
     timeline: &ButtonTimeline,
 ) -> ([u8; 0x800], Vec<[u8; 0x800]>) {
     use oracle_6502::Cpu;
     let mut cpu = Cpu::new();
-    let mut bus = NesBus::new(prg);
+    let mut bus = NesBus::new(prg, chr);
     cpu.reset(&mut bus);
 
     // Pre-roll: run reset-init until NMI is enabled. SMB polls $2002 for
@@ -676,9 +719,13 @@ fn is_excluded(addr: usize) -> bool {
     if (0x0004..0x0008).contains(&addr) {
         return true;
     }
-    // Optional: exclude the VRAM update buffer ($0300-$03FF) to surface
-    // game-logic divergences hidden behind render-buffer phasing.
-    if std::env::var("FD_EXCLUDE_VRAMBUF").is_ok() && (0x0300..0x0500).contains(&addr) {
+    // Optional: exclude the VRAM update buffers to surface game-logic
+    // divergences hidden behind render-buffer phasing. Keep the window
+    // tight: SMB's VRAM_Buffer1/2 live at $0300-$03C3, but $03C4-$03FF
+    // (sprite-shuffle offsets, block-object state such as $03D1/$03E4+)
+    // is real game state that logic branches on — excluding it hid the
+    // true first divergence behind downstream OAM symptoms.
+    if std::env::var("FD_EXCLUDE_VRAMBUF").is_ok() && (0x0300..0x03C4).contains(&addr) {
         return true;
     }
     // Optional: exclude SMB audio-engine RAM while SoundEngine is intentionally
@@ -907,7 +954,7 @@ fn main() {
         "Reference: running SMB PRG ({} bytes) for {frames} frames, script={script_desc}",
         prg.len()
     );
-    let (ref_init, ref_snaps) = run_reference(prg, frames, &timeline);
+    let (ref_init, ref_snaps) = run_reference(prg, image.chr.to_vec(), frames, &timeline);
 
     // Report reference progression of key game-state vars.
     println!("frame | $0770 $0772 $0773 $0772.. (operation/task)");

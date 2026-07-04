@@ -915,6 +915,37 @@ mismatching write names the exact diverging instruction.
 - Remaining top divergence: OAM sprite bytes `$0204-$0220` from frame
   1792 (~844 frames) — next target for the same write-diff workflow.
 
+**Follow-up outcome (same day): NO DIVERGENCE across the full route.**
+Three more fixes took the 4900-frame diff from 1204 diverging frames to
+**zero — the SMS RAM trajectory is byte-for-byte identical to the real
+NES** over the whole route (title, demo, gameplay, death, game-over,
+return to title):
+
+1. `frame-diff` reference gained buffered `$2007` PPUDATA reads from CHR
+   ROM (address latch, 1-byte read buffer, increment). SMB's
+   DrawTitleScreen reads its title layout from CHR through `$2007`; the
+   reference returned zeros, which explains the months-old "frame 22
+   divergence" — the reference was wrong, not the subject. Also narrowed
+   `FD_EXCLUDE_VRAMBUF` to `$0300-$03C3`: `$03C4-$03FF` (sprite-shuffle
+   offsets, block-object state) is real game state.
+2. `rt_asl_mem` / `rt_lsr_mem` clobbered A; 6502 memory-RMW ops preserve
+   it (the rol/ror/inc/dec helpers already pushed AF — these two missed
+   the earlier fix). Sprite-hide rows (`JSR DumpTwoSpr` with A=$F8 after
+   `LSR $00`) received garbage instead.
+3. Fused CMP+branch elision now also checks flag liveness at each fused
+   branch's TAKEN path (via an in-routine label map). SMB's
+   PlayerInjuryBlink does `CMP #$F0; BCS t; CMP #$C8; ...; t: BNE` — the
+   linear scan saw the second CMP overwrite and elided the shadow write,
+   but the taken path consumes the first CMP's Z at `t`. The
+   `cmp_beq_fuses_to_native` test now asserts the sound rule in both
+   directions (fusable when both paths overwrite; not fusable when the
+   taken path reaches RTS).
+
+The acceptance route re-record (against the now-authoritative NES
+reference) is the remaining step to restore the trace-sms route gate:
+with full parity, the old script faithfully reproduces the death the
+real NES suffers under it.
+
 ---
 
 ## Recently fixed (this turn)

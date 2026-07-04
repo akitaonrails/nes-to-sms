@@ -478,6 +478,7 @@ _ror_a_no_z:
 ; 6502 ASL memory: shifts byte at (HL) left in place; updates shadow N, Z, C.
 ; Entry: HL = SMS RAM address of operand.  Clobbers: A.
 rt_asl_mem:
+  push af                   ; preserve caller's A (6502 ASL mem leaves A alone)
   push hl
   push bc
   ld   a, (hl)
@@ -516,11 +517,13 @@ _asl_mem_no_z:
   ld   ($cb03), a
   pop  bc
   pop  hl
+  pop  af
   ret
 
 ; ─── rt_lsr_mem ───────────────────────────────────────────────────────────────
 ; 6502 LSR memory: shifts byte at (HL) right; updates shadow N (always 0), Z, C.
 rt_lsr_mem:
+  push af                   ; preserve caller's A (6502 LSR mem leaves A alone)
   push hl
   push bc
   ld   a, (hl)
@@ -550,6 +553,7 @@ _lsr_mem_no_z:
   ld   ($cb03), a
   pop  bc
   pop  hl
+  pop  af
   ret
 
 ; ─── rt_rol_mem ───────────────────────────────────────────────────────────────
