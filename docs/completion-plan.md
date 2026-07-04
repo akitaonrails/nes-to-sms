@@ -472,6 +472,31 @@ SMS-native terms.
       by the trace PPM renderer. Remaining should-fix polish: the small 01600
       floating fragment, title/menu clutter, and any true SMS priority edge cases.
 
+      **2026-07-04 transition-defect forensics (task: resume raw-CIRAM /
+      E.5 work).** Dense Mednafen captures of the title→game transition
+      show large stale title-screen fragments persisting into gameplay,
+      plus the HUD scrolling with the playfield. The trace-sms
+      checkpoints for the same route moments are CLEAN (proper WORLD 1-1
+      intermission card, blanked screen, fixed HUD) — same ROM, so both
+      symptoms are trace-vs-real-VDP semantic gaps, not translation
+      bugs:
+      - The HUD scroll is explained: the frame handler's overrun pacing
+        read (`in a,($bf)`) clears the VDP's pending LINE interrupt along
+        with the frame flag, and at ~8× budget overrun every frame is an
+        overrun frame — the sprite-0-split line IRQ never services in
+        stock Mednafen. At GPGX 500% (frames fit the budget) the split
+        works. A per-scanline split is physically unserviceable when one
+        handler spans ~8 real frames; treat stock-Mednafen HUD scroll as
+        a slow-motion artifact, not a bug to fix.
+      - The stale title tiles need a real diagnosis: the transition's
+        screen clear reaches trace-sms VRAM but not Mednafen's. Next
+        step is a direct VRAM diff — Mednafen savestates carry the full
+        16 KiB `vram` chunk (see reference_mednafen_forensics), so
+        capture a gameplay savestate and diff against trace-sms VRAM at
+        the matched route frame; the differing addresses identify which
+        write path (render-off direct $2007, vbuf flush, or the new
+        indexed-PPU forwarding) diverges under real VDP semantics.
+
       **E.5c Render-off-only materializer.** Project raw CIRAM into SMS
       nametable space only while NES rendering is off. Use `$D300-$D3FF` for
       dirty metadata when runtime dirty tracking is introduced. Active-display
