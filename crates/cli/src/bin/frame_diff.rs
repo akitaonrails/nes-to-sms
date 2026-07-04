@@ -687,7 +687,15 @@ fn nes_buttons_to_sms_dc(b: Buttons) -> u8 {
     !pressed // active-low
 }
 
-const SUBJ_INSN_PER_FRAME: usize = 2_000_000;
+// Generous per-frame budget: with the translated sound engine active a
+// heavy frame can exceed 2M instructions; truncating a frame mid-handler
+// leaves IFF disabled so every later fire_irq is silently skipped and the
+// subject appears dead.
+const SUBJ_INSN_PER_FRAME: usize = 8_000_000;
+// Pre-roll keeps the original 2M chunk so the boot/init IRQ cadence — and
+// therefore the subject's first-NMI phase alignment against the reference —
+// stays identical to the calibrated behavior.
+const SUBJ_PREROLL_CHUNK: usize = 2_000_000;
 // Pre-roll budget for SMS boot + SMB's translated reset-init (until NMI
 // enable). The VDP critical-section lock adds per-PPU-access overhead to
 // init's thousands of $2006/$2007 writes, so keep generous headroom.
@@ -768,6 +776,18 @@ fn run_subject(
     // firing every frame is correct in both the pre-roll (init polls
     // $2002 for VBlank, no game NMI yet) and steady-state phases.
     let fire_irq = |cpu: &mut Cpu, bus: &mut SmsBus| {
+        // The VDP frame interrupt is level-held: if the CPU currently has
+        // interrupts disabled (e.g. inside the runtime's VDP DI bracket in
+        // the idle loop's $2002 poll), step until IFF1 re-enables instead
+        // of silently dropping the frame — a dropped IRQ freezes the
+        // subject for a frame and desyncs it from the reference.
+        let mut settle = 0usize;
+        while !cpu.iff1 && settle < 100_000 {
+            if cpu.halted || cpu.step(bus).is_err() {
+                break;
+            }
+            settle += 1;
+        }
         if cpu.iff1 {
             cpu.sp = cpu.sp.wrapping_sub(2);
             let pc = cpu.pc;
@@ -786,7 +806,7 @@ fn run_subject(
     let mut pre_frames = 0usize;
     while !nmi_enabled(&bus) && pre < SUBJ_PREROLL_CAP {
         fire_irq(&mut cpu, &mut bus);
-        for _ in 0..SUBJ_INSN_PER_FRAME {
+        for _ in 0..SUBJ_PREROLL_CHUNK {
             if cpu.halted || cpu.step(&mut bus).is_err() {
                 break;
             }

@@ -1379,10 +1379,101 @@ name = "LoadControlRegs"
 addr = 0xfff0
 name = "IRQHandler"
 
-[[replacement]]
-addr = 0xf2d0
-runtime_label = "rt_sound_stub"
-reason = "Audio is deferred; skip SMB SoundEngine so NMI/frame traces stay bounded while APU writes are stubbed."
+
+# Sound-engine dispatch/branch targets the static walk does not reach
+# (promoted from reports/unresolved_labels.txt when the SoundEngine
+# replacement was removed for Phase F).
+[[function]]
+addr = 0xf3bf
+name = "snd_F3BF"
+
+[[function]]
+addr = 0xf3cd
+name = "snd_F3CD"
+
+[[function]]
+addr = 0xf3d1
+name = "snd_F3D1"
+
+[[function]]
+addr = 0xf3df
+name = "snd_F3DF"
+
+[[function]]
+addr = 0xf3f9
+name = "snd_F3F9"
+
+[[function]]
+addr = 0xf3ff
+name = "snd_F3FF"
+
+[[function]]
+addr = 0xf40d
+name = "snd_F40D"
+
+[[function]]
+addr = 0xf4b6
+name = "snd_F4B6"
+
+[[function]]
+addr = 0xf4bb
+name = "snd_F4BB"
+
+[[function]]
+addr = 0xf518
+name = "snd_F518"
+
+[[function]]
+addr = 0xf51e
+name = "snd_F51E"
+
+[[function]]
+addr = 0xf5c5
+name = "snd_F5C5"
+
+[[function]]
+addr = 0xf5c8
+name = "snd_F5C8"
+
+[[function]]
+addr = 0xf5d1
+name = "snd_F5D1"
+
+[[function]]
+addr = 0xf5d3
+name = "snd_F5D3"
+
+[[function]]
+addr = 0xf5e2
+name = "snd_F5E2"
+
+[[function]]
+addr = 0xf5e7
+name = "snd_F5E7"
+
+[[function]]
+addr = 0xf5fc
+name = "snd_F5FC"
+
+[[function]]
+addr = 0xf600
+name = "snd_F600"
+
+[[function]]
+addr = 0xf60f
+name = "snd_F60F"
+
+[[function]]
+addr = 0xf63b
+name = "snd_F63B"
+
+[[function]]
+addr = 0xf640
+name = "snd_F640"
+
+[[function]]
+addr = 0xf64d
+name = "snd_F64D"
 
 # === Labels (branch targets / data labels) ===
 

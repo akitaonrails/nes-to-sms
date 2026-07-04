@@ -32,8 +32,9 @@
 ;   $CB11        PPUDATA read buffer
 ;   $CB12        Synthetic sprite-0 phase for PPUSTATUS bit 6
 ;   $CB1A        Translated NMI has been enabled at least once
-;   $CB1B        Runtime-ready flag: 0 during boot; 1 once irq_handler may work
+;   $CB28        Runtime-ready flag: 0 during boot; 1 once irq_handler may work
 ;   $CB20-$CB24  Split-scroll scheduler state (see runtime/ppu.s)
+;   $CB30-$CB61  APU->PSG shim state (see runtime/apu_stub.s)
 ;   $CB80-$CBFF  Raw mirrored NES attribute shadow (2 CIRAM pages × 64 bytes)
 ;   $CB13-$CB1F  13-byte scratch ("temp w")
 ;   $CB1D        Runtime trap marker for trace-sms diagnostics
@@ -116,7 +117,7 @@ boot_main:
   ; enabled for the whole boot, and the per-frame handler starved boot and
   ; translated init forever (black screen). See docs/completion-plan.md.
   xor a
-  ld  ($cb1b), a
+  ld  ($cb28), a
 
   ; Initialize standard Sega mapper registers explicitly. This keeps emulators
   ; on the Sega mapper path before any optional slot-2 SRAM use.
@@ -201,6 +202,9 @@ boot_main:
   xor a
   ld  ($cb06), a            ; latched controller state = all released
   ld  ($cb07), a            ; bit-read index = 0
+
+  ; 8b. Init the APU->PSG shim (shadow, sequencer state, silence PSG).
+  call apu_psg_init
 
   ; 9. Init PPU shadow registers.
   xor a
@@ -293,7 +297,7 @@ boot_main:
   ld   ($fffe), a            ; map slot 1 ($4000-$7FFF) to this bank
   ld   ($cb14), a            ; mirror in bank shadow for rt_far_call
   ld   a, $01
-  ld   ($cb1b), a            ; runtime ready: irq_handler may do real work
+  ld   ($cb28), a            ; runtime ready: irq_handler may do real work
   ei                          ; now safe: slot 1 has translated code
   jp   $4000                  ; logical slot-1 address of translated_reset
 
@@ -320,7 +324,7 @@ irq_handler:
   ; acknowledged the VDP; leave WITHOUT `ei` so a spurious entry cannot
   ; enable interrupts behind boot's back.
   push af
-  ld  a, ($cb1b)
+  ld  a, ($cb28)
   or  a
   jr  nz, _irq_runtime_ready
   pop af
@@ -420,6 +424,9 @@ _irq_call_translated_nmi:
   ld  ($fffe), a
 
 _irq_skip_translated_nmi:
+
+  ; APU frame sequencer + PSG write-back (envelopes, lengths, sweeps).
+  call apu_frame_tick
 
   ; Flush this frame's prepared state to the VDP (see note above): sprites from
   ; the OAM staging, the scheduled scroll, and the queued VRAM buffer.

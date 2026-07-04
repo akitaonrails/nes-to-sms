@@ -672,6 +672,12 @@ impl Cpu {
                 bus.write(addr, r);
             }
 
+            // ── ld (hl),n ────────────────────────────────────────────
+            0x36 => {
+                let n = self.fetch_byte(bus);
+                bus.write(self.hl(), n);
+            }
+
             // ── ld r,n ────────────────────────────────────────────────
             0x06 => {
                 self.b = self.fetch_byte(bus);
@@ -2465,5 +2471,15 @@ mod tests {
         // ld hl,0x0200; ld b,0xFE; ld (hl),b; ld c,(hl)
         let (cpu, _) = run(&[0x21, 0x00, 0x02, 0x06, 0xFE, 0x70, 0x4E, 0x76]);
         assert_eq!(cpu.c, 0xFE);
+    }
+    #[test]
+    fn ld_hl_ptr_immediate() {
+        // ld hl,$C010; ld (hl),$0F; ret
+        let mut bus = FlatBus::new();
+        bus.load(0x0000, &[0x21, 0x10, 0xC0, 0x36, 0x0F, 0xC9]);
+        let mut cpu = Cpu::new();
+        cpu.sp = 0xDFF0;
+        let _ = cpu.run_until_ret(&mut bus, 100);
+        assert_eq!(bus.mem[0xC010], 0x0F);
     }
 }

@@ -288,12 +288,35 @@ rt_read_zp_ptr_y:
   ld   h, 0
   add  hl, de               ; HL = pointer + Y (16-bit)
   ex   de, hl               ; DE = effective NES address
+  ; NES $C000-$FFFF is fixed high PRG: read it through the data_prg_high
+  ; copy in slot 2 (SMB's music note streams live at $F800-$FFFF and are
+  ; dereferenced via (zp),Y — reading the SMS RAM mirror here fed garbage
+  ; notes to the translated sound engine).
+  ld   a, d
+  cp   $c0
+  jr   nc, _rzpy_prg_high
   ; Remap to SMS address.
   call _dispatch_remap_de
   ; Dereference.
   ld   h, d
   ld   l, e
   ld   a, (hl)
+  pop  bc
+  pop  de
+  pop  hl
+  ret
+_rzpy_prg_high:
+  ld   a, :data_prg_high
+  ld   ($ffff), a
+  ld   a, d
+  sub  $40                  ; $C000-$FFFF -> $8000-$BFFF in slot 2
+  ld   h, a
+  ld   l, e
+  ld   a, (hl)
+  push af
+  ld   a, :data_prg_low     ; translated code expects low PRG in slot 2
+  ld   ($ffff), a
+  pop  af
   pop  bc
   pop  de
   pop  hl

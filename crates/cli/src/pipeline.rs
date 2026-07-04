@@ -254,7 +254,6 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // 5. Lower into Z80. Pre-declare all runtime symbols so the linker can
     //    bind them; we emit calls to them but the actual implementations
     //    live in runtime/*.s.
-    let mut program = Program::new();
     // Each WLA-DX ROM bank is 16 KiB. We pin each generated_code_N
     // section to a unique bank in slot 1 ($4000-$7FFF) so the section's
     // labels resolve to logical slot-1 addresses (and `jp L_XXXX` from
@@ -265,17 +264,17 @@ pub fn run(args: &Args) -> Result<String, Error> {
     const TRANSLATED_BANK_BASE: u8 = 4;
     const TRANSLATED_SLOT: u8 = 1;
 
-    // ---- Pass 1: dry-lower into a throwaway Program to discover which
-    // section each label ends up in. The result is fed into Pass 2 via
-    // `prepopulate_label_section`, so far_call/far_jmp can downgrade to
-    // plain call/jp whenever both ends sit in the same section (= same
-    // bank). Without this, forward-reference branches inside a routine
-    // see an empty label_section map and pessimistically emit the
-    // trampoline pattern.
-    // Interprocedural flag-liveness map: routine label → incoming-flag-read
-    // mask. Lets the lowerer see past calls to flag-agnostic callees when
-    // deciding whether a fused/lifted op's flags are dead. Keyed by both
-    // the L_XXXX entry label and the routine name (JSR targets use either).
+    // ---- Fixed-point section assignment. Lowering shrinks whenever the
+    // label→section map lets far_call/far_jmp downgrade to plain call/jp,
+    // and shrinking moves the SECTION_MAX_BYTES rotation boundaries, which
+    // changes which section each label lands in. A single dry pass is
+    // therefore not sound: a downgrade decided against the dry layout can
+    // straddle a boundary that moved in the real layout (observed as a
+    // near `call` from bank $0A into bank 4 — wild execution — when the
+    // promoted sound-engine routines shifted the layout). Iterate until
+    // the map the emission consumed equals the map it produced; that
+    // self-consistency makes every downgrade provably same-bank.
+    // Iteration 0 with an empty map is the pessimistic all-far dry pass.
     let flag_reads: std::collections::HashMap<String, u8> = {
         let mut m = std::collections::HashMap::new();
         for r in &routines {
@@ -286,151 +285,120 @@ pub fn run(args: &Args) -> Result<String, Error> {
         m
     };
 
-    let label_section_map: std::collections::HashMap<String, usize> = {
-        let mut p = z80_emit::Program::new();
-        let mut sidx: u32 = 0;
-        p.section(&format!("generated_code_{sidx}"));
-        p.set_section_placement(TRANSLATED_BANK_BASE + sidx as u8, TRANSLATED_SLOT);
-        p.org(0x4000);
-        let mut sbase: u16 = p.current_addr();
-        p.label("translated_reset");
-        p.jp(&format_label(vectors.reset));
-        p.label("translated_nmi");
-        p.jp(&format_label(vectors.nmi));
-        let dry_opts = LowerOptions {
+    let emit_translated = |section_map: &std::collections::HashMap<String, usize>|
+     -> Result<(z80_emit::Program, Vec<String>, Vec<String>), Error> {
+        let mut program = z80_emit::Program::new();
+        let mut section_idx: u32 = 0;
+        program.section(&format!("generated_code_{section_idx}"));
+        program.set_section_placement(TRANSLATED_BANK_BASE + section_idx as u8, TRANSLATED_SLOT);
+        program.org(0x4000);
+        program.prepopulate_label_section(section_map);
+        let mut section_base: u16 = program.current_addr();
+        let opts = LowerOptions {
             profile: Some(&prof),
-            emit_source_comments: false,
+            emit_source_comments: true,
             routine_flag_reads: Some(&flag_reads),
         };
+
+        // Translated reset alias so boot.s can `jp translated_reset`.
+        program.label("translated_reset");
+        program.jp(&format_label(vectors.reset));
+        // Translated NMI alias so runtime/boot.s stays game-agnostic.
+        program.label("translated_nmi");
+        program.jp(&format_label(vectors.nmi));
+
+        let mut lower_failures: Vec<String> = Vec::new();
+        let mut defined_labels: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        defined_labels.insert("translated_reset".to_string());
+        defined_labels.insert("translated_nmi".to_string());
+
         for r in &routines {
-            if p.current_addr().saturating_sub(sbase) >= SECTION_MAX_BYTES {
-                sidx += 1;
-                p.section(&format!("generated_code_{sidx}"));
-                p.set_section_placement(TRANSLATED_BANK_BASE + sidx as u8, TRANSLATED_SLOT);
-                p.org(0x4000);
-                sbase = p.current_addr();
+            // Rotate sections when the current one fills up.
+            if program.current_addr().saturating_sub(section_base) >= SECTION_MAX_BYTES {
+                section_idx += 1;
+                program.section(&format!("generated_code_{section_idx}"));
+                program.set_section_placement(
+                    TRANSLATED_BANK_BASE + section_idx as u8,
+                    TRANSLATED_SLOT,
+                );
+                program.org(0x4000);
+                section_base = program.current_addr();
             }
+
+            // Internal call sites use the auto-generated `L_XXXX` label.
+            // Profile-supplied names and the auto label both need to point
+            // at the routine entry — UNLESS the lifter emits the auto label
+            // itself (entry PC is also an internal branch target).
             let auto = format_label(r.entry);
-            if !r.branch_labels.contains(&auto) {
-                p.label(&auto);
+            let lifter_emits_auto = r.branch_labels.contains(&auto);
+            if !lifter_emits_auto && !defined_labels.contains(&auto) {
+                program.label(&auto);
+                defined_labels.insert(auto.clone());
             }
-            let _ = lower::lower_routine(&mut p, r, &dry_opts);
-        }
-        p.label_section_snapshot()
-    };
+            if lifter_emits_auto {
+                defined_labels.insert(auto);
+            }
+            defined_labels.insert(r.name.clone());
+            for bl in &r.branch_labels {
+                defined_labels.insert(bl.clone());
+            }
 
-    let mut section_idx: u32 = 0;
-    program.section(&format!("generated_code_{section_idx}"));
-    program.set_section_placement(TRANSLATED_BANK_BASE + section_idx as u8, TRANSLATED_SLOT);
-    // .org goes via z80_emit but emits no asm directive when placement
-    // is pinned; symbols still use slot-1 addresses ($4000+) because
-    // the section is forced into slot 1 by `.bank N slot 1`.
-    program.org(0x4000);
-    program.prepopulate_label_section(&label_section_map);
-    let mut section_base: u16 = program.current_addr();
-    let opts = LowerOptions {
-        profile: Some(&prof),
-        emit_source_comments: true,
-        routine_flag_reads: Some(&flag_reads),
-    };
-
-    // Translated reset alias so boot.s can `jp translated_reset`.
-    program.label("translated_reset");
-    // If RESET resolves to a discovered function, jump to its label.
-    program.jp(&format_label(vectors.reset));
-    // Translated NMI alias so runtime/boot.s stays game-agnostic.
-    program.label("translated_nmi");
-    program.jp(&format_label(vectors.nmi));
-
-    let mut lower_failures: Vec<String> = Vec::new();
-    let mut defined_labels: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    defined_labels.insert("translated_reset".to_string());
-    defined_labels.insert("translated_nmi".to_string());
-
-    for r in &routines {
-        // Rotate sections when the current one fills up.
-        if program.current_addr().saturating_sub(section_base) >= SECTION_MAX_BYTES {
-            section_idx += 1;
-            program.section(&format!("generated_code_{section_idx}"));
-            program
-                .set_section_placement(TRANSLATED_BANK_BASE + section_idx as u8, TRANSLATED_SLOT);
-            program.org(0x4000);
-            section_base = program.current_addr();
+            match lower::lower_routine(&mut program, r, &opts) {
+                Ok(()) => {}
+                Err(e) => lower_failures.push(format!("${:04X} {}: {}", r.entry, r.name, e)),
+            }
         }
 
-        // Internal call sites use the auto-generated `L_XXXX` label. Profile-
-        // supplied names (e.g. "Reset") and the auto label both need to point
-        // at the routine entry. z80_emit allows two distinct labels at the
-        // same address, so we emit the auto label here before the named one
-        // is emitted inside lower_routine — UNLESS the lifter is going to
-        // emit it anyway (when the entry PC is also an internal branch
-        // target). That's tracked by branch_labels containing the auto name.
-        let auto = format_label(r.entry);
-        let lifter_emits_auto = r.branch_labels.contains(&auto);
-        if !lifter_emits_auto && !defined_labels.contains(&auto) {
-            program.label(&auto);
-            defined_labels.insert(auto.clone());
-        }
-        if lifter_emits_auto {
-            // The lifter will emit the auto label; record it so the
-            // unresolved-stub pass doesn't try to redefine.
-            defined_labels.insert(auto);
-        }
-        defined_labels.insert(r.name.clone());
-        for bl in &r.branch_labels {
-            defined_labels.insert(bl.clone());
-        }
-
-        match lower::lower_routine(&mut program, r, &opts) {
-            Ok(()) => {}
-            Err(e) => lower_failures.push(format!("${:04X} {}: {}", r.entry, r.name, e)),
-        }
-    }
-
-    // 6. Pre-declare runtime symbols (the runtime/*.s files supply the
-    //    real bodies; these placeholders only exist so z80_emit's patch
-    //    resolution succeeds for the in-Rust byte buffer). Emit BEFORE
-    //    the unresolved-stubs pass so we don't redundantly stub them.
-    program.section("runtime_forward_decls");
-    for sym in RUNTIME_SYMBOLS {
-        program.label(sym);
-        defined_labels.insert((*sym).to_string());
-        program.ret();
-    }
-
-    // 7. External-call stubs: ask z80_emit what labels are still referenced
-    //    but not defined. By default each unresolved label jumps to
-    //    `rt_unresolved_jsr` so the final ROM traps loudly if it is reached.
-    //    A temporary debug flag can restore the old permissive stubs for
-    //    visual experiments, but strict trapping is the trustworthy default.
-    //
-    // We trust z80_emit's labels-map (not our `defined_labels` tracker)
-    // because some labels we pre-recorded never actually got emitted —
-    // a lower failure can leave a routine partially-emitted with branch
-    // labels missing.
-    let unresolved: Vec<String> = program.unresolved_labels();
-    program.section("unresolved_stubs");
-    for (idx, ext) in unresolved.iter().enumerate() {
-        program.label(ext);
-        if args.debug_unresolved_stubs {
-            // Debug-only visual-progress mode: treat unresolved profile-named
-            // symbols as a "no-op that advances the sub-task counter". The
-            // ScreenRoutines dispatcher reads NES $073C (SMS $C73C) and runs
-            // sub-tasks in sequence; incrementing lets the state machine move
-            // past missing work. This is intentionally opt-in because it can
-            // hide the real blocker on normal builds.
-            program.ld_hl_imm(0xC73C);
-            program.call("rt_inc_mem");
+        // Pre-declare runtime symbols (real bodies live in runtime/*.s;
+        // placeholders keep z80_emit patch resolution happy).
+        program.section("runtime_forward_decls");
+        for sym in RUNTIME_SYMBOLS {
+            program.label(sym);
             program.ret();
-        } else {
-            let id = idx as u16;
-            program.ld_a_imm((id & 0x00FF) as u8);
-            program.ld_abs_a(0xCB1B);
-            program.ld_a_imm((id >> 8) as u8);
-            program.ld_abs_a(0xCB1C);
-            program.jp("rt_unresolved_jsr");
         }
+
+        // External-call stubs: any label still referenced but not defined
+        // traps loudly via rt_unresolved_jsr (strict default).
+        let unresolved: Vec<String> = program.unresolved_labels();
+        program.section("unresolved_stubs");
+        for (idx, ext) in unresolved.iter().enumerate() {
+            program.label(ext);
+            if args.debug_unresolved_stubs {
+                // Debug-only visual-progress mode: no-op that advances the
+                // ScreenRoutines sub-task counter (NES $073C / SMS $C73C).
+                program.ld_hl_imm(0xC73C);
+                program.call("rt_inc_mem");
+                program.ret();
+            } else {
+                let id = idx as u16;
+                program.ld_a_imm((id & 0x00FF) as u8);
+                program.ld_abs_a(0xCB1B);
+                program.ld_a_imm((id >> 8) as u8);
+                program.ld_abs_a(0xCB1C);
+                program.jp("rt_unresolved_jsr");
+            }
+        }
+        Ok((program, lower_failures, unresolved))
+    };
+
+    let mut section_map: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut converged = None;
+    for _iteration in 0..8 {
+        let (prog, fails, unres) = emit_translated(&section_map)?;
+        let snapshot = prog.label_section_snapshot();
+        if snapshot == section_map {
+            converged = Some((prog, fails, unres));
+            break;
+        }
+        section_map = snapshot;
     }
+    let (mut program, lower_failures, unresolved) = converged.ok_or_else(|| {
+        Error::Diagnostic(
+            "translated section assignment did not converge within 8 iterations".to_string(),
+        )
+    })?;
 
     let mut build = program.finish()?;
     // Post-process the asm listing for WLA-DX:

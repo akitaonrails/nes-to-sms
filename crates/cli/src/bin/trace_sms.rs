@@ -630,6 +630,8 @@ struct SmsBus {
     /// Status byte returned by the next $BF read, used to distinguish injected
     /// frame IRQs (bit 7 set) from line IRQs (bit 7 clear).
     vdp_status_override: Option<u8>,
+    psg_writes: u64,
+    psg_log: Vec<u8>,
     /// VRAM 16 KiB and CRAM 32 B (for inspection if needed).
     vram: [u8; 0x4000],
     cram: [u8; 0x20],
@@ -864,6 +866,8 @@ impl SmsBus {
             io_log: Vec::new(),
             vdp_status_reads: 0,
             vdp_status_override: None,
+            psg_writes: 0,
+            psg_log: Vec::new(),
             vram: [0; 0x4000],
             cram: [0; 0x20],
             vdp_regs: [0; 16],
@@ -1787,6 +1791,14 @@ impl Bus for SmsBus {
         }
     }
     fn out_port(&mut self, port: u8, value: u8) {
+        // PSG writes ($40-$7F): log for audio-path diagnostics (F.5).
+        if (0x40..=0x7F).contains(&port) {
+            self.psg_writes += 1;
+            if self.psg_log.len() < 4096 {
+                self.psg_log.push(value);
+            }
+            return;
+        }
         match port & 0xC1 {
             // VDP data port $BE. SMS VDP codes after address-set:
             //   0=VRAM read, 1=VRAM write, 2=register write, 3=CRAM write.
@@ -3220,6 +3232,16 @@ fn main() {
         None => println!("   no: executed RAM at $C000-$FFFF"),
     }
     println!("VRAM writes: {}", bus.vram_writes);
+    println!(
+        "PSG writes: {} (first 96: {})",
+        bus.psg_writes,
+        bus.psg_log
+            .iter()
+            .take(96)
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     println!("CRAM writes: {}", bus.cram_writes);
     println!("VDP data-port writes: {}", bus.vdp_data_writes);
     println!("VDP control-port writes: {}", bus.vdp_control_writes);
