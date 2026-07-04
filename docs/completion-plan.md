@@ -826,6 +826,51 @@ Add discoveries that change priorities here, dated.
   defect class, (3) v1 visual polish, (4) audio Phase F, (5) CDL-based
   genericity proof with a second NROM game.
 
+### 2026-07-03 — Mednafen black-screen root causes found; title screen renders
+
+The user-facing acceptance test (run the ROM in stock Mednafen) showed a
+permanent black screen while `trace-sms` showed a full game. Diagnosed via a
+new savestate-forensics loop (headless Mednafen + xdotool F5 + a Python
+chunk parser for the `.mc*` format) plus boot progress markers and a
+`replay-state` tool that transplants Mednafen's exact machine state into
+`z80_emu`. Three generic platform bugs, all invisible to the lenient trace
+harness:
+
+1. **Reset vector overlap.** `reset_entry` (`di; im 1; ld sp; jp`) was 9
+   bytes; the `jp`'s last byte collided with the `.org $0008` RST trap — the
+   long-ignored wla `MEM_INSERT` warning. The winner of the byte conflict
+   varied by build. Fixed by shrinking the reset block to 6 bytes (SP init
+   moved into `boot_main`).
+2. **Spurious IRQ-handler entry during boot.** Mednafen was observed
+   accepting an interrupt a few instructions after reset's `di`. The
+   handler's unconditional `ei; ret` exit then left interrupts enabled for
+   the rest of boot; the per-frame handler (~0.5-3 frames of work) starved
+   the main thread so boot/init never completed. Fixed with a runtime-ready
+   flag (`$CB1B`): until boot's final step, irq_handler acks the VDP and
+   returns *without* `ei`.
+3. **Stack pushes reprogrammed the Sega mapper.** SP started at `$DFFE`;
+   the mapper registers `$FFFC-$FFFF` are RAM-mirrored at `$DFFC-$DFFF`
+   (Mednafen honors mapper writes on the mirror), so every top-level `call`
+   rewrote the slot-0/SRAM bank registers under the running code. This is
+   why real SMS software conventionally sets SP=`$DFF0`. Fixed: SP=`$DFF0`;
+   `trace-sms` now models the mirror so this class can't hide again.
+
+Also added this session: frame-overrun pacing in `irq_handler` (ack any
+already-pending frame INT before exit so an over-budget handler still
+yields the main thread one clean frame per cycle), per-frame handler cost
+accounting in `trace-sms` (`frame_handler_cost`/`frame_budget` summary
+lines), an opt-in `DEBUG_BORDER_HEARTBEAT` in boot.s, and the
+`replay-state` diagnostic binary.
+
+**Result: stock Mednafen now renders the full SMB title screen** (logo,
+menu, HUD, Mario idle scene) from the generated ROM — first external-
+emulator rendering in project history. Timing: title appears after ~15 s
+wall (vs ~1 s on NES), consistent with the measured ~8.7× average NMI
+budget overrun; the speed story remains the Phase-G/optimization-findings
+overclock discussion. Measured with the new accounting: median frame
+handler cost 523K approx-cycles vs the 59,736-cycle NTSC budget; 99.7% of
+route frames over budget.
+
 ---
 
 ## Recently fixed (this turn)

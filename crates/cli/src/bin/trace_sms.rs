@@ -981,6 +981,31 @@ impl SmsBus {
         *self.rom.get(i).unwrap_or(&0xFF)
     }
 
+    /// Apply a Sega mapper register write. `addr` is the canonical register
+    /// address ($FFFC-$FFFF); callers translate mirror addresses first.
+    fn apply_mapper_write(&mut self, addr: u16, value: u8) {
+        match addr {
+            0xFFFC => {
+                self.mapper_control = value;
+                self.io_log.push(format!("mapper ctrl=${value:02X}"));
+                self.bank_writes.push((0xFFFC, value));
+            }
+            0xFFFD => {
+                self.slot_bank[0] = value;
+                self.bank_writes.push((0xFFFD, value));
+            }
+            0xFFFE => {
+                self.slot_bank[1] = value;
+                self.bank_writes.push((0xFFFE, value));
+            }
+            0xFFFF => {
+                self.slot_bank[2] = value;
+                self.bank_writes.push((0xFFFF, value));
+            }
+            _ => {}
+        }
+    }
+
     fn slot2_cart_ram_offset(&self, addr: u16) -> Option<usize> {
         if !(0x8000..=0xBFFF).contains(&addr) || self.mapper_control & 0x08 == 0 {
             return None;
@@ -1709,27 +1734,24 @@ impl Bus for SmsBus {
                 if self.watches_write(addr) {
                     self.watch_log.push(self.watch_entry(addr, value));
                 }
+                // Sega mapper registers are RAM-mirrored: Mednafen (and the
+                // usual SMS Plus lineage) applies mapper writes on the
+                // $DFFC-$DFFF mirror as well as $FFFC-$FFFF. Model that here
+                // so stack/data traffic near the top of RAM can't silently
+                // pass in the trace harness while reprogramming banks on a
+                // real emulator (2026-07-03 Mednafen black-screen root cause).
+                if addr >= 0xDFFC {
+                    self.apply_mapper_write(addr | 0x2000, value);
+                }
             }
             0xE000..=0xFFFB => {
                 self.ram[(addr - 0xE000) as usize] = value;
                 self.record_ram_migration_access(addr - 0x2000, RamMigrationAccessKind::Write);
             }
-            0xFFFC => {
-                self.mapper_control = value;
-                self.io_log.push(format!("mapper ctrl=${value:02X}"));
-                self.bank_writes.push((0xFFFC, value));
-            }
-            0xFFFD => {
-                self.slot_bank[0] = value;
-                self.bank_writes.push((0xFFFD, value));
-            }
-            0xFFFE => {
-                self.slot_bank[1] = value;
-                self.bank_writes.push((0xFFFE, value));
-            }
-            0xFFFF => {
-                self.slot_bank[2] = value;
-                self.bank_writes.push((0xFFFF, value));
+            0xFFFC..=0xFFFF => {
+                // Mapper registers also write through to the RAM mirror.
+                self.ram[(addr - 0xE000) as usize] = value;
+                self.apply_mapper_write(addr, value);
             }
         }
     }
@@ -2739,6 +2761,11 @@ fn main() {
     let mut line_irq_at: Option<usize> = None;
     let mut irqs_fired = 0usize;
     let mut line_irqs_fired = 0usize;
+    // Per-frame handler cost: approx cycles from frame-IRQ injection until
+    // IFF1 re-enables (the translated NMI's `ei` path). Line-IRQ handler
+    // cost is not attributed here. Used to budget against real SMS timing.
+    let mut frame_cost_start: Option<u64> = None;
+    let mut frame_costs: Vec<u64> = Vec::new();
     let mut next_button_event = 0usize;
     let mut next_checkpoint = 0usize;
     let mut checkpoint_dump_failed = false;
@@ -3080,6 +3107,7 @@ fn main() {
             cpu.iff2 = false;
             cpu.halted = false;
             irqs_fired += 1;
+            frame_cost_start = Some(cpu.cycles);
             next_irq_at = next_irq_at.saturating_add(IRQ_PERIOD);
         }
 
@@ -3092,6 +3120,12 @@ fn main() {
         match cpu.step(&mut bus) {
             Ok(()) => {
                 taken += 1;
+                if let Some(start) = frame_cost_start
+                    && cpu.iff1
+                {
+                    frame_costs.push(cpu.cycles.saturating_sub(start));
+                    frame_cost_start = None;
+                }
                 let materializer_vdp_writes = bus
                     .vdp_data_writes
                     .saturating_sub(materializer_vdp_writes_before);
@@ -3136,6 +3170,36 @@ fn main() {
     }
     if let Some(at) = interrupt_at_step {
         println!("injected IRQ at step {at}");
+    }
+    if !frame_costs.is_empty() {
+        // NTSC SMS: 59,736 T-states per frame. A handler that exceeds the
+        // full frame budget cannot keep 60 fps on real hardware/Mednafen.
+        const FRAME_BUDGET_CYCLES: u64 = 59_736;
+        let mut sorted = frame_costs.clone();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        let pct = |p: usize| sorted[(n - 1) * p / 100];
+        let avg = sorted.iter().sum::<u64>() / n as u64;
+        let over: usize = sorted.iter().filter(|&&c| c > FRAME_BUDGET_CYCLES).count();
+        let worst_ratio = *sorted.last().unwrap() as f64 / FRAME_BUDGET_CYCLES as f64;
+        println!(
+            "frame_handler_cost approx_cycles: frames={} min={} p50={} avg={} p90={} p99={} max={}",
+            n,
+            sorted[0],
+            pct(50),
+            avg,
+            pct(90),
+            pct(99),
+            sorted[n - 1]
+        );
+        println!(
+            "frame_budget: budget={} over_budget_frames={} ({:.1}%) worst_frame={:.2}x avg={:.2}x",
+            FRAME_BUDGET_CYCLES,
+            over,
+            over as f64 * 100.0 / n as f64,
+            worst_ratio,
+            avg as f64 / FRAME_BUDGET_CYCLES as f64
+        );
     }
     println!("\nMilestones:");
     print_milestone("entered translated slot-1 code", first_translated_step);
@@ -4993,10 +5057,7 @@ fn format_raw_ciram_backend(bus: &SmsBus) -> String {
         .count();
     format!(
         "raw_ciram_backend=sram_slot2 base=$8000 size=2048 mapper_ctrl=${:02X} reads={} writes={} ciram_nonzero={} caveat=standard_sega_mapper_sram_scaffold",
-        bus.mapper_control,
-        bus.cart_ram_reads,
-        bus.cart_ram_writes,
-        ciram_nonzero
+        bus.mapper_control, bus.cart_ram_reads, bus.cart_ram_writes, ciram_nonzero
     )
 }
 
@@ -5459,8 +5520,10 @@ fn format_cc_folded_s_dependency(bus: &SmsBus) -> String {
         other_reads[1],
         other_writes[0],
         other_writes[1],
-        bus.cc_folded_s_max_frame_reads.max(bus.cc_folded_s_frame_reads),
-        bus.cc_folded_s_max_frame_writes.max(bus.cc_folded_s_frame_writes),
+        bus.cc_folded_s_max_frame_reads
+            .max(bus.cc_folded_s_frame_reads),
+        bus.cc_folded_s_max_frame_writes
+            .max(bus.cc_folded_s_frame_writes),
         format_pc_count_top(&bus.cc_folded_s_read_pc_counts),
         format_pc_count_top(&bus.cc_folded_s_write_pc_counts),
         reclaim
@@ -5880,7 +5943,11 @@ fn write_checkpoint_sat_diagnostics<W: std::io::Write>(
         "sat_tail: y_not_d0_after_terminator={} xtile_nonzero_after_terminator={}",
         tail_y_not_d0, tail_xtile_nonzero
     )?;
-    writeln!(f, "{}", format_sprite_fallback_demand(bus, active, sprite_base))?;
+    writeln!(
+        f,
+        "{}",
+        format_sprite_fallback_demand(bus, active, sprite_base)
+    )?;
 
     for i in 0..active.min(24) {
         let y = bus.vram[0x3F00 + i];
@@ -6561,9 +6628,11 @@ mod tests {
             materializer_prioritized_workset(&bus, ExpectedMirroring::Vertical, (0, 0), (1, 0))
                 .unwrap();
         assert_eq!(workset[0].key, 31); // entering right edge comes before dirty cell 0
-        assert!(workset
-            .iter()
-            .any(|cell| cell.key == 0 && cell.reason & 0x01 != 0));
+        assert!(
+            workset
+                .iter()
+                .any(|cell| cell.key == 0 && cell.reason & 0x01 != 0)
+        );
     }
 
     #[test]
@@ -6832,8 +6901,10 @@ mod tests {
         let _ = bus.read(0xD300);
         bus.write(0xD300, 0x01);
 
-        assert!(format_ram_migration_dependency(&bus)
-            .contains("d300_reclaim=ready_if_no_true_consumers"));
+        assert!(
+            format_ram_migration_dependency(&bus)
+                .contains("d300_reclaim=ready_if_no_true_consumers")
+        );
     }
 
     #[test]

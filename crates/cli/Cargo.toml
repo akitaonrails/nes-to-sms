@@ -31,3 +31,7 @@ sms_project = { workspace = true }
 oracle_6502 = { workspace = true }
 z80_emu = { workspace = true }
 validation = { workspace = true }
+
+[[bin]]
+name = "replay-state"
+path = "src/bin/replay_state.rs"

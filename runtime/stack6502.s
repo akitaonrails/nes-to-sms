@@ -6,7 +6,7 @@
 ; pop increments S before read.
 ;
 ; NOTE: These routines touch the EMULATED 6502 stack only.
-; The Z80 native stack (at $DFFE growing down) is completely separate.
+; The Z80 native stack (at $DFF0 growing down) is completely separate.
 ; JSR/RTS use the Z80 native CALL/RET — not these routines.
 ; Only 6502 PHA, PHP, PLA, PLP use these.
 

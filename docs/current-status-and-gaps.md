@@ -70,6 +70,20 @@ it still remains far from a complete game translation.
   Mednafen playability at speed is not yet demonstrated; measurement and a
   performance burn-down are the next work items, ahead of audio.
 
+### 2026-07-03 Snapshot (evening) — first external-emulator rendering
+
+- Stock Mednafen now renders the SMB title screen from the generated ROM.
+  Three generic runtime/platform bugs were fixed (reset-vector overlap at
+  `$0008`, spurious-IRQ `ei` leakage during boot, and SP=`$DFFE` stack
+  pushes hitting the Sega mapper's `$DFFC-$DFFF` RAM mirror). See the
+  2026-07-03 working note in [`completion-plan.md`](completion-plan.md).
+- `trace-sms` gained per-frame handler cost accounting and now models the
+  mapper-register RAM mirror; a new `replay-state` binary can transplant a
+  Mednafen savestate into `z80_emu` for forensic replay.
+- Game speed in Mednafen is ~8.7× slow (measured), as predicted by
+  `optimization-findings.md`; full-speed play still requires an
+  overclock-capable emulator (GPGX/MAME) or future paced-frame design.
+
 ## What We Have
 
 ### ROM and Asset Extraction

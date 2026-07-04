@@ -32,11 +32,16 @@
 ;   $CB11        PPUDATA read buffer
 ;   $CB12        Synthetic sprite-0 phase for PPUSTATUS bit 6
 ;   $CB1A        Translated NMI has been enabled at least once
+;   $CB1B        Runtime-ready flag: 0 during boot; 1 once irq_handler may work
 ;   $CB20-$CB24  Split-scroll scheduler state (see runtime/ppu.s)
 ;   $CB80-$CBFF  Raw mirrored NES attribute shadow (2 CIRAM pages × 64 bytes)
 ;   $CB13-$CB1F  13-byte scratch ("temp w")
 ;   $CB1D        Runtime trap marker for trace-sms diagnostics
-;   Z80 SP lives at $DFFE, grows down — never touches $C100-$C1FF.
+;   Z80 SP lives at $DFF0, grows down — never touches $C100-$C1FF.
+;   SP must stay below $DFFC: the Sega mapper registers $FFFC-$FFFF are
+;   RAM-mirrored at $DFFC-$DFFF, so stack pushes at $DFFC-$DFFF reprogram
+;   slot-0/SRAM banking under the running code (observed under Mednafen;
+;   the standard SMS convention is SP=$DFF0 for exactly this reason).
 
 .define VDP_R0_BASE            $66   ; Mode 4 + top-row hscroll lock + left blank
 .define VDP_R0_LINE_IRQ_ON     $76   ; VDP_R0_BASE + IE1 line IRQ enable
@@ -45,12 +50,15 @@
 .org $0000
 
 reset_entry:
+  ; Must fit in $0000-$0007: the RST $08 trap is at $0008, and a 9-byte
+  ; reset block overlaps it (wla-z80's MEM_INSERT warning; the collision
+  ; corrupted the RST-08 trap bytes in earlier builds). SP init moved to
+  ; boot_main to keep this block at 6 bytes.
   di
   im 1
-  ld sp, $dffe
   jp boot_main
 
-; Padding bytes between $0003 and $0008 are handled by the linker filling
+; Padding bytes between $0006 and $0008 are handled by the linker filling
 ; with $FF (ROM erased value).  WLA-DX will fill the gap automatically.
 
 .org $0008
@@ -97,6 +105,19 @@ reset_entry:
 .section "boot_main" free
 
 boot_main:
+  ld  sp, $dff0               ; native Z80 stack; below the $DFFC-$DFFF
+                              ; mapper-register RAM mirror (see header note)
+
+  ; Mark the runtime NOT ready: until boot finishes, any IRQ-handler entry
+  ; (spurious RST $38, emulator power-on IFF quirks, stray VDP INT) must be
+  ; acknowledged and ignored WITHOUT re-enabling interrupts. Mednafen was
+  ; observed accepting an interrupt a few instructions into boot despite the
+  ; reset DI; the handler's unconditional `ei` exit then kept interrupts
+  ; enabled for the whole boot, and the per-frame handler starved boot and
+  ; translated init forever (black screen). See docs/completion-plan.md.
+  xor a
+  ld  ($cb1b), a
+
   ; Initialize standard Sega mapper registers explicitly. This keeps emulators
   ; on the Sega mapper path before any optional slot-2 SRAM use.
   xor a
@@ -271,6 +292,8 @@ boot_main:
   ld   a, :translated_reset
   ld   ($fffe), a            ; map slot 1 ($4000-$7FFF) to this bank
   ld   ($cb14), a            ; mirror in bank shadow for rt_far_call
+  ld   a, $01
+  ld   ($cb1b), a            ; runtime ready: irq_handler may do real work
   ei                          ; now safe: slot 1 has translated code
   jp   $4000                  ; logical slot-1 address of translated_reset
 
@@ -290,6 +313,25 @@ irq_handler:
   ; Bit 7 clear means a non-frame VDP IRQ; the only one we enable is the
   ; one-shot line split below.
   in  a, ($bf)
+
+  ; Runtime-ready gate: if boot has not finished, this entry is spurious
+  ; (stray RST $38 through linker fill bytes, emulator power-on IFF quirks,
+  ; or a VDP INT that predates our setup). The status read above already
+  ; acknowledged the VDP; leave WITHOUT `ei` so a spurious entry cannot
+  ; enable interrupts behind boot's back.
+  push af
+  ld  a, ($cb1b)
+  or  a
+  jr  nz, _irq_runtime_ready
+  pop af
+  pop de
+  pop bc
+  pop hl
+  pop af
+  ret
+
+_irq_runtime_ready:
+  pop af
   bit 7, a
   jp  z, _irq_line_scroll_split
 
@@ -304,6 +346,18 @@ irq_handler:
   ; Signal "VBlank pending" to translated code that polls $2002.
   ld  a, $01
   ld  ($cb05), a
+
+.ifdef DEBUG_BORDER_HEARTBEAT
+  ; Diagnostic (assemble with -D DEBUG_BORDER_HEARTBEAT): cycle the border
+  ; color (VDP reg 7) with the frame counter so even an all-black screen
+  ; proves in a real emulator that the frame IRQ handler is alive. Used to
+  ; bisect the 2026-07-03 Mednafen black-screen investigation.
+  ld  a, ($cb04)
+  and $0f
+  out ($bf), a
+  ld  a, $87
+  out ($bf), a
+.endif
 
   ; Start each translated NMI before the approximated sprite-0 hit point.
   ; SMB first waits for PPUSTATUS bit 6 to clear, then waits for it to set.
@@ -372,6 +426,19 @@ _irq_skip_translated_nmi:
   call rt_sat_upload
   call _apply_frame_scroll
   call vbuf_flush
+
+  ; Frame-overrun pacing. The VDP frame interrupt is level-held: if this
+  ; handler ran longer than one video frame (heavy translated NMIs do), the
+  ; next frame INT is already pending and would re-enter the handler on the
+  ; very next instruction after `ei; ret`, starving the main thread forever
+  ; (observed as SMB's reset code never finishing init under Mednafen).
+  ; Reading the status port acknowledges any pending frame INT, guaranteeing
+  ; the main thread one full frame of CPU between handler runs. When the
+  ; handler fits its frame budget this read happens during VBlank before a
+  ; line INT can be pending, so nothing is lost. Trade-off: if the handler
+  ; overruns past an armed line-split scanline, that frame's split is
+  ; swallowed — acceptable, since an overrun frame is already out of spec.
+  in  a, ($bf)
 
   pop de
   pop bc
