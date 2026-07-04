@@ -956,6 +956,36 @@ fn main() {
     );
     let (ref_init, ref_snaps) = run_reference(prg, image.chr.to_vec(), frames, &timeline);
 
+    // FD_REF_ONLY=1: print a compact per-frame reference trajectory for
+    // authoring/recalibrating input scripts against real-NES dynamics
+    // (player page:x, y, state, lives, world/level/area, OperMode/task),
+    // then exit without running the subject. Emits a line every 16 frames
+    // and on every OperMode/task/state/lives change.
+    if std::env::var("FD_REF_ONLY").is_ok() {
+        let mut last = (0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8);
+        for (f, s) in ref_snaps.iter().enumerate() {
+            let key = (s[0x0770], s[0x0772], s[0x000E], s[0x075A]);
+            if f % 16 == 0 || key != last {
+                println!(
+                    "f={f:4} mode={:02X} task={:02X} x={:02X}:{:02X} y={:02X} yspd={:02X} state={:02X} lives={:02X} wla={:02X}{:02X}{:02X}",
+                    s[0x0770],
+                    s[0x0772],
+                    s[0x006D],
+                    s[0x0086],
+                    s[0x00CE],
+                    s[0x009F],
+                    s[0x000E],
+                    s[0x075A],
+                    s[0x075F],
+                    s[0x075C],
+                    s[0x0760],
+                );
+                last = key;
+            }
+        }
+        return;
+    }
+
     // Report reference progression of key game-state vars.
     println!("frame | $0770 $0772 $0773 $0772.. (operation/task)");
     let mut last_770 = 0xFFu8;

@@ -946,6 +946,22 @@ reference) is the remaining step to restore the trace-sms route gate:
 with full parity, the old script faithfully reproduces the death the
 real NES suffers under it.
 
+**Route re-recorded (same day): trace-sms gate green again.**
+`frame-diff` gained `FD_REF_ONLY=1` — a compact per-frame reference
+trajectory printer (player page:x, y, state, lives, world/level/area) —
+which turns script authoring into a fast iterate-on-the-NES loop. The
+old script's first death (goomba pair at x=$0799/$07D8, reached with a
+jump timing that the coin-block bounce fix invalidated) was fixed with
+a retimed double jump (frames 1698/1745); input is released at 3950
+after the flag grab (~3949) and a single hop at 4876 dodges 1-2's first
+goomba so Mario idles safely at the 1-2 start. `trace-sms` now counts
+script/checkpoint frames from SMB's NMI enable ($CB08 bit 7) — the same
+convention as frame-diff — so one recorded script drives both harnesses
+identically regardless of boot length. New route expectations:
+`$075C=01` (level 2), `$0760=02` (area), `$075A=02` (no deaths); all
+green plus no-trap on the current build. Checkpoints retimed
+(3940 flagpole, 4700 post-transition-1-2).
+
 ---
 
 ## Recently fixed (this turn)

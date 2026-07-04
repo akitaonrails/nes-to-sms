@@ -2768,6 +2768,8 @@ fn main() {
     let mut frame_costs: Vec<u64> = Vec::new();
     let mut next_button_event = 0usize;
     let mut next_checkpoint = 0usize;
+    // Frame at which SMB first enabled NMI; scripts count from here.
+    let mut script_frame_base: Option<usize> = None;
     let mut checkpoint_dump_failed = false;
     let mut prev_frame_step = 0usize;
     let mut prev_frame_vram_writes = 0u32;
@@ -2922,14 +2924,22 @@ fn main() {
         // Right before injecting the next IRQ, snapshot the framebuffer
         // so we can see how the screen evolves frame by frame.
         if inject_irq && step >= next_irq_at && cpu.iff1 {
+            // Script frames count from SMB's NMI enable ($CB08 bit 7) — the
+            // same convention frame-diff uses — so one recorded script
+            // drives both harnesses identically regardless of how many
+            // boot-time IRQ frames precede translated init.
+            if script_frame_base.is_none() && bus.ram[0x0B08] & 0x80 != 0 {
+                script_frame_base = Some(irqs_fired);
+            }
+            let script_frame = script_frame_base.map(|base| irqs_fired - base);
             while next_button_event < button_events.len()
-                && irqs_fired >= button_events[next_button_event].0
+                && script_frame.is_some_and(|f| f >= button_events[next_button_event].0)
             {
                 bus.controller_port_dc = button_events[next_button_event].1;
                 next_button_event += 1;
             }
             if let (Some(frame), Some(port)) = (buttons_after_frame, delayed_controller_port_dc) {
-                if irqs_fired >= frame {
+                if script_frame.is_some_and(|f| f >= frame) {
                     bus.controller_port_dc = port;
                 }
             }
@@ -2939,7 +2949,7 @@ fn main() {
                 let _ = dump_framebuffer_ppm(&bus, &path);
             }
             while next_checkpoint < checkpoints.len()
-                && irqs_fired >= checkpoints[next_checkpoint].frame
+                && script_frame.is_some_and(|f| f >= checkpoints[next_checkpoint].frame)
             {
                 let checkpoint = &checkpoints[next_checkpoint];
                 if let Err(err) = dump_route_checkpoint(

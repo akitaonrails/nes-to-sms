@@ -41,17 +41,21 @@ target/release/trace-sms out/smb/sms.sms --steps 301000000 \
   --checkpoint-script profiles/smb/acceptance/1-1-clear.checkpoints \
   --checkpoint-dir out/smb/checkpoints/1-1-clear \
   --expect-no-trap \
-  --expect-ram 0x0760=01 \
   --expect-ram 0x075C=01 \
-  --expect-ram 0x000E=07
+  --expect-ram 0x0760=02 \
+  --expect-ram 0x075A=02
 ```
 
-The expectations assert that the route did not hit the unresolved-runtime trap
-and reached the expected post-1-1 transition state (`area=1`, `level=1`, player
-state `$0E=07`).
+The expectations assert that the route did not hit the unresolved-runtime
+trap and reached the expected post-1-1 state: LevelNumber `$075C=01`
+(second level), AreaNumber `$0760=02`, and both lives intact
+(`$075A=02` — the route clears 1-1 and idles at the 1-2 start without
+dying). The script was re-recorded 2026-07-04 against the frame-diff NES
+reference after the translation reached byte-for-byte parity; the old
+script encoded pre-parity buggy behavior and dies on a real NES.
 
 The checkpoint directory should contain inspectable route artifacts such as
-`00060_title-before-start.ppm` / `.txt` through `04900_post-transition.ppm` /
+`00060_title-before-start.ppm` / `.txt` through `04700_post-transition-1-2.ppm` /
 `.txt`.
 
 ## Shared route semantic diff
