@@ -119,6 +119,15 @@ boot_main:
   xor a
   ld  ($cb28), a
 
+  ; I/O port control: configure both controller ports as inputs (TR/TH
+  ; lines included). Real SMS games write $3F=$FF at boot; without it,
+  ; emulators that model the I/O control register (Mednafen) can return
+  ; forced-output levels on port $DC reads and controller input is dead.
+  ; trace-sms does not model port $3F, which is why this never showed
+  ; in the harness.
+  ld  a, $ff
+  out ($3f), a
+
   ; Initialize standard Sega mapper registers explicitly. This keeps emulators
   ; on the Sega mapper path before any optional slot-2 SRAM use.
   xor a
