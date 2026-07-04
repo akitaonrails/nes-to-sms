@@ -540,10 +540,22 @@ Do not close them by adding ordinary gameplay roots. This phase starts by
 deciding the generic audio boundary, then either translating the sound engine
 through an APU shim or replacing it with a profile/runtime-owned PSG event path.
 
-- [ ] **F.0 Sound boundary decision.** Choose and document whether v1 audio is:
+- [x] **F.0 Sound boundary decision.** Choose and document whether v1 audio is:
       (a) translated NES sound engine plus a generic APU-write shim, or
       (b) profile/runtime replacement that emits PSG events directly. The choice
       must apply to NROM games generally, not only SMB.
+
+      **Outcome (2026-07-04):** option (a). Full research + channel mapping +
+      shim architecture + validation strategy in
+      [`audio-plan.md`](audio-plan.md). Key findings: the SMS PSG clock is
+      exactly 2× the NES CPU clock, so NES pulse periods convert bit-exactly
+      (`N = P+1`; triangle `N = 2(P+1)` with octave-fold below ~109 Hz);
+      the sound engine is the only profile `[[replacement]]`, so deleting the
+      `rt_sound_stub` entry lets it translate through the normal pipeline and
+      brings its RAM under the frame-diff parity gate (drop
+      `FD_EXCLUDE_AUDIO`); the runtime APU shim emulates envelopes, length
+      counters and sweeps at 4/2 ticks per frame and diffs a PSG cache to
+      write only changes to port $7F.
 
       **Acceptance:** remaining `$F3xx-$F6xx` labels are either intentionally
       translated as part of the chosen sound-engine path or remain explicitly
