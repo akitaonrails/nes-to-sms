@@ -66,30 +66,30 @@ impl Bus for FlatBus {
 /// compare optimizations against the SMS ~59,736-cycle frame budget.
 fn approx_cycles(op: u8) -> u32 {
     match op {
-        0x76 => 4,                                      // halt (before the (hl) range)
-        0xCD => 17,                                     // call nn
+        0x76 => 4,  // halt (before the (hl) range)
+        0xCD => 17, // call nn
         0xC4 | 0xCC | 0xD4 | 0xDC | 0xE4 | 0xEC | 0xF4 | 0xFC => 14, // call cc (avg)
-        0xC9 => 10,                                     // ret
+        0xC9 => 10, // ret
         0xC0 | 0xC8 | 0xD0 | 0xD8 | 0xE0 | 0xE8 | 0xF0 | 0xF8 => 8, // ret cc (avg)
-        0xC3 => 10,                                     // jp nn
+        0xC3 => 10, // jp nn
         0xC2 | 0xCA | 0xD2 | 0xDA | 0xE2 | 0xEA | 0xF2 | 0xFA => 10, // jp cc
-        0x18 => 12,                                     // jr
-        0x20 | 0x28 | 0x30 | 0x38 => 10,                // jr cc (avg taken/not)
-        0xC5 | 0xD5 | 0xE5 | 0xF5 => 11,                // push rr
-        0xC1 | 0xD1 | 0xE1 | 0xF1 => 10,                // pop rr
-        0x3A | 0x32 => 13,                              // ld a,(nn) / ld (nn),a
-        0x2A | 0x22 => 16,                              // ld hl,(nn) / ld (nn),hl
-        0x36 => 10,                                     // ld (hl),n
-        0x34 | 0x35 => 11,                              // inc/dec (hl)
+        0x18 => 12, // jr
+        0x20 | 0x28 | 0x30 | 0x38 => 10, // jr cc (avg taken/not)
+        0xC5 | 0xD5 | 0xE5 | 0xF5 => 11, // push rr
+        0xC1 | 0xD1 | 0xE1 | 0xF1 => 10, // pop rr
+        0x3A | 0x32 => 13, // ld a,(nn) / ld (nn),a
+        0x2A | 0x22 => 16, // ld hl,(nn) / ld (nn),hl
+        0x36 => 10, // ld (hl),n
+        0x34 | 0x35 => 11, // inc/dec (hl)
         0x46 | 0x4E | 0x56 | 0x5E | 0x66 | 0x6E | 0x7E => 7, // ld r,(hl)
-        0x70..=0x77 => 7,                               // ld (hl),r
+        0x70..=0x77 => 7, // ld (hl),r
         0x86 | 0x8E | 0x96 | 0x9E | 0xA6 | 0xAE | 0xB6 | 0xBE => 7, // alu a,(hl)
-        0x0A | 0x1A | 0x02 | 0x12 => 7,                 // ld a,(bc/de), ld (bc/de),a
-        0x01 | 0x11 | 0x21 | 0x31 => 10,                // ld rr,nn
-        0xCB => 11,                                     // CB prefix (bit/rot reg=8, (hl)=12-15)
-        0xED => 14,                                     // ED prefix (avg)
-        0xDD | 0xFD => 15,                              // IX/IY prefix (avg)
-        _ => 5,                                         // reg ops, ld r,r, alu a,r, inc/dec r, imm
+        0x0A | 0x1A | 0x02 | 0x12 => 7, // ld a,(bc/de), ld (bc/de),a
+        0x01 | 0x11 | 0x21 | 0x31 => 10, // ld rr,nn
+        0xCB => 11, // CB prefix (bit/rot reg=8, (hl)=12-15)
+        0xED => 14, // ED prefix (avg)
+        0xDD | 0xFD => 15, // IX/IY prefix (avg)
+        _ => 5,     // reg ops, ld r,r, alu a,r, inc/dec r, imm
     }
 }
 

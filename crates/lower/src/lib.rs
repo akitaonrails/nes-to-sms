@@ -1425,14 +1425,8 @@ fn match_copy_loop(
     let src_sms_base = src_base_sms(src_b, src_r)?;
     let dst_sms_base = dst_base_sms(dst_b, dst_r)?;
     // Step op (INC/DEC matching idx) then optional CMP then branch.
-    let ascending = matches!(
-        (ops.get(c)?, want_x),
-        (Op::Inx, true) | (Op::Iny, false)
-    );
-    let descending = matches!(
-        (ops.get(c)?, want_x),
-        (Op::Dex, true) | (Op::Dey, false)
-    );
+    let ascending = matches!((ops.get(c)?, want_x), (Op::Inx, true) | (Op::Iny, false));
+    let descending = matches!((ops.get(c)?, want_x), (Op::Dex, true) | (Op::Dey, false));
     if !ascending && !descending {
         return None;
     }
@@ -1600,25 +1594,27 @@ pub fn lower_routine(
     // ops, it is immediately followed by ≥1 BranchIf reading flags it sets
     // (per `map`), and those flags are dead after the run (so skipping the
     // shadow-P write is sound). Helper: returns the run end if fusable.
-    let scan_run = |i: usize, map: fn(&ir::Cond) -> Option<Z80Cond>, dead_mask: u8| -> Option<usize> {
-        let mut j = i + 1;
-        let mut saw_branch = false;
-        while j < ops_slice.len() {
-            match &ops_slice[j] {
-                Op::Source { .. } => j += 1,
-                Op::BranchIf { cond, .. } if map(cond).is_some() => {
-                    saw_branch = true;
-                    j += 1;
+    let scan_run =
+        |i: usize, map: fn(&ir::Cond) -> Option<Z80Cond>, dead_mask: u8| -> Option<usize> {
+            let mut j = i + 1;
+            let mut saw_branch = false;
+            while j < ops_slice.len() {
+                match &ops_slice[j] {
+                    Op::Source { .. } => j += 1,
+                    Op::BranchIf { cond, .. } if map(cond).is_some() => {
+                        saw_branch = true;
+                        j += 1;
+                    }
+                    _ => break,
                 }
-                _ => break,
             }
-        }
-        if saw_branch && !flags_live_after(ops_slice, j - 1, dead_mask, opts.routine_flag_reads) {
-            Some(j)
-        } else {
-            None
-        }
-    };
+            if saw_branch && !flags_live_after(ops_slice, j - 1, dead_mask, opts.routine_flag_reads)
+            {
+                Some(j)
+            } else {
+                None
+            }
+        };
 
     // `fuse_cmp_end`/`fuse_nz_end`: producer index → run end (exclusive).
     // CMP fuses to a native `cp`; LDA fuses to the load + `or a`. Both
@@ -1657,9 +1653,10 @@ pub fn lower_routine(
         }
         let (end, target) = match &ops_slice[i] {
             // CMP sets N/Z/C; all three must be dead after the run.
-            Op::CmpImm(_) | Op::CmpMem { .. } => {
-                (scan_run(i, cmp_cond_to_z80, F_N | F_Z | F_C), &mut fuse_cmp_end)
-            }
+            Op::CmpImm(_) | Op::CmpMem { .. } => (
+                scan_run(i, cmp_cond_to_z80, F_N | F_Z | F_C),
+                &mut fuse_cmp_end,
+            ),
             // LDA/AND/ORA/EOR (imm) set only N/Z (C/V untouched, stay valid
             // in shadow P). AND/ORA/EOR set Z80 flags directly; LDA needs a
             // trailing `or a` (added at emit time).
@@ -2890,15 +2887,27 @@ mod tests {
     fn add16_lifts_to_native() {
         let zp = |z| ir::AddrExpr::ZpConst(z);
         let build = lower_and_finish(vec![
-            Op::LdaMem { addr: zp(0x86), region: MemRegion::ZeroPage },
+            Op::LdaMem {
+                addr: zp(0x86),
+                region: MemRegion::ZeroPage,
+            },
             Op::Clc,
             Op::AdcImm(0x01),
-            Op::StaMem { addr: zp(0x86), region: MemRegion::ZeroPage },
-            Op::LdaMem { addr: zp(0x6D), region: MemRegion::ZeroPage },
+            Op::StaMem {
+                addr: zp(0x86),
+                region: MemRegion::ZeroPage,
+            },
+            Op::LdaMem {
+                addr: zp(0x6D),
+                region: MemRegion::ZeroPage,
+            },
             Op::AdcImm(0x00),
-            Op::StaMem { addr: zp(0x6D), region: MemRegion::ZeroPage },
-            Op::Clv,        // kills V
-            Op::CmpImm(0),  // kills N/Z/C
+            Op::StaMem {
+                addr: zp(0x6D),
+                region: MemRegion::ZeroPage,
+            },
+            Op::Clv,       // kills V
+            Op::CmpImm(0), // kills N/Z/C
             Op::Rts,
         ]);
         // native add a,$01 (C6 01) and adc a,$00 (CE 00); no rt_adc_a.

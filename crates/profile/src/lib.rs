@@ -402,8 +402,9 @@ targets = ["B"]
 "#;
         let err = load_from_str(s).expect_err("duplicate caller should fail");
         assert!(matches!(err, LoadError::Validation(_)));
-        assert!(err
-            .to_string()
-            .contains("duplicate jump_engine caller $8000"));
+        assert!(
+            err.to_string()
+                .contains("duplicate jump_engine caller $8000")
+        );
     }
 }
