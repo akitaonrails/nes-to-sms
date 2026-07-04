@@ -41,7 +41,25 @@
 .section "ppu" free
 
 ; ─── rt_ppu_write ─────────────────────────────────────────────────────────────
+; VDP critical section: translated code calls this from the main thread
+; while the frame IRQ handler also writes VDP ports. rt_vdp_lock keeps the
+; handler from interleaving with the control-port pairs / data bursts the
+; register paths below may emit (see runtime/vdp.s).
 rt_ppu_write:
+  push af                   ; save value argument + caller flags
+  ld   a, i                 ; P/V := IFF2 (1 = interrupts enabled)
+  di                        ; atomic vs the frame IRQ handler from here
+  jp   po, _pw_was_disabled
+  pop  af
+  call _rt_ppu_write_body
+  ei                        ; restore: interrupts were enabled at entry
+  ret
+_pw_was_disabled:
+  pop  af
+  call _rt_ppu_write_body
+  ret                       ; leave interrupts off (handler/nested context)
+
+_rt_ppu_write_body:
   push hl
   push de
   push bc
@@ -459,6 +477,19 @@ _ppu_w_done:
 ; Entry: B = register index (0..7).
 ; Exit:  A = value.
 rt_ppu_read:
+  push af
+  ld   a, i                 ; P/V := IFF2
+  di
+  jp   po, _pr_was_disabled
+  pop  af
+  call _rt_ppu_read_body
+  ei
+  ret
+_pr_was_disabled:
+  pop  af
+  call _rt_ppu_read_body
+  ret
+_rt_ppu_read_body:
   push hl
   push bc
   push de

@@ -871,6 +871,50 @@ overclock discussion. Measured with the new accounting: median frame
 handler cost 523K approx-cycles vs the 59,736-cycle NTSC budget; 99.7% of
 route frames over budget.
 
+### 2026-07-04 — Flag-liveness soundness fix; full-route NES diff drives bug hunt
+
+User-reported in-game defects (blocks not paying out, sky glitches) are now
+being burned down with a wholesale differential workflow: `frame-diff` over
+the full ~4900-frame 1-1 route with `FD_WATCH=all` + `FD_DEBUG_FRAME=N`
+logs every ordered RAM write (addr, value, PC) on both sides; the first
+mismatching write names the exact diverging instruction.
+
+- **Generic lowering soundness bug found and fixed (the block/coin bug):**
+  `flags_live_after` walked ops linearly, ignoring branch-taken paths and
+  treating tail jumps as flag death. SMB's `BlockBumpedChk` returns its
+  answer in CARRY via `CMP; BEQ done; ...; CLC; done: RTS` — the fused
+  native `cp; jp z` elided the shadow-carry write on the match path, so
+  the caller's `BCC` read stale carry and coin blocks silently did not pay
+  out (first divergence frame 1609: block-buffer write identical, then
+  the whole coin/score chain missing). Fix: pending flags stay live
+  across any conditional branch and any tail jump. Route divergence fell
+  from 3292/4900 to 1204/4900 frames.
+- **VDP critical-section bracket (sky-glitch class):** translated code
+  reaches VDP ports through `rt_ppu_write`/`rt_ppu_read` on the main
+  thread while the frame IRQ handler also writes VDP (SAT/scroll/vbuf).
+  An IRQ between the two bytes of a control-port pair corrupts the shared
+  address latch. Both entry points now run under a stateless DI bracket
+  (`ld a,i` capture; `ei` on exit only if interrupts were enabled), ~40
+  cycles overhead, nesting- and handler-safe. `z80_emu` gained `LD A,I`/
+  `LD A,R` with IFF2→P/V for this.
+- **frame-diff harness fixes:** `FD_WATCH=all` write-sequence logging;
+  audio exclusion extended to `$07B0-$07CF` ($07CA is SoundEngine-written);
+  pre-roll cap raised (bracket overhead pushed init past 8M instructions);
+  pre-roll now settles until IFF1 re-enables so frame 0's IRQ isn't
+  swallowed (NMI-enable is detected inside the DI bracket) — this had
+  phase-shifted every snapshot and shown a false 4900/4900 divergence.
+- **Acceptance route script found stale-by-improvement:** the reference
+  NES run under `1-1-clear.buttons` dies and reaches game-over (~frame
+  2899) — the script was recorded against the old, buggy translation and
+  never cleared 1-1 under real-NES dynamics. Now that the translation
+  tracks the NES, it faithfully reproduces the death, so the old
+  `$0760/$075C/$000E` end-state expectations no longer hold. The route
+  script and expectations must be re-recorded against the NES reference
+  (ref-side scripting via frame-diff); until then the trace-sms route
+  gate is known-red for end-state values (no-trap still holds).
+- Remaining top divergence: OAM sprite bytes `$0204-$0220` from frame
+  1792 (~844 frames) — next target for the same write-diff workflow.
+
 ---
 
 ## Recently fixed (this turn)

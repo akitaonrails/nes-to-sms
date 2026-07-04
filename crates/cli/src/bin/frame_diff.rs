@@ -452,7 +452,7 @@ fn run_reference(
         }
         if debug_writes {
             eprintln!("  [ref debug] frame {frame} watched writes (addr <- val @ pc):");
-            for (a, v, pc) in bus.watch_log.iter().take(60) {
+            for (a, v, pc) in bus.watch_log.iter().take(100_000) {
                 eprintln!("    ${a:04X} <- ${v:02X} @ pc=${pc:04X}");
             }
             bus.watch = None;
@@ -601,6 +601,13 @@ fn effective_nes_buttons(frame: usize, timeline: &ButtonTimeline, oper_mode: u8)
 }
 
 fn parse_watch_list() -> Vec<u16> {
+    // FD_WATCH=all watches every NES RAM address ($0000-$07FF): combined
+    // with FD_DEBUG_FRAME=N this logs the full ordered write sequence of
+    // one frame on both sides, so the first mismatching write pinpoints
+    // the diverging instruction.
+    if std::env::var("FD_WATCH").as_deref() == Ok("all") {
+        return (0u16..0x800).collect();
+    }
     std::env::var("FD_WATCH")
         .ok()
         .map(|s| {
@@ -638,7 +645,10 @@ fn nes_buttons_to_sms_dc(b: Buttons) -> u8 {
 }
 
 const SUBJ_INSN_PER_FRAME: usize = 2_000_000;
-const SUBJ_PREROLL_CAP: usize = 8_000_000;
+// Pre-roll budget for SMS boot + SMB's translated reset-init (until NMI
+// enable). The VDP critical-section lock adds per-PPU-access overhead to
+// init's thousands of $2006/$2007 writes, so keep generous headroom.
+const SUBJ_PREROLL_CAP: usize = 24_000_000;
 const PPUCTRL_SHADOW: usize = 0x0B08; // SMS $CB08 = NES $2000 shadow
 
 fn snap_nes_ram(bus: &SmsBus) -> [u8; 0x800] {
@@ -681,7 +691,11 @@ fn is_excluded(addr: usize) -> bool {
 }
 
 fn is_deferred_audio_addr(addr: usize) -> bool {
-    matches!(addr, 0x00F0..=0x00FF | 0x07B0..=0x07C7)
+    // $07B0-$07CF: SMB sound-engine working RAM (music/sfx buffers and
+    // length counters). $07C8-$07CF observed written only from the
+    // $F3xx-$F7xx SoundEngine (e.g. $07CA @ $F72D/$F7D7), which is
+    // intentionally stubbed while audio is deferred.
+    matches!(addr, 0x00F0..=0x00FF | 0x07B0..=0x07CF)
 }
 
 /// Returns (init_snapshot, per_frame_snapshots). Mirrors run_reference:
@@ -735,6 +749,18 @@ fn run_subject(
             }
         }
         pre_frames += 1;
+    }
+    // NMI-enable is detected inside rt_ppu_write's VDP critical section,
+    // which runs with interrupts disabled. Step until the bracket exits
+    // (IFF1 restored) so frame 0's fired IRQ is not silently swallowed —
+    // otherwise the subject misses one NMI and every snapshot is phase-
+    // shifted against the reference.
+    let mut settle = 0usize;
+    while !cpu.iff1 && settle < 10_000 {
+        if cpu.halted || cpu.step(&mut bus).is_err() {
+            break;
+        }
+        settle += 1;
     }
     let init_snap = snap_nes_ram(&bus);
     eprintln!(
@@ -799,7 +825,7 @@ fn run_subject(
         }
         if dbg {
             eprintln!("  [debug] frame {_frame} watched writes (addr <- val @ pc):");
-            for (a, v, pc) in bus.watch_log.iter().take(60) {
+            for (a, v, pc) in bus.watch_log.iter().take(100_000) {
                 eprintln!("    ${a:04X} <- ${v:02X} @ pc=${pc:04X}");
             }
             bus.watch = None;

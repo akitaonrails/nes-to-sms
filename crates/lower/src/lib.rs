@@ -919,16 +919,21 @@ fn flags_live_after(
                     return true;
                 }
             }
-            // A tail jump to a routine that doesn't read the pending flags
-            // means those flags reach that routine unread; treat as dead
-            // here (its own RTS/flag-return convention is its concern, and
-            // we stay conservative for unknown targets via callee_flag_reads).
-            Op::Jmp { target } => {
-                if callee_flag_reads(target, reads) & pending != 0 {
-                    return true;
-                }
-                return false; // no fall-through past a tail jump
-            }
+            // A conditional branch has a taken path this linear scan does
+            // not follow. If any pending flag could be read there — the
+            // classic case is a routine returning its answer in carry via
+            // `CMP ...; BEQ done; ...; CLC; done: RTS`, where the taken
+            // path reaches RTS with the CMP's carry as the return value —
+            // eliding the shadow write would be unsound. Found the hard way
+            // in SMB's BlockBumpedChk (coin blocks silently not paying
+            // out). Conservative: pending flags stay live across any
+            // conditional branch.
+            Op::BranchIf { .. } => return true,
+            // A tail jump transfers control with the pending flags intact;
+            // the target routine's RTS returns them to OUR caller as a
+            // potential flag return value. Same soundness rule as RTS:
+            // treat pending flags as live.
+            Op::Jmp { .. } => return true,
             _ if is_flag_boundary(op) => return true,
             _ => {}
         }

@@ -1164,6 +1164,18 @@ impl Cpu {
                     0x46 | 0x66 => { /* IM 0 */ }
                     0x56 | 0x76 => { /* IM 1 */ }
                     0x5E | 0x7E => { /* IM 2 */ }
+                    // LD A,I ($57) / LD A,R ($5F): P/V := IFF2 — the only
+                    // way for code to inspect interrupt-enable state (used
+                    // by the runtime's VDP critical-section lock). We model
+                    // no I/R registers; A := 0. S/Z from A, H/N cleared.
+                    0x57 | 0x5F => {
+                        self.a = 0;
+                        self.set_flag(FLAG_S, false);
+                        self.set_flag(FLAG_Z, true);
+                        self.set_flag(FLAG_H, false);
+                        self.set_flag(FLAG_N, false);
+                        self.set_flag(FLAG_PV, self.iff2);
+                    }
                     // RETN ($45) / RETI ($4D): like RET but with IFF
                     // semantics. For trace purposes, treat as RET.
                     0x45 | 0x4D | 0x55 | 0x5D | 0x65 | 0x6D | 0x75 | 0x7D => {
