@@ -210,13 +210,28 @@ ready.
       correct ROM. SMB-specific inline trampolines (if any) added to
       `profiles/smb.toml`.
 
-- [ ] **B.6 Coverage report.** Extend `reports/discovery.txt` to break
+- [x] **B.6 Coverage report.** Extend `reports/discovery.txt` to break
       down PRG by: code (executed in CDL, if available), code (statically
       discovered), data (profile-declared), data (CDL-classified),
       unreached. Highlight unreached code as the next-to-attack list.
 
       **Acceptance:** the report has a clear coverage % line and a
       top-N unreached-routine list.
+
+      **Outcome (2026-07-04):** the pipeline now writes
+      `reports/coverage.txt` — a coverage % line plus every contiguous
+      unknown PRG range with a hex peek. Using it, the 305 residual
+      unknown ranges (6,462 bytes: the $A2xx-$AE4B area/level data
+      streams, text/tile tables, music tables at $FD56+) were classified
+      as profile `[[data_region]]` entries — none reachable as code from
+      any root, full route at NES parity without traps. **PRG
+      classification is now 100%** (22,788 code / 9,980 data / 0
+      unknown), with 0 unresolved labels; the translation output is
+      byte-identical to the validated build. Two traps learned: profile
+      `end` is inclusive (an exclusive end swallows the next routine's
+      entry byte and kills its walk), and unknown bytes INSIDE function
+      extents are inline/jumped-over data the lifter must pass through —
+      declaring them as (barrier) data regions truncates lifting.
 
 ---
 

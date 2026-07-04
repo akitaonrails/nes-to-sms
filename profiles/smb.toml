@@ -8061,3 +8061,1233 @@ name = "GetAlternatePalette1"
 [[function]]
 addr = 0x8732
 name = "ClearBuffersDrawIcon"
+
+# === Residual data regions (generated 2026-07-04) ===
+# Unknown PRG ranges outside every discovered function extent: not
+# reachable as code from any root, and the full route executes at
+# byte-for-byte NES parity without traps. The large $A2xx-$AExx blocks
+# are area/level data streams behind the area-pointer tables. Unknown
+# bytes INSIDE function extents are inline/jumped-over data the lifter
+# must pass through and are intentionally NOT declared (data regions
+# are walk barriers). Source: reports/coverage.txt (B.6).
+
+[[data_region]]
+start = 0x8243
+end   = 0x8244
+
+[[data_region]]
+start = 0x8321
+end   = 0x8324
+
+[[data_region]]
+start = 0x8344
+end   = 0x8354
+
+[[data_region]]
+start = 0x8359
+end   = 0x836a
+
+[[data_region]]
+start = 0x84bc
+end   = 0x84c2
+
+[[data_region]]
+start = 0x8756
+end   = 0x8759
+
+[[data_region]]
+start = 0x875e
+end   = 0x8761
+
+[[data_region]]
+start = 0x8766
+end   = 0x8767
+
+[[data_region]]
+start = 0x876c
+end   = 0x876f
+
+[[data_region]]
+start = 0x877d
+end   = 0x877d
+
+[[data_region]]
+start = 0x8782
+end   = 0x8782
+
+[[data_region]]
+start = 0x8787
+end   = 0x8787
+
+[[data_region]]
+start = 0x878c
+end   = 0x878e
+
+[[data_region]]
+start = 0x879c
+end   = 0x879f
+
+[[data_region]]
+start = 0x87a4
+end   = 0x87a9
+
+[[data_region]]
+start = 0x87af
+end   = 0x87b2
+
+[[data_region]]
+start = 0x87b7
+end   = 0x87ba
+
+[[data_region]]
+start = 0x87c4
+end   = 0x87c8
+
+[[data_region]]
+start = 0x87cd
+end   = 0x87d1
+
+[[data_region]]
+start = 0x87d6
+end   = 0x87d7
+
+[[data_region]]
+start = 0x87f1
+end   = 0x87f1
+
+[[data_region]]
+start = 0x8802
+end   = 0x8807
+
+[[data_region]]
+start = 0x89c7
+end   = 0x89c8
+
+[[data_region]]
+start = 0x89cd
+end   = 0x89d0
+
+[[data_region]]
+start = 0x8d53
+end   = 0x8d53
+
+[[data_region]]
+start = 0x8d5b
+end   = 0x8d5c
+
+[[data_region]]
+start = 0x8d65
+end   = 0x8d66
+
+[[data_region]]
+start = 0x8d6f
+end   = 0x8d70
+
+[[data_region]]
+start = 0x8d79
+end   = 0x8d7a
+
+[[data_region]]
+start = 0x8d83
+end   = 0x8d86
+
+[[data_region]]
+start = 0x8d8b
+end   = 0x8d8f
+
+[[data_region]]
+start = 0x8d94
+end   = 0x8d94
+
+[[data_region]]
+start = 0x8d9c
+end   = 0x8d9f
+
+[[data_region]]
+start = 0x8da4
+end   = 0x8da7
+
+[[data_region]]
+start = 0x8daf
+end   = 0x8daf
+
+[[data_region]]
+start = 0x8db5
+end   = 0x8db5
+
+[[data_region]]
+start = 0x8dba
+end   = 0x8dbd
+
+[[data_region]]
+start = 0x8dc9
+end   = 0x8dcc
+
+[[data_region]]
+start = 0x8dd1
+end   = 0x8dd6
+
+[[data_region]]
+start = 0x8ddb
+end   = 0x8ddc
+
+[[data_region]]
+start = 0x8de5
+end   = 0x8de5
+
+[[data_region]]
+start = 0x8dea
+end   = 0x8ded
+
+[[data_region]]
+start = 0x8df6
+end   = 0x8dfb
+
+[[data_region]]
+start = 0x8e00
+end   = 0x8e02
+
+[[data_region]]
+start = 0x8f04
+end   = 0x8f05
+
+[[data_region]]
+start = 0x8fc0
+end   = 0x8fca
+
+[[data_region]]
+start = 0x9120
+end   = 0x9124
+
+[[data_region]]
+start = 0x9129
+end   = 0x912c
+
+[[data_region]]
+start = 0x92fe
+end   = 0x9329
+
+[[data_region]]
+start = 0x932e
+end   = 0x9359
+
+[[data_region]]
+start = 0x935e
+end   = 0x9389
+
+[[data_region]]
+start = 0x93b5
+end   = 0x93bd
+
+[[data_region]]
+start = 0x93c2
+end   = 0x93ca
+
+[[data_region]]
+start = 0x93cf
+end   = 0x93d7
+
+[[data_region]]
+start = 0x97d3
+end   = 0x97d3
+
+[[data_region]]
+start = 0x97d8
+end   = 0x97d8
+
+[[data_region]]
+start = 0x97dd
+end   = 0x97dd
+
+[[data_region]]
+start = 0x97e2
+end   = 0x97e2
+
+[[data_region]]
+start = 0x97e7
+end   = 0x97e7
+
+[[data_region]]
+start = 0x97ec
+end   = 0x97ec
+
+[[data_region]]
+start = 0x97f1
+end   = 0x97f1
+
+[[data_region]]
+start = 0x97f6
+end   = 0x97f6
+
+[[data_region]]
+start = 0x97fb
+end   = 0x97fb
+
+[[data_region]]
+start = 0x9800
+end   = 0x9800
+
+[[data_region]]
+start = 0x9805
+end   = 0x9805
+
+[[data_region]]
+start = 0x9aa9
+end   = 0x9aad
+
+[[data_region]]
+start = 0x9ab2
+end   = 0x9ab6
+
+[[data_region]]
+start = 0x9bfc
+end   = 0x9c02
+
+[[data_region]]
+start = 0x9cb8
+end   = 0x9cbb
+
+[[data_region]]
+start = 0x9cc0
+end   = 0x9cc0
+
+[[data_region]]
+start = 0x9cc5
+end   = 0x9cc5
+
+[[data_region]]
+start = 0x9cce
+end   = 0x9cce
+
+[[data_region]]
+start = 0x9cdb
+end   = 0x9cdb
+
+[[data_region]]
+start = 0x9d74
+end   = 0x9d95
+
+[[data_region]]
+start = 0x9d9b
+end   = 0x9dae
+
+[[data_region]]
+start = 0x9db4
+end   = 0x9ddd
+
+[[data_region]]
+start = 0x9de3
+end   = 0x9e08
+
+[[data_region]]
+start = 0x9e0e
+end   = 0x9e1d
+
+[[data_region]]
+start = 0x9e23
+end   = 0x9e57
+
+[[data_region]]
+start = 0x9e5d
+end   = 0x9e7c
+
+[[data_region]]
+start = 0x9e82
+end   = 0x9e99
+
+[[data_region]]
+start = 0x9e9f
+end   = 0x9ea7
+
+[[data_region]]
+start = 0x9ead
+end   = 0x9ece
+
+[[data_region]]
+start = 0x9ed4
+end   = 0x9eff
+
+[[data_region]]
+start = 0x9f05
+end   = 0x9f1d
+
+[[data_region]]
+start = 0x9f23
+end   = 0x9f3a
+
+[[data_region]]
+start = 0x9f40
+end   = 0x9f4f
+
+[[data_region]]
+start = 0x9f55
+end   = 0x9f7a
+
+[[data_region]]
+start = 0x9f80
+end   = 0x9f9e
+
+[[data_region]]
+start = 0x9fa4
+end   = 0x9fa7
+
+[[data_region]]
+start = 0x9fad
+end   = 0x9fcc
+
+[[data_region]]
+start = 0x9fd2
+end   = 0x9fef
+
+[[data_region]]
+start = 0x9ff5
+end   = 0x9ff8
+
+[[data_region]]
+start = 0x9fff
+end   = 0xa033
+
+[[data_region]]
+start = 0xa039
+end   = 0xa05e
+
+[[data_region]]
+start = 0xa064
+end   = 0xa08c
+
+[[data_region]]
+start = 0xa092
+end   = 0xa0a8
+
+[[data_region]]
+start = 0xa0ae
+end   = 0xa0b1
+
+[[data_region]]
+start = 0xa0b7
+end   = 0xa0d6
+
+[[data_region]]
+start = 0xa0dc
+end   = 0xa103
+
+[[data_region]]
+start = 0xa109
+end   = 0xa131
+
+[[data_region]]
+start = 0xa137
+end   = 0xa15e
+
+[[data_region]]
+start = 0xa164
+end   = 0xa16f
+
+[[data_region]]
+start = 0xa175
+end   = 0xa199
+
+[[data_region]]
+start = 0xa19f
+end   = 0xa1ad
+
+[[data_region]]
+start = 0xa1b5
+end   = 0xa20e
+
+[[data_region]]
+start = 0xa216
+end   = 0xa28d
+
+[[data_region]]
+start = 0xa295
+end   = 0xa300
+
+[[data_region]]
+start = 0xa308
+end   = 0xa36d
+
+[[data_region]]
+start = 0xa375
+end   = 0xa3f8
+
+[[data_region]]
+start = 0xa400
+end   = 0xa469
+
+[[data_region]]
+start = 0xa471
+end   = 0xa4cc
+
+[[data_region]]
+start = 0xa4d4
+end   = 0xa535
+
+[[data_region]]
+start = 0xa53d
+end   = 0xa588
+
+[[data_region]]
+start = 0xa590
+end   = 0xa617
+
+[[data_region]]
+start = 0xa61f
+end   = 0xa68c
+
+[[data_region]]
+start = 0xa694
+end   = 0xa6f1
+
+[[data_region]]
+start = 0xa6f9
+end   = 0xa746
+
+[[data_region]]
+start = 0xa74e
+end   = 0xa7cb
+
+[[data_region]]
+start = 0xa7d3
+end   = 0xa830
+
+[[data_region]]
+start = 0xa838
+end   = 0xa839
+
+[[data_region]]
+start = 0xa841
+end   = 0xa878
+
+[[data_region]]
+start = 0xa880
+end   = 0xa88d
+
+[[data_region]]
+start = 0xa895
+end   = 0xa8f4
+
+[[data_region]]
+start = 0xa8fc
+end   = 0xa959
+
+[[data_region]]
+start = 0xa961
+end   = 0xa9cc
+
+[[data_region]]
+start = 0xa9d4
+end   = 0xa9fd
+
+[[data_region]]
+start = 0xaa05
+end   = 0xaa90
+
+[[data_region]]
+start = 0xaa98
+end   = 0xab03
+
+[[data_region]]
+start = 0xab0b
+end   = 0xab7c
+
+[[data_region]]
+start = 0xab84
+end   = 0xabd5
+
+[[data_region]]
+start = 0xabdd
+end   = 0xac00
+
+[[data_region]]
+start = 0xac08
+end   = 0xac33
+
+[[data_region]]
+start = 0xac3b
+end   = 0xacd6
+
+[[data_region]]
+start = 0xacde
+end   = 0xad77
+
+[[data_region]]
+start = 0xad7f
+end   = 0xae04
+
+[[data_region]]
+start = 0xae0c
+end   = 0xae43
+
+[[data_region]]
+start = 0xae4b
+end   = 0xaebe
+
+[[data_region]]
+start = 0xaec6
+end   = 0xaed9
+
+[[data_region]]
+start = 0xb2c6
+end   = 0xb2c9
+
+[[data_region]]
+start = 0xb428
+end   = 0xb42a
+
+[[data_region]]
+start = 0xb42f
+end   = 0xb431
+
+[[data_region]]
+start = 0xb436
+end   = 0xb438
+
+[[data_region]]
+start = 0xb43d
+end   = 0xb43f
+
+[[data_region]]
+start = 0xb84f
+end   = 0xb84f
+
+[[data_region]]
+start = 0xb854
+end   = 0xb854
+
+[[data_region]]
+start = 0xba8d
+end   = 0xba91
+
+[[data_region]]
+start = 0xbdf0
+end   = 0xbdf0
+
+[[data_region]]
+start = 0xbdf5
+end   = 0xbdf5
+
+[[data_region]]
+start = 0xbfa1
+end   = 0xbfa3
+
+[[data_region]]
+start = 0xc06f
+end   = 0xc075
+
+[[data_region]]
+start = 0xc07a
+end   = 0xc080
+
+[[data_region]]
+start = 0xc085
+end   = 0xc08b
+
+[[data_region]]
+start = 0xc453
+end   = 0xc453
+
+[[data_region]]
+start = 0xc458
+end   = 0xc458
+
+[[data_region]]
+start = 0xc635
+end   = 0xc636
+
+[[data_region]]
+start = 0xc63b
+end   = 0xc63c
+
+[[data_region]]
+start = 0xc696
+end   = 0xc699
+
+[[data_region]]
+start = 0xcccb
+end   = 0xcd29
+
+[[data_region]]
+start = 0xcd32
+end   = 0xcd33
+
+[[data_region]]
+start = 0xcd38
+end   = 0xcd39
+
+[[data_region]]
+start = 0xced9
+end   = 0xced9
+
+[[data_region]]
+start = 0xcede
+end   = 0xcede
+
+[[data_region]]
+start = 0xcfe3
+end   = 0xcfe5
+
+[[data_region]]
+start = 0xcfea
+end   = 0xcfeb
+
+[[data_region]]
+start = 0xd1d5
+end   = 0xd1d8
+
+[[data_region]]
+start = 0xde2d
+end   = 0xde2d
+
+[[data_region]]
+start = 0xdfbd
+end   = 0xdfbe
+
+[[data_region]]
+start = 0xe392
+end   = 0xe39b
+
+[[data_region]]
+start = 0xe3b4
+end   = 0xe3cb
+
+[[data_region]]
+start = 0xe3d0
+end   = 0xe3e7
+
+[[data_region]]
+start = 0xe742
+end   = 0xe743
+
+[[data_region]]
+start = 0xe748
+end   = 0xe749
+
+[[data_region]]
+start = 0xe74e
+end   = 0xe74f
+
+[[data_region]]
+start = 0xe754
+end   = 0xe755
+
+[[data_region]]
+start = 0xe75a
+end   = 0xe75b
+
+[[data_region]]
+start = 0xe760
+end   = 0xe761
+
+[[data_region]]
+start = 0xe766
+end   = 0xe767
+
+[[data_region]]
+start = 0xe76c
+end   = 0xe76d
+
+[[data_region]]
+start = 0xe772
+end   = 0xe773
+
+[[data_region]]
+start = 0xe778
+end   = 0xe779
+
+[[data_region]]
+start = 0xe77e
+end   = 0xe77f
+
+[[data_region]]
+start = 0xe784
+end   = 0xe785
+
+[[data_region]]
+start = 0xe78a
+end   = 0xe78b
+
+[[data_region]]
+start = 0xe790
+end   = 0xe791
+
+[[data_region]]
+start = 0xe796
+end   = 0xe797
+
+[[data_region]]
+start = 0xe79c
+end   = 0xe79d
+
+[[data_region]]
+start = 0xe7a2
+end   = 0xe7a3
+
+[[data_region]]
+start = 0xe7a8
+end   = 0xe7a9
+
+[[data_region]]
+start = 0xe7ae
+end   = 0xe7af
+
+[[data_region]]
+start = 0xe7b4
+end   = 0xe7b5
+
+[[data_region]]
+start = 0xe7ba
+end   = 0xe7bb
+
+[[data_region]]
+start = 0xe7c0
+end   = 0xe7c1
+
+[[data_region]]
+start = 0xe7c6
+end   = 0xe7c7
+
+[[data_region]]
+start = 0xe7cc
+end   = 0xe7cd
+
+[[data_region]]
+start = 0xe7d2
+end   = 0xe7d3
+
+[[data_region]]
+start = 0xe7d8
+end   = 0xe7d9
+
+[[data_region]]
+start = 0xe7de
+end   = 0xe7df
+
+[[data_region]]
+start = 0xe7e4
+end   = 0xe7e5
+
+[[data_region]]
+start = 0xe7ea
+end   = 0xe7eb
+
+[[data_region]]
+start = 0xe7f0
+end   = 0xe7f1
+
+[[data_region]]
+start = 0xe7f6
+end   = 0xe7f7
+
+[[data_region]]
+start = 0xe7fc
+end   = 0xe7fd
+
+[[data_region]]
+start = 0xe802
+end   = 0xe803
+
+[[data_region]]
+start = 0xe808
+end   = 0xe809
+
+[[data_region]]
+start = 0xe80e
+end   = 0xe80f
+
+[[data_region]]
+start = 0xe814
+end   = 0xe815
+
+[[data_region]]
+start = 0xe81a
+end   = 0xe81b
+
+[[data_region]]
+start = 0xe820
+end   = 0xe821
+
+[[data_region]]
+start = 0xe826
+end   = 0xe827
+
+[[data_region]]
+start = 0xe82c
+end   = 0xe82d
+
+[[data_region]]
+start = 0xe832
+end   = 0xe833
+
+[[data_region]]
+start = 0xe838
+end   = 0xe839
+
+[[data_region]]
+start = 0xe83e
+end   = 0xe83f
+
+[[data_region]]
+start = 0xe844
+end   = 0xe85a
+
+[[data_region]]
+start = 0xe85f
+end   = 0xe875
+
+[[data_region]]
+start = 0xe87c
+end   = 0xe87c
+
+[[data_region]]
+start = 0xee0b
+end   = 0xee16
+
+[[data_region]]
+start = 0xee1b
+end   = 0xee1e
+
+[[data_region]]
+start = 0xee23
+end   = 0xee26
+
+[[data_region]]
+start = 0xee2b
+end   = 0xee2e
+
+[[data_region]]
+start = 0xee33
+end   = 0xee36
+
+[[data_region]]
+start = 0xee3b
+end   = 0xee3e
+
+[[data_region]]
+start = 0xee43
+end   = 0xee46
+
+[[data_region]]
+start = 0xee4b
+end   = 0xee4e
+
+[[data_region]]
+start = 0xee53
+end   = 0xee56
+
+[[data_region]]
+start = 0xee5b
+end   = 0xee5e
+
+[[data_region]]
+start = 0xee63
+end   = 0xee66
+
+[[data_region]]
+start = 0xee6b
+end   = 0xee6e
+
+[[data_region]]
+start = 0xee73
+end   = 0xee76
+
+[[data_region]]
+start = 0xee7b
+end   = 0xee7e
+
+[[data_region]]
+start = 0xee83
+end   = 0xee86
+
+[[data_region]]
+start = 0xee8b
+end   = 0xee8e
+
+[[data_region]]
+start = 0xee93
+end   = 0xee96
+
+[[data_region]]
+start = 0xee9b
+end   = 0xee9e
+
+[[data_region]]
+start = 0xeea3
+end   = 0xeea6
+
+[[data_region]]
+start = 0xeeab
+end   = 0xeeae
+
+[[data_region]]
+start = 0xeeb3
+end   = 0xeeb6
+
+[[data_region]]
+start = 0xeebb
+end   = 0xeebe
+
+[[data_region]]
+start = 0xeec3
+end   = 0xeec6
+
+[[data_region]]
+start = 0xeecb
+end   = 0xeece
+
+[[data_region]]
+start = 0xeed3
+end   = 0xeed6
+
+[[data_region]]
+start = 0xeedb
+end   = 0xeede
+
+[[data_region]]
+start = 0xeee3
+end   = 0xeee6
+
+[[data_region]]
+start = 0xefa2
+end   = 0xefa3
+
+[[data_region]]
+start = 0xf0a0
+end   = 0xf0af
+
+[[data_region]]
+start = 0xf1e7
+end   = 0xf1f2
+
+[[data_region]]
+start = 0xf22f
+end   = 0xf233
+
+[[data_region]]
+start = 0xf2ce
+end   = 0xf2cf
+
+[[data_region]]
+start = 0xf3b5
+end   = 0xf3be
+
+[[data_region]]
+start = 0xf4d8
+end   = 0xf4d9
+
+[[data_region]]
+start = 0xf4de
+end   = 0xf4f4
+
+[[data_region]]
+start = 0xf4fc
+end   = 0xf4ff
+
+[[data_region]]
+start = 0xf504
+end   = 0xf507
+
+[[data_region]]
+start = 0xf50c
+end   = 0xf50f
+
+[[data_region]]
+start = 0xf514
+end   = 0xf517
+
+[[data_region]]
+start = 0xf62f
+end   = 0xf63a
+
+[[data_region]]
+start = 0xf911
+end   = 0xf914
+
+[[data_region]]
+start = 0xf919
+end   = 0xf91c
+
+[[data_region]]
+start = 0xf921
+end   = 0xf93d
+
+[[data_region]]
+start = 0xf9bc
+end   = 0xf9d1
+
+[[data_region]]
+start = 0xf9d6
+end   = 0xf9e5
+
+[[data_region]]
+start = 0xf9ea
+end   = 0xf9f7
+
+[[data_region]]
+start = 0xf9fc
+end   = 0xfa00
+
+[[data_region]]
+start = 0xfa05
+end   = 0xfa1b
+
+[[data_region]]
+start = 0xfa21
+end   = 0xfa48
+
+[[data_region]]
+start = 0xfa4d
+end   = 0xfa74
+
+[[data_region]]
+start = 0xfa79
+end   = 0xfa9c
+
+[[data_region]]
+start = 0xfaa1
+end   = 0xfac1
+
+[[data_region]]
+start = 0xfac6
+end   = 0xfada
+
+[[data_region]]
+start = 0xfadf
+end   = 0xfaee
+
+[[data_region]]
+start = 0xfaf3
+end   = 0xfaf8
+
+[[data_region]]
+start = 0xfafd
+end   = 0xfb19
+
+[[data_region]]
+start = 0xfb1e
+end   = 0xfb24
+
+[[data_region]]
+start = 0xfb29
+end   = 0xfb4a
+
+[[data_region]]
+start = 0xfb4f
+end   = 0xfb71
+
+[[data_region]]
+start = 0xfb78
+end   = 0xfb80
+
+[[data_region]]
+start = 0xfb85
+end   = 0xfb85
+
+[[data_region]]
+start = 0xfb8a
+end   = 0xfb8f
+
+[[data_region]]
+start = 0xfb96
+end   = 0xfb9e
+
+[[data_region]]
+start = 0xfba3
+end   = 0xfba3
+
+[[data_region]]
+start = 0xfba8
+end   = 0xfc05
+
+[[data_region]]
+start = 0xfc0a
+end   = 0xfc36
+
+[[data_region]]
+start = 0xfc3b
+end   = 0xfc44
+
+[[data_region]]
+start = 0xfc49
+end   = 0xfc71
+
+[[data_region]]
+start = 0xfc76
+end   = 0xfcaf
+
+[[data_region]]
+start = 0xfcb4
+end   = 0xfceb
+
+[[data_region]]
+start = 0xfcf1
+end   = 0xfd10
+
+[[data_region]]
+start = 0xfd15
+end   = 0xfd51
+
+[[data_region]]
+start = 0xfd56
+end   = 0xfdb9
+
+[[data_region]]
+start = 0xfdbe
+end   = 0xfdc1
+
+[[data_region]]
+start = 0xfdc6
+end   = 0xfdf1
+
+[[data_region]]
+start = 0xfdf6
+end   = 0xfe50
+
+[[data_region]]
+start = 0xfe55
+end   = 0xfe74
+
+[[data_region]]
+start = 0xfe79
+end   = 0xfe9c
+
+[[data_region]]
+start = 0xfea1
+end   = 0xfec7
+
+[[data_region]]
+start = 0xfecc
+end   = 0xfedb
+
+[[data_region]]
+start = 0xfee0
+end   = 0xfeeb
+
+[[data_region]]
+start = 0xfef0
+end   = 0xfefc
+
+[[data_region]]
+start = 0xff04
+end   = 0xff65
+
+[[data_region]]
+start = 0xff6a
+end   = 0xff95
+
+[[data_region]]
+start = 0xff9e
+end   = 0xffa1
+
+[[data_region]]
+start = 0xffa6
+end   = 0xffc9
+
+[[data_region]]
+start = 0xffce
+end   = 0xffe9
+
+[[data_region]]
+start = 0xffee
+end   = 0xffef
+

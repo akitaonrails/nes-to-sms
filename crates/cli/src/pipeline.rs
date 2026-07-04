@@ -483,6 +483,35 @@ pub fn run(args: &Args) -> Result<String, Error> {
     let reports_dir = args.out.join("reports");
     std::fs::create_dir_all(&reports_dir)?;
     std::fs::write(reports_dir.join("discovery.txt"), &analyzed.report.text)?;
+    // B.6 coverage report: contiguous unknown PRG ranges with a hex peek,
+    // the attack list for closing classification coverage.
+    {
+        let mut txt = String::new();
+        let (code, data, unknown) = analyzed.class_map.summary();
+        let total = code + data + unknown;
+        txt.push_str(&format!(
+            "PRG classification: {code} code, {data} data, {unknown} unknown of {total}              ({:.1}% covered)\n\nUnknown ranges (NES addr, len, first bytes):\n",
+            (code + data) as f64 * 100.0 / total as f64
+        ));
+        let mut i = 0usize;
+        while i < total {
+            if analyzed.class_map.class_at(i) == analysis::ByteClass::Unknown {
+                let start = i;
+                while i < total && analyzed.class_map.class_at(i) == analysis::ByteClass::Unknown {
+                    i += 1;
+                }
+                let nes = 0x8000 + start;
+                let peek: String = image.prg[start..(start + 16).min(i)]
+                    .iter()
+                    .map(|b| format!("{b:02X} "))
+                    .collect();
+                txt.push_str(&format!("  ${nes:04X}  {:5}  {peek}\n", i - start));
+            } else {
+                i += 1;
+            }
+        }
+        std::fs::write(reports_dir.join("coverage.txt"), txt)?;
+    }
     std::fs::write(reports_dir.join("lifted.txt"), lifted_report(&routines))?;
     std::fs::write(reports_dir.join("chr_map.txt"), chr_report)?;
     write_optional_report(
