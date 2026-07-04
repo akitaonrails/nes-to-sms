@@ -488,14 +488,22 @@ SMS-native terms.
         works. A per-scanline split is physically unserviceable when one
         handler spans ~8 real frames; treat stock-Mednafen HUD scroll as
         a slow-motion artifact, not a bug to fix.
-      - The stale title tiles need a real diagnosis: the transition's
-        screen clear reaches trace-sms VRAM but not Mednafen's. Next
-        step is a direct VRAM diff — Mednafen savestates carry the full
-        16 KiB `vram` chunk (see reference_mednafen_forensics), so
-        capture a gameplay savestate and diff against trace-sms VRAM at
-        the matched route frame; the differing addresses identify which
-        write path (render-off direct $2007, vbuf flush, or the new
-        indexed-PPU forwarding) diverges under real VDP semantics.
+      - ~~The stale title tiles need a real diagnosis~~ **RESOLVED
+        (2026-07-04, same day): tooling artifact, not the ROM.** Two
+        compounding input bugs: (1) the ROM never wrote I/O control
+        port $3F, so controller input was DEAD in Mednafen (trace-sms
+        doesn't model $3F) — fixed in boot.s ($3F=$FF at boot);
+        (2) the capture scripts' key map was off by one (Mednafen SMS
+        fire1/fire2 = SDL scancodes 90/91 = KP_2/KP_3), so every
+        "Start" press was actually Select — all prior Mednafen
+        "gameplay" footage was the attract demo, and the stale-tile
+        frame was the demo disturbed mid-transition by Select mashing.
+        With input fixed, a real Start press gives a CLEAN title→game
+        transition in stock Mednafen (fixed HUD at rest, correct 1-1,
+        zero stale tiles; savestate shows mode=01), and the untouched
+        attract-demo transition is clean as well. The raw-CIRAM
+        materializer is re-scoped to post-v1 (full-game nametable
+        parity for world 1-2+ layouts), not a v1 transition fix.
 
       **E.5c Render-off-only materializer.** Project raw CIRAM into SMS
       nametable space only while NES rendering is off. Use `$D300-$D3FF` for
