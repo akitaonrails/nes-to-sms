@@ -133,3 +133,5 @@ tolerable — the IRQ-skip pacing already handles them gracefully).
 | Milestone | avg × budget | notes |
 |-----------|--------------|-------|
 | Baseline (pre-H) | 9.75× | worst 65× |
+| H.1a boundary relaxation | 9.62× | hardware writes/PHA no longer flag boundaries; hardware reads kill NZ liveness; 77 static SET_NZ_A sites elided (PPU-streaming loops) |
+| H.2 indexed specialization | 9.07× | direct add+access for provable RAM/PRG-low windows; rt_write_indexed sites 555→29, rt_read_indexed →67 |

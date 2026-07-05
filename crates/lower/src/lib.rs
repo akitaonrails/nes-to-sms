@@ -166,6 +166,57 @@ fn indexed_read_runtime(base: u16, region: ir::MemRegion) -> &'static str {
     }
 }
 
+// H.2 (optimizer plan): indexed-access specialization. When `base+idx`
+// provably stays inside one flat window for every idx 0-255, the
+// dispatcher's runtime range classification is dead weight — emit the
+// direct add + access inline.
+
+/// SMS base for a direct indexed access into plain NES RAM: the folded
+/// base must leave `base+$FF` inside the $C000-$C7FF shadow (no NES
+/// hardware window, no mirror-fold crossing).
+fn indexed_plain_ram_base(base: u16, region: ir::MemRegion) -> Option<u16> {
+    use ir::MemRegion as R;
+    if !matches!(region, R::ZeroPage | R::Ram | R::RamMirror | R::Stack) {
+        return None;
+    }
+    let sms = indexed_base_to_sms(base, region);
+    ((0xC000..=0xC700).contains(&sms)).then_some(sms)
+}
+
+/// PRG bases whose whole `base+$FF` span stays inside the always-mapped
+/// low window ($8000-$BFFF in slot 2): direct read, no banking.
+fn indexed_plain_prg_low(base: u16, region: ir::MemRegion) -> Option<u16> {
+    (region == ir::MemRegion::PrgRom && (0x8000..=0xBF00).contains(&base)).then_some(base)
+}
+
+/// Either of the two direct-read windows.
+fn indexed_direct_base(base: u16, region: ir::MemRegion) -> Option<u16> {
+    indexed_plain_ram_base(base, region).or_else(|| indexed_plain_prg_low(base, region))
+}
+
+/// A := (sms_base + idx). Clobbers HL/B/C and native flags.
+fn emit_indexed_read_direct(p: &mut z80_emit::Program, sms_base: u16, shadow_idx: u16) {
+    p.ld_hl_imm(sms_base);
+    p.ld_a_abs(shadow_idx);
+    p.ld_c_a();
+    p.ld_b_imm(0);
+    p.add_hl_bc();
+    p.ld_a_hl_ptr();
+}
+
+/// (sms_base + idx) := A; A preserved (6502 store contract). Clobbers
+/// HL/C/DE and native flags.
+fn emit_indexed_write_direct(p: &mut z80_emit::Program, sms_base: u16, shadow_idx: u16) {
+    p.ld_c_a();
+    p.ld_hl_imm(sms_base);
+    p.ld_a_abs(shadow_idx);
+    p.ld_e_a();
+    p.ld_d_imm(0);
+    p.add_hl_de();
+    p.ld_hl_ptr_c();
+    p.ld_a_c();
+}
+
 /// Emit a flag-bit set or clear on the shadow status byte without
 /// modifying A or any other emulated 6502 state.
 ///
@@ -202,16 +253,24 @@ fn emit_ldxy_mem(
             program.call(runtime_symbols::READ_PRG_HIGH_INDEXED);
         }
         (AddrExpr::AbsIndexedX(base), _) => {
-            program.ld_hl_imm(indexed_base_to_sms(*base, region));
-            program.ld_a_abs(sms_layout::SHADOW_X);
-            program.ld_b_a();
-            program.call(indexed_read_runtime(*base, region));
+            if let Some(sms) = indexed_direct_base(*base, region) {
+                emit_indexed_read_direct(program, sms, sms_layout::SHADOW_X);
+            } else {
+                program.ld_hl_imm(indexed_base_to_sms(*base, region));
+                program.ld_a_abs(sms_layout::SHADOW_X);
+                program.ld_b_a();
+                program.call(indexed_read_runtime(*base, region));
+            }
         }
         (AddrExpr::AbsIndexedY(base), _) => {
-            program.ld_hl_imm(indexed_base_to_sms(*base, region));
-            program.ld_a_abs(sms_layout::SHADOW_Y);
-            program.ld_b_a();
-            program.call(indexed_read_runtime(*base, region));
+            if let Some(sms) = indexed_direct_base(*base, region) {
+                emit_indexed_read_direct(program, sms, sms_layout::SHADOW_Y);
+            } else {
+                program.ld_hl_imm(indexed_base_to_sms(*base, region));
+                program.ld_a_abs(sms_layout::SHADOW_Y);
+                program.ld_b_a();
+                program.call(indexed_read_runtime(*base, region));
+            }
         }
         (AddrExpr::ZpIndexedX(zp), _) => {
             program.ld_a_abs(sms_layout::SHADOW_X);
@@ -269,22 +328,32 @@ fn emit_stxy_mem(
         (AddrExpr::AbsIndexedX(base), _) => {
             // Load X/Y into the value, also load X (index) — but the value
             // and the index can be the same shadow byte. Use C as scratch.
-            program.ld_a_abs(shadow_addr);
-            program.ld_c_a(); // C = value (X or Y)
-            program.ld_hl_imm(indexed_base_to_sms(*base, region));
-            program.ld_a_abs(sms_layout::SHADOW_X);
-            program.ld_b_a();
-            program.ld_a_c();
-            program.call(runtime_symbols::WRITE_INDEXED);
+            if let Some(sms) = indexed_direct_base(*base, region) {
+                program.ld_a_abs(shadow_addr);
+                emit_indexed_write_direct(program, sms, sms_layout::SHADOW_X);
+            } else {
+                program.ld_a_abs(shadow_addr);
+                program.ld_c_a(); // C = value (X or Y)
+                program.ld_hl_imm(indexed_base_to_sms(*base, region));
+                program.ld_a_abs(sms_layout::SHADOW_X);
+                program.ld_b_a();
+                program.ld_a_c();
+                program.call(runtime_symbols::WRITE_INDEXED);
+            }
         }
         (AddrExpr::AbsIndexedY(base), _) => {
-            program.ld_a_abs(shadow_addr);
-            program.ld_c_a();
-            program.ld_hl_imm(indexed_base_to_sms(*base, region));
-            program.ld_a_abs(sms_layout::SHADOW_Y);
-            program.ld_b_a();
-            program.ld_a_c();
-            program.call(runtime_symbols::WRITE_INDEXED);
+            if let Some(sms) = indexed_direct_base(*base, region) {
+                program.ld_a_abs(shadow_addr);
+                emit_indexed_write_direct(program, sms, sms_layout::SHADOW_Y);
+            } else {
+                program.ld_a_abs(shadow_addr);
+                program.ld_c_a();
+                program.ld_hl_imm(indexed_base_to_sms(*base, region));
+                program.ld_a_abs(sms_layout::SHADOW_Y);
+                program.ld_b_a();
+                program.ld_a_c();
+                program.call(runtime_symbols::WRITE_INDEXED);
+            }
         }
         (AddrExpr::ZpIndexedX(zp), _) => {
             // (zp + X) & $FF wrap.
@@ -443,25 +512,46 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
             p.ld_a_c();
         }
         AddrExpr::AbsIndexedX(base) => {
-            // For indexed reads we must preserve A across rt_read_indexed
-            // (which returns its result in A). Save A in C, do the read,
-            // move the result to B, restore A from C.
-            p.ld_c_a();
-            p.ld_hl_imm(indexed_base_to_sms(*base, region));
-            p.ld_a_abs(SHADOW_X);
-            p.ld_b_a();
-            p.call(indexed_read_runtime(*base, region));
-            p.ld_b_a();
-            p.ld_a_c();
+            // For indexed reads we must preserve A across the read (the
+            // operand lands in B). Save A in C, read, restore.
+            if let Some(sms) = indexed_direct_base(*base, region) {
+                p.ld_c_a();
+                p.ld_hl_imm(sms);
+                p.ld_a_abs(SHADOW_X);
+                p.ld_e_a();
+                p.ld_d_imm(0);
+                p.add_hl_de();
+                p.ld_b_hl_ptr();
+                p.ld_a_c();
+            } else {
+                p.ld_c_a();
+                p.ld_hl_imm(indexed_base_to_sms(*base, region));
+                p.ld_a_abs(SHADOW_X);
+                p.ld_b_a();
+                p.call(indexed_read_runtime(*base, region));
+                p.ld_b_a();
+                p.ld_a_c();
+            }
         }
         AddrExpr::AbsIndexedY(base) => {
-            p.ld_c_a();
-            p.ld_hl_imm(indexed_base_to_sms(*base, region));
-            p.ld_a_abs(SHADOW_Y);
-            p.ld_b_a();
-            p.call(indexed_read_runtime(*base, region));
-            p.ld_b_a();
-            p.ld_a_c();
+            if let Some(sms) = indexed_direct_base(*base, region) {
+                p.ld_c_a();
+                p.ld_hl_imm(sms);
+                p.ld_a_abs(SHADOW_Y);
+                p.ld_e_a();
+                p.ld_d_imm(0);
+                p.add_hl_de();
+                p.ld_b_hl_ptr();
+                p.ld_a_c();
+            } else {
+                p.ld_c_a();
+                p.ld_hl_imm(indexed_base_to_sms(*base, region));
+                p.ld_a_abs(SHADOW_Y);
+                p.ld_b_a();
+                p.call(indexed_read_runtime(*base, region));
+                p.ld_b_a();
+                p.ld_a_c();
+            }
         }
         AddrExpr::ZpIndexedX(zp) => {
             // 6502 zp,X wraps within zero page. Compute (zp+X) & $FF in A,
@@ -582,28 +672,7 @@ fn nz_flags_live_after(ops: &[ir::Op], i: usize) -> bool {
             return true;
         }
         // Routine boundary: be conservative and keep flags live.
-        if matches!(
-            op,
-            Op::Rts
-                | Op::Rti
-                | Op::Jsr { .. }
-                | Op::JsrUnknown { .. }
-                | Op::JumpEngineCall { .. }
-                | Op::Jmp { .. }
-                | Op::JmpIndirect { .. }
-                | Op::Brk
-                | Op::Pha
-                | Op::Php
-                | Op::PpuWrite { .. }
-                | Op::PpuRead { .. }
-                | Op::ApuWrite { .. }
-                | Op::ApuRead { .. }
-                | Op::OamDmaWrite { .. }
-                | Op::MapperWrite { .. }
-                | Op::ControllerRead { .. }
-                | Op::Unsupported { .. }
-                | Op::Jam { .. }
-        ) {
+        if is_flag_boundary(op) {
             return true;
         }
         // Overwrites NZ? → previous flags are dead.
@@ -680,6 +749,9 @@ fn overwrites_nz(op: &ir::Op) -> bool {
             | Op::Tsx
             | Op::Pla
             | Op::Plp
+            | Op::PpuRead { .. }
+            | Op::ApuRead { .. }
+            | Op::ControllerRead { .. }
     )
 }
 
@@ -743,7 +815,10 @@ fn flags_written(op: &ir::Op) -> u8 {
         | Op::Txa
         | Op::Tya
         | Op::Tsx
-        | Op::Pla => F_N | F_Z,
+        | Op::Pla
+        | Op::PpuRead { .. }
+        | Op::ApuRead { .. }
+        | Op::ControllerRead { .. } => F_N | F_Z,
         Op::AdcImm(_) | Op::AdcMem { .. } | Op::SbcImm(_) | Op::SbcMem { .. } => {
             F_N | F_Z | F_C | F_V
         }
@@ -774,6 +849,13 @@ fn flags_written(op: &ir::Op) -> u8 {
 /// PHP/PLP or fall-through).
 fn is_flag_boundary(op: &ir::Op) -> bool {
     use ir::Op;
+    // H.1a (optimizer plan): hardware WRITES (PpuWrite/ApuWrite/
+    // OamDmaWrite/MapperWrite) and PHA neither read nor write the 6502
+    // P register — a STA $2007 between an ALU op and its branch must
+    // not force the shadow update. Hardware READS (PpuRead/ApuRead/
+    // ControllerRead) load A and therefore OVERWRITE N/Z — expressed in
+    // flags_written/overwrites_nz, which is strictly better than a
+    // boundary (it kills pending N/Z liveness instead of preserving it).
     matches!(
         op,
         Op::Rts
@@ -784,15 +866,7 @@ fn is_flag_boundary(op: &ir::Op) -> bool {
             | Op::Jmp { .. }
             | Op::JmpIndirect { .. }
             | Op::Brk
-            | Op::Pha
             | Op::Php
-            | Op::PpuWrite { .. }
-            | Op::PpuRead { .. }
-            | Op::ApuWrite { .. }
-            | Op::ApuRead { .. }
-            | Op::OamDmaWrite { .. }
-            | Op::MapperWrite { .. }
-            | Op::ControllerRead { .. }
             | Op::Unsupported { .. }
             | Op::Jam { .. }
     )
@@ -1855,16 +1929,24 @@ pub fn lower_routine(
                         program.call(CONTROLLER_READ_INDEXED_X);
                     }
                     (AddrExpr::AbsIndexedX(base), _) => {
-                        program.ld_hl_imm(indexed_base_to_sms(*base, *region));
-                        program.ld_a_abs(SHADOW_X);
-                        program.ld_b_a();
-                        program.call(indexed_read_runtime(*base, *region));
+                        if let Some(sms) = indexed_direct_base(*base, *region) {
+                            emit_indexed_read_direct(program, sms, SHADOW_X);
+                        } else {
+                            program.ld_hl_imm(indexed_base_to_sms(*base, *region));
+                            program.ld_a_abs(SHADOW_X);
+                            program.ld_b_a();
+                            program.call(indexed_read_runtime(*base, *region));
+                        }
                     }
                     (AddrExpr::AbsIndexedY(base), _) => {
-                        program.ld_hl_imm(indexed_base_to_sms(*base, *region));
-                        program.ld_a_abs(SHADOW_Y);
-                        program.ld_b_a();
-                        program.call(indexed_read_runtime(*base, *region));
+                        if let Some(sms) = indexed_direct_base(*base, *region) {
+                            emit_indexed_read_direct(program, sms, SHADOW_Y);
+                        } else {
+                            program.ld_hl_imm(indexed_base_to_sms(*base, *region));
+                            program.ld_a_abs(SHADOW_Y);
+                            program.ld_b_a();
+                            program.call(indexed_read_runtime(*base, *region));
+                        }
                     }
                     (AddrExpr::ZpIndexedX(zp), _) => {
                         // 6502 zp,X wraps within zero page: (zp + X) & $FF.
@@ -1964,20 +2046,28 @@ pub fn lower_routine(
                         program.ld_abs_a(nes_ram_addr_to_sms(*a));
                     }
                     (AddrExpr::AbsIndexedX(base), _) => {
-                        program.ld_c_a(); // save value in C
-                        program.ld_hl_imm(indexed_base_to_sms(*base, *region));
-                        program.ld_a_abs(SHADOW_X);
-                        program.ld_b_a();
-                        program.ld_a_c();
-                        program.call(WRITE_INDEXED);
+                        if let Some(sms) = indexed_direct_base(*base, *region) {
+                            emit_indexed_write_direct(program, sms, SHADOW_X);
+                        } else {
+                            program.ld_c_a(); // save value in C
+                            program.ld_hl_imm(indexed_base_to_sms(*base, *region));
+                            program.ld_a_abs(SHADOW_X);
+                            program.ld_b_a();
+                            program.ld_a_c();
+                            program.call(WRITE_INDEXED);
+                        }
                     }
                     (AddrExpr::AbsIndexedY(base), _) => {
-                        program.ld_c_a();
-                        program.ld_hl_imm(indexed_base_to_sms(*base, *region));
-                        program.ld_a_abs(SHADOW_Y);
-                        program.ld_b_a();
-                        program.ld_a_c();
-                        program.call(WRITE_INDEXED);
+                        if let Some(sms) = indexed_direct_base(*base, *region) {
+                            emit_indexed_write_direct(program, sms, SHADOW_Y);
+                        } else {
+                            program.ld_c_a();
+                            program.ld_hl_imm(indexed_base_to_sms(*base, *region));
+                            program.ld_a_abs(SHADOW_Y);
+                            program.ld_b_a();
+                            program.ld_a_c();
+                            program.call(WRITE_INDEXED);
+                        }
                     }
                     (AddrExpr::ZpIndexedX(zp), _) => {
                         // 6502 zp,X wraps within zero page: addr = (zp + X) & $FF.
