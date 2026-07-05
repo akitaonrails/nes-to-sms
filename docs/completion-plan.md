@@ -1368,3 +1368,30 @@ goomba pair, staircase, flagpole, 1-2 transition — NO DIVERGENCE.
 No translation fixes were needed: the pipeline handled every flow on
 the first parity run. v1 playability is proven, not just route
 completability.
+
+## Second-target findings: Alter Ego (2026-07-05)
+
+Master plan 5.3 executed with Shiru's freeware *Alter Ego* (NROM,
+32K PRG + 8K CHR, vertical mirroring — hardware-identical to SMB;
+freely distributed by the author, fetched from
+shiru.untergrund.net). With a deliberately minimal profile (header
+facts + vectors only, zero game knowledge):
+
+- The pipeline ingested it blind: 183 functions discovered and
+  lifted, 0 lift/lower failures, 7 unresolved labels; the ROM
+  assembles, boots, uploads CHR/palette, and the frame handler runs
+  clean at **0.63× budget — under real-time on stock hardware** (a
+  simpler game than SMB; also evidence the runtime scales down).
+- The game logic stalls in init: the stuck PC executes raw PRG bytes
+  in slot 2 and one unresolved stub targets RAM ($0374). Diagnosis,
+  confirmed by the author's development notes: Alter Ego is
+  **cc65-compiled C**. The cc65 runtime dispatches through RAM
+  trampolines and zero-page pointer jumps that static discovery
+  cannot trace — a new engine-capability class (indirect-dispatch
+  support / interpreter fallback per the master plan's dispatch.s
+  note), NOT a fixable profile gap.
+
+Conclusion: the generic engine handles assembly-style NROM games
+(SMB fully); C-compiled NROM games need the indirect-dispatch
+milestone. That is the honest next frontier for generality, sized
+as its own phase.

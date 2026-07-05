@@ -1,0 +1,21 @@
+# Alter Ego (Shiru, 2011, freeware) — second NROM target for the
+# generality test (master plan 5.3). Deliberately minimal: no
+# game-specific knowledge; everything below is read from the ROM
+# header/vectors. Discovery must carry the rest.
+
+[rom]
+name    = "Alter Ego"
+mapper  = 0
+prg_kib = 32
+chr_kib = 8
+
+[vectors]
+nmi   = 0x8093
+reset = 0x8000
+irq   = 0x81a6
+
+[[chr_pack]]
+table = 1
+start = 0x00
+end = 0xff
+dest = 0
