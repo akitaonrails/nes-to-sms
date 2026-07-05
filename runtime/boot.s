@@ -372,6 +372,22 @@ _irq_runtime_ready:
   out ($bf), a
 .endif
 
+  ; PRESENT-THEN-COMPUTE (reordered 2026-07-05): flush LAST frame's
+  ; prepared state to the VDP first, while we are still inside VBlank —
+  ; sprites from the OAM staging, the scheduled scroll (and its line-IRQ
+  ; split arm), and the queued VRAM buffer. All three were produced
+  ; together by the previous translated NMI, so they are mutually
+  ; coherent. The old order (present AFTER this frame's NMI) only worked
+  ; when the whole handler fit in VBlank; at real hardware speed the NMI
+  ; overruns into active display and the late presentation caused torn
+  ; tiles at the top of the screen and sprites leading the background
+  ; scroll by a frame (observed in GPGX at 500%). The translated NMI's
+  ; direct $2007 background writes still land mid-frame on overrun, but
+  ; those enter at the scroll seam where they are effectively invisible.
+  call rt_sat_upload
+  call _apply_frame_scroll
+  call vbuf_flush
+
   ; Start each translated NMI before the approximated sprite-0 hit point.
   ; SMB first waits for PPUSTATUS bit 6 to clear, then waits for it to set.
   ; The status reader advances this phase on polling so those barriers can
@@ -379,15 +395,6 @@ _irq_runtime_ready:
   xor a
   ld  ($cb12), a
   ld  ($cb20), a            ; clear per-frame split flags; keep last latches
-
-  ; NOTE: the VDP flushes (SAT upload, scroll apply, VRAM buffer) run AFTER the
-  ; translated NMI below, not before. SMB's NMI is what writes THIS frame's OAM
-  ; ($4014 -> $C900), scroll ($2005 -> $CB0C) and background tiles ($2007). The
-  ; background tile writes go straight to VRAM during the NMI, so if we flushed
-  ; sprites + scroll before it we'd show this frame's background with last
-  ; frame's sprite positions and scroll -- the few-pixel sprite/background
-  ; misalignment ("blocks rendered too early"). Flushing after keeps all three
-  ; in sync for the frame.
 
   ; Do not invoke the translated NMI handler until NES PPUCTRL bit 7 has enabled
   ; NMI at least once. The SMS frame IRQ is our timing source, but NES reset code
@@ -436,12 +443,6 @@ _irq_skip_translated_nmi:
 
   ; APU frame sequencer + PSG write-back (envelopes, lengths, sweeps).
   call apu_frame_tick
-
-  ; Flush this frame's prepared state to the VDP (see note above): sprites from
-  ; the OAM staging, the scheduled scroll, and the queued VRAM buffer.
-  call rt_sat_upload
-  call _apply_frame_scroll
-  call vbuf_flush
 
   ; Frame-overrun pacing. The VDP frame interrupt is level-held: if this
   ; handler ran longer than one video frame (heavy translated NMIs do), the

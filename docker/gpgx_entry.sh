@@ -32,5 +32,37 @@ input_joypad_driver = "udev"
 input_autodetect_enable = "true"
 CFG
 
+# Gamepad autoconfig: the container ships no joypad profiles, so RetroArch
+# detects pads but reports "not configured". Provide one for the 8BitDo
+# Ultimate 2 Wireless (XInput layout: south/east/west/north = 0/1/2/3,
+# select/start = 6/7, D-pad = hat 0). GPGX SMS maps RetroPad B -> button 1
+# (jump) and A -> button 2 (run); Start on the title = button 2.
+ACDIR="$HOME/.config/retroarch/autoconfig/udev"
+mkdir -p "$ACDIR"
+cat > "$ACDIR/8BitDo Ultimate 2 Wireless Controller.cfg" <<'PAD'
+input_driver = "udev"
+input_device = "8BitDo Ultimate 2 Wireless Controller"
+input_vendor_id = "11720"
+input_product_id = "12555"
+input_b_btn = "0"
+input_a_btn = "1"
+input_y_btn = "2"
+input_x_btn = "3"
+input_select_btn = "6"
+input_start_btn = "7"
+input_up_btn = "h0up"
+input_down_btn = "h0down"
+input_left_btn = "h0left"
+input_right_btn = "h0right"
+input_l_btn = "4"
+input_r_btn = "5"
+input_l2_axis = "+2"
+input_r2_axis = "+5"
+input_l_x_plus_axis = "+0"
+input_l_x_minus_axis = "-0"
+input_l_y_plus_axis = "+1"
+input_l_y_minus_axis = "-1"
+PAD
+
 echo "Launching RetroArch (Genesis Plus GX, Z80 overclock ${OVERCLOCK}%, paced to 60 fps) on $ROM"
 exec retroarch -L /opt/cores/genesis_plus_gx_libretro.so --appendconfig "$OVR" "$ROM"

@@ -18,7 +18,11 @@ ROM="${1:-out/smb/sms.sms}"
 # with `xhost -local:`). Harmless local-only grant.
 xhost +local: >/dev/null 2>&1 || true
 
-exec docker run --rm -it \
+# -i/-t only when stdin is a real terminal (allows `! docker/run_gpgx.sh`
+# from non-TTY shells; RetroArch does not need stdin).
+TTY_FLAGS=""
+[ -t 0 ] && TTY_FLAGS="-it"
+exec docker run --rm $TTY_FLAGS \
   -e DISPLAY="${DISPLAY:-:0}" \
   -e OVERCLOCK="${OVERCLOCK:-500}" \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
