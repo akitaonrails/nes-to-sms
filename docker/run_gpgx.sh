@@ -23,6 +23,8 @@ exec docker run --rm -it \
   -e OVERCLOCK="${OVERCLOCK:-500}" \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
   -v "$REPO":/work \
+  --device /dev/input \
+  -v /run/udev/data:/run/udev/data:ro \
   --workdir /work \
   nes-to-sms-retroarch:latest \
   bash /work/docker/gpgx_entry.sh "$ROM"

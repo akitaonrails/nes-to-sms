@@ -28,6 +28,8 @@ vrr_runloop_enable = "true"
 video_vsync = "false"
 audio_sync = "false"
 fastforward_ratio = "1.000000"
+input_joypad_driver = "udev"
+input_autodetect_enable = "true"
 CFG
 
 echo "Launching RetroArch (Genesis Plus GX, Z80 overclock ${OVERCLOCK}%, paced to 60 fps) on $ROM"
