@@ -431,7 +431,16 @@ If any of these are true, stop adding features and fix the trajectory:
 
 ## Progress snapshot
 
-As of 2026-05-20, the pipeline runs end-to-end on `Super Mario Bros.
+**2026-07-04: v1 COMPLETE.** Byte-for-byte NES parity on three full
+routes (1-1 clear, death/game-over, bonus-pipe with the underground
+coin room), all four audio channels (Phase 5.2 done early via the
+APU->PSG register shim), 100% PRG classification, 0 unresolved labels,
+input working in stock Mednafen, 375 tests. Remaining from Phase 5:
+5.1 (world 1-2+ visuals / raw-CIRAM) and 5.3 (second NROM target).
+New Phase H planned: predictable Z80 optimizer to close the ~8x frame
+budget overrun (docs/optimizer-plan.md).
+
+Earlier snapshot, as of 2026-05-20, the pipeline runs end-to-end on `Super Mario Bros.
 (World).nes` and produces a 64 KiB `.sms` that WLA-DX assembles cleanly
 and Mednafen loads as a Sega Master System ROM. Test suite: 280 passing
 across 11 Rust crates (10,615 LOC). Z80 runtime: 2,395 lines across 10

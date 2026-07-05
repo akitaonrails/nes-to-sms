@@ -2773,6 +2773,10 @@ fn main() {
     let mut line_irq_at: Option<usize> = None;
     let mut irqs_fired = 0usize;
     let mut line_irqs_fired = 0usize;
+    // SMS_PC_PROFILE=1: per-(bank,pc) execution histogram, folded by
+    // the ROM's .sym symbols at exit — the optimizer's hot-spot oracle.
+    let mut pc_profile: Option<std::collections::HashMap<(u8, u16), u64>> =
+        std::env::var("SMS_PC_PROFILE").is_ok().then(Default::default);
     // Per-frame handler cost: approx cycles from frame-IRQ injection until
     // IFF1 re-enables (the translated NMI's `ei` path). Line-IRQ handler
     // cost is not attributed here. Used to budget against real SMS timing.
@@ -3137,6 +3141,14 @@ fn main() {
             // halted but no IRQ pending — endless halt. Stop.
             break;
         }
+        if let Some(map) = pc_profile.as_mut() {
+            let bank = match pc {
+                0x0000..=0x3FFF => 0u8,
+                0x4000..=0x7FFF => bus.slot_bank[1],
+                _ => bus.slot_bank[2],
+            };
+            *map.entry((bank, pc)).or_insert(0u64) += 1;
+        }
         let materializer_render_before = current_render_state(&bus);
         let materializer_vdp_writes_before = bus.vdp_data_writes;
         match cpu.step(&mut bus) {
@@ -3214,6 +3226,48 @@ fn main() {
             pct(99),
             sorted[n - 1]
         );
+    if let Some(map) = pc_profile {
+        let sym_path = rom_path.with_extension("sym");
+        let mut syms: Vec<(u8, u16, String)> = Vec::new();
+        if let Ok(text) = std::fs::read_to_string(&sym_path) {
+            let mut in_labels = false;
+            for line in text.lines() {
+                let t = line.trim();
+                if t.starts_with('[') {
+                    in_labels = t == "[labels]";
+                    continue;
+                }
+                if !in_labels || t.is_empty() || t.starts_with(';') {
+                    continue;
+                }
+                if let Some((ba, name)) = t.split_once(' ')
+                    && let Some((b, a)) = ba.split_once(':')
+                    && let (Ok(b), Ok(a)) = (u8::from_str_radix(b, 16), u16::from_str_radix(a, 16))
+                {
+                    syms.push((b, a, name.to_string()));
+                }
+            }
+            syms.sort();
+        }
+        let total: u64 = map.values().sum();
+        let mut per_sym: std::collections::HashMap<String, u64> = Default::default();
+        for (&(bank, pc), &n) in &map {
+            let name = syms
+                .iter()
+                .rev()
+                .find(|(b, a, _)| *b == bank && *a <= pc)
+                .map(|(_, _, s)| s.clone())
+                .unwrap_or_else(|| format!("{bank:02X}:{pc:04X}?"));
+            *per_sym.entry(name).or_insert(0) += n;
+        }
+        let mut rows: Vec<(String, u64)> = per_sym.into_iter().collect();
+        rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        eprintln!("pc_profile: {total} sampled instructions; top symbols:");
+        for (name, n) in rows.iter().take(40) {
+            eprintln!("  {:6.2}%  {:>12}  {}", *n as f64 * 100.0 / total as f64, n, name);
+        }
+    }
+
         println!(
             "frame_budget: budget={} over_budget_frames={} ({:.1}%) worst_frame={:.2}x avg={:.2}x",
             FRAME_BUDGET_CYCLES,
