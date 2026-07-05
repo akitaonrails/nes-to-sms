@@ -1,0 +1,11 @@
+# SMB acceptance: block-bump probe — jump under the first ? block
+# (x=00:DA), verifying head-bump collision byte parity (recorded
+# after a field report of Mario 'passing through' blocks; physics
+# proved NES-exact, the report was the presentation desync).
+80:start
+220:right
+370:
+420:a
+450:
+520:a
+550:
