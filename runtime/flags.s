@@ -171,7 +171,10 @@ rt_cmp_a:
 ; 6502 CPX: compare shadow X with B.  Shadow N, Z, C updated.
 ; Entry: B = operand M.  Exit: A clobbered with result.
 rt_cpx_a:
-  ; H.1d branchless F-mapping; A clobbered with the result (contract).
+  ; H.1d branchless F-mapping. A and B preserved — the 6502 CPX/CPY
+  ; touch only flags (the old header comment claimed A was clobbered;
+  ; the old CODE preserved it, and callers rely on that).
+  push af
   push hl
   ld   a, ($cb00)
   sub  b
@@ -193,13 +196,17 @@ rt_cpx_a:
   or   h
   ld   ($cb03), a
   pop  hl
+  pop  af
   ret
 
 ; ─── rt_cpy_a ─────────────────────────────────────────────────────────────────
 ; 6502 CPY: compare shadow Y with B.  Shadow N, Z, C updated.
 ; Entry: B = operand M.  Exit: A clobbered with result.
 rt_cpy_a:
-  ; H.1d branchless F-mapping; A clobbered with the result (contract).
+  ; H.1d branchless F-mapping. A and B preserved — the 6502 CPX/CPY
+  ; touch only flags (the old header comment claimed A was clobbered;
+  ; the old CODE preserved it, and callers rely on that).
+  push af
   push hl
   ld   a, ($cb01)
   sub  b
@@ -221,6 +228,7 @@ rt_cpy_a:
   or   h
   ld   ($cb03), a
   pop  hl
+  pop  af
   ret
 
 ; ─── rt_asl_a ─────────────────────────────────────────────────────────────────
@@ -635,9 +643,7 @@ _bit_no_v:
 ; ─── NZ lookup table ──────────────────────────────────────────────────────────
 ; nz_table[v] = 6502 P bits N (bit 7) and Z (bit 1) for value v. Pinned at
 ; $3E00 (256-aligned, bank 0) so lowered code can inline the lookup as
-; `ld h, $3E` without symbol fixups: the H.1c inline sequence is
-;   ld l,a / ld h,$3e / ld a,($cb03) / and $7d / or (hl) / ld ($cb03),a / ld a,l
-; See docs/optimizer-plan.md. rt_set_nz_a below uses it too.
+; `ld h, $3e` without symbol fixups (H.1c inline sequence in lower).
 .orga $3e00
 .section "nz_table" force
 rt_nz_table:

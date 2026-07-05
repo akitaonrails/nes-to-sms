@@ -610,6 +610,19 @@ fn run_z80_with_prg(
     for (i, b) in z80_bytes.iter().enumerate() {
         bus.mem[0x4000 + i] = *b;
     }
+    // H.1c: lowered code updates shadow N/Z through the 256-byte lookup
+    // table pinned at $3E00 (see runtime/flags.s). The harness must
+    // provide it or every inline NZ update reads zeros.
+    for v in 0..256usize {
+        let mut p = 0u8;
+        if v & 0x80 != 0 {
+            p |= 0x80;
+        }
+        if v == 0 {
+            p |= 0x02;
+        }
+        bus.mem[0x3E00 + v] = p;
+    }
     // Embed the NES PRG bytes at their NES addresses ($8000-$BFFF) so
     // the lowered code's PrgRom indexed reads find real bytes. We can
     // ONLY embed the lower 16 KiB: SMS $C000-$FFFF is where the shadow

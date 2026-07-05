@@ -2947,7 +2947,10 @@ mod tests {
         }]);
         // ld ($C00E),a = 32 0E C0
         assert!(build.bytes.windows(3).any(|w| w == [0x32, 0x0E, 0xC0]));
-        assert!(!build.asm.contains("and $7D"), "unexpected inline NZ update");
+        assert!(
+            !build.asm.contains("and $7D"),
+            "unexpected inline NZ update"
+        );
     }
 
     // -------------------------------------------------------------------
