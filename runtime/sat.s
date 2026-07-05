@@ -490,11 +490,24 @@ _sat_y_skip:
   inc  hl
   djnz _sat_y_loop
 
-  ; End-of-list terminator. If all 64 sprites were visible this writes just past
-  ; the Y table into the unused $3F40 gap, which is harmless; otherwise it hides
-  ; all stale SAT entries after the compacted visible list.
-  ld   a, $d0
+  ; Hide every remaining SAT slot. The classic Y=$D0 end-of-list terminator
+  ; only exists in 192-line mode — in our 224-line mode $D0 is a VISIBLE
+  ; line (208) and entries past the compacted list kept rendering stale
+  ; sprites (field report: squashed-goomba remains following the player).
+  ; Write Y=$E0 (line 224+, offscreen in 224-line mode) to all 64-N slots.
+  ; N visible = (DE - SAT_ATTRS); remaining = 64 - N, always >= 0.
+  ld   a, e
+  sub  <SAT_ATTRS            ; A = visible count (attrs table is 64-aligned)
+  ld   b, a
+  ld   a, 64
+  sub  b                     ; A = remaining slots
+  jr   z, _sat_y_done
+  ld   b, a
+  ld   a, $e0
+_sat_y_hide:
   out  ($be), a
+  djnz _sat_y_hide
+_sat_y_done:
 
   ; ── Phase 2: compact visible (X, resolved tile) pairs to VRAM $3F80 ───────
   ld   a, $80
