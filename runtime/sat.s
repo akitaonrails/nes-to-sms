@@ -76,6 +76,13 @@
 .define SAT_VARIANT_MASK  $d467
 .define SAT_VISIBLE_FLAG  $d468
 .define SAT_HFLIP_LUT     $d500   ; page-aligned: LUT[b] = SAT_HFLIP_LUT + b
+; H.7 per-sprite variant memo: sprite OAM entries rarely change between
+; frames, so cache each OAM slot's last (tile, attr) -> resolved answer
+; and skip the 16-entry pool scan on hits. The pool flush clears the
+; memo tile bytes (coherence: memo results index pool slots).
+.define SAT_MEMO_TILE     $da00   ; 64 bytes: last rel tile per sprite ($FF invalid)
+.define SAT_MEMO_ATTR     $da40   ; 64 bytes: last attr key per sprite
+.define SAT_MEMO_RES      $da80   ; 64 bytes: last resolved tile per sprite
 
 .section "sat" free
 
@@ -286,6 +293,13 @@ _vgs_flush:
   ld   (hl), $ff             ; invalid key (rel tiles are < $FF after map)
   inc  hl
   djnz _vgs_flush
+  ; The per-sprite memo results index pool slots — invalidate it too.
+  ld   hl, SAT_MEMO_TILE
+  ld   b, 64
+_vgs_flush_memo:
+  ld   (hl), $ff
+  inc  hl
+  djnz _vgs_flush_memo
   pop  hl
   pop  bc
   jr   _vgs_alloc
@@ -380,12 +394,48 @@ _res_mark_store:
   pop  bc
   jr   _res_store
 _res_visible_variant:
-  push de
+  ; Memo probe: DE = SAT_RESOLVED+i and the tables are 64-aligned, so E
+  ; doubles as the sprite index.
   push hl
-  call variant_get_scratch   ; C = src rel, B = attr key -> A = scratch rel
+  ld   h, >SAT_MEMO_TILE
+  ld   l, e
+  ld   a, (hl)
+  cp   c                     ; same source tile as last time?
+  jr   nz, _res_memo_miss
+  ld   a, l
+  add  a, $40               ; -> SAT_MEMO_ATTR page offset
+  ld   l, a
+  ld   a, (hl)
+  cp   b                     ; same attr key?
+  jr   nz, _res_memo_miss_atl
+  ld   a, l
+  add  a, $40               ; -> SAT_MEMO_RES page offset
+  ld   l, a
+  ld   c, (hl)               ; C = memoized resolved tile
   pop  hl
+  jr   _res_store
+_res_memo_miss_atl:
+  ld   a, l
+  sub  $40                   ; back to the tile-table offset
+  ld   l, a
+_res_memo_miss:
+  ; L = sprite index, H = >SAT_MEMO_TILE. Fill the memo after resolving.
+  push hl
+  push de
+  call variant_get_scratch   ; C = src rel, B = attr key -> A = scratch rel
   pop  de
-  ld   c, a
+  pop  hl
+  ld   (hl), c               ; memo tile = source rel tile
+  ld   c, a                  ; C = resolved
+  ld   a, l
+  add  a, $40               ; -> SAT_MEMO_ATTR page offset
+  ld   l, a
+  ld   (hl), b               ; memo attr
+  ld   a, l
+  add  a, $40               ; -> SAT_MEMO_RES page offset
+  ld   l, a
+  ld   (hl), c               ; memo result
+  pop  hl
 _res_store:
   ld   a, c
   ld   (de), a               ; resolved[i]

@@ -48,7 +48,14 @@
 .define PSG_CACHE    $CB56
 .define PSG_ATTN     $CB5E
 .define PSG_PORT     $7F
-.define TRI_ATTN     $04    ; fixed triangle loudness (tune by ear)
+; Triangle loudness, derived from the NES APU mixer curves (nesdev):
+; at SMB's typical pulse volumes (8-12), the full-scale triangle sits
+; +5..+8 dB above a pulse after fundamental-amplitude scaling (25%-duty
+; square 0.90x, triangle 0.81x) — i.e. it wants ~0 dB attenuation to
+; match the NES balance. Rendering a triangle as a PSG square adds
+; harmonic harshness, so back off 4 dB: attenuation step 2. (Was $04 =
+; -8 dB: measurably too quiet vs the NES mix.) Final polish by ear.
+.define TRI_ATTN     $02
 
 .section "apu_shim" free
 

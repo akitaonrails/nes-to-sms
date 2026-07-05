@@ -1209,6 +1209,22 @@ fn emit_native_branch(
 /// after an op that sets S/Z from its result (e.g. `or a` after a load,
 /// or `inc`/`dec`). Only N/Z conditions are derivable this way; C/V
 /// branches aren't.
+/// Condition map for producers whose 6502 carry has the SAME polarity
+/// as the Z80 carry: ADC (carry-out) and ASL/LSR (shifted-out bit).
+/// CMP/CPX/CPY/SBC use `cmp_cond_to_z80` (6502 C = !Z80 borrow).
+fn direct_cond_to_z80(cond: &ir::Cond) -> Option<Z80Cond> {
+    use ir::Cond;
+    Some(match cond {
+        Cond::Zero => Z80Cond::Z,
+        Cond::NotZero => Z80Cond::Nz,
+        Cond::Carry => Z80Cond::C,
+        Cond::NoCarry => Z80Cond::Nc,
+        Cond::Negative => Z80Cond::M,
+        Cond::Positive => Z80Cond::P,
+        Cond::Overflow | Cond::NoOverflow => return None,
+    })
+}
+
 fn nz_cond_to_z80(cond: &ir::Cond) -> Option<Z80Cond> {
     use ir::Cond;
     Some(match cond {
@@ -1783,6 +1799,9 @@ pub fn lower_routine(
     // emit their branch run natively and mark the run `fuse_consumed`.
     let mut fuse_cmp_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
     let mut fuse_nz_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
+    // H.5: direct-polarity producers (ADC carry-out, ASL/LSR shifted-out
+    // bit) fuse through `direct_cond_to_z80`.
+    let mut fuse_direct_end: Vec<Option<usize>> = vec![None; ops_slice.len()];
     let mut add16_plans: Vec<Option<Add16Plan>> = vec![None; ops_slice.len()];
     let mut copy_loop_plans: Vec<Option<CopyLoopPlan>> = vec![None; ops_slice.len()];
     let mut fuse_consumed: Vec<bool> = vec![false; ops_slice.len()];
@@ -1814,10 +1833,26 @@ pub fn lower_routine(
             continue;
         }
         let (end, target) = match &ops_slice[i] {
-            // CMP sets N/Z/C; all three must be dead after the run.
-            Op::CmpImm(_) | Op::CmpMem { .. } => (
+            // CMP/CPX/CPY set N/Z/C; all three must be dead after the run.
+            // SBC additionally sets V (mask includes it; Overflow branches
+            // map to None so V-consuming runs never fuse) and writes A.
+            Op::CmpImm(_) | Op::CmpMem { .. } | Op::CpxImm(_) | Op::CpxMem { .. }
+            | Op::CpyImm(_) | Op::CpyMem { .. } => (
                 scan_run(i, cmp_cond_to_z80, F_N | F_Z | F_C),
                 &mut fuse_cmp_end,
+            ),
+            Op::SbcImm(_) | Op::SbcMem { .. } => (
+                scan_run(i, cmp_cond_to_z80, F_N | F_Z | F_C | F_V),
+                &mut fuse_cmp_end,
+            ),
+            // ADC and accumulator shifts: 6502 carry has Z80 polarity.
+            Op::AdcImm(_) | Op::AdcMem { .. } => (
+                scan_run(i, direct_cond_to_z80, F_N | F_Z | F_C | F_V),
+                &mut fuse_direct_end,
+            ),
+            Op::AslA | Op::LsrA => (
+                scan_run(i, direct_cond_to_z80, F_N | F_Z | F_C),
+                &mut fuse_direct_end,
             ),
             // LDA/AND/ORA/EOR (imm) set only N/Z (C/V untouched, stay valid
             // in shadow P). AND/ORA/EOR set Z80 flags directly; LDA needs a
@@ -2267,23 +2302,102 @@ pub fn lower_routine(
             // ALU: ADC / SBC
             // ------------------------------------------------------------------
             Op::AdcImm(v) => {
-                program.ld_b_imm(*v);
-                program.call(ADC_A_VIA_SHADOW);
+                if let Some(end) = fuse_direct_end[op_idx] {
+                    // Native ADC: shadow C -> Z80 carry (RRCA on shadow P,
+                    // A parked in E; LD doesn't touch flags), result in A.
+                    // Scanner guarantees N/Z/C/V all dead after the run,
+                    // so the stale shadow-C byte is never read.
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_P);
+                    program.rrca();
+                    program.ld_a_e();
+                    program.adc_a_imm(*v);
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        direct_cond_to_z80,
+                    );
+                } else {
+                    program.ld_b_imm(*v);
+                    program.call(ADC_A_VIA_SHADOW);
+                }
             }
 
             Op::AdcMem { addr, region } => {
-                emit_mem_to_b(program, addr, *region);
-                program.call(ADC_A_VIA_SHADOW);
+                if let Some(end) = fuse_direct_end[op_idx] {
+                    emit_mem_to_b(program, addr, *region);
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_P);
+                    program.rrca();
+                    program.ld_a_e();
+                    program.adc_a_b();
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        direct_cond_to_z80,
+                    );
+                } else {
+                    emit_mem_to_b(program, addr, *region);
+                    program.call(ADC_A_VIA_SHADOW);
+                }
             }
 
             Op::SbcImm(v) => {
-                program.ld_b_imm(*v);
-                program.call(SBC_A_VIA_SHADOW);
+                if let Some(end) = fuse_cmp_end[op_idx] {
+                    // Native SBC: Z80 carry-in = !shadow C (CCF), and the
+                    // 6502 carry-out = !borrow — cmp_cond_to_z80 handles
+                    // the inverted branch polarity.
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_P);
+                    program.rrca();
+                    program.ccf();
+                    program.ld_a_e();
+                    program.sbc_a_imm(*v);
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        cmp_cond_to_z80,
+                    );
+                } else {
+                    program.ld_b_imm(*v);
+                    program.call(SBC_A_VIA_SHADOW);
+                }
             }
 
             Op::SbcMem { addr, region } => {
-                emit_mem_to_b(program, addr, *region);
-                program.call(SBC_A_VIA_SHADOW);
+                if let Some(end) = fuse_cmp_end[op_idx] {
+                    emit_mem_to_b(program, addr, *region);
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_P);
+                    program.rrca();
+                    program.ccf();
+                    program.ld_a_e();
+                    program.sbc_a_b();
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        cmp_cond_to_z80,
+                    );
+                } else {
+                    emit_mem_to_b(program, addr, *region);
+                    program.call(SBC_A_VIA_SHADOW);
+                }
             }
 
             // ------------------------------------------------------------------
@@ -2444,23 +2558,91 @@ pub fn lower_routine(
             }
 
             Op::CpxImm(v) => {
-                program.ld_b_imm(*v);
-                program.call(CPX_A);
+                if let Some(end) = fuse_cmp_end[op_idx] {
+                    // Native compare of shadow X; the 6502 accumulator in
+                    // Z80 A survives in E (LD does not touch flags).
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_X);
+                    program.cp_imm(*v);
+                    program.ld_a_e();
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        cmp_cond_to_z80,
+                    );
+                } else {
+                    program.ld_b_imm(*v);
+                    program.call(CPX_A);
+                }
             }
 
             Op::CpxMem { addr, region } => {
-                emit_mem_to_b(program, addr, *region);
-                program.call(CPX_A);
+                if let Some(end) = fuse_cmp_end[op_idx] {
+                    emit_mem_to_b(program, addr, *region);
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_X);
+                    program.cp_b();
+                    program.ld_a_e();
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        cmp_cond_to_z80,
+                    );
+                } else {
+                    emit_mem_to_b(program, addr, *region);
+                    program.call(CPX_A);
+                }
             }
 
             Op::CpyImm(v) => {
-                program.ld_b_imm(*v);
-                program.call(CPY_A);
+                if let Some(end) = fuse_cmp_end[op_idx] {
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_Y);
+                    program.cp_imm(*v);
+                    program.ld_a_e();
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        cmp_cond_to_z80,
+                    );
+                } else {
+                    program.ld_b_imm(*v);
+                    program.call(CPY_A);
+                }
             }
 
             Op::CpyMem { addr, region } => {
-                emit_mem_to_b(program, addr, *region);
-                program.call(CPY_A);
+                if let Some(end) = fuse_cmp_end[op_idx] {
+                    emit_mem_to_b(program, addr, *region);
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_Y);
+                    program.cp_b();
+                    program.ld_a_e();
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        cmp_cond_to_z80,
+                    );
+                } else {
+                    emit_mem_to_b(program, addr, *region);
+                    program.call(CPY_A);
+                }
             }
 
             // ------------------------------------------------------------------
@@ -2475,7 +2657,23 @@ pub fn lower_routine(
             // Shifts / rotates
             // ------------------------------------------------------------------
             Op::AslA => {
-                program.call(ASL_A);
+                if let Some(end) = fuse_direct_end[op_idx] {
+                    // Native shift: carry = shifted-out bit, same polarity
+                    // as the 6502; Z native; N (=0 after LSR, bit7 after
+                    // ASL) matches Z80 S.
+                    program.add_a_a();
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        direct_cond_to_z80,
+                    );
+                } else {
+                    program.call(ASL_A);
+                }
             }
 
             Op::AslMem { addr, region } => {
@@ -2484,7 +2682,20 @@ pub fn lower_routine(
             }
 
             Op::LsrA => {
-                program.call(LSR_A);
+                if let Some(end) = fuse_direct_end[op_idx] {
+                    program.srl_a();
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        direct_cond_to_z80,
+                    );
+                } else {
+                    program.call(LSR_A);
+                }
             }
 
             Op::LsrMem { addr, region } => {

@@ -215,6 +215,15 @@ boot_main:
   ; 8b. Init the APU->PSG shim (shadow, sequencer state, silence PSG).
   call apu_psg_init
 
+  ; 8c. Invalidate the per-sprite variant memo (H.7): RAM powers up
+  ; undefined and garbage could alias as a valid memo entry.
+  ld  hl, $da00
+  ld  b, 64
+_boot_memo_clear:
+  ld  (hl), $ff
+  inc hl
+  djnz _boot_memo_clear
+
   ; 9. Init PPU shadow registers.
   xor a
   ld  ($cb08), a            ; ppu_ctrl = 0

@@ -2824,7 +2824,15 @@ fn main() {
         if first_runtime_trap_step.is_none() && bus.ram[0x0B1D] == 0xE1 {
             first_runtime_trap_step = Some(step);
             let id = (bus.ram[0x0B1C] as u16) << 8 | bus.ram[0x0B1B] as u16;
-            eprintln!("*** first trap at step {step}: unresolved_id=${id:04X} pc=${pc:04X}");
+            let sp = cpu.sp;
+            let ret = bus.read(sp) as u16 | ((bus.read(sp.wrapping_add(1)) as u16) << 8);
+            eprintln!(
+                "*** first trap at step {step}: unresolved_id=${id:04X} pc=${pc:04X} \
+                 ret=${ret:04X} (call at ${:04X}) slot1_bank={} slot2_bank={}",
+                ret.wrapping_sub(3),
+                bus.slot_bank[1],
+                bus.slot_bank[2],
+            );
         }
         if first_ram_exec_step.is_none() && pc >= 0xC000 {
             first_ram_exec_step = Some((step, pc));
@@ -3767,6 +3775,19 @@ fn main() {
         bus.read(0xCB23),
         bus.read(0xCB24)
     );
+    if bus.read(0xCB1D) == 0xE1 {
+        // rt_unresolved_jsr trap: the CALL's return address is on the Z80
+        // stack — name the call site (and its bank via the mapper regs).
+        let sp = cpu.sp;
+        let ret = bus.read(sp) as u16 | ((bus.read(sp.wrapping_add(1)) as u16) << 8);
+        eprintln!(
+            "  unresolved-jsr call site: ret=${ret:04X} (call at ${:04X}) slot1_bank={} slot2_bank={}",
+            ret.wrapping_sub(3),
+            bus.slot_bank[1],
+            bus.slot_bank[2],
+        );
+    }
+
     println!("{}", format_nt_trace_ciram_summary(&bus, true));
     println!("{}", format_nt_trace_ciram_summary(&bus, false));
     println!("{}", format_nt_dry_project_summary(&bus, true));

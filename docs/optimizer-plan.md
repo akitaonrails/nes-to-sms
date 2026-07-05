@@ -138,6 +138,7 @@ tolerable — the IRQ-skip pacing already handles them gracefully).
 | H.4a push/pop inline | (bundled) | PHA/PLA/PHP/PLP inline the 6502 stack ops; helper kept for RTI |
 | H.1c table NZ + inline | 8.34× | 256-byte N/Z table pinned at $3E00; shadow-NZ update inlined at all emission sites (7 instructions, no call, no branch); rt_set_nz_a left the profile |
 | H.3 variant persistence | (see next) | sprite variant pool persists across frames (CHR static on NROM); flush-on-full generation reset; _dof_*/do_sprite_variant left the profile, idle share 6.3%→12.2% |
+| H.5 fusion extension | 6.93× | CPX/CPY/ADC/SBC/ASL/LSR fusable; honest result: nearly flat — SMB's carry chains keep flags live across branches, so the dead-flags precondition rarely holds on hot paths. Structural work (X/Y residency, interprocedural flag contracts) is the remaining lever |
 | H.1d branchless flag bodies | **6.96×** | rt_cmp/cpx/cpy/adc/sbc/asl_a/lsr_a rewritten branchless via the Z80 F-layout mapping (S→N, C→C aligned; Z bit6→1, PV bit2→6 by rotates) and the $3E00 table; ~40% cheaper per call. Found+fixed: old cpx/cpy header comments claimed "A clobbered" while the code preserved A — callers rely on preservation (6502 CPX/CPY touch only flags). Validation harness now installs the $3E00 table. Idle share 14.9%. Worst frame 65×→58× |
 
 ## Finalization plan (2026-07-05)
