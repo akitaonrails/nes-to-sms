@@ -141,6 +141,10 @@ tolerable — the IRQ-skip pacing already handles them gracefully).
 | H.5 fusion extension | 6.93× | CPX/CPY/ADC/SBC/ASL/LSR fusable; honest result: nearly flat — SMB's carry chains keep flags live across branches, so the dead-flags precondition rarely holds on hot paths. Structural work (X/Y residency, interprocedural flag contracts) is the remaining lever |
 | H.1d branchless flag bodies | **6.96×** | rt_cmp/cpx/cpy/adc/sbc/asl_a/lsr_a rewritten branchless via the Z80 F-layout mapping (S→N, C→C aligned; Z bit6→1, PV bit2→6 by rotates) and the $3E00 table; ~40% cheaper per call. Found+fixed: old cpx/cpy header comments claimed "A clobbered" while the code preserved A — callers rely on preservation (6502 CPX/CPY touch only flags). Validation harness now installs the $3E00 table. Idle share 14.9%. Worst frame 65×→58× |
 
+| H.6 prg-high inline | skipped | the helper cost is the unavoidable double bank-switch; inlining saves <0.5% — not worth the code-size |
+| H.7 per-OAM variant memo | tried, reverted | the 16-slot pool overflows every few frames in gameplay, so the 64-byte memo invalidation itself became 1.9% hot; measured 6.93× with memo vs 7.04× without — sub-noise. Simpler code kept |
+| **Final (2026-07-05)** | **~7.0×** | from 9.75× baseline: −28% handler cycles; idle share 5%→15% (handler itself ~3× faster). Reaching ≤1.0× needs structural work: X/Y register residency + interprocedural flag contracts |
+
 ## Finalization plan (2026-07-05)
 
 Remaining work to close every pending item, in execution order:
