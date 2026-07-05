@@ -135,3 +135,6 @@ tolerable — the IRQ-skip pacing already handles them gracefully).
 | Baseline (pre-H) | 9.75× | worst 65× |
 | H.1a boundary relaxation | 9.62× | hardware writes/PHA no longer flag boundaries; hardware reads kill NZ liveness; 77 static SET_NZ_A sites elided (PPU-streaming loops) |
 | H.2 indexed specialization | 9.07× | direct add+access for provable RAM/PRG-low windows; rt_write_indexed sites 555→29, rt_read_indexed →67 |
+| H.4a push/pop inline | (bundled) | PHA/PLA/PHP/PLP inline the 6502 stack ops; helper kept for RTI |
+| H.1c table NZ + inline | 8.34× | 256-byte N/Z table pinned at $3E00; shadow-NZ update inlined at all emission sites (7 instructions, no call, no branch); rt_set_nz_a left the profile |
+| H.3 variant persistence | (see next) | sprite variant pool persists across frames (CHR static on NROM); flush-on-full generation reset; _dof_*/do_sprite_variant left the profile, idle share 6.3%→12.2% |

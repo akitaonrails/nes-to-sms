@@ -204,6 +204,47 @@ fn emit_indexed_read_direct(p: &mut z80_emit::Program, sms_base: u16, shadow_idx
     p.ld_a_hl_ptr();
 }
 
+/// H.1c: inline shadow-N/Z update from A via the pinned $3E00 lookup
+/// table (see runtime/flags.s). Replaces `call rt_set_nz_a`. Clobbers
+/// HL and native flags; preserves A. Callers must not hold live state
+/// in HL across a shadow-NZ update (the lowering never carries HL
+/// across IR ops; verified against the three-route oracle).
+fn emit_set_nz_inline(p: &mut z80_emit::Program) {
+    p.ld_l_a();
+    p.ld_h_imm(0x3E);
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.and_imm(0x7D);
+    p.or_hl_ptr();
+    p.ld_abs_a(sms_layout::SHADOW_P);
+    p.ld_a_l();
+}
+
+/// H.4: inline 6502 push
+
+/// H.4: inline 6502 push — A to $C100+S, S decremented. A preserved.
+/// Clobbers HL/D and native flags (same contract as rt_push6502).
+fn emit_push6502_inline(p: &mut z80_emit::Program) {
+    p.ld_d_a();
+    p.ld_a_abs(sms_layout::SHADOW_S);
+    p.ld_l_a();
+    p.ld_h_imm(0xC1);
+    p.ld_hl_ptr_d();
+    p.dec_a();
+    p.ld_abs_a(sms_layout::SHADOW_S);
+    p.ld_a_d();
+}
+
+/// H.4: inline 6502 pop — S incremented, A from $C100+S. Clobbers HL
+/// and native flags (same contract as rt_pop6502).
+fn emit_pop6502_inline(p: &mut z80_emit::Program) {
+    p.ld_a_abs(sms_layout::SHADOW_S);
+    p.inc_a();
+    p.ld_abs_a(sms_layout::SHADOW_S);
+    p.ld_l_a();
+    p.ld_h_imm(0xC1);
+    p.ld_a_hl_ptr();
+}
+
 /// (sms_base + idx) := A; A preserved (6502 store contract). Clobbers
 /// HL/C/DE and native flags.
 fn emit_indexed_write_direct(p: &mut z80_emit::Program, sms_base: u16, shadow_idx: u16) {
@@ -292,7 +333,7 @@ fn emit_ldxy_mem(
         }
     }
     program.ld_abs_a(shadow_addr);
-    program.call(runtime_symbols::SET_NZ_A);
+    emit_set_nz_inline(program);
     // `push af` saved caller A in the high byte. Pop into BC and restore
     // only A, leaving the N/Z flags produced by SET_NZ_A live for a
     // following 6502 branch (e.g. LDY mem; BEQ).
@@ -1216,7 +1257,7 @@ fn emit_inc_dec_xy(
         // value is at (HL); preserve the caller's A across the helper.
         program.push_af();
         program.ld_a_hl_ptr();
-        program.call(runtime_symbols::SET_NZ_A);
+        emit_set_nz_inline(program);
         program.pop_af();
     }
 }
@@ -1245,7 +1286,7 @@ fn emit_nz_producer_tail(
             nz_cond_to_z80,
         );
     } else if nz_live {
-        program.call(runtime_symbols::SET_NZ_A);
+        emit_set_nz_inline(program);
     }
 }
 
@@ -1902,7 +1943,7 @@ pub fn lower_routine(
                         nz_cond_to_z80,
                     );
                 } else if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
@@ -1991,7 +2032,7 @@ pub fn lower_routine(
                         nz_cond_to_z80,
                     );
                 } else if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
@@ -2004,7 +2045,7 @@ pub fn lower_routine(
                 program.ld_a_imm(*v);
                 program.ld_abs_a(SHADOW_X);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                     restore_a_keep_flags_after_push_af(program);
                 } else {
                     program.pop_af();
@@ -2020,7 +2061,7 @@ pub fn lower_routine(
                 program.ld_a_imm(*v);
                 program.ld_abs_a(SHADOW_Y);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                     restore_a_keep_flags_after_push_af(program);
                 } else {
                     program.pop_af();
@@ -2133,28 +2174,28 @@ pub fn lower_routine(
             Op::Tax => {
                 program.ld_abs_a(SHADOW_X);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
             Op::Tay => {
                 program.ld_abs_a(SHADOW_Y);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
             Op::Txa => {
                 program.ld_a_abs(SHADOW_X);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
             Op::Tya => {
                 program.ld_a_abs(SHADOW_Y);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
@@ -2162,7 +2203,7 @@ pub fn lower_routine(
                 program.ld_a_abs(SHADOW_S);
                 program.ld_abs_a(SHADOW_X);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
@@ -2178,13 +2219,13 @@ pub fn lower_routine(
             // Stack
             // ------------------------------------------------------------------
             Op::Pha => {
-                program.call(PUSH_6502);
+                emit_push6502_inline(program);
             }
 
             Op::Pla => {
-                program.call(POP_6502);
+                emit_pop6502_inline(program);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
@@ -2193,7 +2234,7 @@ pub fn lower_routine(
                 // A must be preserved.
                 program.push_af();
                 program.ld_a_abs(SHADOW_P);
-                program.call(PUSH_6502);
+                emit_push6502_inline(program);
                 program.pop_af();
             }
 
@@ -2201,7 +2242,7 @@ pub fn lower_routine(
                 // PLP pops a value from the emulated 6502 stack into
                 // shadow P; A must be preserved.
                 program.push_af();
-                program.call(POP_6502);
+                emit_pop6502_inline(program);
                 program.ld_abs_a(SHADOW_P);
                 program.pop_af();
             }
@@ -2261,7 +2302,7 @@ pub fn lower_routine(
                         nz_cond_to_z80,
                     );
                 } else if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
@@ -2706,7 +2747,7 @@ pub fn lower_routine(
                 program.ld_b_imm(*reg);
                 program.call(PPU_READ);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
@@ -2729,7 +2770,7 @@ pub fn lower_routine(
                 program.ld_hl_imm(*reg);
                 program.call(APU_READ);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
@@ -2737,7 +2778,7 @@ pub fn lower_routine(
                 program.ld_a_imm(*port as u8);
                 program.call(CONTROLLER_READ);
                 if nz_live[op_idx] {
-                    program.call(SET_NZ_A);
+                    emit_set_nz_inline(program);
                 }
             }
 
@@ -2873,7 +2914,9 @@ mod tests {
         // ret = C9
         assert!(build.bytes.contains(&0xC9));
         // call rt_set_nz_a present
-        assert!(build.asm.contains("call rt_set_nz_a"));
+        // H.1c: shadow-NZ update is inlined (table at $3E00).
+        assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
+        assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
         assert!(build.asm.contains("ret"));
     }
 
@@ -2888,7 +2931,9 @@ mod tests {
         }]);
         // ld a,($C00E) = 3A 0E C0
         assert!(build.bytes.windows(3).any(|w| w == [0x3A, 0x0E, 0xC0]));
-        assert!(build.asm.contains("call rt_set_nz_a"));
+        // H.1c: shadow-NZ update is inlined (table at $3E00).
+        assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
+        assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
     }
 
     // -------------------------------------------------------------------
@@ -2902,7 +2947,7 @@ mod tests {
         }]);
         // ld ($C00E),a = 32 0E C0
         assert!(build.bytes.windows(3).any(|w| w == [0x32, 0x0E, 0xC0]));
-        assert!(!build.asm.contains("call rt_set_nz_a"));
+        assert!(!build.asm.contains("and $7D"), "unexpected inline NZ update");
     }
 
     // -------------------------------------------------------------------
@@ -2954,7 +2999,9 @@ mod tests {
         // ld b,$02 = 06 02
         assert!(build.bytes.windows(2).any(|w| w == [0x06, 0x02]));
         assert!(build.asm.contains("call rt_ppu_read"));
-        assert!(build.asm.contains("call rt_set_nz_a"));
+        // H.1c: shadow-NZ update is inlined (table at $3E00).
+        assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
+        assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
     }
 
     // -------------------------------------------------------------------
@@ -2975,7 +3022,9 @@ mod tests {
         // ld a,$16 = 3E 16
         assert!(build.bytes.windows(2).any(|w| w == [0x3E, 0x16]));
         assert!(build.asm.contains("call rt_controller_read"));
-        assert!(build.asm.contains("call rt_set_nz_a"));
+        // H.1c: shadow-NZ update is inlined (table at $3E00).
+        assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
+        assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
     }
 
     // -------------------------------------------------------------------
@@ -3186,7 +3235,9 @@ mod tests {
             Op::Rts,
         ]);
 
-        assert!(build.asm.contains("call rt_set_nz_a"));
+        // H.1c: shadow-NZ update is inlined (table at $3E00).
+        assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
+        assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
         assert!(build.asm.contains("pop bc"));
         assert!(build.asm.contains("ld a,b"));
     }
@@ -3207,7 +3258,9 @@ mod tests {
         ]);
 
         assert!(build.asm.contains("ld a,($C7A2)"));
-        assert!(build.asm.contains("call rt_set_nz_a"));
+        // H.1c: shadow-NZ update is inlined (table at $3E00).
+        assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
+        assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
         assert!(build.asm.contains("pop bc"));
         assert!(build.asm.contains("ld a,b"));
     }
@@ -3248,7 +3301,9 @@ mod tests {
         let build = lower_and_finish(vec![Op::Tax]);
         // ld ($CB00),a = 32 00 CB
         assert!(build.bytes.windows(3).any(|w| w == [0x32, 0x00, 0xCB]));
-        assert!(build.asm.contains("call rt_set_nz_a"));
+        // H.1c: shadow-NZ update is inlined (table at $3E00).
+        assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
+        assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
     }
 
     // -------------------------------------------------------------------
@@ -3262,7 +3317,9 @@ mod tests {
         // inc (hl) = 34 (modifies shadow X in place, preserves A)
         assert!(build.bytes.contains(&0x34));
         // flags live across the routine end -> still persists to shadow P
-        assert!(build.asm.contains("call rt_set_nz_a"));
+        // H.1c: shadow-NZ update is inlined (table at $3E00).
+        assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
+        assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
     }
 
     // -------------------------------------------------------------------
@@ -3399,7 +3456,9 @@ runtime_label = "rt_replacement"
         assert!(build.bytes.windows(2).any(|w| w == [0x3E, 0x0A]));
         // ld ($CB00),a = 32 00 CB
         assert!(build.bytes.windows(3).any(|w| w == [0x32, 0x00, 0xCB]));
-        assert!(build.asm.contains("call rt_set_nz_a"));
+        // H.1c: shadow-NZ update is inlined (table at $3E00).
+        assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
+        assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
     }
 
     // -------------------------------------------------------------------

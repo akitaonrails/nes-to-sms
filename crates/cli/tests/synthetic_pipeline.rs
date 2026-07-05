@@ -91,7 +91,8 @@ fn pipeline_runs_on_minimal_reset_only_rom() {
         asm.contains("L_8000:"),
         "missing entry label in asm:\n{asm}"
     );
-    assert!(asm.contains("rt_set_nz_a"), "missing runtime call");
+    // H.1c: the shadow-NZ update is inlined via the $3E00 table.
+    assert!(asm.contains("and $7D"), "missing inline NZ update");
     assert!(asm.contains("ret"));
 }
 

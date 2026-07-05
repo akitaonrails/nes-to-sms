@@ -273,8 +273,22 @@ _vgs_miss:
   ld   a, (SAT_SCRATCH_NEXT)
   cp   SAT_SCRATCH_COUNT
   jr   c, _vgs_alloc
-  ld   a, (SAT_VARIANT_TILE) ; pool full -> base mapped tile
-  ret
+  ; Pool full: flush it (generation reset) and fall through to allocate
+  ; slot 0 for the current request. Amortized: happens only when the
+  ; working set of variants exceeds the pool, not per frame.
+  xor  a
+  ld   (SAT_SCRATCH_NEXT), a
+  push bc
+  push hl
+  ld   hl, SAT_VAR_TILE_KEYS
+  ld   b, SAT_SCRATCH_COUNT
+_vgs_flush:
+  ld   (hl), $ff             ; invalid key (rel tiles are < $FF after map)
+  inc  hl
+  djnz _vgs_flush
+  pop  hl
+  pop  bc
+  jr   _vgs_alloc
 _vgs_alloc:
   ld   a, (SAT_VARIANT_ATTR)
   ld   b, a
@@ -310,8 +324,11 @@ _vgs_hit:
 ; software palette/flip variants into VRAM scratch as needed. Clobbers AF, BC,
 ; DE, HL.
 rt_sat_resolve:
-  xor  a
-  ld   (SAT_SCRATCH_NEXT), a ; reset scratch pool for this frame
+  ; H.3 (optimizer plan): the variant pool PERSISTS across frames — CHR
+  ; is static on NROM, so a generated (tile, attr) variant stays valid
+  ; forever. Regenerating every frame made do_sprite_variant ~12% of
+  ; all execution. The pool now only flushes when it fills (see
+  ; _vgs_miss), amortizing generation to first-appearance only.
   ld   hl, $c900             ; OAM staging
   ld   de, SAT_RESOLVED
   ld   b, 64

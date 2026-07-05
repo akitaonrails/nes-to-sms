@@ -27,24 +27,16 @@
 ; vs the old triple push af/pop af juggle. This is the hottest runtime
 ; helper, so the per-call saving matters.
 rt_set_nz_a:
-  push bc
-  ld   b, a                 ; B = caller A (preserved; also the N/Z source)
+  ; Table-driven (H.1c): rt_nz_table[v] holds the N/Z bits for v.
+  push hl
+  ld   l, a
+  ld   h, $3e               ; rt_nz_table page (pinned, see table section)
   ld   a, ($cb03)
   and  %01111101            ; clear shadow N (bit 7) and Z (bit 1)
-  ld   c, a                 ; C = P with N,Z cleared
-  ld   a, b
-  and  %10000000            ; isolate N = bit 7 of the value
-  or   c                    ; merge N into P
-  ld   c, a
-  ld   a, b
-  or   a                    ; Z80 Z = (value == 0)
-  jr   nz, _set_nz_done
-  set  1, c                 ; set shadow Z (bit 1)
-_set_nz_done:
-  ld   a, c
+  or   (hl)
   ld   ($cb03), a           ; write updated shadow P
-  ld   a, b                 ; restore caller's A
-  pop  bc
+  ld   a, l                 ; restore caller's A
+  pop  hl
   ret
 
 ; ─── rt_adc_a ─────────────────────────────────────────────────────────────────
@@ -53,59 +45,43 @@ _set_nz_done:
 ; Exit:  A = result.  Shadow P updated: N, V, Z, C.
 ; Preserves: B (caller may still need it).
 rt_adc_a:
+  ; H.1d branchless: Z80 F layout (S Z . H . PV N C) maps to 6502 P as
+  ; S->N (same bit 7), C->C (same bit 0), Z bit6 -> bit1 (3x rlca),
+  ; PV bit2 -> V bit6 (4x rlca).
   push bc
-  ; Step 1: extract shadow C into Z80 carry.
-  ;   Shadow P is at $CB03, bit 0 = C.
-  ;   RRCA rotates A right through carry; bit 0 goes to carry flag.
-  ld   c, a                 ; save accumulator
+  push hl
+  ld   c, a
   ld   a, ($cb03)
-  rrca                      ; bit 0 (shadow C) -> Z80 carry flag
-  ld   a, c                 ; restore accumulator
-  ; Step 2: ADC A, B with native Z80 carry (which now holds shadow C).
-  adc  a, b
-  ; Step 3: build updated shadow P from Z80 flag results.
-  push af                   ; save result A + Z80 flags
+  rrca                      ; shadow C -> Z80 carry
+  ld   a, c
+  adc  a, b                 ; result; native S/Z/PV/C
+  ld   c, a                 ; C = result
+  push af
+  pop  hl                   ; L = F
+  ld   a, l
+  and  %10000001            ; N + C already in place
+  ld   h, a
+  ld   a, l
+  and  %01000000            ; Z
+  rlca
+  rlca
+  rlca                      ; bit 6 -> bit 1
+  or   h
+  ld   h, a
+  ld   a, l
+  and  %00000100            ; PV (overflow)
+  rlca
+  rlca
+  rlca
+  rlca                      ; bit 2 -> bit 6
+  or   h
+  ld   h, a
   ld   a, ($cb03)
-  and  %00111100            ; clear N (7), V (6), Z (1), C (0); keep D (3), I (2), B (4), U (5)
-  ld   c, a                 ; C = P with arithmetic flags cleared
-  pop  af
-  push af
-  ; Set shadow C from Z80 carry.
-  jr   nc, _adc_no_c
+  and  %00111100            ; clear N, V, Z, C
+  or   h
+  ld   ($cb03), a
   ld   a, c
-  or   %00000001
-  ld   c, a
-_adc_no_c:
-  pop  af
-  push af
-  ; Set shadow V from Z80 PV (overflow).
-  ;   PV is set on signed overflow for addition; jp po = parity odd = overflow clear.
-  jp   po, _adc_no_v
-  ld   a, c
-  or   %01000000            ; set 6502 V (bit 6)
-  ld   c, a
-_adc_no_v:
-  pop  af
-  push af
-  ; Set shadow N from bit 7 of result.
-  bit  7, a
-  jr   z, _adc_no_n
-  ld   a, c
-  or   %10000000            ; set 6502 N (bit 7)
-  ld   c, a
-_adc_no_n:
-  pop  af
-  push af
-  ; Set shadow Z if result == 0.
-  or   a
-  jr   nz, _adc_no_z
-  ld   a, c
-  or   %00000010            ; set 6502 Z (bit 1)
-  ld   c, a
-_adc_no_z:
-  ld   a, c
-  ld   ($cb03), a           ; write updated shadow P
-  pop  af                   ; final result in A
+  pop  hl
   pop  bc
   ret
 
@@ -117,56 +93,44 @@ _adc_no_z:
 ; Exit:  A = result.  Shadow P updated: N, V, Z, C.
 ; Preserves: B.
 rt_sbc_a:
+  ; H.1d branchless. 6502 SBC subtracts (1 - C): Z80 carry-in = !shadow C
+  ; (ccf after loading), and 6502 C_out = !borrow (xor bit 0).
   push bc
-  ; Step 1: compute Z80 carry = NOT(shadow_C).
-  ld   c, a                 ; save accumulator
+  push hl
+  ld   c, a
   ld   a, ($cb03)
   rrca                      ; shadow C -> Z80 carry
-  ccf                       ; invert: 6502 borrow-in = !C
-  ld   a, c                 ; restore accumulator
-  ; Step 2: SBC A, B.
+  ccf                       ; Z80 sbc subtracts carry; 6502 subtracts (1-C)
+  ld   a, c
   sbc  a, b
-  ; Step 3: build updated shadow P.
+  ld   c, a
   push af
+  pop  hl                   ; L = F
+  ld   a, l
+  and  %10000001
+  xor  %00000001            ; 6502 C = !borrow
+  ld   h, a
+  ld   a, l
+  and  %01000000
+  rlca
+  rlca
+  rlca
+  or   h
+  ld   h, a
+  ld   a, l
+  and  %00000100
+  rlca
+  rlca
+  rlca
+  rlca
+  or   h
+  ld   h, a
   ld   a, ($cb03)
-  and  %00111100            ; clear N, V, Z, C
-  ld   c, a
-  pop  af
-  push af
-  ; Shadow C = Z80 carry (a borrow-out in Z80 SBC means C=0 in 6502, i.e. borrow occurred;
-  ; Z80 carry after SBC = 1 means borrow, so 6502 C = NOT Z80_carry).
-  jr   c, _sbc_carry_clear  ; Z80 carry set = borrow = 6502 C clear
-  ld   a, c
-  or   %00000001            ; 6502 C = 1 (no borrow)
-  ld   c, a
-_sbc_carry_clear:
-  pop  af
-  push af
-  ; Shadow V from Z80 PV.
-  jp   po, _sbc_no_v
-  ld   a, c
-  or   %01000000
-  ld   c, a
-_sbc_no_v:
-  pop  af
-  push af
-  bit  7, a
-  jr   z, _sbc_no_n
-  ld   a, c
-  or   %10000000
-  ld   c, a
-_sbc_no_n:
-  pop  af
-  push af
-  or   a
-  jr   nz, _sbc_no_z
-  ld   a, c
-  or   %00000010
-  ld   c, a
-_sbc_no_z:
-  ld   a, c
+  and  %00111100
+  or   h
   ld   ($cb03), a
-  pop  af
+  ld   a, c
+  pop  hl
   pop  bc
   ret
 
@@ -176,219 +140,127 @@ _sbc_no_z:
 ; Entry: A = accumulator, B = operand M.
 ; Exit:  A preserved.  Shadow N, Z, C updated.
 rt_cmp_a:
-  push af
+  ; H.1d branchless F-mapping; A and B preserved.
   push bc
-  ; Subtract B from A without storing result.
-  ld   c, a                 ; save A
-  sub  b                    ; Z80 sub; carry set on borrow (unsigned A < B)
+  push hl
+  ld   c, a
+  sub  b
   push af
-  ; Build new shadow P.
+  pop  hl                   ; L = F
+  ld   a, l
+  and  %10000001
+  xor  %00000001            ; 6502 C = !borrow
+  ld   h, a
+  ld   a, l
+  and  %01000000
+  rlca
+  rlca
+  rlca                      ; Z: bit 6 -> bit 1
+  or   h
+  ld   h, a
   ld   a, ($cb03)
-  and  %01111100            ; clear N (7), Z (1), C (0)
-  ld   b, a
-  pop  af
-  push af
-  ; C: Z80 carry after SUB = 1 means borrow = A < B = 6502 C clear.
-  jr   c, _cmp_no_c
-  ld   a, b
-  or   %00000001            ; 6502 C = 1 (A >= B)
-  ld   b, a
-_cmp_no_c:
-  pop  af
-  push af
-  ; N: bit 7 of (A - B).
-  bit  7, a
-  jr   z, _cmp_no_n
-  ld   a, b
-  or   %10000000
-  ld   b, a
-_cmp_no_n:
-  pop  af
-  push af
-  ; Z: (A - B) == 0.
-  or   a
-  jr   nz, _cmp_no_z
-  ld   a, b
-  or   %00000010
-  ld   b, a
-_cmp_no_z:
-  ld   a, b
+  and  %01111100            ; clear N, Z, C
+  or   h
   ld   ($cb03), a
-  pop  af                   ; discard temp flags
+  ld   a, c
+  pop  hl
   pop  bc
-  pop  af                   ; restore original A
   ret
 
 ; ─── rt_cpx_a ─────────────────────────────────────────────────────────────────
 ; 6502 CPX: compare shadow X with B.  Shadow N, Z, C updated.
 ; Entry: B = operand M.  Exit: A clobbered with result.
 rt_cpx_a:
-  push af
-  ld   a, ($cb00)           ; load shadow X
-  pop  af
-  ; Fall through to shared compare logic (we now have X in A, B = operand).
-  ; We cannot call rt_cmp_a directly as it saves/restores A from the caller's A.
-  ; Use the same inline logic.
-  push af
-  push bc
-  ld   c, a                 ; save X value
-  ld   a, ($cb00)           ; reload X (A was caller's A above)
+  ; H.1d branchless F-mapping; A clobbered with the result (contract).
+  push hl
+  ld   a, ($cb00)
   sub  b
   push af
+  pop  hl                   ; L = F
+  ld   a, l
+  and  %10000001
+  xor  %00000001            ; 6502 C = !borrow
+  ld   h, a
+  ld   a, l
+  and  %01000000
+  rlca
+  rlca
+  rlca                      ; Z: bit 6 -> bit 1
+  or   h
+  ld   h, a
   ld   a, ($cb03)
   and  %01111100
-  ld   b, a
-  pop  af
-  push af
-  jr   c, _cpx_no_c
-  ld   a, b
-  or   %00000001
-  ld   b, a
-_cpx_no_c:
-  pop  af
-  push af
-  bit  7, a
-  jr   z, _cpx_no_n
-  ld   a, b
-  or   %10000000
-  ld   b, a
-_cpx_no_n:
-  pop  af
-  push af
-  or   a
-  jr   nz, _cpx_no_z
-  ld   a, b
-  or   %00000010
-  ld   b, a
-_cpx_no_z:
-  ld   a, b
+  or   h
   ld   ($cb03), a
-  pop  af
-  pop  bc
-  pop  af
+  pop  hl
   ret
 
 ; ─── rt_cpy_a ─────────────────────────────────────────────────────────────────
 ; 6502 CPY: compare shadow Y with B.  Shadow N, Z, C updated.
 ; Entry: B = operand M.  Exit: A clobbered with result.
 rt_cpy_a:
-  push af
-  push bc
-  ld   a, ($cb01)           ; load shadow Y
+  ; H.1d branchless F-mapping; A clobbered with the result (contract).
+  push hl
+  ld   a, ($cb01)
   sub  b
   push af
+  pop  hl                   ; L = F
+  ld   a, l
+  and  %10000001
+  xor  %00000001            ; 6502 C = !borrow
+  ld   h, a
+  ld   a, l
+  and  %01000000
+  rlca
+  rlca
+  rlca                      ; Z: bit 6 -> bit 1
+  or   h
+  ld   h, a
   ld   a, ($cb03)
   and  %01111100
-  ld   b, a
-  pop  af
-  push af
-  jr   c, _cpy_no_c
-  ld   a, b
-  or   %00000001
-  ld   b, a
-_cpy_no_c:
-  pop  af
-  push af
-  bit  7, a
-  jr   z, _cpy_no_n
-  ld   a, b
-  or   %10000000
-  ld   b, a
-_cpy_no_n:
-  pop  af
-  push af
-  or   a
-  jr   nz, _cpy_no_z
-  ld   a, b
-  or   %00000010
-  ld   b, a
-_cpy_no_z:
-  ld   a, b
+  or   h
   ld   ($cb03), a
-  pop  af
-  pop  bc
-  pop  af
+  pop  hl
   ret
 
 ; ─── rt_asl_a ─────────────────────────────────────────────────────────────────
 ; 6502 ASL accumulator: shadow C = old bit 7; A <<= 1; update N, Z.
 rt_asl_a:
-  ; Capture bit 7 into a temp.
-  push af
-  rlca                      ; bit 7 -> carry, A rotated (bit 7 wraps to bit 0)
-  ; Z80 carry now = old bit 7 = new 6502 shadow C.
-  push af                   ; save carry state
+  ; H.1d branchless: add a,a; C = old bit 7; N/Z via the $3E00 table.
+  push hl
+  add  a, a
+  ld   l, a
+  sbc  a, a                 ; $FF if carry else $00
+  and  %00000001            ; 6502 C bit
+  ld   h, $3e
+  or   (hl)                 ; + N/Z of the result
+  ld   h, a
   ld   a, ($cb03)
-  and  %01111110            ; clear N, C (keep Z for now — will replace)
-  ; We also need to clear Z; clear all of N, Z, C.
   and  %01111100
-  ld   b, a
-  pop  af                   ; restore carry
-  push af
-  jr   nc, _asl_a_no_c
-  ld   a, b
-  or   %00000001
-  ld   b, a
-_asl_a_no_c:
-  ; Compute actual shift: restore original A from first push.
-  pop  af                   ; flags with carry; A is shifted-rotated (has bit 7 at 0)
-  pop  af                   ; original A before rlca
-  add  a, a                 ; logical shift left (bit 7 goes to carry, bit 0 = 0)
-  push af                   ; save result + carry (same as shadow C we already set)
-  ; N from bit 7 of result.
-  bit  7, a
-  jr   z, _asl_a_no_n
-  ld   a, b
-  or   %10000000
-  ld   b, a
-_asl_a_no_n:
-  ; Z from result == 0.
-  pop  af
-  push af
-  or   a
-  jr   nz, _asl_a_no_z
-  ld   a, b
-  or   %00000010
-  ld   b, a
-_asl_a_no_z:
-  ld   a, b
+  or   h
   ld   ($cb03), a
-  pop  af                   ; result in A
+  ld   a, l
+  pop  hl
   ret
 
 ; ─── rt_lsr_a ─────────────────────────────────────────────────────────────────
 ; 6502 LSR accumulator: shadow C = old bit 0; A >>= 1 (logical); update N (always 0), Z.
 rt_lsr_a:
-  push af
-  ; Move bit 0 into carry.
-  rrca                      ; bit 0 -> carry; A rotated right (bit 0 wraps to bit 7)
-  push af                   ; save carry = old bit 0
+  ; H.1d branchless: srl; C = old bit 0; N always 0; Z via the table.
+  push hl
+  srl  a
+  ld   l, a
+  sbc  a, a
+  and  %00000001
+  ld   h, $3e
+  or   (hl)
+  ld   h, a
   ld   a, ($cb03)
-  and  %01111100            ; clear N, Z, C
-  ld   b, a
-  pop  af
-  push af
-  jr   nc, _lsr_a_no_c
-  ld   a, b
-  or   %00000001
-  ld   b, a
-_lsr_a_no_c:
-  ; Compute actual shift.
-  pop  af                   ; flags after rrca; A has bit 0 at bit 7
-  pop  af                   ; original A
-  srl  a                    ; logical shift right; bit 0 -> carry, bit 7 = 0
-  push af
-  ; N is always 0 after LSR (bit 7 of result is always 0).
-  ; Z from result == 0.
-  or   a
-  jr   nz, _lsr_a_no_z
-  ld   a, b
-  or   %00000010
-  ld   b, a
-_lsr_a_no_z:
-  ld   a, b
+  and  %01111100
+  or   h
   ld   ($cb03), a
-  pop  af
+  ld   a, l
+  pop  hl
   ret
 
 ; ─── rt_rol_a ─────────────────────────────────────────────────────────────────
@@ -758,4 +630,31 @@ _bit_no_v:
   pop  af                   ; restore caller's AF (A = accumulator)
   ret
 
+.ends
+
+; ─── NZ lookup table ──────────────────────────────────────────────────────────
+; nz_table[v] = 6502 P bits N (bit 7) and Z (bit 1) for value v. Pinned at
+; $3E00 (256-aligned, bank 0) so lowered code can inline the lookup as
+; `ld h, $3E` without symbol fixups: the H.1c inline sequence is
+;   ld l,a / ld h,$3e / ld a,($cb03) / and $7d / or (hl) / ld ($cb03),a / ld a,l
+; See docs/optimizer-plan.md. rt_set_nz_a below uses it too.
+.orga $3e00
+.section "nz_table" force
+rt_nz_table:
+.db $02, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+.db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+.db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+.db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+.db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+.db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+.db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+.db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+.db $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80
+.db $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80
+.db $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80
+.db $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80
+.db $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80
+.db $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80
+.db $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80
+.db $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80
 .ends
