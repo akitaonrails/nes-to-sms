@@ -488,10 +488,43 @@ _apply_frame_scroll:
   ; Frame IRQ applies the pre/top scroll first. If a complete post-hit pair was
   ; captured, schedule one SMS line IRQ at NES sprite 0 Y + 8 to switch to the
   ; post/playfield scroll during active display.
+  ;
+  ; OVERRUN GUARD (2026-07-05, field report): the split protocol writes the
+  ; pre/status-bar scroll (0 for SMB) and relies on the line IRQ to switch to
+  ; the playfield scroll. On frames where the handler overran, presentation
+  ; runs mid-display and the armed line IRQ gets swallowed by the pacing
+  ; read — those frames rendered END-TO-END with the status-bar scroll,
+  ; alternating with correct frames ("two levels on top of each other,
+  ; shifted"). Read the V-counter: outside VBlank, skip the split and write
+  ; the playfield scroll directly — the HUD wobbles on those frames instead
+  ; of the whole level double-imaging.
+  in  a, ($7e)              ; V-counter
+  cp  $e0
+  jr  c, _apply_playfield_direct
   ld  a, ($cb20)
   bit 2, a
   jr  nz, _apply_frame_split_scroll
   call _apply_pre_or_live_scroll
+  call _disable_line_irq
+  ret
+
+_apply_playfield_direct:
+  ; Out-of-vblank presentation: apply the post/playfield pair when one was
+  ; captured, else the live latch pair; never arm the line IRQ.
+  ld  a, ($cb20)
+  bit 2, a
+  jr  z, _apd_live
+  ld  a, ($cb23)
+  ld  c, a
+  ld  a, ($cb24)
+  call _apply_scroll_pair_cx_ay
+  jr  _apd_done
+_apd_live:
+  ld  a, ($cb0c)
+  ld  c, a
+  ld  a, ($cb0d)
+  call _apply_scroll_pair_cx_ay
+_apd_done:
   call _disable_line_irq
   ret
 
