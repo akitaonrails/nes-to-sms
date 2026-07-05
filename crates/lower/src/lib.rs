@@ -1836,8 +1836,12 @@ pub fn lower_routine(
             // CMP/CPX/CPY set N/Z/C; all three must be dead after the run.
             // SBC additionally sets V (mask includes it; Overflow branches
             // map to None so V-consuming runs never fuse) and writes A.
-            Op::CmpImm(_) | Op::CmpMem { .. } | Op::CpxImm(_) | Op::CpxMem { .. }
-            | Op::CpyImm(_) | Op::CpyMem { .. } => (
+            Op::CmpImm(_)
+            | Op::CmpMem { .. }
+            | Op::CpxImm(_)
+            | Op::CpxMem { .. }
+            | Op::CpyImm(_)
+            | Op::CpyMem { .. } => (
                 scan_run(i, cmp_cond_to_z80, F_N | F_Z | F_C),
                 &mut fuse_cmp_end,
             ),

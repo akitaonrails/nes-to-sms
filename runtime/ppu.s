@@ -282,6 +282,14 @@ _ppu_w_ppudata:
   jp   nc, _ppudata_direct_attribute
 
 _ppudata_direct_nametable_tile:
+  ; Window routing (E.5c): raw-store every tile write; only in-window
+  ; columns reach the folded VRAM table (out-of-window columns are
+  ; projected later when they scroll in). Preserves DE; the data byte
+  ; stays on the stack for the write path below.
+  pop  af
+  push af
+  call rt_nt_route_tile_write
+  jp   nc, _ppudata_discard_direct
   ; DE = NES nametable byte. Convert `(DE - $2000) & $03FF` to
   ; SMS `$3700 + offset * 2` (224-line-mode name table base), write tile
   ; low byte and clear attrs.
@@ -385,38 +393,64 @@ _pal_universal:
   jp   _ppudata_inc_addr
 
 _ppudata_direct_attribute:
-  ; Attribute byte at $23C0/$27C0/$2BC0/$2FC0. Expand its four 2-bit palette
-  ; selectors to SMS palette bits across the covered 4x4 tile area, preserving
-  ; each tile's CHR remap high bit through the nametable shadow.
+  ; Attribute byte at $23C0/$27C0/$2BC0/$2FC0. Store to the raw attr shadow,
+  ; then expand through the window-gated core below.
   pop  af
   ld   ($cb15), a            ; attr byte
   call rt_nt_write_attr_shadow ; preserves DE; current folded rendering unchanged
+  call _apply_attr_core
+  jp   _ppudata_inc_addr
+
+; ─── rt_apply_attr_byte ──────────────────────────────────────────────────────
+; Apply one NES attribute byte to the folded window (window-gated).
+; Entry: A = attribute byte, DE = NES attribute address ($23C0-$2FFF).
+; Used by the ppudata path above and by the scroll projector (ntmap.s),
+; which re-applies an entering column's attributes from the raw shadow.
+rt_apply_attr_byte:
+  ld   ($cb15), a
+_apply_attr_core:
+  ; Expand the four 2-bit palette selectors to SMS palette bits across the
+  ; covered 4x4 tile area, preserving each tile's CHR remap high bit through
+  ; the nametable shadow. Each quadrant (2 columns wide) is skipped when its
+  ; columns lie outside the projected window ($CB2A): rewriting those fold
+  ; slots would corrupt the columns currently displayed there (E.5c).
+  ld   a, d
+  and  $04
+  ld   ($cb16), a            ; NT page flag ($04 = second nametable)
   ld   a, e
   sub  $c0
   ld   ($cb19), a            ; attr offset 0..63
 
   ; Top-left quadrant: bits 0-1, base + 0.
   call rt_attr_base_tl
+  call _attr_quad_in_window
+  jr   nc, _attr_q_tr
   ld   a, ($cb15)
   and  $03
   call rt_write_bg_attr_quadrant
 
+_attr_q_tr:
   ; Top-right quadrant: bits 2-3, base + 4 bytes (2 tiles).
   call rt_attr_base_tl
   ld   a, e
   add  a, 4
   ld   e, a
+  call _attr_quad_in_window
+  jr   nc, _attr_q_bl
   ld   a, ($cb15)
   srl  a
   srl  a
   and  $03
   call rt_write_bg_attr_quadrant
 
+_attr_q_bl:
   ; Bottom-left quadrant: bits 4-5, base + 128 bytes (2 rows).
   call rt_attr_base_tl
   ld   a, e
   add  a, $80
   ld   e, a
+  call _attr_quad_in_window
+  jr   nc, _attr_q_br
   ld   a, ($cb15)
   srl  a
   srl  a
@@ -425,11 +459,14 @@ _ppudata_direct_attribute:
   and  $03
   call rt_write_bg_attr_quadrant
 
+_attr_q_br:
   ; Bottom-right quadrant: bits 6-7, base + 132 bytes (2 rows + 2 tiles).
   call rt_attr_base_tl
   ld   a, e
   add  a, $84
   ld   e, a
+  call _attr_quad_in_window
+  jr   nc, _attr_q_done
   ld   a, ($cb15)
   srl  a
   srl  a
@@ -439,6 +476,42 @@ _ppudata_direct_attribute:
   srl  a
   and  $03
   call rt_write_bg_attr_quadrant
+_attr_q_done:
+  ret
+
+; _attr_quad_in_window — carry SET when the quadrant's 2-column pair lies
+; inside the projected window. Entry: DE = folded SMS nametable low-byte
+; address of the quadrant's top-left cell. Preserves DE. Clobbers AF, HL.
+_attr_quad_in_window:
+  ; HUD band (fold rows 0-3 <=> fold high byte $37): NT-A attr quadrants
+  ; always apply (the split keeps those rows on screen); NT-B ones never
+  ; do (their fold slots display the HUD).
+  ld   a, d
+  cp   $38
+  jr   nc, _aqw_windowed
+  ld   a, ($cb16)
+  or   a
+  jr   z, _aqw_yes
+  or   a                     ; carry clear: NT-B over the HUD band
+  ret
+_aqw_windowed:
+  ld   a, e
+  rrca                       ; fold col = (E >> 1) & $1F
+  and  $1f
+  ld   l, a
+  ld   a, ($cb16)
+  rlca
+  rlca
+  rlca                       ; $04 -> $20
+  or   l                     ; world column (0-63)
+  ld   hl, $cb2a
+  sub  (hl)
+  and  $3f
+  cp   31                    ; both columns (c, c+1) must fit
+  ret
+_aqw_yes:
+  scf
+  ret
 
 _ppudata_inc_addr:
   ; Auto-increment VRAM address.

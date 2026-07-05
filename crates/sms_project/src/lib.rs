@@ -192,6 +192,11 @@ fn build_runtime_includes(runtime_s_files: &[PathBuf]) -> String {
             .to_string();
         if name == "boot.s" {
             (0u8, name)
+        } else if name == "nz_table.s" {
+            // Must be LAST: its `.orga $3e00 force` moves the WLA placement
+            // cursor, and any section included after it would spill past the
+            // 16 KiB bank-0 boundary.
+            (2u8, name)
         } else {
             (1u8, name)
         }

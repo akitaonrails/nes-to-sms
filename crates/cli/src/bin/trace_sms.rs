@@ -3850,6 +3850,24 @@ fn main() {
         format_runtime_materializer_hooks(&runtime_materializer_monitor)
     );
     println!("{}", format_nt_raw_write_stats(&bus));
+    if std::env::var("SMS_DUMP_CIRAM").is_ok() {
+        for row in 0..12usize {
+            let mut raw = String::new();
+            let mut vr = String::new();
+            for col in 0..40usize {
+                let (page, c31) = (col / 32, col % 32);
+                let off = page * 0x400 + row * 32 + c31;
+                raw.push_str(&format!("{:02X} ", bus.cart_ram[off]));
+                if col < 32 {
+                    let cell = 0x3700 + (row * 32 + col) * 2;
+                    vr.push_str(&format!("{:02X} ", bus.vram[cell]));
+                }
+            }
+            println!("ciram r{row:02}: {raw}");
+            println!("vram  r{row:02}: {vr}");
+        }
+    }
+
     println!("{}", format_nt_raw_frame_stats(&bus));
     println!("{}", format_nt_raw_shadow_parity(&bus));
     println!("{}", format_raw_ciram_storage_decision());

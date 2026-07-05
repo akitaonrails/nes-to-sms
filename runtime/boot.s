@@ -34,6 +34,7 @@
 ;   $CB1A        Translated NMI has been enabled at least once
 ;   $CB28        Runtime-ready flag: 0 during boot; 1 once irq_handler may work
 ;   $CB29        Previous-frame overrun flag ($80 = overran; split suppressed)
+;   $CB2A        Projected window start column; $CB2B/$CB2C projector scratch
 ;   $CB20-$CB24  Split-scroll scheduler state (see runtime/ppu.s)
 ;   $CB30-$CB61  APU->PSG shim state (see runtime/apu_stub.s)
 ;   $CB80-$CBFF  Raw mirrored NES attribute shadow (2 CIRAM pages × 64 bytes)
@@ -120,6 +121,7 @@ boot_main:
   xor a
   ld  ($cb28), a
   ld  ($cb29), a            ; overrun flag (see irq_handler pacing read)
+  ld  ($cb2a), a            ; projected window start column (ntmap.s)
 
   ; I/O port control: configure both controller ports as inputs (TR/TH
   ; lines included). Real SMS games write $3F=$FF at boot; without it,
@@ -387,6 +389,20 @@ _irq_runtime_ready:
   ; direct $2007 background writes still land mid-frame on overrun, but
   ; those enter at the scroll seam where they are effectively invisible.
   call rt_sat_upload
+  ; Project columns entering the visible window (E.5c) with the same
+  ; playfield scroll the apply below will present: post pair when the
+  ; split captured one this frame, else the live latch.
+  ld  a, ($cb20)
+  bit 2, a
+  jr  z, _irq_proj_live
+  ld  a, ($cb23)
+  ld  c, a
+  jr  _irq_proj_go
+_irq_proj_live:
+  ld  a, ($cb0c)
+  ld  c, a
+_irq_proj_go:
+  call rt_nt_project_scroll
   call _apply_frame_scroll
   call vbuf_flush
 

@@ -248,3 +248,216 @@ _nt_attr_shadow_shift_done:
   ret
 
 .ends
+
+; ─── Window-routed nametable writes (E.5c runtime materializer, tiles) ───────
+; The visible SMS table has 32 columns; the NES streams columns for the
+; NEXT screen into the second nametable, and folding those writes directly
+; (mod 32) overwrote on-screen columns mid-screen (field report: terrain
+; drawing at the player's position). Routing rule:
+;   - every tile write lands in the raw CIRAM SRAM store,
+;   - the folded VRAM write only happens when the write's column lies
+;     inside the projected window,
+;   - at presentation, columns entering the window are projected from the
+;     raw store (rt_nt_project_scroll).
+; Window state:
+;   $CB2A  projected window start column (0-63, NES coarse-scroll space)
+;   $CB2B  projector scratch: column
+;   $CB2C  projector scratch: row
+; Attributes keep the existing folded path (follow-up; SMB's playfield
+; palettes are coarse enough that entering columns look right).
+
+; rt_nt_route_tile_write — raw-store a tile byte and classify visibility.
+; Entry: DE = NES PPU tile address ($2000-$2FFF, offset < $3C0), A = byte.
+; Exit:  carry SET   -> in-window: caller performs the folded VRAM write.
+;        carry CLEAR -> out-of-window: raw-store only, caller skips VRAM.
+; Preserves: DE. Clobbers: AF, HL, BC.
+rt_nt_route_tile_write:
+  call rt_raw_ciram_sram_write
+  ; row = ((D & 3) << 3) | (E >> 5); rows 0-3 (status region) always render.
+  ld   a, e
+  rlca
+  rlca
+  rlca
+  and  $07
+  ld   b, a
+  ld   a, d
+  and  $03
+  rlca
+  rlca
+  rlca
+  or   b
+  cp   4
+  jr   nc, _nrt_col_check
+  ; Rows 0-3 are the status-bar band: the fold slots always display the
+  ; first nametable there (split-fixed HUD). NT-A writes render; NT-B
+  ; writes (streamed column tops) must NEVER reach VRAM or they garble
+  ; the HUD — raw-store only.
+  ld   a, d
+  and  $04
+  jr   z, _nrt_in
+  or   a                    ; carry clear: NT-B row 0-3 -> raw only
+  ret
+_nrt_col_check:
+  ; column = (D bit2) * 32 | (E & $1F)   (vertical mirroring: $24xx = page 1)
+  ld   a, d
+  and  $04
+  rlca
+  rlca
+  rlca                      ; bit 2 -> bit 5 (= 32)
+  ld   b, a
+  ld   a, e
+  and  $1f
+  or   b
+  ld   hl, $cb2a
+  sub  (hl)
+  and  $3f
+  cp   32
+  jr   c, _nrt_in
+  or   a                    ; carry clear: outside the window
+  ret
+_nrt_in:
+  scf
+  ret
+
+; rt_nt_project_scroll — project columns entering the visible window.
+; Entry: C = playfield scroll X about to be presented (the same value the
+;        scroll apply will write, pre-negation). Reads PPUCTRL bit 0 for
+;        the nametable select. Called from the frame IRQ during VBlank.
+; Clobbers: AF, BC, DE, HL.
+rt_nt_project_scroll:
+  ld   a, ($cb08)
+  and  $01
+  rrca
+  rrca
+  rrca                      ; bit 0 -> bit 5 (= 32)
+  ld   b, a
+  ld   a, c
+  rrca
+  rrca
+  rrca
+  and  $1f
+  or   b                    ; new window start column (0-63)
+  ld   hl, $cb2a
+  ld   b, (hl)              ; B = previous start
+  ld   (hl), a
+  sub  b
+  and  $3f
+  ret  z
+  cp   5
+  ret  nc                   ; teleport/left scroll: the game redraws itself
+  ld   d, a                 ; D = entering-column count (1-4)
+  ld   a, b
+  add  a, 32
+  and  $3f                  ; first entering column
+_nps_loop:
+  push af
+  push de
+  call _nt_project_col
+  pop  de
+  pop  af
+  inc  a
+  and  $3f
+  dec  d
+  jr   nz, _nps_loop
+  ret
+
+; _nt_project_col — copy rows 4-27 of one column from raw CIRAM into the
+; folded VRAM window through the CHR mapper (keeps shadows coherent).
+; Entry: A = column (0-63). Clobbers: AF, BC, DE, HL.
+_nt_project_col:
+  ld   ($cb2b), a
+  ld   a, 4
+  ld   ($cb2c), a
+_npc_row:
+  ; DE = NES tile address for (row, col)
+  ld   a, ($cb2b)
+  and  $1f
+  ld   e, a
+  ld   a, ($cb2c)
+  and  $07
+  rrca
+  rrca
+  rrca                      ; (row & 7) << 5
+  or   e
+  ld   e, a
+  ld   a, ($cb2c)
+  and  $18
+  rrca
+  rrca
+  rrca                      ; row >> 3
+  ld   d, a
+  ld   a, ($cb2b)
+  and  $20
+  rrca
+  rrca
+  rrca                      ; column bit 5 -> address bit 10 ($04 in D)
+  or   d
+  or   $20
+  ld   d, a
+  call rt_raw_ciram_sram_read   ; A = raw tile (preserves DE)
+  push af
+  ; fold to the SMS table: $3700 + ((DE - $2000) & $3FF) * 2
+  ld   a, d
+  and  $03
+  ld   d, a
+  sla  e
+  rl   d
+  ld   a, d
+  add  a, $37
+  ld   d, a
+  ld   a, e
+  out  ($bf), a
+  ld   a, d
+  and  $3f
+  or   $40
+  out  ($bf), a
+  pop  af
+  call rt_write_mapped_bg_tile
+  ld   a, ($cb2c)
+  inc  a
+  ld   ($cb2c), a
+  cp   28
+  jr   c, _npc_row
+
+  ; Re-apply the column's attributes from the raw attr shadow: the tile
+  ; writes above resolved their palette variants against the folded attr
+  ; state of the OLD column occupying these fold slots. Feeding the 8
+  ; governing attribute bytes through rt_apply_attr_byte re-resolves the
+  ; 4x4 groups with the correct sub-palettes (neighbor columns are
+  ; re-resolved too, harmlessly — their state is already correct).
+  xor  a
+  ld   ($cb2c), a            ; attr group row 0..7
+_npc_attr:
+  ; DE = NES attr address $23C0 | page<<10 | gy*8 | groupx
+  ld   a, ($cb2b)
+  and  $1f
+  rrca
+  rrca                       ; (col&31)>>2 = groupx (col<32 so 2 rrca ok on 5-bit)
+  and  $07
+  ld   e, a
+  ld   a, ($cb2c)
+  rlca
+  rlca
+  rlca                       ; gy*8 (gy<8: 3-bit <<3)
+  or   e
+  or   $c0
+  ld   e, a
+  ld   a, ($cb2b)
+  and  $20
+  rrca
+  rrca
+  rrca                       ; page -> $04
+  or   $23
+  ld   d, a
+  ; A = raw attr byte from the compact shadow ($CB80 + page*64 + off)
+  push de
+  call rt_nt_attr_shadow_addr
+  ld   a, (hl)
+  pop  de
+  call rt_apply_attr_byte
+  ld   a, ($cb2c)
+  inc  a
+  ld   ($cb2c), a
+  cp   8
+  jr   c, _npc_attr
+  ret
