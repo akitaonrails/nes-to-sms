@@ -1055,10 +1055,12 @@ fn main() {
     if std::env::var("FD_REF_ONLY").is_ok() {
         let mut last = (0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8);
         for (f, s) in ref_snaps.iter().enumerate() {
+            let ud = s[0x000D];
+            let ps = s[0x06FC];
             let key = (s[0x0770], s[0x0772], s[0x000E], s[0x075A]);
             if f % 16 == 0 || key != last {
                 println!(
-                    "f={f:4} mode={:02X} task={:02X} x={:02X}:{:02X} y={:02X} yspd={:02X} state={:02X} lives={:02X} wla={:02X}{:02X}{:02X}",
+                    "f={f:4} mode={:02X} task={:02X} x={:02X}:{:02X} y={:02X} yspd={:02X} state={:02X} lives={:02X} wla={:02X}{:02X}{:02X} ud={ud:02X} pstate={ps:02X}",
                     s[0x0770],
                     s[0x0772],
                     s[0x006D],

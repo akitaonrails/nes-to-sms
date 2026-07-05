@@ -1,0 +1,10 @@
+# SMB acceptance: death + game-over route (G.1 + G.3).
+#
+# Start, then hold Right and never jump: Mario runs into the first
+# goomba three times (deaths at ~441/1007/1573 on the NES reference,
+# lives 02->01->00->FF), reaches GAME OVER (mode 03 at ~1782), returns
+# to the title (~2205), and the attract demo starts (~3068). Regression
+# data for the SMB stress target, recorded against the NES reference
+# with FD_REF_ONLY.
+80:start
+220:right

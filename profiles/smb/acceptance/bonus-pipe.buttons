@@ -1,0 +1,47 @@
+# SMB acceptance: 1-1 bonus-pipe route (G.2).
+#
+# Start, run to pipe 4, land on top (x in [$394,$39B]: the entry check
+# at $DEE8 requires Down + foot metatiles exactly [$11,$10], i.e. feet
+# straddling the two enterable-pipe-top tiles), press Down: vertical
+# pipe entry to the underground coin room (first non-overworld area
+# type). Cross the coin table, side-pipe exit, re-emerge on the exit
+# pipe at 0A:38, run-jump the goomba pair, climb the staircase,
+# flagpole (~f2880), 1-2 transition (~f3299). Recorded against the NES
+# reference with FD_REF_ONLY.
+80:start
+220:right
+415:right,a
+440:right
+540:right,a
+570:right
+720:right,a
+750:right
+795:right,a
+830:
+850:right
+880:right,a
+930:
+1100:right,a
+1136:
+1210:left
+1230:
+1290:down
+1430:right
+1620:right,a
+1940:
+2036:right,b
+2052:right,a,b
+2110:right,b
+2140:right
+2220:right,a
+2265:right
+2320:right,a
+2365:right
+2420:right,a
+2465:right
+2520:right,a
+2565:right
+2620:right,a
+2665:right
+2720:right,a
+2765:right

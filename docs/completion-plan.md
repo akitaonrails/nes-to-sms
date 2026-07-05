@@ -1333,3 +1333,38 @@ testing:
 Followups beyond visual: upper-PRG access scheme for the remaining
 13 reds; runtime $2001 → VDP reg 1 forwarding (E.2); scroll register
 forwarding (E.4).
+
+## Phase G — v1 playability hardening (2026-07-04 re-plan)
+
+The 1-1-clear route proves completability, not playability. A player
+reaches three flows within a minute that the route never exercises;
+each gets the standard treatment (record route against the NES
+reference with FD_REF_ONLY, run full-route frame-diff parity, fix
+divergences, add trace-sms acceptance expectations):
+
+- [x] **G.1 Death route.** DONE 2026-07-04: Run into the first goomba without jumping:
+      death animation, life decrement ($075A 02->01), respawn
+      intermission, gameplay resumes. Parity across the full route.
+- [x] **G.2 Bonus-pipe route.** DONE 2026-07-04: Enter the 4th pipe (Down on top),
+      underground coin room (area-type/palette switch — the first
+      non-overworld area type exercised!), exit pipe, continue to the
+      flagpole. Parity across the full route.
+- [x] **G.3 Game-over route.** DONE 2026-07-04 (same script as G.1): Lose all lives; game-over screen and
+      return to title. Parity across the full route.
+
+v1 ships when G.1-G.3 are green. Post-v1 backlog unchanged: world
+1-2+ visuals (raw-CIRAM materializer), TRI_ATTN by-ear tuning,
+second NROM target (master plan 5.3).
+
+**Phase G outcome (2026-07-04):** all three flows are byte-for-byte
+against the NES reference. `death-gameover.buttons` (3,200 frames):
+three goomba deaths, lives 02->01->00->FF, GAME OVER (mode 03 at
+f1782), title return (f2205), attract demo restart — NO DIVERGENCE.
+`bonus-pipe.buttons` (3,400 frames): vertical pipe entry (the $DEE8
+check needs feet straddling metatiles [$11,$10], x in [$394,$39B]),
+underground coin room (first non-overworld area type through the
+whole stack), side-pipe exit warp, re-emergence, run-jump over the
+goomba pair, staircase, flagpole, 1-2 transition — NO DIVERGENCE.
+No translation fixes were needed: the pipeline handled every flow on
+the first parity run. v1 playability is proven, not just route
+completability.
