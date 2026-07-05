@@ -33,6 +33,7 @@
 ;   $CB12        Synthetic sprite-0 phase for PPUSTATUS bit 6
 ;   $CB1A        Translated NMI has been enabled at least once
 ;   $CB28        Runtime-ready flag: 0 during boot; 1 once irq_handler may work
+;   $CB29        Previous-frame overrun flag ($80 = overran; split suppressed)
 ;   $CB20-$CB24  Split-scroll scheduler state (see runtime/ppu.s)
 ;   $CB30-$CB61  APU->PSG shim state (see runtime/apu_stub.s)
 ;   $CB80-$CBFF  Raw mirrored NES attribute shadow (2 CIRAM pages × 64 bytes)
@@ -118,6 +119,7 @@ boot_main:
   ; translated init forever (black screen). See docs/completion-plan.md.
   xor a
   ld  ($cb28), a
+  ld  ($cb29), a            ; overrun flag (see irq_handler pacing read)
 
   ; I/O port control: configure both controller ports as inputs (TR/TH
   ; lines included). Real SMS games write $3F=$FF at boot; without it,
@@ -452,10 +454,16 @@ _irq_skip_translated_nmi:
   ; Reading the status port acknowledges any pending frame INT, guaranteeing
   ; the main thread one full frame of CPU between handler runs. When the
   ; handler fits its frame budget this read happens during VBlank before a
-  ; line INT can be pending, so nothing is lost. Trade-off: if the handler
-  ; overruns past an armed line-split scanline, that frame's split is
-  ; swallowed — acceptable, since an overrun frame is already out of spec.
+  ; line INT can be pending, so nothing is lost.
+  ;
+  ; The read also tells us whether THIS handler overran (bit 7 = a frame INT
+  ; is already pending again). Record it in $CB29: while overrunning, the
+  ; next frame's scroll presentation must not arm the sprite-0 split — the
+  ; line IRQ would be swallowed right here and the whole frame would render
+  ; at the status-bar scroll (the alternating double-image seen in play).
   in  a, ($bf)
+  and $80
+  ld  ($cb29), a
 
   pop de
   pop bc
@@ -501,6 +509,14 @@ _apply_frame_scroll:
   in  a, ($7e)              ; V-counter
   cp  $e0
   jr  c, _apply_playfield_direct
+  ; Adaptive split suppression: if the previous handler overran, this one
+  ; almost certainly will too, and its armed split would be swallowed.
+  ; Present the playfield scroll directly instead (HUD scrolls with the
+  ; camera on those frames — stable, no double image). At full speed the
+  ; flag stays clear and the fixed-HUD split path returns automatically.
+  ld  a, ($cb29)
+  or  a
+  jr  nz, _apply_playfield_direct
   ld  a, ($cb20)
   bit 2, a
   jr  nz, _apply_frame_split_scroll
