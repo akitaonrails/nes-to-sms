@@ -139,3 +139,50 @@ tolerable — the IRQ-skip pacing already handles them gracefully).
 | H.1c table NZ + inline | 8.34× | 256-byte N/Z table pinned at $3E00; shadow-NZ update inlined at all emission sites (7 instructions, no call, no branch); rt_set_nz_a left the profile |
 | H.3 variant persistence | (see next) | sprite variant pool persists across frames (CHR static on NROM); flush-on-full generation reset; _dof_*/do_sprite_variant left the profile, idle share 6.3%→12.2% |
 | H.1d branchless flag bodies | **6.96×** | rt_cmp/cpx/cpy/adc/sbc/asl_a/lsr_a rewritten branchless via the Z80 F-layout mapping (S→N, C→C aligned; Z bit6→1, PV bit2→6 by rotates) and the $3E00 table; ~40% cheaper per call. Found+fixed: old cpx/cpy header comments claimed "A clobbered" while the code preserved A — callers rely on preservation (6502 CPX/CPY touch only flags). Validation harness now installs the $3E00 table. Idle share 14.9%. Worst frame 65×→58× |
+
+## Finalization plan (2026-07-05)
+
+Remaining work to close every pending item, in execution order:
+
+**H.5 Fusion extension** (attacks rt_adc_a 7.4% + rt_cmp_a 6.7% +
+rt_sbc_a 4.3% + rt_lsr_a 4.0% call volume): extend the fusable
+producer set —
+- CPX/CPY + branch: `ld e,a ; ld a,(shadow) ; cp op ; ld a,e` then
+  native branches (LD does not touch flags).
+- ADC/SBC + branch: native carry-in (`ld a,($cb03) ; rrca` — plus
+  `ccf` for SBC), `adc/sbc a,operand`, result stays in A; requires
+  N/Z/C/V all dead after the run (the shadow-C byte goes stale, so
+  no later reader may exist — the existing dead-mask machinery
+  guarantees it).
+- LSR/ASL accumulator + branch: `srl a` / `add a,a` native Z/C.
+- CMP with indexed operand: allow fused runs whose producer loads the
+  operand through the H.2 direct-window path.
+
+**H.6 rt_read_prg_high_indexed inline** (2.6%): bank-map slot 2 to
+:data_prg_high, direct read, restore — inline at sites where the
+H.2-style window proof holds for $C000-$FF00 bases.
+
+**H.7 per-OAM variant memo** (_vgs_scan ~3.2%): 64-entry per-sprite
+cache of (tile, attr) → resolved SMS tile; sprites rarely change
+between frames, so the 16-entry key scan runs only on memo misses.
+
+**Deferred with rationale:** X/Y register residency (structural
+lowering rework; revisit only if the above lands >2× short of goal)
+and cross-bank call co-location (low yield). NES2SMS_OPT per-pass
+toggles: dropped — passes land individually committed and
+oracle-gated; git bisect covers regression isolation.
+
+**Audio finalization:** TRI_ATTN set analytically from the NES APU
+mixer curves (triangle vs pulse relative loudness at typical game
+volumes) instead of by ear; the constant and its derivation
+documented in apu_stub.s. User listening remains the final polish.
+
+**World 1-2 visuals:** verify the existing post-transition-1-2
+checkpoint and record a deeper 1-2 route (scroll + first enemies);
+fix specific defects found (raw-CIRAM materializer only if the
+evidence demands it).
+
+**Second ROM:** no second NES ROM exists on disk; attempt a
+freely-licensed homebrew NROM title; if unavailable, the item is
+blocked on the user supplying a ROM (documented, not silently
+dropped).
