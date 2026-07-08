@@ -1057,10 +1057,11 @@ impl Program {
         // stay zero): cross-section transfers are never executed in the
         // validation emulator, and a binary patch would hard-error on
         // targets only WLA can resolve (profile stubs, other sections).
-        self.sec().push_byte(0x11);
+        // Phase R: target travels in BC — DE permanently holds 6502 X/Y.
+        self.sec().push_byte(0x01);
         self.sec().push_byte(0x00);
         self.sec().push_byte(0x00);
-        self.sec().push_asm(format!("  ld de,{label}"));
+        self.sec().push_asm(format!("  ld bc,{label}"));
         // ld a, :TARGET — bank immediate (binary placeholder; validation
         // never executes cross-section transfers).
         self.emit_bytes_asm(&[0x3E, 0x00], &format!("  ld a,:{label}"));
@@ -1070,6 +1071,23 @@ impl Program {
             self.emit_bytes_asm(&[0xCD, 0x00, 0x00], "  call rt_far_gate");
         }
         self.referenced_labels.insert(label.to_string());
+    }
+
+    // ── X/Y residency moves (Phase R: 6502 X lives in D, Y in E) ────────────
+    pub fn ld_a_e_reg(&mut self) {
+        self.emit1(0x7B, "ld a,e");
+    }
+    pub fn ld_d_a_reg(&mut self) {
+        self.emit1(0x57, "ld d,a");
+    }
+    pub fn ld_e_a_reg(&mut self) {
+        self.emit1(0x5F, "ld e,a");
+    }
+    pub fn ld_l_e_reg(&mut self) {
+        self.emit1(0x6B, "ld l,e");
+    }
+    pub fn adc_a_imm0(&mut self) {
+        self.emit_imm8(0xCE, 0, "adc a,$00".to_string());
     }
 
     /// `ld a, :label` — bank-number immediate (binary placeholder; only

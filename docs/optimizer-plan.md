@@ -214,3 +214,25 @@ step-timing relic from before the frame-level oracle.
 Next phase (agreed with the user): register residency — keep 6502
 X/Y (and provably-private zero-page bytes) in Z80 registers across
 basic blocks. That is the path from ~5× toward real-time.
+
+## Phase R (2026-07-08): X/Y register residency
+
+6502 X lives in Z80 D, Y in E, across ALL translated code. RAM shadows
+($CB00/01) remain as boundary-sync mirrors only: the frame handler
+syncs on entry, reloads before / stores after the translated NMI, and
+re-establishes on exit; boot establishes residency before jumping in.
+Everything downstream moved: 43 emit-path shadow accesses became
+register moves; INX/DEX are `inc d`/`dec d`; the indexed helpers use
+an A/L add so BC/DE stay untouched; far transfers carry targets in BC
+through rt_far_gate; LDIR copy loops save/restore DE; zp-pointer and
+controller helpers read the resident registers; the validation
+harness seeds and reads cpu.d/cpu.e.
+
+| Milestone | avg | p50 | p90 |
+|-----------|-----|-----|-----|
+| Pre-R (H2 final) | 4.98× | 4.70× | 7.05× |
+| Phase R core | **4.74×** | 4.47× | **6.74×** |
+
+Honest read: X/Y traffic was ~5% of heavy frames. The remaining p90
+weight is accumulator/memory traffic and general translated code —
+next tiers are redundant load/store peephole and zero-page promotion.

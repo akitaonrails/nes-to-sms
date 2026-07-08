@@ -53,6 +53,9 @@
 ; the original caller's is. Either way the target's RET unwinds through
 ; _far_after, which restores the previous bank.
 rt_far_gate:
+  ; Phase R: target arrives in BC (DE holds resident 6502 X/Y and must
+  ; flow through untouched). A = target bank; ($cb15) = caller A.
+  ld   ($cb2e), bc          ; park target (dedicated gate scratch word)
   ld   c, a
   ld   a, ($cb14)
   push af                   ; save previous slot-1 bank
@@ -61,7 +64,8 @@ rt_far_gate:
   ld   ($fffe), a
   ld   bc, _far_after
   push bc
-  push de
+  ld   bc, ($cb2e)
+  push bc                   ; target
   ld   a, ($cb15)           ; caller A (JSR/JMP preserve the accumulator)
   ret                       ; jump to target
 
@@ -343,6 +347,7 @@ rt_read_zp_ptr_y:
   push hl
   push de
   push bc
+  ld   c, e                 ; Phase R: capture resident Y before DE is reused
   ; Read pointer from zero page.
   ld   l, b                 ; zero-page offset
   ld   h, $c0               ; SMS base for zero page = $C000
@@ -352,7 +357,7 @@ rt_read_zp_ptr_y:
   ld   d, (hl)              ; high byte of pointer
   ; DE = NES pointer value.
   ; Add Y to form effective address.
-  ld   a, ($cb01)           ; shadow Y
+  ld   a, c                 ; resident Y (captured at entry)
   ld   l, a
   ld   h, 0
   add  hl, de               ; HL = pointer + Y (16-bit)
@@ -401,6 +406,7 @@ rt_write_zp_ptr_y:
   push hl
   push de
   push bc
+  ld   c, e                 ; Phase R: capture resident Y before DE is reused
   push af                   ; save value to write
   ; Read pointer from zero page.
   ld   l, b
@@ -409,7 +415,7 @@ rt_write_zp_ptr_y:
   inc  l
   ld   d, (hl)
   ; Add Y.
-  ld   a, ($cb01)
+  ld   a, c                 ; resident Y (captured at entry)
   ld   l, a
   ld   h, 0
   add  hl, de

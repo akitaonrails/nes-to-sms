@@ -35,6 +35,7 @@
 ;   $CB28        Runtime-ready flag: 0 during boot; 1 once irq_handler may work
 ;   $CB29        Previous-frame overrun flag ($80 = overran; split suppressed)
 ;   $CB2A        Projected window start column; $CB2B/$CB2C projector scratch
+;   $CB2E/$CB2F  rt_far_gate target park (Phase R: BC carries far targets)
 ;   $CB20-$CB24  Split-scroll scheduler state (see runtime/ppu.s)
 ;   $CB30-$CB61  APU->PSG shim state (see runtime/apu_stub.s)
 ;   $CB80-$CBFF  Raw mirrored NES attribute shadow (2 CIRAM pages × 64 bytes)
@@ -311,6 +312,11 @@ boot_main:
   ld   ($cb14), a            ; mirror in bank shadow for rt_far_call
   ld   a, $01
   ld   ($cb28), a            ; runtime ready: irq_handler may do real work
+  ; Phase R: establish X/Y residency (D = X, E = Y) from the shadows.
+  ld   a, ($cb00)
+  ld   d, a
+  ld   a, ($cb01)
+  ld   e, a
   ei                          ; now safe: slot 1 has translated code
   jp   $4000                  ; logical slot-1 address of translated_reset
 
@@ -324,6 +330,13 @@ irq_handler:
   push hl
   push bc
   push de
+  ; Phase R: DE carries the resident 6502 X/Y of the interrupted thread.
+  ; Sync to the RAM shadows now; the handler body may clobber DE, and the
+  ; translated NMI reloads from the shadows below.
+  ld  a, d
+  ld  ($cb00), a
+  ld  a, e
+  ld  ($cb01), a
 
   ; Acknowledge the VDP interrupt by reading the status port. Frame and line
   ; interrupts share the Z80 IM1 vector; status bit 7 identifies frame IRQs.
@@ -434,6 +447,11 @@ _irq_mark_nmi_started:
   ld  ($cb1a), a
 
 _irq_call_translated_nmi:
+  ; Phase R: reload resident X/Y for the translated NMI.
+  ld  a, ($cb00)
+  ld  d, a
+  ld  a, ($cb01)
+  ld  e, a
 
   ; Per-frame game logic runs through the translated NES NMI handler.
   ; Per NES NMI semantics, hardware would push PC + P on the 6502 stack
@@ -453,6 +471,11 @@ _irq_call_translated_nmi:
   ld  ($cb14), a
   ld  ($fffe), a
   call translated_nmi       ; jumps to the profile/ROM NMI vector
+  ; Phase R: the NMI may have changed X/Y — new truth back to the shadows.
+  ld  a, d
+  ld  ($cb00), a
+  ld  a, e
+  ld  ($cb01), a
   pop af
   ld  ($cb14), a
   ld  ($fffe), a
@@ -482,6 +505,12 @@ _irq_skip_translated_nmi:
   ld  ($cb29), a
 
   pop de
+  ; Phase R: X/Y may have changed in the translated NMI; the interrupted
+  ; thread resumes with the new values (6502 semantics).
+  ld  a, ($cb00)
+  ld  d, a
+  ld  a, ($cb01)
+  ld  e, a
   pop bc
   pop hl
   pop af

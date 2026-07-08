@@ -176,7 +176,7 @@ rt_cpx_a:
   ; the old CODE preserved it, and callers rely on that).
   push af
   push hl
-  ld   a, ($cb00)
+  ld   a, d                 ; Phase R: resident X
   sub  b
   push af
   pop  hl                   ; L = F
@@ -208,7 +208,7 @@ rt_cpy_a:
   ; the old CODE preserved it, and callers rely on that).
   push af
   push hl
-  ld   a, ($cb01)
+  ld   a, e                 ; Phase R: resident Y
   sub  b
   push af
   pop  hl                   ; L = F

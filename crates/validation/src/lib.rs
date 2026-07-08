@@ -648,7 +648,8 @@ fn run_z80_with_prg(
         // SMS RAM at $C200..$C7FF mirrors NES $0200..$07FF.
         bus.write(0xC200 + i as u16, *b);
     }
-    // Shadow X/Y/S/P.
+    // Shadow S/P stay in RAM; X/Y are register-resident (Phase R: D/E),
+    // with the RAM shadows kept as the boundary-sync mirror.
     bus.write(sms_layout::SHADOW_X, init.x);
     bus.write(sms_layout::SHADOW_Y, init.y);
     bus.write(sms_layout::SHADOW_S, init.sp);
@@ -657,6 +658,8 @@ fn run_z80_with_prg(
     let mut cpu = z80_emu::Cpu::new();
     cpu.pc = entry;
     cpu.a = init.a;
+    cpu.d = init.x;
+    cpu.e = init.y;
     // F: irrelevant; lowered code reads/writes shadow P, not native F.
     cpu.sp = 0xDFFE;
     // Push a sentinel return: when the routine RETs, PC = $FFFE which is
@@ -676,8 +679,8 @@ fn run_z80_with_prg(
     }
     FinalState {
         a: cpu.a,
-        x: bus.read(sms_layout::SHADOW_X),
-        y: bus.read(sms_layout::SHADOW_Y),
+        x: cpu.d,
+        y: cpu.e,
         p: bus.read(sms_layout::SHADOW_P),
         sp: bus.read(sms_layout::SHADOW_S),
         zp: zp_out,

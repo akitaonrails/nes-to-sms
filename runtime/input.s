@@ -226,7 +226,7 @@ _ctrl_read_shift_done:
 ; the serial latch; X=1 reads controller 2, which is unconnected for v1 and
 ; returns 0. Other X values also return 0.
 rt_controller_read_indexed_x:
-  ld   a, ($cb00)             ; shadow X
+  ld   a, d                   ; Phase R: resident X
   or   a
   jp   z, rt_controller_read
   xor  a

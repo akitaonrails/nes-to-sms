@@ -166,6 +166,28 @@ fn indexed_read_runtime(base: u16, region: ir::MemRegion) -> &'static str {
     }
 }
 
+/// Phase R: which resident index register an emission uses (X=D, Y=E).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IdxReg {
+    X,
+    Y,
+}
+
+impl IdxReg {
+    fn load_into_a(self, p: &mut z80_emit::Program) {
+        match self {
+            IdxReg::X => p.ld_a_d(),
+            IdxReg::Y => p.ld_a_e_reg(),
+        }
+    }
+    fn store_from_a(self, p: &mut z80_emit::Program) {
+        match self {
+            IdxReg::X => p.ld_d_a_reg(),
+            IdxReg::Y => p.ld_e_a_reg(),
+        }
+    }
+}
+
 // H.2 (optimizer plan): indexed-access specialization. When `base+idx`
 // provably stays inside one flat window for every idx 0-255, the
 // dispatcher's runtime range classification is dead weight — emit the
@@ -201,36 +223,42 @@ fn emit_prg_high_read_direct(p: &mut z80_emit::Program, nes_addr: u16) {
     p.ld_a_bank_imm("data_prg_high");
     p.ld_abs_a(0xFFFF);
     p.ld_a_abs(nes_addr - 0x4000);
-    p.ld_e_a();
+    p.ld_c_a();
     p.ld_a_bank_imm("data_prg_low");
     p.ld_abs_a(0xFFFF);
-    p.ld_a_e();
+    p.ld_a_c();
 }
 
 /// H2: direct high-PRG indexed read: A := (base + idx). Clobbers HL/B/C/E
 /// and native flags.
-fn emit_prg_high_indexed_direct(p: &mut z80_emit::Program, base: u16, shadow_idx: u16) {
+fn emit_prg_high_indexed_direct(p: &mut z80_emit::Program, base: u16, idx: IdxReg) {
     p.ld_a_bank_imm("data_prg_high");
     p.ld_abs_a(0xFFFF);
     p.ld_hl_imm(base - 0x4000);
-    p.ld_a_abs(shadow_idx);
-    p.ld_c_a();
-    p.ld_b_imm(0);
-    p.add_hl_bc();
+    idx.load_into_a(p);
+    p.add_a_l();
+    p.ld_l_a();
+    p.ld_a_h();
+    p.adc_a_imm0();
+    p.ld_h_a();
     p.ld_a_hl_ptr();
-    p.ld_e_a();
+    p.ld_c_a();
     p.ld_a_bank_imm("data_prg_low");
     p.ld_abs_a(0xFFFF);
-    p.ld_a_e();
+    p.ld_a_c();
 }
 
 /// A := (sms_base + idx). Clobbers HL/B/C and native flags.
-fn emit_indexed_read_direct(p: &mut z80_emit::Program, sms_base: u16, shadow_idx: u16) {
+fn emit_indexed_read_direct(p: &mut z80_emit::Program, sms_base: u16, idx: IdxReg) {
+    // Phase R: index from the resident register; 16-bit add via A/L so
+    // BC/DE stay untouched.
     p.ld_hl_imm(sms_base);
-    p.ld_a_abs(shadow_idx);
-    p.ld_c_a();
-    p.ld_b_imm(0);
-    p.add_hl_bc();
+    idx.load_into_a(p);
+    p.add_a_l();
+    p.ld_l_a();
+    p.ld_a_h();
+    p.adc_a_imm0();
+    p.ld_h_a();
     p.ld_a_hl_ptr();
 }
 
@@ -259,10 +287,10 @@ fn emit_set_nz_inline(p: &mut z80_emit::Program) {
 /// A = A + B + shadowC; shadow N/V/Z/C updated. Clobbers B?no(B kept as
 /// operand input, untouched)/C/E/HL.
 fn emit_adc_flags_inline(p: &mut z80_emit::Program) {
-    p.ld_e_a();
+    p.ld_c_a();
     p.ld_a_abs(sms_layout::SHADOW_P);
     p.rrca();
-    p.ld_a_e();
+    p.ld_a_c();
     p.adc_a_b();
     p.ld_c_a();
     p.push_af();
@@ -294,11 +322,11 @@ fn emit_adc_flags_inline(p: &mut z80_emit::Program) {
 
 /// A = A - B - (1-shadowC); shadow N/V/Z/C updated (6502 borrow polarity).
 fn emit_sbc_flags_inline(p: &mut z80_emit::Program) {
-    p.ld_e_a();
+    p.ld_c_a();
     p.ld_a_abs(sms_layout::SHADOW_P);
     p.rrca();
     p.ccf();
-    p.ld_a_e();
+    p.ld_a_c();
     p.sbc_a_b();
     p.ld_c_a();
     p.push_af();
@@ -354,9 +382,9 @@ fn emit_cmp_flags_inline(p: &mut z80_emit::Program) {
 }
 
 /// CPX/CPY: like CMP but comparing a shadow register; A preserved via E.
-fn emit_cpxy_flags_inline(p: &mut z80_emit::Program, shadow: u16) {
-    p.ld_e_a();
-    p.ld_a_abs(shadow);
+fn emit_cpxy_flags_inline(p: &mut z80_emit::Program, idx: IdxReg) {
+    p.ld_c_a();
+    idx.load_into_a(p);
     p.sub_b();
     p.push_af();
     p.pop_hl();
@@ -375,16 +403,16 @@ fn emit_cpxy_flags_inline(p: &mut z80_emit::Program, shadow: u16) {
     p.and_imm(0x7C);
     p.or_h();
     p.ld_abs_a(sms_layout::SHADOW_P);
-    p.ld_a_e();
+    p.ld_a_c();
 }
 
 /// LSR A with live flags: C = old bit0, N = 0, Z via the $3E00 table.
 fn emit_lsr_a_flags_inline(p: &mut z80_emit::Program) {
     p.srl_a();
-    p.ld_e_a();
+    p.ld_c_a();
     p.sbc_a_a();
     p.and_imm(0x01);
-    p.ld_l_e();
+    p.ld_l_c();
     p.ld_h_imm(0x3E);
     p.or_hl_ptr();
     p.ld_h_a();
@@ -392,16 +420,16 @@ fn emit_lsr_a_flags_inline(p: &mut z80_emit::Program) {
     p.and_imm(0x7C);
     p.or_h();
     p.ld_abs_a(sms_layout::SHADOW_P);
-    p.ld_a_e();
+    p.ld_a_c();
 }
 
 /// ASL A with live flags: C = old bit7, N/Z via the table.
 fn emit_asl_a_flags_inline(p: &mut z80_emit::Program) {
     p.add_a_a();
-    p.ld_e_a();
+    p.ld_c_a();
     p.sbc_a_a();
     p.and_imm(0x01);
-    p.ld_l_e();
+    p.ld_l_c();
     p.ld_h_imm(0x3E);
     p.or_hl_ptr();
     p.ld_h_a();
@@ -409,7 +437,7 @@ fn emit_asl_a_flags_inline(p: &mut z80_emit::Program) {
     p.and_imm(0x7C);
     p.or_h();
     p.ld_abs_a(sms_layout::SHADOW_P);
-    p.ld_a_e();
+    p.ld_a_c();
 }
 
 /// H.4: inline 6502 push
@@ -419,14 +447,14 @@ fn emit_asl_a_flags_inline(p: &mut z80_emit::Program) {
 /// H.4: inline 6502 push — A to $C100+S, S decremented. A preserved.
 /// Clobbers HL/D and native flags (same contract as rt_push6502).
 fn emit_push6502_inline(p: &mut z80_emit::Program) {
-    p.ld_d_a();
+    p.ld_c_a();
     p.ld_a_abs(sms_layout::SHADOW_S);
     p.ld_l_a();
     p.ld_h_imm(0xC1);
-    p.ld_hl_ptr_d();
+    p.ld_hl_ptr_c();
     p.dec_a();
     p.ld_abs_a(sms_layout::SHADOW_S);
-    p.ld_a_d();
+    p.ld_a_c();
 }
 
 /// H.4: inline 6502 pop — S incremented, A from $C100+S. Clobbers HL
@@ -442,13 +470,16 @@ fn emit_pop6502_inline(p: &mut z80_emit::Program) {
 
 /// (sms_base + idx) := A; A preserved (6502 store contract). Clobbers
 /// HL/C/DE and native flags.
-fn emit_indexed_write_direct(p: &mut z80_emit::Program, sms_base: u16, shadow_idx: u16) {
+fn emit_indexed_write_direct(p: &mut z80_emit::Program, sms_base: u16, idx: IdxReg) {
+    // (sms_base + idx) := A; A preserved. Clobbers HL/C; DE untouched.
     p.ld_c_a();
     p.ld_hl_imm(sms_base);
-    p.ld_a_abs(shadow_idx);
-    p.ld_e_a();
-    p.ld_d_imm(0);
-    p.add_hl_de();
+    idx.load_into_a(p);
+    p.add_a_l();
+    p.ld_l_a();
+    p.ld_a_h();
+    p.adc_a_imm0();
+    p.ld_h_a();
     p.ld_hl_ptr_c();
     p.ld_a_c();
 }
@@ -465,7 +496,7 @@ fn emit_ldxy_mem(
     program: &mut z80_emit::Program,
     addr: &ir::AddrExpr,
     region: ir::MemRegion,
-    shadow_addr: u16,
+    target: IdxReg,
 ) {
     use ir::{AddrExpr, MemRegion};
     program.push_af();
@@ -488,13 +519,13 @@ fn emit_ldxy_mem(
         }
         (AddrExpr::AbsIndexedX(base), _) => {
             if let Some(sms) = indexed_direct_base(*base, region) {
-                emit_indexed_read_direct(program, sms, sms_layout::SHADOW_X);
+                emit_indexed_read_direct(program, sms, IdxReg::X);
             } else {
                 if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                    emit_prg_high_indexed_direct(program, *base, sms_layout::SHADOW_X);
+                    emit_prg_high_indexed_direct(program, *base, IdxReg::X);
                 } else {
                     program.ld_hl_imm(indexed_base_to_sms(*base, region));
-                    program.ld_a_abs(sms_layout::SHADOW_X);
+                    program.ld_a_d();
                     program.ld_b_a();
                     program.call(indexed_read_runtime(*base, region));
                 }
@@ -502,27 +533,27 @@ fn emit_ldxy_mem(
         }
         (AddrExpr::AbsIndexedY(base), _) => {
             if let Some(sms) = indexed_direct_base(*base, region) {
-                emit_indexed_read_direct(program, sms, sms_layout::SHADOW_Y);
+                emit_indexed_read_direct(program, sms, IdxReg::Y);
             } else {
                 if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                    emit_prg_high_indexed_direct(program, *base, sms_layout::SHADOW_Y);
+                    emit_prg_high_indexed_direct(program, *base, IdxReg::Y);
                 } else {
                     program.ld_hl_imm(indexed_base_to_sms(*base, region));
-                    program.ld_a_abs(sms_layout::SHADOW_Y);
+                    program.ld_a_e_reg();
                     program.ld_b_a();
                     program.call(indexed_read_runtime(*base, region));
                 }
             }
         }
         (AddrExpr::ZpIndexedX(zp), _) => {
-            program.ld_a_abs(sms_layout::SHADOW_X);
+            program.ld_a_d();
             program.add_a_imm(*zp);
             program.ld_l_a();
             program.ld_h_imm((sms_layout::NES_ZP_BASE >> 8) as u8);
             program.ld_a_hl_ptr();
         }
         (AddrExpr::ZpIndexedY(zp), _) => {
-            program.ld_a_abs(sms_layout::SHADOW_Y);
+            program.ld_a_e_reg();
             program.add_a_imm(*zp);
             program.ld_l_a();
             program.ld_h_imm((sms_layout::NES_ZP_BASE >> 8) as u8);
@@ -533,7 +564,7 @@ fn emit_ldxy_mem(
             program.ld_a_imm(0x00);
         }
     }
-    program.ld_abs_a(shadow_addr);
+    target.store_from_a(program);
     emit_set_nz_inline(program);
     // `push af` saved caller A in the high byte. Pop into BC and restore
     // only A, leaving the N/Z flags produced by SET_NZ_A live for a
@@ -554,30 +585,30 @@ fn emit_stxy_mem(
     program: &mut z80_emit::Program,
     addr: &ir::AddrExpr,
     region: ir::MemRegion,
-    shadow_addr: u16,
+    src: IdxReg,
 ) {
     use ir::{AddrExpr, MemRegion};
     program.push_af();
     match (addr, region) {
         (AddrExpr::ZpConst(z), MemRegion::ZeroPage) => {
-            program.ld_a_abs(shadow_addr);
+            src.load_into_a(program);
             program.ld_abs_a(sms_layout::NES_ZP_BASE + *z as u16);
         }
         (AddrExpr::Const(a), MemRegion::Ram | MemRegion::RamMirror | MemRegion::Stack) => {
-            program.ld_a_abs(shadow_addr);
+            src.load_into_a(program);
             program.ld_abs_a(nes_ram_addr_to_sms(*a));
         }
         (AddrExpr::AbsIndexedX(base), _) => {
             // Load X/Y into the value, also load X (index) — but the value
             // and the index can be the same shadow byte. Use C as scratch.
             if let Some(sms) = indexed_direct_base(*base, region) {
-                program.ld_a_abs(shadow_addr);
-                emit_indexed_write_direct(program, sms, sms_layout::SHADOW_X);
+                src.load_into_a(program);
+                emit_indexed_write_direct(program, sms, IdxReg::X);
             } else {
-                program.ld_a_abs(shadow_addr);
+                src.load_into_a(program);
                 program.ld_c_a(); // C = value (X or Y)
                 program.ld_hl_imm(indexed_base_to_sms(*base, region));
-                program.ld_a_abs(sms_layout::SHADOW_X);
+                program.ld_a_d();
                 program.ld_b_a();
                 program.ld_a_c();
                 program.call(runtime_symbols::WRITE_INDEXED);
@@ -585,13 +616,13 @@ fn emit_stxy_mem(
         }
         (AddrExpr::AbsIndexedY(base), _) => {
             if let Some(sms) = indexed_direct_base(*base, region) {
-                program.ld_a_abs(shadow_addr);
-                emit_indexed_write_direct(program, sms, sms_layout::SHADOW_Y);
+                src.load_into_a(program);
+                emit_indexed_write_direct(program, sms, IdxReg::Y);
             } else {
-                program.ld_a_abs(shadow_addr);
+                src.load_into_a(program);
                 program.ld_c_a();
                 program.ld_hl_imm(indexed_base_to_sms(*base, region));
-                program.ld_a_abs(sms_layout::SHADOW_Y);
+                program.ld_a_e_reg();
                 program.ld_b_a();
                 program.ld_a_c();
                 program.call(runtime_symbols::WRITE_INDEXED);
@@ -599,26 +630,26 @@ fn emit_stxy_mem(
         }
         (AddrExpr::ZpIndexedX(zp), _) => {
             // (zp + X) & $FF wrap.
-            program.ld_a_abs(sms_layout::SHADOW_X);
+            program.ld_a_d();
             program.add_a_imm(*zp);
             program.ld_l_a();
             program.ld_h_imm((sms_layout::NES_ZP_BASE >> 8) as u8);
-            program.ld_a_abs(shadow_addr);
+            src.load_into_a(program);
             program.ld_hl_ptr_a();
         }
         (AddrExpr::ZpIndexedY(zp), _) => {
-            program.ld_a_abs(sms_layout::SHADOW_Y);
+            program.ld_a_e_reg();
             program.add_a_imm(*zp);
             program.ld_l_a();
             program.ld_h_imm((sms_layout::NES_ZP_BASE >> 8) as u8);
-            program.ld_a_abs(shadow_addr);
+            src.load_into_a(program);
             program.ld_hl_ptr_a();
         }
         (AddrExpr::Const(a), MemRegion::ApuIo) => {
             // STX/STY to an APU register routes through the APU shim like
             // STA does (SMB's Dump_Squ1_Regs is `STY $4001 / STX $4000`;
             // these were silently dropped before, muting whole channels).
-            program.ld_a_abs(shadow_addr);
+            src.load_into_a(program);
             if *a == 0x4016 {
                 program.call(runtime_symbols::CONTROLLER_STROBE);
             } else {
@@ -627,7 +658,7 @@ fn emit_stxy_mem(
             }
         }
         (AddrExpr::Const(a), MemRegion::PpuReg | MemRegion::PpuMirror) => {
-            program.ld_a_abs(shadow_addr);
+            src.load_into_a(program);
             program.ld_b_imm((*a & 7) as u8);
             program.call(runtime_symbols::PPU_WRITE);
         }
@@ -689,10 +720,10 @@ fn emit_value_src_to_a(p: &mut z80_emit::Program, src: &ir::ValueSrc) {
     match src {
         ValueSrc::A => {}
         ValueSrc::X => {
-            p.ld_a_abs(SHADOW_X);
+            p.ld_a_d();
         }
         ValueSrc::Y => {
-            p.ld_a_abs(SHADOW_Y);
+            p.ld_a_e_reg();
         }
         ValueSrc::Imm(v) => {
             p.ld_a_imm(*v);
@@ -757,23 +788,25 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
             if let Some(sms) = indexed_direct_base(*base, region) {
                 p.ld_c_a();
                 p.ld_hl_imm(sms);
-                p.ld_a_abs(SHADOW_X);
-                p.ld_e_a();
-                p.ld_d_imm(0);
-                p.add_hl_de();
+                p.ld_a_d();
+                p.add_a_l();
+                p.ld_l_a();
+                p.ld_a_h();
+                p.adc_a_imm0();
+                p.ld_h_a();
                 p.ld_b_hl_ptr();
                 p.ld_a_c();
             } else if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
                 // A saved in E-free path: the direct emitter clobbers C/E,
                 // so park the accumulator on the stack around it.
                 p.push_af();
-                emit_prg_high_indexed_direct(p, *base, SHADOW_X);
+                emit_prg_high_indexed_direct(p, *base, IdxReg::X);
                 p.ld_b_a();
                 p.pop_af();
             } else {
                 p.ld_c_a();
                 p.ld_hl_imm(indexed_base_to_sms(*base, region));
-                p.ld_a_abs(SHADOW_X);
+                p.ld_a_d();
                 p.ld_b_a();
                 p.call(indexed_read_runtime(*base, region));
                 p.ld_b_a();
@@ -784,23 +817,25 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
             if let Some(sms) = indexed_direct_base(*base, region) {
                 p.ld_c_a();
                 p.ld_hl_imm(sms);
-                p.ld_a_abs(SHADOW_Y);
-                p.ld_e_a();
-                p.ld_d_imm(0);
-                p.add_hl_de();
+                p.ld_a_e_reg();
+                p.add_a_l();
+                p.ld_l_a();
+                p.ld_a_h();
+                p.adc_a_imm0();
+                p.ld_h_a();
                 p.ld_b_hl_ptr();
                 p.ld_a_c();
             } else if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
                 // A saved in E-free path: the direct emitter clobbers C/E,
                 // so park the accumulator on the stack around it.
                 p.push_af();
-                emit_prg_high_indexed_direct(p, *base, SHADOW_Y);
+                emit_prg_high_indexed_direct(p, *base, IdxReg::Y);
                 p.ld_b_a();
                 p.pop_af();
             } else {
                 p.ld_c_a();
                 p.ld_hl_imm(indexed_base_to_sms(*base, region));
-                p.ld_a_abs(SHADOW_Y);
+                p.ld_a_e_reg();
                 p.ld_b_a();
                 p.call(indexed_read_runtime(*base, region));
                 p.ld_b_a();
@@ -811,7 +846,7 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
             // 6502 zp,X wraps within zero page. Compute (zp+X) & $FF in A,
             // load value via HL=$C000 | offset into B (preserving caller A).
             p.ld_c_a(); // C = caller A
-            p.ld_a_abs(SHADOW_X);
+            p.ld_a_d();
             p.add_a_imm(*zp);
             p.ld_l_a();
             p.ld_h_imm((NES_ZP_BASE >> 8) as u8);
@@ -820,7 +855,7 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
         }
         AddrExpr::ZpIndexedY(zp) => {
             p.ld_c_a();
-            p.ld_a_abs(SHADOW_Y);
+            p.ld_a_e_reg();
             p.add_a_imm(*zp);
             p.ld_l_a();
             p.ld_h_imm((NES_ZP_BASE >> 8) as u8);
@@ -867,7 +902,7 @@ fn emit_hl_for_rw_mem(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir
         AddrExpr::AbsIndexedX(base) => {
             p.push_af();
             p.ld_hl_imm(indexed_base_to_sms(*base, region));
-            p.ld_a_abs(SHADOW_X);
+            p.ld_a_d();
             p.ld_c_a();
             p.ld_b_imm(0);
             p.add_hl_bc();
@@ -876,7 +911,7 @@ fn emit_hl_for_rw_mem(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir
         AddrExpr::AbsIndexedY(base) => {
             p.push_af();
             p.ld_hl_imm(indexed_base_to_sms(*base, region));
-            p.ld_a_abs(SHADOW_Y);
+            p.ld_a_e_reg();
             p.ld_c_a();
             p.ld_b_imm(0);
             p.add_hl_bc();
@@ -884,7 +919,7 @@ fn emit_hl_for_rw_mem(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir
         }
         AddrExpr::ZpIndexedX(z) => {
             p.push_af();
-            p.ld_a_abs(SHADOW_X);
+            p.ld_a_d();
             p.add_a_imm(*z);
             p.ld_l_a();
             p.ld_h_imm((NES_ZP_BASE >> 8) as u8);
@@ -892,7 +927,7 @@ fn emit_hl_for_rw_mem(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir
         }
         AddrExpr::ZpIndexedY(z) => {
             p.push_af();
-            p.ld_a_abs(SHADOW_Y);
+            p.ld_a_e_reg();
             p.add_a_imm(*z);
             p.ld_l_a();
             p.ld_h_imm((NES_ZP_BASE >> 8) as u8);
@@ -1459,17 +1494,19 @@ fn emit_inc_dec_xy(
     routine: &ir::Routine,
     ops: &[ir::Op],
     op_idx: usize,
-    shadow_addr: u16,
+    target: IdxReg,
     is_inc: bool,
     fuse_end: Option<usize>,
     nz_live: bool,
     emit_comments: bool,
 ) {
-    program.ld_hl_imm(shadow_addr);
-    if is_inc {
-        program.inc_hl_ptr(); // inc (hl): sets S/Z, preserves A
-    } else {
-        program.dec_hl_ptr();
+    // Phase R: inc/dec the resident register directly (4T; sets S/Z,
+    // preserves A and carry).
+    match (target, is_inc) {
+        (IdxReg::X, true) => program.inc_d(),
+        (IdxReg::X, false) => program.dec_d(),
+        (IdxReg::Y, true) => program.inc_e(),
+        (IdxReg::Y, false) => program.dec_e(),
     }
     if let Some(end) = fuse_end {
         emit_fused_branches(
@@ -1482,10 +1519,9 @@ fn emit_inc_dec_xy(
             nz_cond_to_z80,
         );
     } else if nz_live {
-        // Non-adjacent reader of the flags: persist to shadow P. The new
-        // value is at (HL); preserve the caller's A across the helper.
+        // Non-adjacent flag reader: persist to shadow P from the register.
         program.push_af();
-        program.ld_a_hl_ptr();
+        target.load_into_a(program);
         emit_set_nz_inline(program);
         program.pop_af();
     }
@@ -1677,9 +1713,9 @@ struct CopyLoopPlan {
     src_sms: u16, // SMS address of the first copied source byte
     dst_sms: u16, // SMS address of the first copied dest byte
     count: u16,
-    idx_shadow: u16, // SHADOW_X or SHADOW_Y
-    exit_idx: u8,    // value the loop index holds on exit
-    end: usize,      // one past the loop's back-branch
+    idx: IdxReg,
+    exit_idx: u8, // value the loop index holds on exit
+    end: usize,   // one past the loop's back-branch
 }
 
 /// Is A read (used) before being overwritten after op `i`? Conservative
@@ -1862,11 +1898,7 @@ fn match_copy_loop(
         src_sms: src_start,
         dst_sms: dst_start,
         count,
-        idx_shadow: if want_x {
-            sms_layout::SHADOW_X
-        } else {
-            sms_layout::SHADOW_Y
-        },
+        idx: if want_x { IdxReg::X } else { IdxReg::Y },
         exit_idx,
         end: branch_idx + 1,
     })
@@ -1876,13 +1908,22 @@ fn match_copy_loop(
 /// then restore the loop index's exit value. (A is dead; flags dead.)
 fn emit_copy_loop(program: &mut z80_emit::Program, plan: &CopyLoopPlan) {
     program.comment(format!("[lifted copy loop: {} bytes via ldir]", plan.count));
+    // Phase R: LDIR uses DE as the destination pointer — save the resident
+    // X/Y pair around it, then set the loop register's exit value.
+    program.push_de();
     program.ld_hl_imm(plan.src_sms);
     program.ld_de_imm(plan.dst_sms);
     program.ld_bc_imm(plan.count);
     program.ldir();
-    // Restore the 6502 index register to its post-loop value (preserves A).
-    program.ld_hl_imm(plan.idx_shadow);
-    program.data(None, &[0x36, plan.exit_idx]); // ld (hl),exit_idx
+    program.pop_de();
+    match plan.idx {
+        IdxReg::X => {
+            program.data(None, &[0x16, plan.exit_idx]); // ld d,exit
+        }
+        IdxReg::Y => {
+            program.data(None, &[0x1E, plan.exit_idx]); // ld e,exit
+        }
+    }
 }
 
 fn emit_add16(program: &mut z80_emit::Program, plan: &Add16Plan) {
@@ -2221,24 +2262,24 @@ pub fn lower_routine(
                     }
                     (AddrExpr::AbsIndexedX(base), _) => {
                         if let Some(sms) = indexed_direct_base(*base, *region) {
-                            emit_indexed_read_direct(program, sms, SHADOW_X);
+                            emit_indexed_read_direct(program, sms, IdxReg::X);
                         } else if *region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                            emit_prg_high_indexed_direct(program, *base, SHADOW_X);
+                            emit_prg_high_indexed_direct(program, *base, IdxReg::X);
                         } else {
                             program.ld_hl_imm(indexed_base_to_sms(*base, *region));
-                            program.ld_a_abs(SHADOW_X);
+                            program.ld_a_d();
                             program.ld_b_a();
                             program.call(indexed_read_runtime(*base, *region));
                         }
                     }
                     (AddrExpr::AbsIndexedY(base), _) => {
                         if let Some(sms) = indexed_direct_base(*base, *region) {
-                            emit_indexed_read_direct(program, sms, SHADOW_Y);
+                            emit_indexed_read_direct(program, sms, IdxReg::Y);
                         } else if *region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                            emit_prg_high_indexed_direct(program, *base, SHADOW_Y);
+                            emit_prg_high_indexed_direct(program, *base, IdxReg::Y);
                         } else {
                             program.ld_hl_imm(indexed_base_to_sms(*base, *region));
-                            program.ld_a_abs(SHADOW_Y);
+                            program.ld_a_e_reg();
                             program.ld_b_a();
                             program.call(indexed_read_runtime(*base, *region));
                         }
@@ -2247,14 +2288,14 @@ pub fn lower_routine(
                         // 6502 zp,X wraps within zero page: (zp + X) & $FF.
                         // rt_read_indexed adds 16-bit, no wrap, so do the
                         // wrap inline.
-                        program.ld_a_abs(SHADOW_X);
+                        program.ld_a_d();
                         program.add_a_imm(*zp);
                         program.ld_l_a();
                         program.ld_h_imm((NES_ZP_BASE >> 8) as u8);
                         program.ld_a_hl_ptr();
                     }
                     (AddrExpr::ZpIndexedY(zp), _) => {
-                        program.ld_a_abs(SHADOW_Y);
+                        program.ld_a_e_reg();
                         program.add_a_imm(*zp);
                         program.ld_l_a();
                         program.ld_h_imm((NES_ZP_BASE >> 8) as u8);
@@ -2297,7 +2338,7 @@ pub fn lower_routine(
             Op::LdxImm(v) => {
                 program.push_af();
                 program.ld_a_imm(*v);
-                program.ld_abs_a(SHADOW_X);
+                program.ld_d_a_reg();
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
                     restore_a_keep_flags_after_push_af(program);
@@ -2307,13 +2348,13 @@ pub fn lower_routine(
             }
 
             Op::LdxMem { addr, region } => {
-                emit_ldxy_mem(program, addr, *region, sms_layout::SHADOW_X);
+                emit_ldxy_mem(program, addr, *region, IdxReg::X);
             }
 
             Op::LdyImm(v) => {
                 program.push_af();
                 program.ld_a_imm(*v);
-                program.ld_abs_a(SHADOW_Y);
+                program.ld_e_a_reg();
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
                     restore_a_keep_flags_after_push_af(program);
@@ -2323,7 +2364,7 @@ pub fn lower_routine(
             }
 
             Op::LdyMem { addr, region } => {
-                emit_ldxy_mem(program, addr, *region, sms_layout::SHADOW_Y);
+                emit_ldxy_mem(program, addr, *region, IdxReg::Y);
             }
 
             // ------------------------------------------------------------------
@@ -2342,11 +2383,11 @@ pub fn lower_routine(
                     }
                     (AddrExpr::AbsIndexedX(base), _) => {
                         if let Some(sms) = indexed_direct_base(*base, *region) {
-                            emit_indexed_write_direct(program, sms, SHADOW_X);
+                            emit_indexed_write_direct(program, sms, IdxReg::X);
                         } else {
                             program.ld_c_a(); // save value in C
                             program.ld_hl_imm(indexed_base_to_sms(*base, *region));
-                            program.ld_a_abs(SHADOW_X);
+                            program.ld_a_d();
                             program.ld_b_a();
                             program.ld_a_c();
                             program.call(WRITE_INDEXED);
@@ -2354,11 +2395,11 @@ pub fn lower_routine(
                     }
                     (AddrExpr::AbsIndexedY(base), _) => {
                         if let Some(sms) = indexed_direct_base(*base, *region) {
-                            emit_indexed_write_direct(program, sms, SHADOW_Y);
+                            emit_indexed_write_direct(program, sms, IdxReg::Y);
                         } else {
                             program.ld_c_a();
                             program.ld_hl_imm(indexed_base_to_sms(*base, *region));
-                            program.ld_a_abs(SHADOW_Y);
+                            program.ld_a_e_reg();
                             program.ld_b_a();
                             program.ld_a_c();
                             program.call(WRITE_INDEXED);
@@ -2369,7 +2410,7 @@ pub fn lower_routine(
                         // Compute the wrapped offset in A, then build HL = $C000 + offset.
                         // Save value first, since A is the value to write.
                         program.ld_c_a(); // C = value
-                        program.ld_a_abs(SHADOW_X);
+                        program.ld_a_d();
                         program.add_a_imm(*zp);
                         program.ld_l_a();
                         program.ld_h_imm((NES_ZP_BASE >> 8) as u8);
@@ -2390,11 +2431,11 @@ pub fn lower_routine(
             Op::StxMem { addr, region } => {
                 // STX must NOT modify A. Bracket with push/pop AF, mirror
                 // StaMem's addressing-mode coverage.
-                emit_stxy_mem(program, addr, *region, sms_layout::SHADOW_X);
+                emit_stxy_mem(program, addr, *region, IdxReg::X);
             }
 
             Op::StyMem { addr, region } => {
-                emit_stxy_mem(program, addr, *region, sms_layout::SHADOW_Y);
+                emit_stxy_mem(program, addr, *region, IdxReg::Y);
             }
 
             Op::SaxMem { addr, region } => {
@@ -2404,19 +2445,19 @@ pub fn lower_routine(
                 // handles all addressing modes), then restore A.
                 program.push_af();
                 program.ld_c_a(); // C = original A
-                program.ld_a_abs(sms_layout::SHADOW_X);
+                program.ld_a_d();
                 program.and_c(); // A = A & C = X & A
                 // Stash the AND result in shadow X temporarily so we can
                 // reuse emit_stxy_mem; restore X after.
                 program.push_bc(); // save B,C; C still holds orig A
                 program.ld_b_a(); // B = (A & X) value to write
-                program.ld_a_abs(sms_layout::SHADOW_X);
+                program.ld_a_d();
                 program.push_af(); // save shadow X on Z80 stack
                 program.ld_a_b();
-                program.ld_abs_a(sms_layout::SHADOW_X); // SHADOW_X = (A & X) value temporarily
-                emit_stxy_mem(program, addr, *region, sms_layout::SHADOW_X);
+                program.ld_d_a_reg(); // SHADOW_X = (A & X) value temporarily
+                emit_stxy_mem(program, addr, *region, IdxReg::X);
                 program.pop_af();
-                program.ld_abs_a(sms_layout::SHADOW_X); // restore real X
+                program.ld_d_a_reg(); // restore real X
                 program.pop_bc();
                 program.ld_a_c(); // restore A
                 program.pop_af();
@@ -2426,28 +2467,28 @@ pub fn lower_routine(
             // Transfers
             // ------------------------------------------------------------------
             Op::Tax => {
-                program.ld_abs_a(SHADOW_X);
+                program.ld_d_a_reg();
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
                 }
             }
 
             Op::Tay => {
-                program.ld_abs_a(SHADOW_Y);
+                program.ld_e_a_reg();
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
                 }
             }
 
             Op::Txa => {
-                program.ld_a_abs(SHADOW_X);
+                program.ld_a_d();
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
                 }
             }
 
             Op::Tya => {
-                program.ld_a_abs(SHADOW_Y);
+                program.ld_a_e_reg();
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
                 }
@@ -2455,7 +2496,7 @@ pub fn lower_routine(
 
             Op::Tsx => {
                 program.ld_a_abs(SHADOW_S);
-                program.ld_abs_a(SHADOW_X);
+                program.ld_d_a_reg();
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
                 }
@@ -2464,7 +2505,7 @@ pub fn lower_routine(
             Op::Txs => {
                 // TXS sets S := X with no flag effect AND no change to A.
                 program.push_af();
-                program.ld_a_abs(SHADOW_X);
+                program.ld_a_d();
                 program.ld_abs_a(SHADOW_S);
                 program.pop_af();
             }
@@ -2529,20 +2570,20 @@ pub fn lower_routine(
                 ) {
                     // H.8: result-only ADC — no consumer reads any flag
                     // before overwrite, so skip the whole shadow update.
-                    program.ld_e_a();
+                    program.ld_c_a();
                     program.ld_a_abs(SHADOW_P);
                     program.rrca();
-                    program.ld_a_e();
+                    program.ld_a_c();
                     program.adc_a_imm(*v);
                 } else if let Some(end) = fuse_direct_end[op_idx] {
                     // Native ADC: shadow C -> Z80 carry (RRCA on shadow P,
-                    // A parked in E; LD doesn't touch flags), result in A.
+                    // A parked in C; LD doesn't touch flags), result in A.
                     // Scanner guarantees N/Z/C/V all dead after the run,
                     // so the stale shadow-C byte is never read.
-                    program.ld_e_a();
+                    program.ld_c_a();
                     program.ld_a_abs(SHADOW_P);
                     program.rrca();
-                    program.ld_a_e();
+                    program.ld_a_c();
                     program.adc_a_imm(*v);
                     emit_fused_branches(
                         program,
@@ -2567,17 +2608,17 @@ pub fn lower_routine(
                     opts.routine_flag_reads,
                 ) {
                     emit_mem_to_b(program, addr, *region);
-                    program.ld_e_a();
+                    program.ld_c_a();
                     program.ld_a_abs(SHADOW_P);
                     program.rrca();
-                    program.ld_a_e();
+                    program.ld_a_c();
                     program.adc_a_b();
                 } else if let Some(end) = fuse_direct_end[op_idx] {
                     emit_mem_to_b(program, addr, *region);
-                    program.ld_e_a();
+                    program.ld_c_a();
                     program.ld_a_abs(SHADOW_P);
                     program.rrca();
-                    program.ld_a_e();
+                    program.ld_a_c();
                     program.adc_a_b();
                     emit_fused_branches(
                         program,
@@ -2601,21 +2642,21 @@ pub fn lower_routine(
                     F_N | F_Z | F_C | F_V,
                     opts.routine_flag_reads,
                 ) {
-                    program.ld_e_a();
+                    program.ld_c_a();
                     program.ld_a_abs(SHADOW_P);
                     program.rrca();
                     program.ccf();
-                    program.ld_a_e();
+                    program.ld_a_c();
                     program.sbc_a_imm(*v);
                 } else if let Some(end) = fuse_cmp_end[op_idx] {
                     // Native SBC: Z80 carry-in = !shadow C (CCF), and the
                     // 6502 carry-out = !borrow — cmp_cond_to_z80 handles
                     // the inverted branch polarity.
-                    program.ld_e_a();
+                    program.ld_c_a();
                     program.ld_a_abs(SHADOW_P);
                     program.rrca();
                     program.ccf();
-                    program.ld_a_e();
+                    program.ld_a_c();
                     program.sbc_a_imm(*v);
                     emit_fused_branches(
                         program,
@@ -2640,19 +2681,19 @@ pub fn lower_routine(
                     opts.routine_flag_reads,
                 ) {
                     emit_mem_to_b(program, addr, *region);
-                    program.ld_e_a();
+                    program.ld_c_a();
                     program.ld_a_abs(SHADOW_P);
                     program.rrca();
                     program.ccf();
-                    program.ld_a_e();
+                    program.ld_a_c();
                     program.sbc_a_b();
                 } else if let Some(end) = fuse_cmp_end[op_idx] {
                     emit_mem_to_b(program, addr, *region);
-                    program.ld_e_a();
+                    program.ld_c_a();
                     program.ld_a_abs(SHADOW_P);
                     program.rrca();
                     program.ccf();
-                    program.ld_a_e();
+                    program.ld_a_c();
                     program.sbc_a_b();
                     emit_fused_branches(
                         program,
@@ -2833,11 +2874,11 @@ pub fn lower_routine(
             Op::CpxImm(v) => {
                 if let Some(end) = fuse_cmp_end[op_idx] {
                     // Native compare of shadow X; the 6502 accumulator in
-                    // Z80 A survives in E (LD does not touch flags).
-                    program.ld_e_a();
-                    program.ld_a_abs(SHADOW_X);
+                    // Z80 A survives in C (LD does not touch flags).
+                    program.ld_c_a();
+                    program.ld_a_d();
                     program.cp_imm(*v);
-                    program.ld_a_e();
+                    program.ld_a_c();
                     emit_fused_branches(
                         program,
                         routine,
@@ -2849,17 +2890,17 @@ pub fn lower_routine(
                     );
                 } else {
                     program.ld_b_imm(*v);
-                    emit_cpxy_flags_inline(program, SHADOW_X);
+                    emit_cpxy_flags_inline(program, IdxReg::X);
                 }
             }
 
             Op::CpxMem { addr, region } => {
                 if let Some(end) = fuse_cmp_end[op_idx] {
                     emit_mem_to_b(program, addr, *region);
-                    program.ld_e_a();
-                    program.ld_a_abs(SHADOW_X);
+                    program.ld_c_a();
+                    program.ld_a_d();
                     program.cp_b();
-                    program.ld_a_e();
+                    program.ld_a_c();
                     emit_fused_branches(
                         program,
                         routine,
@@ -2871,16 +2912,16 @@ pub fn lower_routine(
                     );
                 } else {
                     emit_mem_to_b(program, addr, *region);
-                    emit_cpxy_flags_inline(program, SHADOW_X);
+                    emit_cpxy_flags_inline(program, IdxReg::X);
                 }
             }
 
             Op::CpyImm(v) => {
                 if let Some(end) = fuse_cmp_end[op_idx] {
-                    program.ld_e_a();
-                    program.ld_a_abs(SHADOW_Y);
+                    program.ld_c_a();
+                    program.ld_a_e_reg();
                     program.cp_imm(*v);
-                    program.ld_a_e();
+                    program.ld_a_c();
                     emit_fused_branches(
                         program,
                         routine,
@@ -2892,17 +2933,17 @@ pub fn lower_routine(
                     );
                 } else {
                     program.ld_b_imm(*v);
-                    emit_cpxy_flags_inline(program, SHADOW_Y);
+                    emit_cpxy_flags_inline(program, IdxReg::Y);
                 }
             }
 
             Op::CpyMem { addr, region } => {
                 if let Some(end) = fuse_cmp_end[op_idx] {
                     emit_mem_to_b(program, addr, *region);
-                    program.ld_e_a();
-                    program.ld_a_abs(SHADOW_Y);
+                    program.ld_c_a();
+                    program.ld_a_e_reg();
                     program.cp_b();
-                    program.ld_a_e();
+                    program.ld_a_c();
                     emit_fused_branches(
                         program,
                         routine,
@@ -2914,7 +2955,7 @@ pub fn lower_routine(
                     );
                 } else {
                     emit_mem_to_b(program, addr, *region);
-                    emit_cpxy_flags_inline(program, SHADOW_Y);
+                    emit_cpxy_flags_inline(program, IdxReg::Y);
                 }
             }
 
@@ -3032,7 +3073,7 @@ pub fn lower_routine(
                 routine,
                 ops_slice,
                 op_idx,
-                SHADOW_X,
+                IdxReg::X,
                 true,
                 fuse_nz_end[op_idx],
                 nz_live[op_idx],
@@ -3044,7 +3085,7 @@ pub fn lower_routine(
                 routine,
                 ops_slice,
                 op_idx,
-                SHADOW_Y,
+                IdxReg::Y,
                 true,
                 fuse_nz_end[op_idx],
                 nz_live[op_idx],
@@ -3056,7 +3097,7 @@ pub fn lower_routine(
                 routine,
                 ops_slice,
                 op_idx,
-                SHADOW_X,
+                IdxReg::X,
                 false,
                 fuse_nz_end[op_idx],
                 nz_live[op_idx],
@@ -3068,7 +3109,7 @@ pub fn lower_routine(
                 routine,
                 ops_slice,
                 op_idx,
-                SHADOW_Y,
+                IdxReg::Y,
                 false,
                 fuse_nz_end[op_idx],
                 nz_live[op_idx],
@@ -3796,8 +3837,8 @@ mod tests {
         }]);
 
         assert!(build.asm.contains("call rt_far_gate"));
-        assert!(build.asm.contains("ld de,L_a"));
-        assert!(build.asm.contains("ld de,L_b"));
+        assert!(build.asm.contains("ld bc,L_a"));
+        assert!(build.asm.contains("ld bc,L_b"));
         assert!(build.asm.contains("ret"));
         assert!(!build.asm.contains("call rt_far_jmp"));
     }
@@ -3809,7 +3850,8 @@ mod tests {
     fn tax_stores_to_shadow_x() {
         let build = lower_and_finish(vec![Op::Tax]);
         // ld ($CB00),a = 32 00 CB
-        assert!(build.bytes.windows(3).any(|w| w == [0x32, 0x00, 0xCB]));
+        // Phase R: X lives in D — `ld d,a`.
+        assert!(build.bytes.contains(&0x57));
         // H.1c: shadow-NZ update is inlined (table at $3E00).
         assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
         assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
@@ -3822,9 +3864,8 @@ mod tests {
     fn inx_sequence() {
         let build = lower_and_finish(vec![Op::Inx]);
         // ld hl,$CB00 = 21 00 CB
-        assert!(build.bytes.windows(3).any(|w| w == [0x21, 0x00, 0xCB]));
-        // inc (hl) = 34 (modifies shadow X in place, preserves A)
-        assert!(build.bytes.contains(&0x34));
+        // Phase R: INX is `inc d` on the resident register.
+        assert!(build.bytes.contains(&0x14));
         // flags live across the routine end -> still persists to shadow P
         // H.1c: shadow-NZ update is inlined (table at $3E00).
         assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
@@ -3857,7 +3898,7 @@ mod tests {
         // (in a `; → L_8200` comment).
         // H2: cross-bank JSRs use the compact slot-0 gate with immediates.
         assert!(build.asm.contains("call rt_far_gate"));
-        assert!(build.asm.contains("ld de,L_8200"));
+        assert!(build.asm.contains("ld bc,L_8200"));
     }
 
     // -------------------------------------------------------------------
@@ -3965,7 +4006,8 @@ runtime_label = "rt_replacement"
         // ld a,$0A = 3E 0A
         assert!(build.bytes.windows(2).any(|w| w == [0x3E, 0x0A]));
         // ld ($CB00),a = 32 00 CB
-        assert!(build.bytes.windows(3).any(|w| w == [0x32, 0x00, 0xCB]));
+        // Phase R: X lives in D — `ld d,a`.
+        assert!(build.bytes.contains(&0x57));
         // H.1c: shadow-NZ update is inlined (table at $3E00).
         assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
         assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
