@@ -471,14 +471,26 @@ rt_sat_upload:
 
   call rt_sat_resolve
 
-  ; ── Phase 1: compact visible Y positions to VRAM $3F00 ───────────────────
+  ; ── SAT double buffering ──────────────────────────────────────────────────
+  ; Under frame overrun the upload can land mid-display; writing the live
+  ; SAT then tears sprites (field report: persistent flicker). Two SATs —
+  ; $3F00 and $3E00 — alternate: write the back buffer, then flip VDP
+  ; reg 5 (atomic) to present it. $CB2D holds the back buffer's high byte.
+  ld   a, ($cb2d)
+  cp   $3e
+  jr   z, _sat_back_ok
+  ld   a, $3f                ; first run / garbage -> default back = $3F00
+_sat_back_ok:
+  ld   ($cb2d), a
+
+  ; ── Phase 1: compact visible Y positions to the back buffer ───────────────
   ; SMS treats Y=$D0 as an end-of-list terminator, unlike NES OAM where hidden
   ; sprites can appear anywhere. Scan NES OAM in order, write only visible
   ; sprites, then emit one terminator. Also test raw NES Y before adding 1 so
   ; hidden values like $FF do not wrap to SMS Y=$00.
   ld   a, $00
   out  ($bf), a
-  ld   a, $3f
+  ld   a, ($cb2d)
   or   $40
   out  ($bf), a
 
@@ -525,10 +537,10 @@ _sat_y_hide:
   djnz _sat_y_hide
 _sat_y_done:
 
-  ; ── Phase 2: compact visible (X, resolved tile) pairs to VRAM $3F80 ───────
+  ; ── Phase 2: compact visible (X, resolved tile) pairs to back+$80 ─────────
   ld   a, $80
   out  ($bf), a
-  ld   a, $3f
+  ld   a, ($cb2d)
   or   $40
   out  ($bf), a
 
@@ -557,6 +569,26 @@ _sat_xt_skip:
   inc  de                    ; skip resolved tile for this hidden sprite
 _sat_xt_next:
   djnz _sat_xt_loop
+
+  ; ── Present: flip VDP reg 5 to the just-written SAT, then swap the back
+  ; buffer for next frame. reg5 bits 6-1 = address bits 13-8; bits 7/0 stay
+  ; set (SMS1 mask quirk): $3F00 -> $FF, $3E00 -> $FD.
+  ld   a, ($cb2d)
+  cp   $3e
+  jr   z, _sat_flip_3e
+  ld   a, $ff                ; presented $3F00; back becomes $3E00
+  ld   b, 5
+  call vdp_set_register
+  ld   a, $3e
+  ld   ($cb2d), a
+  jr   _sat_flip_done
+_sat_flip_3e:
+  ld   a, $fd                ; presented $3E00; back becomes $3F00
+  ld   b, 5
+  call vdp_set_register
+  ld   a, $3f
+  ld   ($cb2d), a
+_sat_flip_done:
 
   pop  de
   pop  bc

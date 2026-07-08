@@ -35,6 +35,7 @@
 ;   $CB28        Runtime-ready flag: 0 during boot; 1 once irq_handler may work
 ;   $CB29        Previous-frame overrun flag ($80 = overran; split suppressed)
 ;   $CB2A        Projected window start column; $CB2B/$CB2C projector scratch
+;   $CB2D        SAT back-buffer high byte ($3E/$3F; reg5 double buffering)
 ;   $CB2E/$CB2F  rt_far_gate target park (Phase R: BC carries far targets)
 ;   $CB20-$CB24  Split-scroll scheduler state (see runtime/ppu.s)
 ;   $CB30-$CB61  APU->PSG shim state (see runtime/apu_stub.s)
@@ -401,6 +402,15 @@ _irq_runtime_ready:
   ; scroll by a frame (observed in GPGX at 500%). The translated NMI's
   ; direct $2007 background writes still land mid-frame on overrun, but
   ; those enter at the scroll seam where they are effectively invisible.
+  ; VBlank alignment: under overrun this presentation block can start
+  ; mid-display; VRAM writes then race the beam (field report: constant
+  ; flicker in heavy scenes). If the beam is in the active area, wait for
+  ; the next VBlank start before touching VRAM. The main thread is idle
+  ; under sustained overrun, so the wait costs nothing real.
+_present_wait_vblank:
+  in  a, ($7e)               ; V-counter
+  cp  $e0
+  jr  c, _present_wait_vblank
   call rt_sat_upload
   ; Project columns entering the visible window (E.5c) with the same
   ; playfield scroll the apply below will present: post pair when the
