@@ -6,3 +6,6 @@ out/
 .ai-jail
 third_party/nesrecomp/
 .slim/deepwork/
+*.mov
+*.mkv
+*.mc0
