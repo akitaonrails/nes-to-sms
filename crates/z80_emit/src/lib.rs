@@ -1043,7 +1043,45 @@ impl Program {
             self.call(label);
             return;
         }
-        self.emit_far(label, "rt_far_call");
+        self.emit_far_gate(label, false);
+    }
+
+    /// Compact far dispatch (H2): target address and bank are immediates,
+    /// transferred through the slot-0 rt_far_gate shim (switching $FFFE
+    /// from slot-1 code would swap the executing bank under the PC — the
+    /// gate must run from slot 0). Saves the trampoline's inline data
+    /// block decode.
+    fn emit_far_gate(&mut self, label: &str, jump: bool) {
+        self.emit_bytes_asm(&[0x32, 0x15, 0xCB], "  ld ($cb15),a");
+        // ld de, TARGET — 16-bit label immediate.
+        let section_idx = self.current;
+        let offset = self.sections[self.current].len() + 1;
+        self.sec().push_byte(0x11);
+        self.sec().push_byte(0x00);
+        self.sec().push_byte(0x00);
+        self.sec().push_asm(format!("  ld de,{label}"));
+        self.patches.push(Patch {
+            label: label.to_string(),
+            section_idx,
+            kind: PatchKind::Abs16 { offset },
+        });
+        // ld a, :TARGET — bank immediate (binary placeholder; validation
+        // never executes cross-section transfers).
+        self.emit_bytes_asm(&[0x3E, 0x00], &format!("  ld a,:{label}"));
+        if jump {
+            self.emit_bytes_asm(&[0xC3, 0x00, 0x00], "  jp rt_far_gate");
+        } else {
+            self.emit_bytes_asm(&[0xCD, 0x00, 0x00], "  call rt_far_gate");
+        }
+        self.referenced_labels.insert(label.to_string());
+    }
+
+    /// Raw byte+asm emission helper for composite sequences.
+    fn emit_bytes_asm(&mut self, bytes: &[u8], asm: &str) {
+        for &b in bytes {
+            self.sec().push_byte(b);
+        }
+        self.sec().push_asm(asm.to_string());
     }
 
     /// Bank-aware cross-section JMP. Same encoding as far_call but
@@ -1055,7 +1093,7 @@ impl Program {
             self.jp(label);
             return;
         }
-        self.emit_far(label, "rt_far_jmp");
+        self.emit_far_gate(label, true);
     }
 
     fn emit_far(&mut self, target: &str, dispatcher: &str) {

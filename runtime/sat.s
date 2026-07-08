@@ -83,6 +83,7 @@
 .define SAT_MEMO_TILE     $da00   ; 64 bytes: last rel tile per sprite ($FF invalid)
 .define SAT_MEMO_ATTR     $da40   ; 64 bytes: last attr key per sprite
 .define SAT_MEMO_RES      $da80   ; 64 bytes: last resolved tile per sprite
+.define SAT_RR_VICTIM     $dac0   ; round-robin eviction cursor (H2)
 
 .section "sat" free
 
@@ -280,38 +281,35 @@ _vgs_miss:
   ld   a, (SAT_SCRATCH_NEXT)
   cp   SAT_SCRATCH_COUNT
   jr   c, _vgs_alloc
-  ; Pool full: flush it (generation reset) and fall through to allocate
-  ; slot 0 for the current request. Amortized: happens only when the
-  ; working set of variants exceeds the pool, not per frame.
-  xor  a
-  ld   (SAT_SCRATCH_NEXT), a
-  push bc
-  push hl
-  ld   hl, SAT_VAR_TILE_KEYS
-  ld   b, SAT_SCRATCH_COUNT
-_vgs_flush:
-  ld   (hl), $ff             ; invalid key (rel tiles are < $FF after map)
-  inc  hl
-  djnz _vgs_flush
-  ; The per-sprite memo results index pool slots — invalidate it too.
-  ld   hl, SAT_MEMO_TILE
-  ld   b, 64
-_vgs_flush_memo:
-  ld   (hl), $ff
-  inc  hl
-  djnz _vgs_flush_memo
-  pop  hl
-  pop  bc
-  jr   _vgs_alloc
+  ; Pool full: evict ONE slot round-robin (H2). No bulk flush, no memo
+  ; clear — memo hits verify their slot's keys, so entries pointing at a
+  ; reused slot simply miss. This removed the flush storm (the pool
+  ; overflows every few frames in busy scenes; full regeneration bursts
+  ; and 80-byte invalidation loops were ~2% of all execution).
+  ld   a, (SAT_RR_VICTIM)
+  inc  a
+  and  SAT_SCRATCH_COUNT - 1
+  ld   (SAT_RR_VICTIM), a
+  jr   _vgs_alloc_at         ; A = victim slot
+
 _vgs_alloc:
+  ld   a, (SAT_SCRATCH_NEXT)
+  push af
+  inc  a
+  ld   (SAT_SCRATCH_NEXT), a
+  pop  af
+_vgs_alloc_at:
+  ; A = slot to (re)generate into.
+  push af
   ld   a, (SAT_VARIANT_ATTR)
   ld   b, a
   ld   a, (SAT_VARIANT_TILE)
   ld   c, a
-  ld   a, (SAT_SCRATCH_NEXT)
+  pop  af
+  push af
   call do_sprite_variant     ; A = index, B = attr key, C = source rel
-  ld   a, (SAT_SCRATCH_NEXT)
-  ld   c, a                  ; index just used / returned on miss
+  pop  af
+  ld   c, a                  ; C = slot
   ld   e, a
   ld   d, $00
   ld   hl, SAT_VAR_TILE_KEYS
@@ -322,9 +320,6 @@ _vgs_alloc:
   add  hl, de
   ld   a, (SAT_VARIANT_ATTR)
   ld   (hl), a
-  ld   a, c
-  inc  a
-  ld   (SAT_SCRATCH_NEXT), a
   ld   a, c
   add  a, SAT_SCRATCH_BASE
   ret
@@ -411,9 +406,42 @@ _res_visible_variant:
   ld   a, l
   add  a, $40               ; -> SAT_MEMO_RES page offset
   ld   l, a
-  ld   c, (hl)               ; C = memoized resolved tile
+  ld   a, (hl)               ; A = memoized resolved tile
+  ; Verify the pool slot still holds this (tile, attr): round-robin
+  ; eviction reuses slots without clearing the memo.
+  sub  SAT_SCRATCH_BASE
+  cp   SAT_SCRATCH_COUNT
+  jr   nc, _res_memo_stale   ; not a scratch slot: stale by construction
+  push de
+  ld   e, a
+  ld   d, $00
+  ld   hl, SAT_VAR_TILE_KEYS
+  add  hl, de
+  ld   a, (hl)
+  cp   c                     ; slot's source tile still ours?
+  jr   nz, _res_memo_stale_de
+  ld   hl, SAT_VAR_ATTR_KEYS
+  add  hl, de
+  ld   a, (hl)
+  cp   b                     ; slot's attr key still ours?
+  jr   nz, _res_memo_stale_de
+  ld   a, e
+  add  a, SAT_SCRATCH_BASE
+  pop  de
+  ld   c, a                  ; C = verified resolved tile
   pop  hl
   jr   _res_store
+_res_memo_stale_de:
+  pop  de
+_res_memo_stale:
+  ; fall through to the miss path with L pointing at the RES table; the
+  ; miss path recomputes L from E, so just restore the tile-table offset.
+  push hl
+  pop  hl
+  ld   a, l
+  sub  $80                   ; RES page offset back to tile-table offset
+  ld   l, a
+  jr   _res_memo_miss
 _res_memo_miss_atl:
   ld   a, l
   sub  $40                   ; back to the tile-table offset
@@ -441,7 +469,8 @@ _res_store:
   ld   (de), a               ; resolved[i]
   inc  de
   pop  bc
-  djnz _res_loop
+  dec  b
+  jp   nz, _res_loop         ; body outgrew djnz's 8-bit range (memo verify)
   ret
 
 ; ─── rt_sat_upload ────────────────────────────────────────────────────────────

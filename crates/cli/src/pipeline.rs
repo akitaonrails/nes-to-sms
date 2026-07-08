@@ -307,6 +307,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
         program.label("translated_nmi");
         program.jp(&format_label(vectors.nmi));
 
+        let mut prev_mapped_section: Option<usize> = None;
         let mut lower_failures: Vec<String> = Vec::new();
         let mut defined_labels: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
@@ -314,8 +315,25 @@ pub fn run(args: &Args) -> Result<String, Error> {
         defined_labels.insert("translated_nmi".to_string());
 
         for r in &routines {
-            // Rotate sections when the current one fills up.
-            if program.current_addr().saturating_sub(section_base) >= SECTION_MAX_BYTES {
+            // Rotate sections. With a frozen map (pass 2) the routine's
+            // section comes from the map — near-call downgrades shrink code,
+            // and re-rotating by size would move routines across the banks
+            // their callers were downgraded against (observed as wild
+            // near-calls into the wrong bank). Without a map (sizing pass)
+            // rotate when the section fills.
+            // Compare map TRANSITIONS, not absolute indices: the snapshot's
+            // section numbering includes program-internal sections, so its
+            // index space is offset from our counter.
+            let mapped_section = section_map.get(&format_label(r.entry)).copied();
+            let should_rotate = match (mapped_section, prev_mapped_section) {
+                (Some(sec), Some(prev)) => sec != prev,
+                (Some(_), None) => false,
+                _ => program.current_addr().saturating_sub(section_base) >= SECTION_MAX_BYTES,
+            };
+            if mapped_section.is_some() {
+                prev_mapped_section = mapped_section;
+            }
+            if should_rotate {
                 section_idx += 1;
                 program.section(&format!("generated_code_{section_idx}"));
                 program.set_section_placement(
@@ -382,23 +400,21 @@ pub fn run(args: &Args) -> Result<String, Error> {
         Ok((program, lower_failures, unresolved))
     };
 
-    let mut section_map: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    let mut converged = None;
-    for _iteration in 0..8 {
-        let (prog, fails, unres) = emit_translated(&section_map)?;
-        let snapshot = prog.label_section_snapshot();
-        if snapshot == section_map {
-            converged = Some((prog, fails, unres));
-            break;
+    // Two-pass freeze (H2): pass 1 sizes every cross-section call at the
+    // full inline-far length and yields the section map; pass 2 emits with
+    // near-call downgrades against that FROZEN map. Downgrades only shrink
+    // sections, so every same-section pair from pass 1 stays same-section —
+    // sound without iterating to a fixed point (the old equality iteration
+    // oscillated once the far/near size delta grew to 24 bytes).
+    let empty_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let (sizing_prog, _f, _u) = emit_translated(&empty_map)?;
+    let section_map = sizing_prog.label_section_snapshot();
+    if std::env::var("N2S_DEBUG_SECTIONS").is_ok() {
+        for l in ["translated_reset", "L_8000", "L_800F", "L_8220", "L_9000"] {
+            eprintln!("map[{l}] = {:?}", section_map.get(l));
         }
-        section_map = snapshot;
     }
-    let (mut program, lower_failures, unresolved) = converged.ok_or_else(|| {
-        Error::Diagnostic(
-            "translated section assignment did not converge within 8 iterations".to_string(),
-        )
-    })?;
+    let (mut program, lower_failures, unresolved) = emit_translated(&section_map)?;
 
     let mut build = program.finish()?;
     // Post-process the asm listing for WLA-DX:

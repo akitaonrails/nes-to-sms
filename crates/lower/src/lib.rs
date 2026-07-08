@@ -3511,7 +3511,10 @@ mod tests {
         let build = lower_and_finish(vec![Op::AdcImm(2)]);
         // ld b,$02 = 06 02
         assert!(build.bytes.windows(2).any(|w| w == [0x06, 0x02]));
-        assert!(build.asm.contains("call rt_adc_a"));
+        // H.10: flag-live ADC emits the branchless body inline (adc a,b
+        // + the F-map merge into shadow P), no helper call.
+        assert!(build.asm.contains("adc a,b"));
+        assert!(build.asm.contains("and $3C"));
     }
 
     // -------------------------------------------------------------------
@@ -3559,7 +3562,9 @@ mod tests {
         let build = lower_and_finish(vec![Op::CmpImm(3)]);
         // ld b,$03 = 06 03
         assert!(build.bytes.windows(2).any(|w| w == [0x06, 0x03]));
-        assert!(build.asm.contains("call rt_cmp_a"));
+        // H.10: flag-live CMP emits the branchless body inline.
+        assert!(build.asm.contains("sub b"));
+        assert!(build.asm.contains("and $7C"));
     }
 
     // CMP #$10 / BEQ ; a later CMP overwrites N/Z/C before any boundary,
@@ -3598,7 +3603,10 @@ mod tests {
             Op::Label("L_r".into()),
             Op::Rts,
         ]);
-        assert!(build.asm.contains("call rt_cmp_a"));
+        // H.10: the unfusable compare keeps the full shadow update,
+        // now emitted inline rather than via rt_cmp_a.
+        assert!(build.asm.contains("sub b"));
+        assert!(build.asm.contains("and $7C"));
         assert!(!build.bytes.windows(2).any(|w| w == [0xFE, 0x10]));
     }
 

@@ -42,6 +42,29 @@
 ; Trade-off: each cross-bank call costs ~50 Z80 cycles plus 3 bytes of
 ; inline data versus the original 3-byte `call`. For SMB this is a few
 ; hundred extra calls per frame, well within Z80 budget at 4 MHz.
+; ─── rt_far_gate ──────────────────────────────────────────────────────────────
+; Compact far dispatch (H2): the call site loads DE = target and A = bank
+; as immediates (no data-block decode) and transfers here. This shim MUST
+; live in slot 0: switching $FFFE from code running in slot 1 swaps the
+; executing bank under the PC (found the hard way).
+;   far CALL sites:  ld ($cb15),a / ld de,T / ld a,:T / call rt_far_gate
+;   far JMP  sites:  ld ($cb15),a / ld de,T / ld a,:T / jp  rt_far_gate
+; For calls, the site's return address is already on the stack; for jumps
+; the original caller's is. Either way the target's RET unwinds through
+; _far_after, which restores the previous bank.
+rt_far_gate:
+  ld   c, a
+  ld   a, ($cb14)
+  push af                   ; save previous slot-1 bank
+  ld   a, c
+  ld   ($cb14), a
+  ld   ($fffe), a
+  ld   bc, _far_after
+  push bc
+  push de
+  ld   a, ($cb15)           ; caller A (JSR/JMP preserve the accumulator)
+  ret                       ; jump to target
+
 rt_far_call:
   pop  hl                   ; HL = data block PC (just after the `call`)
   ld   ($cb15), a            ; preserve caller A for target entry
