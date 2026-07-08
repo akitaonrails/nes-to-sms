@@ -151,9 +151,14 @@ _ppu_reg1_display_done:
   or   $02
   ld   c, a
 _ppu_reg1_sprite_done:
+  ; Defer the actual reg-1 write to the vblank-aligned presentation
+  ; ($CB2D latch; 0 = no pending write — real values always have bit 7
+  ; set). SMB's NMI toggles PPUMASK off during its VRAM update and back
+  ; on after; under frame overrun that pair lands mid-display and
+  ; blanked a band of scanlines (the alternating black-band flicker).
+  ; Applied once per frame in vblank, the off/on pair collapses.
   ld   a, c
-  ld   b, 1
-  call vdp_set_register
+  ld   ($cb2d), a
   ret
 
 _ppu_w_status:

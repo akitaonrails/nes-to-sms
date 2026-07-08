@@ -1,0 +1,18 @@
+# Castlevania III (USA) — mapper-5 generality probe. Expected to fail
+# beyond header parsing: the engine is NROM-scoped (see report).
+[rom]
+name    = "Castlevania III"
+mapper  = 5
+prg_kib = 256
+chr_kib = 128
+
+[vectors]
+nmi   = 0xe053
+reset = 0xe00b
+irq   = 0xe11a
+
+[[chr_pack]]
+table = 1
+start = 0x00
+end = 0xff
+dest = 0

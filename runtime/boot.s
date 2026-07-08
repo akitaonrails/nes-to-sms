@@ -35,7 +35,7 @@
 ;   $CB28        Runtime-ready flag: 0 during boot; 1 once irq_handler may work
 ;   $CB29        Previous-frame overrun flag ($80 = overran; split suppressed)
 ;   $CB2A        Projected window start column; $CB2B/$CB2C projector scratch
-;   $CB2D        SAT back-buffer high byte ($3E/$3F; reg5 double buffering)
+;   $CB2D        Deferred VDP reg-1 latch (0 = none; see ppu.s reg1 sync)
 ;   $CB2E/$CB2F  rt_far_gate target park (Phase R: BC carries far targets)
 ;   $CB20-$CB24  Split-scroll scheduler state (see runtime/ppu.s)
 ;   $CB30-$CB61  APU->PSG shim state (see runtime/apu_stub.s)
@@ -411,6 +411,16 @@ _present_wait_vblank:
   in  a, ($7e)               ; V-counter
   cp  $e0
   jr  c, _present_wait_vblank
+  ; Apply a deferred PPUMASK-driven VDP reg-1 write (see ppu.s): display
+  ; enable changes only ever land here, inside VBlank.
+  ld  a, ($cb2d)
+  or  a
+  jr  z, _present_no_reg1
+  ld  b, 1
+  call vdp_set_register
+  xor a
+  ld  ($cb2d), a
+_present_no_reg1:
   call rt_sat_upload
   ; Project columns entering the visible window (E.5c) with the same
   ; playfield scroll the apply below will present: post pair when the

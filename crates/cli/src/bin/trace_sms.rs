@@ -3078,6 +3078,13 @@ fn main() {
                 materializer_budget,
                 materializer_policy,
             );
+            if std::env::var("SMS_DUMP_SAT").is_ok() && (90..=110).contains(&irqs_fired) {
+                let ys: Vec<String> =
+                    (0..24).map(|i| format!("{:02X}", bus.vram[0x3F00 + i])).collect();
+                let xt: Vec<String> =
+                    (0..12).map(|i| format!("{:02X}", bus.vram[0x3F80 + i])).collect();
+                eprintln!("SAT f{irqs_fired}: Y {}  XT {}", ys.join(" "), xt.join(" "));
+            }
             prev_frame_step = step;
             prev_frame_vram_writes = bus.vram_writes;
             prev_frame_cram_writes = bus.cram_writes;
