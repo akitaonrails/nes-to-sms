@@ -1072,6 +1072,15 @@ impl Program {
         self.referenced_labels.insert(label.to_string());
     }
 
+    /// `ld a, :label` — bank-number immediate (binary placeholder; only
+    /// meaningful in the WLA text output).
+    pub fn ld_a_bank_imm(&mut self, label: &str) {
+        // NOTE: not added to referenced_labels — bank references target
+        // external asset labels that WLA resolves; registering them would
+        // make the unresolved-stub generator DEFINE them (duplicate label).
+        self.emit_bytes_asm(&[0x3E, 0x00], &format!("  ld a,:{label}"));
+    }
+
     /// Raw byte+asm emission helper for composite sequences.
     fn emit_bytes_asm(&mut self, bytes: &[u8], asm: &str) {
         for &b in bytes {

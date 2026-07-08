@@ -194,6 +194,36 @@ fn indexed_direct_base(base: u16, region: ir::MemRegion) -> Option<u16> {
     indexed_plain_ram_base(base, region).or_else(|| indexed_plain_prg_low(base, region))
 }
 
+/// H2: direct high-PRG read (NES $C000+): map :data_prg_high into slot 2,
+/// read, restore :data_prg_low. Compile-time constant addressing — no
+/// dispatcher. A := (addr). Clobbers E and native flags.
+fn emit_prg_high_read_direct(p: &mut z80_emit::Program, nes_addr: u16) {
+    p.ld_a_bank_imm("data_prg_high");
+    p.ld_abs_a(0xFFFF);
+    p.ld_a_abs(nes_addr - 0x4000);
+    p.ld_e_a();
+    p.ld_a_bank_imm("data_prg_low");
+    p.ld_abs_a(0xFFFF);
+    p.ld_a_e();
+}
+
+/// H2: direct high-PRG indexed read: A := (base + idx). Clobbers HL/B/C/E
+/// and native flags.
+fn emit_prg_high_indexed_direct(p: &mut z80_emit::Program, base: u16, shadow_idx: u16) {
+    p.ld_a_bank_imm("data_prg_high");
+    p.ld_abs_a(0xFFFF);
+    p.ld_hl_imm(base - 0x4000);
+    p.ld_a_abs(shadow_idx);
+    p.ld_c_a();
+    p.ld_b_imm(0);
+    p.add_hl_bc();
+    p.ld_a_hl_ptr();
+    p.ld_e_a();
+    p.ld_a_bank_imm("data_prg_low");
+    p.ld_abs_a(0xFFFF);
+    p.ld_a_e();
+}
+
 /// A := (sms_base + idx). Clobbers HL/B/C and native flags.
 fn emit_indexed_read_direct(p: &mut z80_emit::Program, sms_base: u16, shadow_idx: u16) {
     p.ld_hl_imm(sms_base);
@@ -454,28 +484,34 @@ fn emit_ldxy_mem(
             program.ld_a_abs(*a);
         }
         (AddrExpr::Const(a), MemRegion::PrgRom) => {
-            program.ld_hl_imm(*a);
-            program.ld_b_imm(0);
-            program.call(runtime_symbols::READ_PRG_HIGH_INDEXED);
+            emit_prg_high_read_direct(program, *a);
         }
         (AddrExpr::AbsIndexedX(base), _) => {
             if let Some(sms) = indexed_direct_base(*base, region) {
                 emit_indexed_read_direct(program, sms, sms_layout::SHADOW_X);
             } else {
-                program.ld_hl_imm(indexed_base_to_sms(*base, region));
-                program.ld_a_abs(sms_layout::SHADOW_X);
-                program.ld_b_a();
-                program.call(indexed_read_runtime(*base, region));
+                if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
+                    emit_prg_high_indexed_direct(program, *base, sms_layout::SHADOW_X);
+                } else {
+                    program.ld_hl_imm(indexed_base_to_sms(*base, region));
+                    program.ld_a_abs(sms_layout::SHADOW_X);
+                    program.ld_b_a();
+                    program.call(indexed_read_runtime(*base, region));
+                }
             }
         }
         (AddrExpr::AbsIndexedY(base), _) => {
             if let Some(sms) = indexed_direct_base(*base, region) {
                 emit_indexed_read_direct(program, sms, sms_layout::SHADOW_Y);
             } else {
-                program.ld_hl_imm(indexed_base_to_sms(*base, region));
-                program.ld_a_abs(sms_layout::SHADOW_Y);
-                program.ld_b_a();
-                program.call(indexed_read_runtime(*base, region));
+                if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
+                    emit_prg_high_indexed_direct(program, *base, sms_layout::SHADOW_Y);
+                } else {
+                    program.ld_hl_imm(indexed_base_to_sms(*base, region));
+                    program.ld_a_abs(sms_layout::SHADOW_Y);
+                    program.ld_b_a();
+                    program.call(indexed_read_runtime(*base, region));
+                }
             }
         }
         (AddrExpr::ZpIndexedX(zp), _) => {
@@ -711,9 +747,7 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
         }
         AddrExpr::Const(a) if region == MemRegion::PrgRom => {
             p.ld_c_a();
-            p.ld_hl_imm(*a);
-            p.ld_b_imm(0);
-            p.call(READ_PRG_HIGH_INDEXED);
+            emit_prg_high_read_direct(p, *a);
             p.ld_b_a();
             p.ld_a_c();
         }
@@ -729,6 +763,13 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
                 p.add_hl_de();
                 p.ld_b_hl_ptr();
                 p.ld_a_c();
+            } else if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
+                // A saved in E-free path: the direct emitter clobbers C/E,
+                // so park the accumulator on the stack around it.
+                p.push_af();
+                emit_prg_high_indexed_direct(p, *base, SHADOW_X);
+                p.ld_b_a();
+                p.pop_af();
             } else {
                 p.ld_c_a();
                 p.ld_hl_imm(indexed_base_to_sms(*base, region));
@@ -749,6 +790,13 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
                 p.add_hl_de();
                 p.ld_b_hl_ptr();
                 p.ld_a_c();
+            } else if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
+                // A saved in E-free path: the direct emitter clobbers C/E,
+                // so park the accumulator on the stack around it.
+                p.push_af();
+                emit_prg_high_indexed_direct(p, *base, SHADOW_Y);
+                p.ld_b_a();
+                p.pop_af();
             } else {
                 p.ld_c_a();
                 p.ld_hl_imm(indexed_base_to_sms(*base, region));
@@ -2166,9 +2214,7 @@ pub fn lower_routine(
                         program.ld_a_abs(*a);
                     }
                     (AddrExpr::Const(a), MemRegion::PrgRom) => {
-                        program.ld_hl_imm(*a);
-                        program.ld_b_imm(0);
-                        program.call(READ_PRG_HIGH_INDEXED);
+                        emit_prg_high_read_direct(program, *a);
                     }
                     (AddrExpr::AbsIndexedX(0x4016), MemRegion::ApuIo) => {
                         program.call(CONTROLLER_READ_INDEXED_X);
@@ -2176,6 +2222,8 @@ pub fn lower_routine(
                     (AddrExpr::AbsIndexedX(base), _) => {
                         if let Some(sms) = indexed_direct_base(*base, *region) {
                             emit_indexed_read_direct(program, sms, SHADOW_X);
+                        } else if *region == ir::MemRegion::PrgRom && *base >= 0xC000 {
+                            emit_prg_high_indexed_direct(program, *base, SHADOW_X);
                         } else {
                             program.ld_hl_imm(indexed_base_to_sms(*base, *region));
                             program.ld_a_abs(SHADOW_X);
@@ -2186,6 +2234,8 @@ pub fn lower_routine(
                     (AddrExpr::AbsIndexedY(base), _) => {
                         if let Some(sms) = indexed_direct_base(*base, *region) {
                             emit_indexed_read_direct(program, sms, SHADOW_Y);
+                        } else if *region == ir::MemRegion::PrgRom && *base >= 0xC000 {
+                            emit_prg_high_indexed_direct(program, *base, SHADOW_Y);
                         } else {
                             program.ld_hl_imm(indexed_base_to_sms(*base, *region));
                             program.ld_a_abs(SHADOW_Y);
