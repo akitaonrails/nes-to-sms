@@ -2306,7 +2306,20 @@ pub fn lower_routine(
             // ALU: ADC / SBC
             // ------------------------------------------------------------------
             Op::AdcImm(v) => {
-                if let Some(end) = fuse_direct_end[op_idx] {
+                if !flags_live_after(
+                    ops_slice,
+                    op_idx,
+                    F_N | F_Z | F_C | F_V,
+                    opts.routine_flag_reads,
+                ) {
+                    // H.8: result-only ADC — no consumer reads any flag
+                    // before overwrite, so skip the whole shadow update.
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_P);
+                    program.rrca();
+                    program.ld_a_e();
+                    program.adc_a_imm(*v);
+                } else if let Some(end) = fuse_direct_end[op_idx] {
                     // Native ADC: shadow C -> Z80 carry (RRCA on shadow P,
                     // A parked in E; LD doesn't touch flags), result in A.
                     // Scanner guarantees N/Z/C/V all dead after the run,
@@ -2332,7 +2345,19 @@ pub fn lower_routine(
             }
 
             Op::AdcMem { addr, region } => {
-                if let Some(end) = fuse_direct_end[op_idx] {
+                if !flags_live_after(
+                    ops_slice,
+                    op_idx,
+                    F_N | F_Z | F_C | F_V,
+                    opts.routine_flag_reads,
+                ) {
+                    emit_mem_to_b(program, addr, *region);
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_P);
+                    program.rrca();
+                    program.ld_a_e();
+                    program.adc_a_b();
+                } else if let Some(end) = fuse_direct_end[op_idx] {
                     emit_mem_to_b(program, addr, *region);
                     program.ld_e_a();
                     program.ld_a_abs(SHADOW_P);
@@ -2355,7 +2380,19 @@ pub fn lower_routine(
             }
 
             Op::SbcImm(v) => {
-                if let Some(end) = fuse_cmp_end[op_idx] {
+                if !flags_live_after(
+                    ops_slice,
+                    op_idx,
+                    F_N | F_Z | F_C | F_V,
+                    opts.routine_flag_reads,
+                ) {
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_P);
+                    program.rrca();
+                    program.ccf();
+                    program.ld_a_e();
+                    program.sbc_a_imm(*v);
+                } else if let Some(end) = fuse_cmp_end[op_idx] {
                     // Native SBC: Z80 carry-in = !shadow C (CCF), and the
                     // 6502 carry-out = !borrow — cmp_cond_to_z80 handles
                     // the inverted branch polarity.
@@ -2381,7 +2418,20 @@ pub fn lower_routine(
             }
 
             Op::SbcMem { addr, region } => {
-                if let Some(end) = fuse_cmp_end[op_idx] {
+                if !flags_live_after(
+                    ops_slice,
+                    op_idx,
+                    F_N | F_Z | F_C | F_V,
+                    opts.routine_flag_reads,
+                ) {
+                    emit_mem_to_b(program, addr, *region);
+                    program.ld_e_a();
+                    program.ld_a_abs(SHADOW_P);
+                    program.rrca();
+                    program.ccf();
+                    program.ld_a_e();
+                    program.sbc_a_b();
+                } else if let Some(end) = fuse_cmp_end[op_idx] {
                     emit_mem_to_b(program, addr, *region);
                     program.ld_e_a();
                     program.ld_a_abs(SHADOW_P);
@@ -2525,7 +2575,11 @@ pub fn lower_routine(
             // ALU: CMP / CPX / CPY
             // ------------------------------------------------------------------
             Op::CmpImm(v) => {
-                if let Some(end) = fuse_cmp_end[op_idx] {
+                if !flags_live_after(ops_slice, op_idx, F_N | F_Z | F_C, opts.routine_flag_reads) {
+                    // H.8: CMP only produces flags; with no consumer it is
+                    // a complete no-op.
+                    let _ = v;
+                } else if let Some(end) = fuse_cmp_end[op_idx] {
                     program.cp_imm(*v);
                     emit_fused_branches(
                         program,
@@ -2661,7 +2715,9 @@ pub fn lower_routine(
             // Shifts / rotates
             // ------------------------------------------------------------------
             Op::AslA => {
-                if let Some(end) = fuse_direct_end[op_idx] {
+                if !flags_live_after(ops_slice, op_idx, F_N | F_Z | F_C, opts.routine_flag_reads) {
+                    program.add_a_a();
+                } else if let Some(end) = fuse_direct_end[op_idx] {
                     // Native shift: carry = shifted-out bit, same polarity
                     // as the 6502; Z native; N (=0 after LSR, bit7 after
                     // ASL) matches Z80 S.
@@ -2686,7 +2742,9 @@ pub fn lower_routine(
             }
 
             Op::LsrA => {
-                if let Some(end) = fuse_direct_end[op_idx] {
+                if !flags_live_after(ops_slice, op_idx, F_N | F_Z | F_C, opts.routine_flag_reads) {
+                    program.srl_a();
+                } else if let Some(end) = fuse_direct_end[op_idx] {
                     program.srl_a();
                     emit_fused_branches(
                         program,
@@ -2730,12 +2788,22 @@ pub fn lower_routine(
             // ------------------------------------------------------------------
             Op::IncMem { addr, region } => {
                 emit_hl_for_rw_mem(program, addr, *region);
-                program.call(INC_MEM);
+                if !flags_live_after(ops_slice, op_idx, F_N | F_Z, opts.routine_flag_reads) {
+                    // H.8: no flag consumer — the helper's only extra work
+                    // is the shadow N/Z update.
+                    program.inc_hl_ptr();
+                } else {
+                    program.call(INC_MEM);
+                }
             }
 
             Op::DecMem { addr, region } => {
                 emit_hl_for_rw_mem(program, addr, *region);
-                program.call(DEC_MEM);
+                if !flags_live_after(ops_slice, op_idx, F_N | F_Z, opts.routine_flag_reads) {
+                    program.dec_hl_ptr();
+                } else {
+                    program.call(DEC_MEM);
+                }
             }
 
             // ------------------------------------------------------------------
