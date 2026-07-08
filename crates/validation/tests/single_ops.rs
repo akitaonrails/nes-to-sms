@@ -14,6 +14,7 @@ fn lift(prg: &[u8], at: u16, len: u16, name: &str) -> ir::Routine {
     lift_range(
         prg,
         &LiftOptions {
+            window_label_prefix: None,
             start: at,
             end: at + len,
             entry_name: name.into(),

@@ -46,6 +46,8 @@ pub enum RawCiramBackend {
     SramSlot2,
 }
 
+const NES_PRG_BANK_BASE: u32 = 36;
+
 #[derive(Debug, Clone)]
 pub struct ProjectConfig<'a> {
     /// ROM size in KB. Must be a multiple of 16 and >= 16.
@@ -222,7 +224,25 @@ fn sms_asm_content(
 ) -> String {
     let rom_banks = cfg.rom_kib / 16;
     let runtime_includes = build_runtime_includes(runtime_s_files);
-    let mapper_define = format!(".define NES_MAPPER {}", cfg.mapper);
+    // Asset banks: NROM keeps the legacy 24-30; banked carts place them
+    // ABOVE the NES PRG data banks so generated code can grow into 4-35.
+    let asset_base: u32 = if assets.prg_banks.is_some() {
+        NES_PRG_BANK_BASE
+            + assets
+                .prg_banks
+                .as_ref()
+                .map(|b| b.len() as u32)
+                .unwrap_or(0)
+    } else {
+        24
+    };
+    let mut mapper_define = format!(".define NES_MAPPER {}", cfg.mapper);
+    if let Some(banks) = &assets.prg_banks {
+        mapper_define.push_str(&format!(
+            "\n.define NES_PRG_BANK_BASE {NES_PRG_BANK_BASE}\n.define NES_PRG_BANK_MASK {}",
+            banks.len().next_power_of_two() - 1
+        ));
+    }
     let mirroring_define = match cfg.mirroring {
         NesMirroring::Vertical => ".define NES_MIRRORING_VERTICAL 1",
         NesMirroring::Horizontal => ".define NES_MIRRORING_HORIZONTAL 1",
@@ -269,7 +289,7 @@ fn sms_asm_content(
          ; Each asset lives in its own dedicated bank, pinned to slot 2 so\n\
          ; the symbol value is a clean slot-2 logical address ($8000-$BFFF).\n\
          ; boot.s switches the right bank into slot 2 before reading.\n\
-         .bank 24 slot 2\n\
+         .bank {asset_chr} slot 2\n\
          .org $0000\n\
          .section \"data_chr\" force\n\
          data_chr:\n\
@@ -279,13 +299,15 @@ fn sms_asm_content(
          \n\
          .define data_chr_size {chr_size}\n\
          \n\
-         .bank 25 slot 2\n\
+         .bank {asset_palette} slot 2\n\
          .org $0000\n\
          .section \"data_palette\" force\n\
          data_palette:\n\
          .incbin \"data/palette.cram\"\n\
          .ends\n",
         rom_banks = rom_banks,
+        asset_chr = asset_base,
+        asset_palette = asset_base + 1,
         title = cfg.title,
         mapper_define = mapper_define,
         mirroring_define = mirroring_define,
@@ -294,27 +316,29 @@ fn sms_asm_content(
     );
 
     if has_nametable {
-        out.push_str(
+        out.push_str(&format!(
             "\n\
-             .bank 26 slot 2\n\
+             .bank {} slot 2\n\
              .org $0000\n\
              .section \"data_nametable\" force\n\
              data_nametable:\n\
              .incbin \"data/nametable.bin\"\n\
              .ends\n",
-        );
+            asset_base + 2
+        ));
     }
 
     if assets.prg_low.is_some() {
-        out.push_str(
+        out.push_str(&format!(
             "\n\
-             .bank 27 slot 2\n\
+             .bank {} slot 2\n\
              .org $0000\n\
              .section \"data_prg_low\" force\n\
              data_prg_low:\n\
              .incbin \"data/prg_low.bin\"\n\
              .ends\n",
-        );
+            asset_base + 3
+        ));
     }
 
     if let Some(banks) = &assets.prg_banks {
@@ -322,12 +346,6 @@ fn sms_asm_content(
         // NES_PRG_BANK_BASE + k, pinned to slot 2. rt_mapper_write maps
         // the selected bank into the window; data_prg_low aliases bank 0
         // so game-agnostic runtime restore paths keep working.
-        const NES_PRG_BANK_BASE: u32 = 36;
-        out.push_str(&format!(
-            "\n.define NES_PRG_BANK_BASE {NES_PRG_BANK_BASE}\n\
-             .define NES_PRG_BANK_MASK {}\n",
-            banks.len().next_power_of_two() - 1
-        ));
         for (k, _) in banks.iter().enumerate() {
             let bank = NES_PRG_BANK_BASE + k as u32;
             out.push_str(&format!(
@@ -343,33 +361,35 @@ fn sms_asm_content(
     }
 
     if assets.prg_high.is_some() {
-        out.push_str(
+        out.push_str(&format!(
             "\n\
-             .bank 30 slot 2\n\
+             .bank {} slot 2\n\
              .org $0000\n\
              .section \"data_prg_high\" force\n\
              data_prg_high:\n\
              .incbin \"data/prg_high.bin\"\n\
              .ends\n",
-        );
+            asset_base + 6
+        ));
     }
 
     if assets.chr_nes.is_some() {
-        out.push_str(
+        out.push_str(&format!(
             "\n\
-             .bank 28 slot 2\n\
+             .bank {} slot 2\n\
              .org $0000\n\
              .section \"data_chr_nes\" force\n\
              data_chr_nes:\n\
              .incbin \"data/chr.nes\"\n\
              .ends\n",
-        );
+            asset_base + 4
+        ));
     }
 
     if assets.chr_maps.is_some() {
-        out.push_str(
+        out.push_str(&format!(
             "\n\
-             .bank 29 slot 2\n\
+             .bank {} slot 2\n\
              .org $0000\n\
              .section \"data_chr_maps\" force\n\
              data_chr_maps:\n\
@@ -383,7 +403,8 @@ fn sms_asm_content(
              .incbin \"data/chr_maps.bin\" SKIP $500 READ $100\n\
              data_chr_maps_end:\n\
              .ends\n",
-        );
+            asset_base + 5
+        ));
     }
 
     out

@@ -333,6 +333,12 @@ pub enum Op {
         addr: u16,
         value: ValueSrc,
     },
+    /// RTS used as a computed jump (the 6502 `PHA hi / PHA lo / RTS`
+    /// dispatch idiom): pops two bytes from the emulated 6502 stack and
+    /// transfers to (target + 1) through the runtime banked dispatcher.
+    /// Detected by the post-lift pass: an RTS whose basic block has two
+    /// or more unmatched PHAs immediately before it.
+    RtsDispatch,
     ControllerRead {
         port: u16,
     },
@@ -388,6 +394,12 @@ pub struct LiftOptions {
     /// `JSR` at one of these PCs, it substitutes a `JumpEngineCall`
     /// op carrying the listed targets instead of a plain `Jsr`.
     pub jump_engine_sites: Vec<JumpEngineSite>,
+    /// Banked-window lifting (mapper plan M1): when set (e.g. "b0_"),
+    /// every label generated for an address inside $8000-$BFFF becomes
+    /// `L_b0_XXXX` — the routine's identity is (bank, addr). Fixed-bank
+    /// targets ($C000+) keep plain `L_XXXX` and resolve to the shared
+    /// fixed-bank translation.
+    pub window_label_prefix: Option<String>,
     /// PCs that other routines branch to which fall inside our range.
     /// We emit `Op::Label(L_<pc>)` at each so the cross-routine
     /// reference resolves. Without this, a `BEQ $85C8` from one
@@ -409,6 +421,7 @@ impl Default for LiftOptions {
             end: 0,
             entry_name: String::new(),
             jump_engine_sites: Vec::new(),
+            window_label_prefix: None,
             extra_label_pcs: Vec::new(),
         }
     }
@@ -446,8 +459,40 @@ fn cpu_to_prg_offset(addr: u16) -> Option<usize> {
     }
 }
 
+/// Rewrite `PHA hi / PHA lo / RTS` computed-jump idioms: an `Op::Rts`
+/// with >= 2 unmatched `Op::Pha` since the last label/branch boundary
+/// becomes `Op::RtsDispatch` (the pushes stay — the dispatcher pops).
+pub fn mark_rts_dispatch(ops: &mut [Op]) -> usize {
+    let mut unmatched: i32 = 0;
+    let mut hits = 0usize;
+    for op in ops.iter_mut() {
+        match op {
+            Op::Pha => unmatched += 1,
+            Op::Pla => unmatched -= 1,
+            // Block boundaries reset the local push balance.
+            Op::Label(_) | Op::BranchIf { .. } | Op::Jmp { .. } | Op::Jsr { .. } => unmatched = 0,
+            Op::Rts => {
+                if unmatched >= 2 {
+                    *op = Op::RtsDispatch;
+                    hits += 1;
+                }
+                unmatched = 0;
+            }
+            _ => {}
+        }
+    }
+    hits
+}
+
 fn label_for(addr: u16) -> String {
     format!("L_{addr:04X}")
+}
+
+fn label_for_prefixed(addr: u16, window_prefix: Option<&str>) -> String {
+    match window_prefix {
+        Some(p) if (0x8000..0xC000).contains(&addr) => format!("L_{p}{addr:04X}"),
+        _ => label_for(addr),
+    }
 }
 
 fn branch_cond(mnem: Mnemonic) -> Cond {
@@ -494,7 +539,7 @@ fn lift_insn(
     // Helper: record a label (internal or external)
     let record_target =
         |target: u16, branch_labels: &mut Vec<String>, external_calls: &mut Vec<String>| {
-            let lbl = label_for(target);
+            let lbl = label_for_prefixed(target, opts.window_label_prefix.as_deref());
             if target >= opts.start && target < opts.end {
                 if !branch_labels.contains(&lbl) {
                     branch_labels.push(lbl.clone());
@@ -1094,8 +1139,12 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
     while pc < opts.end {
         // Emit internal label if this PC is a branch target
         if all_targets.contains(&pc) {
-            let lbl = label_for(pc);
-            ops.push(Op::Label(lbl.clone()));
+            let lbl = label_for_prefixed(pc, opts.window_label_prefix.as_deref());
+            // The entry label is already emitted as op 0 (entry_name); a
+            // self-targeting entry must not define the same string twice.
+            if lbl != opts.entry_name {
+                ops.push(Op::Label(lbl.clone()));
+            }
             if !branch_labels.contains(&lbl) {
                 branch_labels.push(lbl);
             }
@@ -1167,6 +1216,7 @@ mod tests {
     fn lift(cpu_start: u16, bytes: &[u8]) -> Routine {
         let prg = make_prg_at(cpu_start, bytes);
         let opts = LiftOptions {
+            window_label_prefix: None,
             start: cpu_start,
             end: cpu_start + bytes.len() as u16,
             entry_name: format!("L_{cpu_start:04X}"),
@@ -1328,6 +1378,7 @@ mod tests {
         let bytes = &[0xC9, 0x03, 0xB0, 0x01, 0x60];
         let prg = make_prg_at(0xAEF9, bytes);
         let opts = LiftOptions {
+            window_label_prefix: None,
             start: 0xAEF9,
             end: 0xAEFE,
             entry_name: "L_AEF9".to_string(),
@@ -1378,6 +1429,7 @@ mod tests {
         let r = lift_range(
             &prg,
             &LiftOptions {
+                window_label_prefix: None,
                 start: 0xE3E9,
                 end: 0xE3EC,
                 entry_name: "L_E3E9".into(),
@@ -1475,6 +1527,7 @@ mod tests {
     fn lift_error_on_empty_range() {
         let prg = vec![0u8; 0x8000];
         let opts = LiftOptions {
+            window_label_prefix: None,
             start: 0x8000,
             end: 0x8000,
             entry_name: "test".to_string(),
@@ -1488,6 +1541,7 @@ mod tests {
     fn lift_error_start_gt_end() {
         let prg = vec![0u8; 0x8000];
         let opts = LiftOptions {
+            window_label_prefix: None,
             start: 0x8010,
             end: 0x8000,
             entry_name: "test".to_string(),

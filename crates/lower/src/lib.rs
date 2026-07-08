@@ -2369,59 +2369,87 @@ pub fn lower_routine(
             // Stores
             // ------------------------------------------------------------------
             Op::StaMem { addr, region } => {
-                match (addr, region) {
-                    (AddrExpr::ZpConst(z), MemRegion::ZeroPage) => {
-                        program.ld_abs_a(NES_ZP_BASE + *z as u16);
-                    }
-                    (
-                        AddrExpr::Const(a),
-                        MemRegion::Ram | MemRegion::RamMirror | MemRegion::Stack,
-                    ) => {
-                        program.ld_abs_a(nes_ram_addr_to_sms(*a));
-                    }
-                    (AddrExpr::AbsIndexedX(base), _) => {
-                        if let Some(sms) = indexed_direct_base(*base, *region) {
-                            emit_indexed_write_direct(program, sms, IdxReg::X);
-                        } else {
-                            program.ld_c_a(); // save value in C
-                            program.ld_hl_imm(indexed_base_to_sms(*base, *region));
-                            program.ld_a_d();
-                            program.ld_b_a();
-                            program.ld_a_c();
-                            program.call(WRITE_INDEXED);
-                        }
-                    }
-                    (AddrExpr::AbsIndexedY(base), _) => {
-                        if let Some(sms) = indexed_direct_base(*base, *region) {
-                            emit_indexed_write_direct(program, sms, IdxReg::Y);
-                        } else {
-                            program.ld_c_a();
-                            program.ld_hl_imm(indexed_base_to_sms(*base, *region));
-                            program.ld_a_e_reg();
-                            program.ld_b_a();
-                            program.ld_a_c();
-                            program.call(WRITE_INDEXED);
-                        }
-                    }
-                    (AddrExpr::ZpIndexedX(zp), _) => {
-                        // 6502 zp,X wraps within zero page: addr = (zp + X) & $FF.
-                        // Compute the wrapped offset in A, then build HL = $C000 + offset.
-                        // Save value first, since A is the value to write.
-                        program.ld_c_a(); // C = value
-                        program.ld_a_d();
-                        program.add_a_imm(*zp);
+                // Stores into ROM space are MAPPER register writes for any
+                // addressing mode (CV1's bus-conflict-safe `STA $C000,Y`
+                // bank switch). They must never remap to SMS RAM.
+                if matches!(region, MemRegion::PrgRom | MemRegion::Mapper) {
+                    let idx = match addr {
+                        AddrExpr::AbsIndexedX(_) => Some(IdxReg::X),
+                        AddrExpr::AbsIndexedY(_) => Some(IdxReg::Y),
+                        _ => None,
+                    };
+                    let base = match addr {
+                        AddrExpr::AbsIndexedX(b) | AddrExpr::AbsIndexedY(b) => *b,
+                        AddrExpr::Const(a) => *a,
+                        _ => 0x8000,
+                    };
+                    program.ld_hl_imm(base);
+                    if let Some(ix) = idx {
+                        program.ld_c_a();
+                        ix.load_into_a(program);
+                        program.add_a_l();
                         program.ld_l_a();
-                        program.ld_h_imm((NES_ZP_BASE >> 8) as u8);
+                        program.ld_a_h();
+                        program.adc_a_imm0();
+                        program.ld_h_a();
                         program.ld_a_c();
-                        program.ld_hl_ptr_a();
                     }
-                    (AddrExpr::IndirectY(zp), _) => {
-                        // entry: B=zp, A=value
-                        program.ld_b_imm(*zp);
-                        program.call(WRITE_ZP_PTR_Y);
-                    }
-                    _ => {
-                        program.comment("WARN: unresolved StaMem addressing mode");
+                    program.call(MAPPER_WRITE);
+                } else {
+                    match (addr, region) {
+                        (AddrExpr::ZpConst(z), MemRegion::ZeroPage) => {
+                            program.ld_abs_a(NES_ZP_BASE + *z as u16);
+                        }
+                        (
+                            AddrExpr::Const(a),
+                            MemRegion::Ram | MemRegion::RamMirror | MemRegion::Stack,
+                        ) => {
+                            program.ld_abs_a(nes_ram_addr_to_sms(*a));
+                        }
+                        (AddrExpr::AbsIndexedX(base), _) => {
+                            if let Some(sms) = indexed_direct_base(*base, *region) {
+                                emit_indexed_write_direct(program, sms, IdxReg::X);
+                            } else {
+                                program.ld_c_a(); // save value in C
+                                program.ld_hl_imm(indexed_base_to_sms(*base, *region));
+                                program.ld_a_d();
+                                program.ld_b_a();
+                                program.ld_a_c();
+                                program.call(WRITE_INDEXED);
+                            }
+                        }
+                        (AddrExpr::AbsIndexedY(base), _) => {
+                            if let Some(sms) = indexed_direct_base(*base, *region) {
+                                emit_indexed_write_direct(program, sms, IdxReg::Y);
+                            } else {
+                                program.ld_c_a();
+                                program.ld_hl_imm(indexed_base_to_sms(*base, *region));
+                                program.ld_a_e_reg();
+                                program.ld_b_a();
+                                program.ld_a_c();
+                                program.call(WRITE_INDEXED);
+                            }
+                        }
+                        (AddrExpr::ZpIndexedX(zp), _) => {
+                            // 6502 zp,X wraps within zero page: addr = (zp + X) & $FF.
+                            // Compute the wrapped offset in A, then build HL = $C000 + offset.
+                            // Save value first, since A is the value to write.
+                            program.ld_c_a(); // C = value
+                            program.ld_a_d();
+                            program.add_a_imm(*zp);
+                            program.ld_l_a();
+                            program.ld_h_imm((NES_ZP_BASE >> 8) as u8);
+                            program.ld_a_c();
+                            program.ld_hl_ptr_a();
+                        }
+                        (AddrExpr::IndirectY(zp), _) => {
+                            // entry: B=zp, A=value
+                            program.ld_b_imm(*zp);
+                            program.call(WRITE_ZP_PTR_Y);
+                        }
+                        _ => {
+                            program.comment("WARN: unresolved StaMem addressing mode");
+                        }
                     }
                 }
             }
@@ -3317,6 +3345,13 @@ pub fn lower_routine(
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
                 }
+            }
+
+            Op::RtsDispatch => {
+                // Computed jump via the 6502 stack (PHA hi / PHA lo / RTS):
+                // pop lo then hi from the shadow stack, target+1, and go
+                // through the runtime banked dispatcher (fail-closed).
+                program.call("rt_rts_dispatch");
             }
 
             Op::MapperWrite { addr, value } => {

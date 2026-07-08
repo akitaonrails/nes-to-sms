@@ -871,10 +871,13 @@ rt_sound_stub:
 ; per-read cost.
 rt_mapper_write:
 .ifdef NES_PRG_BANK_BASE
+  push af                   ; STA leaves the 6502 accumulator intact — the
+                            ; double-write idiom (sta/sta) reuses A
   and  NES_PRG_BANK_MASK
   ld   ($cb62), a           ; NES PRG bank shadow
   add  a, NES_PRG_BANK_BASE
   ld   ($ffff), a           ; slot 2 = selected NES bank's data image
+  pop  af
 .endif
   ret
 

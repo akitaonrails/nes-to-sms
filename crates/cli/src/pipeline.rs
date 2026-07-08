@@ -146,6 +146,15 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // the lowered output; internal branches that target the trimmed-off
     // tail become external references and resolve via the alias label.
     let mut funcs: Vec<analysis::DiscoveredFunction> = analyzed.functions.functions.clone();
+    // Banked ROMs (M1): functions discovered inside the switchable window
+    // ($8000-$BFFF) came from walking the VIEW's bank-0 bytes — the real
+    // target bank is only known at run time. Drop them: their callers'
+    // targets become unresolved strict-trap stubs whose diagnostics
+    // (together with the $CB62 bank shadow) name the (bank, addr) pairs
+    // to annotate as [[bank_entry]] profile roots.
+    if banked {
+        funcs.retain(|f| f.addr >= 0xC000);
+    }
     funcs.sort_by_key(|f| f.addr);
     for i in 0..funcs.len() {
         if i + 1 < funcs.len() && funcs[i].end > funcs[i + 1].addr {
@@ -177,6 +186,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             end: f.end,
             entry_name: f.name.clone(),
             jump_engine_sites: jump_engine_sites.clone(),
+            window_label_prefix: None,
             extra_label_pcs: Vec::new(),
         };
         if let Ok(r) = ir::lift_range(&analysis_view, &opts) {
@@ -209,8 +219,185 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
     }
 
-    let mut routines: Vec<ir::Routine> = Vec::with_capacity(funcs.len());
     let mut lift_failures: Vec<String> = Vec::new();
+    let mut banked_routines: Vec<ir::Routine> = Vec::new();
+    // 4b. Banked-window translation units (mapper plan M1). For each
+    // bank named by a [[bank_entry]], analyze an NROM-shaped view (that
+    // bank + the fixed bank) rooted at its entries and lift the window
+    // routines with bank-prefixed labels (L_bK_XXXX). Fixed-bank
+    // re-discoveries are dropped (the shared fixed translation wins);
+    // NEW fixed-bank functions reached only via banked code are lifted
+    // unprefixed from the same view (identical bytes).
+    if banked && !prof.bank_entries.is_empty() {
+        use std::collections::BTreeMap;
+        let mut by_bank: BTreeMap<u8, Vec<u16>> = BTreeMap::new();
+        for be in &prof.bank_entries {
+            by_bank.entry(be.bank).or_default().push(be.addr);
+        }
+        let mut known_fixed: std::collections::HashSet<u16> =
+            funcs.iter().map(|f| f.addr).collect();
+        for (bank, entries) in by_bank {
+            let mut view = Vec::with_capacity(0x8000);
+            view.extend_from_slice(
+                &image.prg[bank as usize * 0x4000..(bank as usize + 1) * 0x4000],
+            );
+            view.extend_from_slice(&image.prg[image.prg.len() - 0x4000..]);
+            let prefix = format!("b{bank}_");
+            let mut bprof = prof.clone();
+            bprof.functions = entries
+                .iter()
+                .map(|&a| profile::Function {
+                    addr: a,
+                    name: format!("L_{prefix}{a:04X}"),
+                    note: None,
+                })
+                .collect();
+            let banalyzed = analysis::analyze(
+                &view,
+                nes_rom_like::Vectors {
+                    nmi: vectors.nmi,
+                    reset: vectors.reset,
+                    irq: vectors.irq,
+                },
+                &bprof,
+            );
+            let mut bfuncs: Vec<analysis::DiscoveredFunction> =
+                banalyzed.functions.functions.clone();
+            let main_ranges: Vec<(u16, u16)> = funcs.iter().map(|f| (f.addr, f.end)).collect();
+            bfuncs.retain(|f| {
+                if (0x8000..0xC000).contains(&f.addr) {
+                    return true;
+                }
+                if f.addr < 0xC000 || known_fixed.contains(&f.addr) {
+                    return false;
+                }
+                // A fixed-region discovery whose entry lies INSIDE a main
+                // routine is a mid-routine alias target, not a new
+                // function — the interior-label mechanism resolves it.
+                !main_ranges.iter().any(|&(a, e)| f.addr > a && f.addr < e)
+            });
+            bfuncs.sort_by_key(|f| f.addr);
+            bfuncs.dedup_by_key(|f| f.addr);
+            // Fixed-region discoveries from this view must not overlap the
+            // MAIN fixed routines: clamp each one's end to the next main
+            // function start (otherwise their interior labels collide with
+            // main entries/aliases — duplicate-label link failures).
+            let mut main_starts: Vec<u16> = funcs.iter().map(|f| f.addr).collect();
+            main_starts.sort_unstable();
+            for f in bfuncs.iter_mut().filter(|f| f.addr >= 0xC000) {
+                if let Some(&next) = main_starts.iter().find(|&&a| a > f.addr) {
+                    if f.end > next {
+                        f.end = next;
+                    }
+                }
+            }
+            if std::env::var("N2S_DEBUG_BANKFUNCS").is_ok() {
+                for f in &bfuncs {
+                    eprintln!("bank{bank} func ${:04X}-${:04X} {}", f.addr, f.end, f.name);
+                }
+            }
+            for w in 0..bfuncs.len().saturating_sub(1) {
+                let next = bfuncs[w + 1].addr;
+                if bfuncs[w].end > next {
+                    bfuncs[w].end = next;
+                }
+            }
+            for f in &bfuncs {
+                if f.addr >= 0xC000 {
+                    // Later views must not re-lift this fixed routine.
+                    known_fixed.insert(f.addr);
+                }
+            }
+            // Interior-alias pass (mirrors the main funcs' two-pass):
+            // collect every referenced window pc, then re-lift with
+            // extra labels so cross-routine branch targets resolve.
+            let mut bank_referenced: std::collections::HashSet<u16> = Default::default();
+            for f in &bfuncs {
+                let opts = ir::LiftOptions {
+                    start: f.addr,
+                    end: f.end,
+                    entry_name: String::new(),
+                    jump_engine_sites: jump_engine_sites.clone(),
+                    window_label_prefix: (f.addr < 0xC000).then(|| prefix.clone()),
+                    extra_label_pcs: Vec::new(),
+                };
+                if let Ok(r) = ir::lift_range(&view, &opts) {
+                    for lbl in r.branch_labels.iter().chain(r.external_calls.iter()) {
+                        if let Some(hex) = lbl
+                            .strip_prefix(&format!("L_{prefix}"))
+                            .or_else(|| lbl.strip_prefix("L_"))
+                            && hex.len() == 4
+                            && let Ok(a) = u16::from_str_radix(hex, 16)
+                        {
+                            bank_referenced.insert(a);
+                        }
+                    }
+                }
+            }
+            for f in &bfuncs {
+                let in_window = f.addr < 0xC000;
+                let extras: Vec<u16> = bank_referenced
+                    .iter()
+                    .filter(|&&pc| pc > f.addr && pc < f.end)
+                    .copied()
+                    .collect();
+                let opts = ir::LiftOptions {
+                    start: f.addr,
+                    end: f.end,
+                    entry_name: if in_window {
+                        format!("L_{prefix}{:04X}", f.addr)
+                    } else {
+                        format_label(f.addr)
+                    },
+                    jump_engine_sites: jump_engine_sites.clone(),
+                    window_label_prefix: in_window.then(|| prefix.clone()),
+                    extra_label_pcs: extras,
+                };
+                match ir::lift_range(&view, &opts) {
+                    Ok(mut r) => {
+                        ir::mark_rts_dispatch(&mut r.ops);
+                        let has_terminator = r.ops.last().is_some_and(|op| {
+                            matches!(
+                                op,
+                                ir::Op::Rts
+                                    | ir::Op::Rti
+                                    | ir::Op::Jmp { .. }
+                                    | ir::Op::JmpIndirect { .. }
+                                    | ir::Op::Brk
+                                    | ir::Op::Jam { .. }
+                            )
+                        });
+                        if !has_terminator {
+                            // Trimmed fallthrough: continue into the next
+                            // routine via an explicit jump (bank-prefixed
+                            // when the target is in the window).
+                            let tgt = if r.end < 0xC000 {
+                                format!("L_{prefix}{:04X}", r.end)
+                            } else {
+                                format_label(r.end)
+                            };
+                            if !r.external_calls.contains(&tgt) {
+                                r.external_calls.push(tgt.clone());
+                            }
+                            r.ops.push(ir::Op::Jmp { target: tgt });
+                        }
+                        for lbl in r.branch_labels.iter().chain(r.external_calls.iter()) {
+                            if let Some(hex) = lbl.strip_prefix("L_")
+                                && hex.len() == 4
+                                && let Ok(a) = u16::from_str_radix(hex, 16)
+                            {
+                                all_referenced_pcs.insert(a);
+                            }
+                        }
+                        banked_routines.push(r)
+                    }
+                    Err(e) => lift_failures.push(format!("bank{bank} ${:04X}: {:?}", f.addr, e)),
+                }
+            }
+        }
+    }
+
+    let mut routines: Vec<ir::Routine> = Vec::with_capacity(funcs.len());
     for f in funcs.iter() {
         // Compute extra labels: PCs in our range that are referenced
         // from outside this routine but aren't its own entry point.
@@ -224,6 +411,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             end: f.end,
             entry_name: f.name.clone(),
             jump_engine_sites: jump_engine_sites.clone(),
+            window_label_prefix: None,
             extra_label_pcs: extras,
         };
         match ir::lift_range(&analysis_view, &opts) {
@@ -261,12 +449,86 @@ pub fn run(args: &Args) -> Result<String, Error> {
                         }
                     }
                 }
+                ir::mark_rts_dispatch(&mut r.ops);
                 routines.push(r);
             }
             Err(e) => lift_failures.push(format!(
                 "${:04X} {} (${:04X}..${:04X}): {:?}",
                 f.addr, f.name, f.addr, f.end, e
             )),
+        }
+    }
+
+    routines.extend(banked_routines);
+
+    // Global interior-label dedup: overlapping fixed-region translations
+    // (main vs bank-view discoveries) can each emit an interior label for
+    // the same NES pc. The translations cover IDENTICAL bytes, so any
+    // reference may resolve to whichever copy keeps the definition —
+    // strip all but the first.
+    {
+        // Every routine's ENTRY label (its auto label — the lifter may
+        // emit it as an Op::Label when the entry is a branch target).
+        let auto_of = |r: &ir::Routine| -> String {
+            if r.name.starts_with("L_b") {
+                r.name.clone()
+            } else {
+                format_label(r.entry)
+            }
+        };
+        let mut defined: std::collections::HashSet<String> =
+            routines.iter().map(&auto_of).collect();
+        for r in routines.iter_mut() {
+            let own = auto_of(r);
+            r.ops.retain(|op| {
+                if let ir::Op::Label(l) = op {
+                    if *l == own {
+                        return true; // the routine's own entry definition
+                    }
+                    if defined.contains(l) {
+                        return false; // defined elsewhere (overlap copy)
+                    }
+                    defined.insert(l.clone());
+                }
+                true
+            });
+        }
+    }
+
+    // 4c. [[bank_call]] rewrites: fixed-bank call sites whose window
+    // target's bank is annotated get retargeted to the bank-prefixed
+    // label; everything else stays an unresolved strict-trap stub.
+    if !prof.bank_calls.is_empty() {
+        use ir::Op;
+        let map: std::collections::HashMap<String, String> = prof
+            .bank_calls
+            .iter()
+            .map(|bc| {
+                (
+                    format!("L_{:04X}", bc.target),
+                    format!("L_b{}_{:04X}", bc.bank, bc.target),
+                )
+            })
+            .collect();
+        for r in routines.iter_mut() {
+            if r.name.starts_with("L_b") {
+                continue; // banked units already carry their own prefix
+            }
+            for op in r.ops.iter_mut() {
+                match op {
+                    Op::Jsr { target } | Op::Jmp { target } => {
+                        if let Some(new) = map.get(target) {
+                            *target = new.clone();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for lbl in r.external_calls.iter_mut() {
+                if let Some(new) = map.get(lbl) {
+                    *lbl = new.clone();
+                }
+            }
         }
     }
 
@@ -333,6 +595,15 @@ pub fn run(args: &Args) -> Result<String, Error> {
         defined_labels.insert("translated_reset".to_string());
         defined_labels.insert("translated_nmi".to_string());
 
+        if std::env::var("N2S_DEBUG_RNAMES").is_ok() {
+            let mut names: std::collections::HashMap<&str, usize> = Default::default();
+            for r in &routines {
+                *names.entry(r.name.as_str()).or_insert(0) += 1;
+            }
+            for (n, c) in names.iter().filter(|(_, c)| **c > 1) {
+                eprintln!("ROUTINE NAME x{c}: {n}");
+            }
+        }
         for r in &routines {
             // Rotate sections. With a frozen map (pass 2) the routine's
             // section comes from the map — near-call downgrades shrink code,
@@ -367,8 +638,15 @@ pub fn run(args: &Args) -> Result<String, Error> {
             // Profile-supplied names and the auto label both need to point
             // at the routine entry — UNLESS the lifter emits the auto label
             // itself (entry PC is also an internal branch target).
-            let auto = format_label(r.entry);
-            let lifter_emits_auto = r.branch_labels.contains(&auto);
+            let auto = if r.name.starts_with("L_b") {
+                r.name.clone() // banked unit: entry label carries the bank prefix
+            } else {
+                format_label(r.entry)
+            };
+            // The lifter always emits Op::Label(entry_name) as the first
+            // op — when the routine's NAME is the auto label (banked units,
+            // L_bK_XXXX), that op IS the definition.
+            let lifter_emits_auto = r.branch_labels.contains(&auto) || r.name == auto;
             if !lifter_emits_auto && !defined_labels.contains(&auto) {
                 program.label(&auto);
                 defined_labels.insert(auto.clone());
@@ -407,6 +685,17 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 program.ld_hl_imm(0xC73C);
                 program.call("rt_inc_mem");
                 program.ret();
+            } else if let Some(addr) = ext
+                .strip_prefix("L_")
+                .map(|h| h.rsplit('_').next().unwrap_or(h))
+                .and_then(|h| u16::from_str_radix(h, 16).ok())
+                .filter(|a| (0x8000..0xC000).contains(a) && banked)
+            {
+                // Switchable-window target: the correct translation depends
+                // on the bank mapped AT CALL TIME. Route through the
+                // runtime (bank, addr) dispatch table — never hard-bind.
+                program.ld_bc_imm(addr);
+                program.jp("rt_banked_dispatch");
             } else {
                 let id = idx as u16;
                 program.ld_a_imm((id & 0x00FF) as u8);
@@ -416,6 +705,30 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 program.jp("rt_unresolved_jsr");
             }
         }
+        // Banked-dispatch table (mapper plan M1): every translated routine
+        // keyed by (NES bank, NES addr) for runtime indirect dispatch.
+        // Fixed-bank routines use bank $FF (matches any window bank).
+        program.section("rt_dispatch_table_sec");
+        program.label("rt_dispatch_table");
+        for r in &routines {
+            let (bank, addr, label) = match r.name.strip_prefix("L_b") {
+                Some(rest) => {
+                    let mut it = rest.splitn(2, '_');
+                    let b: u8 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0xFF);
+                    let a = it
+                        .next()
+                        .and_then(|x| u16::from_str_radix(x, 16).ok())
+                        .unwrap_or(r.entry);
+                    (b, a, r.name.clone())
+                }
+                // Fixed-bank routines are DEFINED under their auto L_XXXX
+                // label (profile display names are aliases only).
+                None => (0xFF, r.entry, format_label(r.entry)),
+            };
+            program.dispatch_entry(addr, bank, &label);
+        }
+        program.data(None, &[0x00, 0x00]); // terminator: addr $0000
+
         Ok((program, lower_failures, unresolved))
     };
 
@@ -1058,6 +1371,8 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_controller_read_indexed_x",
     "rt_mapper_write",
     "rt_restore_prg_window",
+    "rt_banked_dispatch",
+    "rt_rts_dispatch",
     "rt_indirect_jmp",
     "rt_unresolved_jsr",
     "rt_brk",

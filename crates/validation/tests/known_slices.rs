@@ -26,6 +26,7 @@ fn smb_9ca6_pointer_increment_validates_green() {
     let routine = lift_range(
         &prg,
         &LiftOptions {
+            window_label_prefix: None,
             start: 0x9CA6,
             end: 0x9CA6 + bytes.len() as u16,
             entry_name: "AdvancePointer".into(),
@@ -52,6 +53,7 @@ fn smb_b1b4_branch_store_validates_green() {
     let routine = lift_range(
         &prg,
         &LiftOptions {
+            window_label_prefix: None,
             start: 0xB1B4,
             end: 0xB1B4 + bytes.len() as u16,
             entry_name: "BranchStore".into(),
@@ -76,6 +78,7 @@ fn smb_aef9_compare_branch_skips_external() {
     let routine = lift_range(
         &prg,
         &LiftOptions {
+            window_label_prefix: None,
             start: 0xAEF9,
             end: 0xAEF9 + bytes.len() as u16,
             entry_name: "CompareBranch".into(),
@@ -117,6 +120,7 @@ fn smb_b1b4_with_intentional_lower_bug_validates_red() {
     let routine = lift_range(
         &prg,
         &LiftOptions {
+            window_label_prefix: None,
             start: 0x9100,
             end: 0x9100 + bytes.len() as u16,
             entry_name: "TwoStores".into(),

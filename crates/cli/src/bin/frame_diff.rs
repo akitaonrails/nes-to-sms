@@ -224,7 +224,10 @@ struct NesBus {
     joy_dbg: u32,
     watch: Option<Vec<u16>>,
     watch_log: Vec<(u16, u8, u16)>,
+    watch_bank_log: Vec<u8>,
     last_pc: u16,
+    /// UxROM: selected 16 KiB bank at $8000-$BFFF.
+    prg_bank: u8,
 }
 
 impl NesBus {
@@ -269,14 +272,27 @@ impl NesBus {
             joy_dbg: 0,
             watch: None,
             watch_log: Vec::new(),
+            watch_bank_log: Vec::new(),
             last_pc: 0,
+            prg_bank: 0,
         }
     }
 
     fn prg_read(&self, addr: u16) -> u8 {
-        // 32 KiB PRG at $8000-$FFFF; if 16 KiB, mirror — SMB is 32 KiB.
-        let off = (addr as usize - 0x8000) % self.prg.len();
-        self.prg[off]
+        if self.prg.len() > 32 * 1024 {
+            // Banked (UxROM model): $8000-$BFFF = selected 16 KiB bank,
+            // $C000-$FFFF = fixed last bank.
+            let off = if addr >= 0xC000 {
+                self.prg.len() - 0x4000 + (addr as usize - 0xC000)
+            } else {
+                (self.prg_bank as usize * 0x4000 + (addr as usize - 0x8000)) % self.prg.len()
+            };
+            self.prg[off]
+        } else {
+            // 32 KiB PRG at $8000-$FFFF; if 16 KiB, mirror.
+            let off = (addr as usize - 0x8000) % self.prg.len();
+            self.prg[off]
+        }
     }
 }
 
@@ -371,7 +387,13 @@ impl oracle_6502::Bus for NesBus {
                 self.ram[nes as usize] = value;
                 if let Some(w) = &self.watch {
                     if w.contains(&nes) {
+                        // Encode the current PRG bank in the high byte of a
+                        // third slot? Keep tuple shape: fold bank into pc's
+                        // unused range only for logging via eprintln at dump
+                        // time — instead store bank in value's spare... no:
+                        // simplest is a parallel log.
                         self.watch_log.push((nes, value, self.last_pc));
+                        self.watch_bank_log.push(self.prg_bank);
                     }
                 }
             }
@@ -441,6 +463,13 @@ impl oracle_6502::Bus for NesBus {
                 }
                 self.strobe = new_strobe;
             }
+            0x8000..=0xFFFF => {
+                // UxROM mapper register: any write selects the window bank.
+                if self.prg.len() > 32 * 1024 {
+                    let nbanks = (self.prg.len() / 0x4000) as u8;
+                    self.prg_bank = value % nbanks;
+                }
+            }
             _ => {}
         }
     }
@@ -479,7 +508,73 @@ fn run_reference(
         bus.vblank = true; // keep VBlank pollable during init
         pre += 1;
     }
+    // FD_ANCHOR_RENDER=1 (mapper plan M1): games that enable NMI early
+    // and keep initializing (CV1) can't be frame-aligned at NMI-enable.
+    // Anchor instead on rendering-enabled (PPUMASK bg+sprites, bits 3+4):
+    // run whole frames (NMI + frame budget) until the mask bit sets on
+    // both sides, then compare from that common visual milestone.
+    // FD_ANCHOR=addr:val — generic semantic anchor: run whole frames on
+    // both sides until NES RAM[addr] == val, then compare from there.
+    let sem_anchor: Option<(usize, u8)> = std::env::var("FD_ANCHOR").ok().and_then(|s| {
+        let (a, v) = s.split_once(':')?;
+        Some((
+            usize::from_str_radix(a, 16).ok()?,
+            u8::from_str_radix(v, 16).ok()?,
+        ))
+    });
+    if let Some((aa, av)) = sem_anchor {
+        let mut aframes = 0usize;
+        while bus.ram[aa] != av && aframes < 1800 {
+            bus.vblank = true;
+            bus.sprite0_phase = 0;
+            if bus.nmi_enabled {
+                cpu.nmi(&mut bus);
+            }
+            for _ in 0..REF_INSN_PER_FRAME {
+                if cpu.step(&mut bus).is_err() {
+                    break;
+                }
+            }
+            bus.apu_frame_tick();
+            aframes += 1;
+        }
+        eprintln!(
+            "  ref sem-anchor: {aframes} frames, ram[${aa:04X}]=${:02X}",
+            bus.ram[aa]
+        );
+    }
+    if std::env::var("FD_ANCHOR_RENDER").is_ok() {
+        let mut aframes = 0usize;
+        while bus.ppu_mask & 0x18 != 0x18 && aframes < 900 {
+            bus.vblank = true;
+            bus.sprite0_phase = 0;
+            if bus.nmi_enabled {
+                cpu.nmi(&mut bus);
+            }
+            for _ in 0..REF_INSN_PER_FRAME {
+                if cpu.step(&mut bus).is_err() {
+                    break;
+                }
+                if bus.ppu_mask & 0x18 == 0x18 {
+                    break;
+                }
+            }
+            bus.apu_frame_tick();
+            aframes += 1;
+        }
+        eprintln!(
+            "  ref render-anchor: {aframes} frames, ppu_mask=${:02X}",
+            bus.ppu_mask
+        );
+    }
     let init_snap = bus.ram;
+    if std::env::var("FD_DUMP_RAMCODE").is_ok() {
+        let hex: Vec<String> = bus.ram[0x05C0..0x0620]
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect();
+        eprintln!("  ref ram[05C0..0620]: {}", hex.join(" "));
+    }
     eprintln!(
         "  ref pre-roll: {pre} insn, nmi_enabled={}",
         bus.nmi_enabled
@@ -513,6 +608,8 @@ fn run_reference(
         (0x82BB, "NullJoypad"),
     ];
 
+    let log_bank_entries = std::env::var("FD_LOG_BANK_ENTRIES").is_ok();
+    let mut bank_entry_set: std::collections::BTreeSet<(u8, u16)> = Default::default();
     let mut nmi_latched = bus.nmi_enabled;
     let mut nmi_fires = 0usize;
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
@@ -532,6 +629,7 @@ fn run_reference(
         if debug_writes {
             bus.watch = Some(watch_list.clone());
             bus.watch_log.clear();
+            bus.watch_bank_log.clear();
         }
         for _ in 0..REF_INSN_PER_FRAME {
             if debug_writes {
@@ -546,14 +644,30 @@ fn run_reference(
                     );
                 }
             }
+            if log_bank_entries {
+                // Ground truth for [[bank_entry]]: JSR/JMP whose operand
+                // lands in the switchable window, keyed by the mapped bank.
+                let pc = cpu.pc;
+                if pc >= 0x8000 {
+                    let op = bus.prg_read(pc);
+                    if op == 0x20 || op == 0x4C {
+                        let t = bus.prg_read(pc.wrapping_add(1)) as u16
+                            | (bus.prg_read(pc.wrapping_add(2)) as u16) << 8;
+                        if (0x8000..0xC000).contains(&t) {
+                            bank_entry_set.insert((bus.prg_bank, t));
+                        }
+                    }
+                }
+            }
             if cpu.step(&mut bus).is_err() {
                 break;
             }
         }
         if debug_writes {
             eprintln!("  [ref debug] frame {frame} watched writes (addr <- val @ pc):");
-            for (a, v, pc) in bus.watch_log.iter().take(100_000) {
-                eprintln!("    ${a:04X} <- ${v:02X} @ pc=${pc:04X}");
+            for (i, (a, v, pc)) in bus.watch_log.iter().take(100_000).enumerate() {
+                let bank = bus.watch_bank_log.get(i).copied().unwrap_or(0);
+                eprintln!("    ${a:04X} <- ${v:02X} @ pc=${pc:04X} bank={bank}");
             }
             bus.watch = None;
         }
@@ -561,6 +675,11 @@ fn run_reference(
         // subject, whose apu_frame_tick runs after the translated NMI.
         bus.apu_frame_tick();
         snaps.push(bus.ram);
+    }
+    if log_bank_entries {
+        for (b, t) in &bank_entry_set {
+            eprintln!("BANK_ENTRY bank={b} addr=0x{t:04x}");
+        }
     }
     eprintln!(
         "  ref total $4016 reads: {}, nmi fires: {nmi_fires}",
@@ -585,6 +704,7 @@ struct SmsBus {
     // capturing the CPU PC at the time of the write.
     watch: Option<Vec<u16>>,
     watch_log: Vec<(u16, u8, u16)>,
+    watch_bank_log: Vec<u8>,
     last_pc: u16,
 }
 
@@ -597,6 +717,7 @@ impl SmsBus {
             port_dc: 0xFF,
             watch: None,
             watch_log: Vec::new(),
+            watch_bank_log: Vec::new(),
             last_pc: 0,
         }
     }
@@ -900,6 +1021,52 @@ fn run_subject(
         }
         settle += 1;
     }
+    let sem_anchor: Option<(usize, u8)> = std::env::var("FD_ANCHOR").ok().and_then(|s| {
+        let (a, v) = s.split_once(':')?;
+        Some((
+            usize::from_str_radix(a, 16).ok()?,
+            u8::from_str_radix(v, 16).ok()?,
+        ))
+    });
+    if let Some((aa, av)) = sem_anchor {
+        let mut aframes = 0usize;
+        while bus.ram[aa] != av && aframes < 1800 {
+            fire_irq(&mut cpu, &mut bus);
+            for _ in 0..SUBJ_PREROLL_CHUNK {
+                if cpu.halted || cpu.step(&mut bus).is_err() {
+                    break;
+                }
+                if bus.ram[aa] == av {
+                    break;
+                }
+            }
+            aframes += 1;
+        }
+        eprintln!(
+            "  subj sem-anchor: {aframes} frames, ram[${aa:04X}]=${:02X}",
+            bus.ram[aa]
+        );
+    }
+    if std::env::var("FD_ANCHOR_RENDER").is_ok() {
+        let mut aframes = 0usize;
+        // SMS $CB09 = NES PPUMASK shadow.
+        while bus.ram[0x0B09] & 0x18 != 0x18 && aframes < 900 {
+            fire_irq(&mut cpu, &mut bus);
+            for _ in 0..SUBJ_PREROLL_CHUNK {
+                if cpu.halted || cpu.step(&mut bus).is_err() {
+                    break;
+                }
+                if bus.ram[0x0B09] & 0x18 == 0x18 {
+                    break;
+                }
+            }
+            aframes += 1;
+        }
+        eprintln!(
+            "  subj render-anchor: {aframes} frames, mask-shadow=${:02X}",
+            bus.ram[0x0B09]
+        );
+    }
     let init_snap = snap_nes_ram(&bus);
     eprintln!(
         "  subj pre-roll: {pre} insn over {pre_frames} frames, PC=${:04X} nmi_enabled={} $C772={:02X}",
@@ -948,9 +1115,7 @@ fn run_subject(
             if cpu.halted {
                 break;
             }
-            if dbg {
-                bus.last_pc = cpu.pc;
-            }
+            bus.last_pc = cpu.pc;
             if cpu.step(&mut bus).is_err() {
                 break;
             }

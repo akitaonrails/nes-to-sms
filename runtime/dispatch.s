@@ -162,14 +162,101 @@ _far_jmp_after:
 ; reproduced here. If a future target relies on it, add a check: if L == $FF,
 ; set H unchanged and L = 0 for the second read.
 rt_indirect_jmp:
-  ld   e, (hl)              ; low byte of target
+  ; Phase R note: DE is the resident X/Y pair — this helper is a JMP
+  ; (control transfer), so X/Y must SURVIVE into the target. Use BC for
+  ; the pointer instead.
+  ld   c, (hl)              ; low byte of target
   inc  hl
-  ld   d, (hl)              ; high byte of target
-  ; Remap if DE is in NES RAM range.
-  call _dispatch_remap_de
-  ; Push DE as return address and RET to jump there.
+  ld   b, (hl)              ; high byte of target
+  ; ROM targets ($8000+) dispatch through the generated (bank, addr)
+  ; table — never execute raw NES bytes (mapper plan M1).
+  ld   a, b
+  cp   $80
+  jp   nc, rt_banked_dispatch
+  ; RAM targets: remap NES RAM -> SMS RAM and jump.
   push de
+  ld   d, b
+  ld   e, c
+  call _dispatch_remap_de
+  ld   b, d
+  ld   c, e
+  pop  de
+  push bc
   ret
+
+; ─── rt_banked_dispatch ───────────────────────────────────────────────────────
+; BC = NES ROM target address. Look it up in the generated dispatch
+; table: entries of .dw nes_addr / .db nes_bank / .db sms_bank / .dw label,
+; terminated by addr $0000. Fixed-bank entries carry nes_bank $FF and
+; match any window state; window entries ($8000-$BFFF) also require the
+; current UxROM bank shadow ($CB62) to match. Hit -> far-gate jump (bank
+; restore on return included). Miss -> loud trap ($CB1D=$E2, target in
+; $CB1B/1C) — fail closed, never run raw NES bytes.
+rt_banked_dispatch:
+  push de                   ; preserve resident X/Y through the search
+  ld   a, ($cb14)
+  push af                   ; caller's slot-1 bank (restored before far-gate)
+  ld   a, :rt_dispatch_table
+  ld   ($fffe), a
+  ld   hl, rt_dispatch_table
+_bd_loop:
+  ld   e, (hl)              ; entry addr lo
+  inc  hl
+  ld   d, (hl)              ; entry addr hi
+  inc  hl
+  ld   a, d
+  or   e
+  jr   z, _bd_miss
+  ; address match?
+  ld   a, d
+  cp   b
+  jr   nz, _bd_skip
+  ld   a, e
+  cp   c
+  jr   nz, _bd_skip
+  ; bank constraint: entry nes_bank $FF matches anything; else compare
+  ; with the mapper shadow (only meaningful for window targets).
+  ld   a, (hl)
+  cp   $ff
+  jr   z, _bd_hit
+  ld   e, a
+  ld   a, ($cb62)
+  cp   e
+  jr   z, _bd_hit
+_bd_skip:
+  inc  hl                   ; skip nes_bank
+  inc  hl                   ; skip sms bank
+  inc  hl                   ; skip label lo
+  inc  hl                   ; skip label hi
+  jr   _bd_loop
+_bd_hit:
+  inc  hl                   ; -> sms bank byte
+  ld   a, (hl)
+  inc  hl
+  ld   c, (hl)              ; label lo
+  inc  hl
+  ld   b, (hl)              ; label hi
+  ld   e, a                 ; park sms bank
+  pop  af                   ; caller's slot-1 bank
+  ld   ($cb14), a
+  ld   ($fffe), a
+  ld   a, e                 ; A = target's sms bank, BC = label
+  pop  de                   ; restore resident X/Y
+  jp   rt_far_gate
+_bd_miss:
+  pop  af
+  ld   ($cb14), a
+  ld   ($fffe), a
+  pop  de
+  ld   a, c
+  ld   ($cb1b), a
+  ld   a, b
+  ld   ($cb1c), a
+  ld   a, ($cb62)
+  ld   ($cb1a), a           ; live NES bank at miss time (diagnostics)
+  ld   a, $e2               ; distinct marker: banked-dispatch miss
+  ld   ($cb1d), a
+  jp   rt_unresolved_jsr_flash
 
 ; ─── _dispatch_remap_de ───────────────────────────────────────────────────────
 ; Remaps a NES address in DE to the SMS equivalent if it falls in NES RAM.
@@ -201,6 +288,33 @@ _remap_mirror:
   ld   d, a
   ret
 
+; ─── rt_rts_dispatch ──────────────────────────────────────────────────────────
+; 6502 `PHA hi / PHA lo / RTS` computed jump. Pop lo, then hi from the
+; emulated 6502 stack ($C100 + S), add 1, and transfer through
+; rt_banked_dispatch. The Z80 return address of the caller (pushed by
+; the `call rt_rts_dispatch` in translated code) is discarded — the
+; 6502 semantics transfer control, they don't return.
+rt_rts_dispatch:
+  pop  hl                   ; discard translated-code return address
+  push de
+  ld   a, ($cb02)           ; 6502 S
+  inc  a
+  ld   l, a
+  ld   h, $c1
+  ld   e, (hl)              ; lo (S+1)
+  inc  a
+  ld   l, a
+  ld   d, (hl)              ; hi (S+2)
+  ld   ($cb02), a           ; S += 2
+  ; BC = target + 1
+  inc  de
+  ld   b, d
+  ld   c, e
+  pop  de
+  ; RAM-target computed jumps would need translated RAM code — trap via
+  ; the dispatcher's miss path ($E2) if the table has no entry.
+  jp   rt_banked_dispatch
+
 ; ─── rt_unresolved_jsr ────────────────────────────────────────────────────────
 ; Trap: called when the Rust back end emitted a JSR to an address that could
 ; not be resolved to a translated label at compile time.
@@ -214,6 +328,8 @@ rt_unresolved_jsr:
   ld   a, $e1
   ld   ($cb1d), a            ; trace-sms runtime trap marker
   ; Flash screen: write $FF (bright white) to CRAM palette 0.
+rt_unresolved_jsr_flash:
+  di
 _ujsr_flash:
   xor  a
   out  ($bf), a             ; CRAM addr 0 low

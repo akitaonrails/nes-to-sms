@@ -276,7 +276,7 @@ _ppu_w_ppudata:
   jp   z, _ppudata_direct_palette
   ld   a, d
   cp   $20
-  jp   c, _ppudata_discard_direct
+  jp   c, _ppudata_pattern_write
   cp   $30
   jp   nc, _ppudata_discard_direct
   and  $03
@@ -314,6 +314,53 @@ _ppudata_direct_nametable_tile:
   out  ($bf), a
   pop  af
   call rt_write_mapped_bg_tile
+  jp   _ppudata_inc_addr
+
+_ppudata_pattern_write:
+  ; CHR-RAM (mapper plan M1): a $2007 write into pattern space
+  ; ($0000-$1FFF). NES tile row plane bytes are bit-identical to SMS
+  ; Mode-4 planes 0/1 (planes 2/3 stay zero from the blank CHR), so the
+  ; upload is a pure address transform:
+  ;   nes = tttttttttprrr (t=tile 0-511, p=plane, r=row)
+  ;   sms = tile*32 + row*4 + plane
+  ;       = ((nes & $FFF0) << 1) | ((nes & 7) << 2) | ((nes >> 3) & 1)
+  ; Tiles >= 448 ($1C00+) exceed the SMS pattern budget and are dropped.
+  ld   a, d
+  cp   $1c
+  jp   nc, _ppudata_discard_direct
+  push bc
+  ; C = ((nes & 7) << 2) | ((nes >> 3) & 1)
+  ld   a, e
+  and  $07
+  add  a, a
+  add  a, a
+  ld   c, a
+  ld   a, e
+  rrca
+  rrca
+  rrca
+  and  $01
+  or   c
+  ld   c, a
+  ; HL(sms) = (nes & $FFF0) << 1 | C
+  ld   a, e
+  and  $f0
+  ld   l, a
+  ld   h, d
+  add  hl, hl
+  ld   a, l
+  or   c
+  ld   l, a
+  ; VDP write
+  ld   a, l
+  out  ($bf), a
+  ld   a, h
+  and  $3f
+  or   $40
+  out  ($bf), a
+  pop  bc
+  pop  af                    ; the data byte
+  out  ($be), a
   jp   _ppudata_inc_addr
 
 _ppudata_discard_direct:

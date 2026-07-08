@@ -115,6 +115,26 @@ Sequence inside M1:
 5. CHR-RAM conversion path; verify title visuals.
 6. Level-1 route recorded against the reference; parity gate.
 
+### M1 status (2026-07-08)
+
+Architecture LANDED, SMB regression byte-for-byte through all of it:
+per-bank 32 KiB translation units (interior aliases, cross-view and
+global label dedup), the runtime (bank, addr) dispatch table with
+rt_banked_dispatch (fail-closed: misses trap with the live bank in
+$CB1A), lazy-trap window stubs, the UxROM slot-2 remap shim, and
+ground-truth bank-entry harvesting from the reference oracle
+(FD_LOG_BANK_ENTRIES). Root causes fixed along the way: indexed ROM
+stores remapped to zero page (bank switching dead + zp corruption);
+late .define compiled the mapper shim out entirely; rt_mapper_write
+clobbered A (broke the double-STA bus-conflict idiom).
+
+CV1 now: boots, uploads CHR, switches banks, dispatches its master
+task table (17 entries via the $CA6D jump engine). BLOCKED on a
+PPU-handshake poll inside a DI loop (L_ECEA/L_EE35/L_EF43 cycle,
+~2.6K iterations) — same class as SMB's sprite-0 handshake, needs
+CV1's specific $2002/vblank expectation modeled. Next work item,
+then CHR-RAM visuals verification and the level-1 parity route.
+
 ## M2 — MMC1
 
 Serial 5-write register protocol (shim buffers the shift register),

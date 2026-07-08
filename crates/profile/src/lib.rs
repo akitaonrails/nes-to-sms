@@ -16,6 +16,10 @@ pub struct Profile {
     pub vectors: Option<Vectors>,
     #[serde(default, rename = "function")]
     pub functions: Vec<Function>,
+    #[serde(default, rename = "bank_entry")]
+    pub bank_entries: Vec<BankEntry>,
+    #[serde(default, rename = "bank_call")]
+    pub bank_calls: Vec<BankCall>,
     #[serde(default, rename = "label")]
     pub labels: Vec<Label>,
     #[serde(default, rename = "data_region")]
@@ -50,6 +54,23 @@ pub struct Vectors {
     pub nmi: u16,
     pub reset: u16,
     pub irq: u16,
+}
+
+/// A code entry point inside a switchable PRG window (mapper plan M1):
+/// `addr` is only meaningful with `bank` mapped at $8000-$BFFF.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BankEntry {
+    pub bank: u8,
+    pub addr: u16,
+}
+
+/// Binds a fixed-bank call TARGET in the switchable window to the bank
+/// the game always has mapped when calling it. Trap diagnostics
+/// ($CB62 shadow at trap time) supply these.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BankCall {
+    pub target: u16,
+    pub bank: u8,
 }
 
 #[derive(Debug, Clone, Deserialize)]

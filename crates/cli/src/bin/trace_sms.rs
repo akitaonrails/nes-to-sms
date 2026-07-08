@@ -2828,10 +2828,11 @@ fn main() {
             let ret = bus.read(sp) as u16 | ((bus.read(sp.wrapping_add(1)) as u16) << 8);
             eprintln!(
                 "*** first trap at step {step}: unresolved_id=${id:04X} pc=${pc:04X} \
-                 ret=${ret:04X} (call at ${:04X}) slot1_bank={} slot2_bank={}",
+                 ret=${ret:04X} (call at ${:04X}) slot1_bank={} slot2_bank={} nes_bank={}",
                 ret.wrapping_sub(3),
                 bus.slot_bank[1],
                 bus.slot_bank[2],
+                bus.ram[0x0B1A],
             );
         }
         if first_ram_exec_step.is_none() && pc >= 0xC000 {

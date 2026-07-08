@@ -150,6 +150,12 @@ impl Program {
         let name = name.as_ref().to_string();
         let addr = self.sections[self.current].current_addr();
         if self.labels.contains_key(&name) {
+            if std::env::var("Z80_DEBUG_DUP").is_ok() {
+                eprintln!(
+                    "DUP LABEL {name} (section idx {:?})",
+                    self.label_section.get(&name)
+                );
+            }
             self.dup_labels.push(name.clone());
         }
         self.labels.insert(name.clone(), addr);
@@ -1073,6 +1079,23 @@ impl Program {
         self.referenced_labels.insert(label.to_string());
     }
 
+    /// Banked-dispatch table entry (mapper plan M1): 6 bytes —
+    /// .dw nes_addr / .db nes_bank ($FF = fixed, matches any bank) /
+    /// .db :LABEL / .dw LABEL. Byte stream carries placeholders for the
+    /// label fields (never executed in the validation harness).
+    pub fn dispatch_entry(&mut self, nes_addr: u16, nes_bank: u8, label: &str) {
+        self.sec().push_byte((nes_addr & 0xFF) as u8);
+        self.sec().push_byte((nes_addr >> 8) as u8);
+        self.sec().push_byte(nes_bank);
+        self.sec().push_byte(0x00);
+        self.sec().push_byte(0x00);
+        self.sec().push_byte(0x00);
+        self.sec().push_asm(format!(
+            "  .dw ${nes_addr:04X}\n  .db ${nes_bank:02X}, :{label}\n  .dw {label}"
+        ));
+        self.referenced_labels.insert(label.to_string());
+    }
+
     // ── X/Y residency moves (Phase R: 6502 X lives in D, Y in E) ────────────
     pub fn ld_a_e_reg(&mut self) {
         self.emit1(0x7B, "ld a,e");
@@ -1241,7 +1264,9 @@ impl Program {
 
     pub fn finish(mut self) -> Result<Build, EmitError> {
         if let Some(name) = self.dup_labels.into_iter().next() {
-            return Err(EmitError::DuplicateLabel(name));
+            if std::env::var("Z80_ALLOW_DUP").is_err() {
+                return Err(EmitError::DuplicateLabel(name));
+            }
         }
 
         // Apply patches.

@@ -189,6 +189,15 @@ rt_controller_strobe:
 ; Exit:  A = 0 or 1 (button released or pressed).
 ; The bit-read index wraps at 8; reads 9+ return 1 (NES open-bus behavior).
 rt_controller_read:
+  ; Entry: A = port low byte ($16 = controller 1, $17 = controller 2).
+  ; Controller 2 is unconnected for v1: return 0 WITHOUT touching the
+  ; controller-1 shift index — games like CV1 interleave $4016/$4017
+  ; reads, and a shared index de-serializes port 1 (phantom input).
+  cp   $17
+  jr   nz, _ctrl_read_p1
+  xor  a
+  ret
+_ctrl_read_p1:
   push hl
   push bc
   ld   a, ($cb07)           ; current bit index (0..7)
