@@ -22,6 +22,13 @@ xhost +local: >/dev/null 2>&1 || true
 # from non-TTY shells; RetroArch does not need stdin).
 TTY_FLAGS=""
 [ -t 0 ] && TTY_FLAGS="-it"
+# Host audio: forward the PulseAudio/PipeWire socket so the PSG is audible.
+PULSE_DIR="/run/user/$(id -u)/pulse"
+AUDIO_ARGS=()
+if [ -S "$PULSE_DIR/native" ]; then
+  AUDIO_ARGS=(-v "$PULSE_DIR":/run/pulse -e PULSE_SERVER=unix:/run/pulse/native)
+fi
+
 exec docker run --rm $TTY_FLAGS \
   -e DISPLAY="${DISPLAY:-:0}" \
   -e OVERCLOCK="${OVERCLOCK:-500}" \
@@ -29,6 +36,7 @@ exec docker run --rm $TTY_FLAGS \
   -v "$REPO":/work \
   --device /dev/input \
   -v /run/udev/data:/run/udev/data:ro \
+  "${AUDIO_ARGS[@]}" \
   --workdir /work \
   nes-to-sms-retroarch:latest \
   bash /work/docker/gpgx_entry.sh "$ROM"
