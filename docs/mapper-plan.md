@@ -3,12 +3,24 @@
 Goal: run the bulk of the NES library through the pipeline. Target
 ladder, each rung a shippable milestone with its own stress ROM:
 
-| Milestone | Mapper | Stress ROM | Share of library |
-|-----------|--------|------------|------------------|
-| M1 | 2 (UxROM) | Castlevania 1 | ~11% |
-| M2 | 1 (MMC1) | Zelda/Metroid class | ~28% |
-| M3 | 4 (MMC3) | Super Mario Bros. 3, Kirby's Adventure | ~24% |
-| M4 | 5 (MMC5) | Castlevania III | ~1%, hardest |
+One mapper at a time; each milestone gets ONE test game from the
+user's collection (/mnt/terachad/Emulators/EmuDeck/roms/nes), in
+ascending difficulty:
+
+| Milestone | Mapper | Test game (user's collection) | Their library |
+|-----------|--------|-------------------------------|---------------|
+| M1 | 2 (UxROM) | Castlevania (USA) (Rev 1) | 9 games |
+| M2 | 3 (CNROM) | Gradius (USA) | 3 games |
+| M3 | 1 (MMC1) | Blaster Master (USA) | 17 games |
+| M4 | 4 (MMC3) | Bonk's Adventure / Adventure Island II | 22 games |
+| M5 | 7 (AxROM) | Marble Madness (then Battletoads, the torture test) | 2 games |
+| M6 | 5 (MMC5) | Castlevania III | 1 game, hardest |
+| Later | 23/25 (VRC2/4), 69 (FME-7) | Kid Dracula, Gradius II, Batman RotJ | 3 games |
+
+**Hard regression rule (user directive): every mapper-phase commit
+must pass the FULL SMB gate (three routes byte-for-byte, 375 tests,
+route expectations) and keep Alter Ego building. No exceptions, no
+quick-gates on commit.**
 
 NROM (SMB, Alter Ego) remains the regression floor: every milestone
 must keep the three SMB routes byte-for-byte and Alter Ego building.
