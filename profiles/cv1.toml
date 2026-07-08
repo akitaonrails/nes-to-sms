@@ -1,0 +1,13 @@
+# Castlevania (USA) (Rev 1) — mapper-2 (UxROM) stress target for the
+# mapper phase (docs/mapper-plan.md M1). CHR is RAM (chr_kib = 0):
+# tiles upload at runtime through $2007.
+[rom]
+name    = "Castlevania"
+mapper  = 2
+prg_kib = 128
+chr_kib = 0
+
+[vectors]
+nmi   = 0xc052
+reset = 0xc008
+irq   = 0xc0bf

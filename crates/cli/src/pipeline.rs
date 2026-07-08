@@ -108,8 +108,27 @@ pub fn run(args: &Args) -> Result<String, Error> {
     }
 
     // 3. Analyze. Discover functions; classify code/data.
+    //
+    // Mapper M0 (docs/mapper-plan.md): banked ROMs (PRG > 32 KiB) are
+    // analyzed through per-bank 32 KiB VIEWS — each view = one switchable
+    // bank at $8000-$BFFF + the fixed last bank at $C000-$FFFF, exactly
+    // NROM-shaped, so analysis and lifting run unchanged per view. View 0
+    // provides the shared fixed-bank code; banked-region discoveries are
+    // future M1 work (bank-entry annotations); for now the fixed bank
+    // alone boots UxROM titles to the trap-reporting stage.
+    let banked = image.prg.len() > 32 * 1024;
+    let analysis_view: Vec<u8> = if banked {
+        let fixed = &image.prg[image.prg.len() - 0x4000..];
+        let bank0 = &image.prg[..0x4000];
+        let mut v = Vec::with_capacity(0x8000);
+        v.extend_from_slice(bank0);
+        v.extend_from_slice(fixed);
+        v
+    } else {
+        image.prg.to_vec()
+    };
     let analyzed = analysis::analyze(
-        image.prg,
+        &analysis_view,
         nes_rom_like::Vectors {
             nmi: vectors.nmi,
             reset: vectors.reset,
@@ -160,7 +179,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             jump_engine_sites: jump_engine_sites.clone(),
             extra_label_pcs: Vec::new(),
         };
-        if let Ok(r) = ir::lift_range(image.prg, &opts) {
+        if let Ok(r) = ir::lift_range(&analysis_view, &opts) {
             for lbl in r.branch_labels.iter().chain(r.external_calls.iter()) {
                 if let Some(hex) = lbl.strip_prefix("L_")
                     && let Ok(addr) = u16::from_str_radix(hex, 16)
@@ -207,7 +226,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             jump_engine_sites: jump_engine_sites.clone(),
             extra_label_pcs: extras,
         };
-        match ir::lift_range(image.prg, &opts) {
+        match ir::lift_range(&analysis_view, &opts) {
             Ok(mut r) => {
                 // If the lifted routine doesn't end with a terminator,
                 // it's a fall-through routine. Insert an explicit
@@ -435,7 +454,17 @@ pub fn run(args: &Args) -> Result<String, Error> {
     build.asm = strip_inline_org(&build.asm);
 
     // 8. Convert assets (CHR + a default palette + nametable placeholder).
-    let (chr_4bpp, chr_maps, chr_report) = build_chr_assets(image.chr, &prof.chr_packs)?;
+    // CHR-RAM carts (chr_kib = 0) ship no pattern data: build the asset
+    // set from an all-zero 8 KiB CHR (blank tiles, identity maps). The
+    // runtime $2007 pattern-write conversion fills real tiles in play.
+    let chr_ram_blank;
+    let chr_source: &[u8] = if image.chr.is_empty() {
+        chr_ram_blank = vec![0u8; 8192];
+        &chr_ram_blank
+    } else {
+        image.chr
+    };
+    let (chr_4bpp, chr_maps, chr_report) = build_chr_assets(chr_source, &prof.chr_packs)?;
     let palette: [u8; 32] = default_palette();
     // Default name table: all zeros. Real rendering comes from translated
     // PPU $2006/$2007 writes during init/NMI. (Switch this to a tile-
@@ -519,7 +548,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     i += 1;
                 }
                 let nes = 0x8000 + start;
-                let peek: String = image.prg[start..(start + 16).min(i)]
+                let peek: String = analysis_view[start..(start + 16).min(i)]
                     .iter()
                     .map(|b| format!("{b:02X} "))
                     .collect();

@@ -164,6 +164,11 @@ pub fn read_word_at_cpu_addr(prg: &[u8], cpu_addr: u16) -> Option<u16> {
 
 /// CPU address → PRG byte offset, NROM only. Mirrors $C000..=$FFFF onto $8000..=$BFFF
 /// when PRG is 16 KB (NROM-128).
+/// CPU address → PRG byte offset for the FIXED region of the layout.
+/// NROM: whole window (16 KB mirrored or flat 32 KB). Banked mappers
+/// (PRG > 32 KB; UxROM/MMC1-typical/MMC3 fix the top): $C000-$FFFF maps
+/// to the LAST 16 KB of PRG; the switchable window returns None
+/// (callers need a bank: `banked_prg_offset`).
 pub fn cpu_to_prg_offset(prg_len: usize, cpu_addr: u16) -> Option<usize> {
     if cpu_addr < 0x8000 {
         return None;
@@ -173,9 +178,21 @@ pub fn cpu_to_prg_offset(prg_len: usize, cpu_addr: u16) -> Option<usize> {
         Some(off & 0x3fff)
     } else if prg_len == 32 * 1024 {
         Some(off)
+    } else if prg_len > 32 * 1024 && cpu_addr >= 0xC000 {
+        Some(prg_len - 0x4000 + (cpu_addr as usize - 0xC000))
     } else {
         None
     }
+}
+
+/// CPU address in the switchable window ($8000-$BFFF for 16 KB-banked
+/// mappers) → PRG offset given the selected bank.
+pub fn banked_prg_offset(prg_len: usize, bank: u8, cpu_addr: u16) -> Option<usize> {
+    if !(0x8000..0xC000).contains(&cpu_addr) {
+        return None;
+    }
+    let off = bank as usize * 0x4000 + (cpu_addr as usize - 0x8000);
+    (off < prg_len).then_some(off)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
