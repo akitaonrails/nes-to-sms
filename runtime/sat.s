@@ -239,8 +239,7 @@ _dof_p3_out:
   inc  c
   djnz _dof_row
 
-  ld   a, :data_prg_low      ; restore translated-data bank
-  ld   ($ffff), a
+  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
   ret
 
 ; ─── variant_get_scratch ─────────────────────────────────────────────────────

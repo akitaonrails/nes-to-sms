@@ -862,8 +862,35 @@ rt_sound_stub:
   ret
 
 ; ─── rt_mapper_write ──────────────────────────────────────────────────────────
-; NROM has no mapper registers; all writes are discarded.
+; Entry: A = value written, HL = NES address ($8000-$FFFF).
+; NROM: no mapper registers; writes are discarded.
+; UxROM (mapper 2): any write selects the 16 KiB PRG bank at the
+; $8000-$BFFF window. The shim stores the NES bank shadow ($CB62) and
+; maps the matching SMS data bank into slot 2 immediately — every
+; existing PRG-window read path then sees the right bytes with zero
+; per-read cost.
 rt_mapper_write:
+.ifdef NES_PRG_BANK_BASE
+  and  NES_PRG_BANK_MASK
+  ld   ($cb62), a           ; NES PRG bank shadow
+  add  a, NES_PRG_BANK_BASE
+  ld   ($ffff), a           ; slot 2 = selected NES bank's data image
+.endif
+  ret
+
+; ─── rt_restore_prg_window ────────────────────────────────────────────────────
+; Restore slot 2 to the CURRENT NES PRG window after a temporary remap
+; (CHR maps, chr data, prg_high). NROM: the single data_prg_low bank.
+; Banked: the bank selected by the mapper shadow. Clobbers A.
+rt_restore_prg_window:
+.ifdef NES_PRG_BANK_BASE
+  ld   a, ($cb62)
+  add  a, NES_PRG_BANK_BASE
+  ld   ($ffff), a
+.else
+  ld   a, :data_prg_low
+  ld   ($ffff), a
+.endif
   ret
 
 .ends

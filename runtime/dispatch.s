@@ -265,8 +265,7 @@ rt_read_prg_high_indexed:
   add  hl, bc
   ld   a, (hl)
   push af
-  ld   a, :data_prg_low
-  ld   ($ffff), a
+  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
   pop  af
   pop  bc
   pop  hl
@@ -388,8 +387,7 @@ _rzpy_prg_high:
   ld   l, e
   ld   a, (hl)
   push af
-  ld   a, :data_prg_low     ; translated code expects low PRG in slot 2
-  ld   ($ffff), a
+  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
   pop  af
   pop  bc
   pop  de

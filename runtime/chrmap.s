@@ -105,8 +105,7 @@ _gv_row:
   inc  hl
   inc  hl
   djnz _gv_row
-  ld   a, :data_prg_low
-  ld   ($ffff), a
+  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
   ret
 
 ; ─── rt_bg_get_variant ──────────────────────────────────────────────────────
@@ -238,8 +237,7 @@ _bg_map_base_slot_ready:
   add  hl, hl
   add  hl, de
   ld   c, (hl)                ; byte 0 of two-byte map record = base slot
-  ld   a, :data_prg_low
-  ld   ($ffff), a
+  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
   ld   a, c
   pop  bc
   pop  de
@@ -306,8 +304,7 @@ _bgw_map_ready:
   add  hl, de
   ld   a, (hl)               ; base slot (bg tiles are 0-255)
   ld   c, a                  ; C = base slot
-  ld   a, :data_prg_low
-  ld   ($ffff), a
+  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
 
   ; In nametable range: record the base slot for this cell (so a later
   ; attribute write can re-resolve the variant), then read the sub-palette S.
@@ -387,8 +384,7 @@ _bgw_s_map_ready:
   add  hl, de
   ld   a, (hl)               ; base slot (bg tiles are 0-255)
   ld   c, a                  ; C = base slot
-  ld   a, :data_prg_low
-  ld   ($ffff), a
+  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
 
   ; In nametable range: record the base slot for this folded SMS cell.
   ld   hl, ($cb17)
@@ -501,8 +497,7 @@ _chrmap_sprite_base_ready:
   ld   a, (hl)
   ld   ($cb13), a
 
-  ld   a, :data_prg_low
-  ld   ($ffff), a
+  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
   pop  bc
   pop  de
   pop  hl

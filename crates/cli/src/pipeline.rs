@@ -473,11 +473,24 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // Mirror the lower PRG window into a dedicated SMS slot-2 bank. The
     // translated SMB code reads data tables such as $805A/$806D/$8080 via raw
     // slot-2 addresses; without this bank those reads hit CHR/nametable assets.
-    let prg_low = Some(image.prg[..image.prg.len().min(0x4000)].to_vec());
+    // Banked mappers (M1): every switchable 16 KiB NES bank becomes its
+    // own SMS data bank; the fixed LAST bank is prg_high. NROM keeps the
+    // flat low/high split.
+    let (prg_low, prg_banks) = if banked {
+        let banks: Vec<Vec<u8>> = image.prg.chunks(0x4000).map(|c| c.to_vec()).collect();
+        (None, Some(banks))
+    } else {
+        (
+            Some(image.prg[..image.prg.len().min(0x4000)].to_vec()),
+            None,
+        )
+    };
     // Mirror the fixed upper PRG window as well. The translated code can run
     // from generated banks in slot 1, so original fixed-bank data tables such
     // as SMB's Bitmasks at $C68A are read via a slot-2 runtime helper.
-    let prg_high = if image.prg.len() > 0x4000 {
+    let prg_high = if banked {
+        Some(image.prg[image.prg.len() - 0x4000..].to_vec())
+    } else if image.prg.len() > 0x4000 {
         Some(image.prg[0x4000..image.prg.len().min(0x8000)].to_vec())
     } else {
         Some(image.prg[..image.prg.len().min(0x4000)].to_vec())
@@ -486,13 +499,18 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // DrawTitleScreen copies a command stream from PPU pattern-table space
     // ($1EC0+) through $2007; the converted SMS 4bpp tiles are not suitable
     // for that CPU-visible readback path.
-    let chr_nes = Some(image.chr.to_vec());
+    let chr_nes = Some(if image.chr.is_empty() {
+        vec![0u8; 8192]
+    } else {
+        image.chr.to_vec()
+    });
 
     let project_assets = ProjectAssets {
         chr_4bpp,
         palette,
         nametable,
         prg_low,
+        prg_banks,
         prg_high,
         chr_nes,
         chr_maps: Some(chr_maps),
@@ -516,13 +534,15 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
     };
     let cfg = ProjectConfig {
-        // 512 KiB: H.10 body inlining grew translated code past the old
-        // 304 KiB layout (mappers address up to 512 KiB natively).
-        rom_kib: 512,
+        // NROM: 512 KiB (H.10 body inlining outgrew 304). Banked mappers:
+        // 1 MiB — NES PRG data banks sit at SMS banks 36+ (the Sega mapper
+        // addresses 64 banks; emulators handle 1 MiB fine).
+        rom_kib: if banked { 1024 } else { 512 },
         region: 0x4C,
         title: truncate_title(&prof.rom.name),
         mirroring,
         raw_ciram_backend: RawCiramBackend::SramSlot2,
+        mapper: prof.rom.mapper,
     };
     sms_project::emit_project(&args.out, &build, &project_assets, &cfg, runtime_dir)?;
 
@@ -1037,6 +1057,7 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_controller_read",
     "rt_controller_read_indexed_x",
     "rt_mapper_write",
+    "rt_restore_prg_window",
     "rt_indirect_jmp",
     "rt_unresolved_jsr",
     "rt_brk",

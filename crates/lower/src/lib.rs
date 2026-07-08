@@ -224,8 +224,7 @@ fn emit_prg_high_read_direct(p: &mut z80_emit::Program, nes_addr: u16) {
     p.ld_abs_a(0xFFFF);
     p.ld_a_abs(nes_addr - 0x4000);
     p.ld_c_a();
-    p.ld_a_bank_imm("data_prg_low");
-    p.ld_abs_a(0xFFFF);
+    p.call("rt_restore_prg_window");
     p.ld_a_c();
 }
 
@@ -243,8 +242,7 @@ fn emit_prg_high_indexed_direct(p: &mut z80_emit::Program, base: u16, idx: IdxRe
     p.ld_h_a();
     p.ld_a_hl_ptr();
     p.ld_c_a();
-    p.ld_a_bank_imm("data_prg_low");
-    p.ld_abs_a(0xFFFF);
+    p.call("rt_restore_prg_window");
     p.ld_a_c();
 }
 

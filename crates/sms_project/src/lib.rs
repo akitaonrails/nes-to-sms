@@ -19,6 +19,9 @@ pub struct ProjectAssets {
     /// Optional lower NES PRG window ($8000-$BFFF) mirrored into SMS slot 2
     /// so translated code can read profiled PRG data tables directly.
     pub prg_low: Option<Vec<u8>>,
+    /// Banked mappers (M1+): each switchable 16 KiB NES PRG bank as its
+    /// own SMS data bank ($8000-$BFFF window contents per NES bank).
+    pub prg_banks: Option<Vec<Vec<u8>>>,
     /// Optional upper/fixed NES PRG window ($C000-$FFFF) mirrored into SMS slot 2
     /// for runtime-assisted reads of fixed-bank data tables.
     pub prg_high: Option<Vec<u8>>,
@@ -55,6 +58,8 @@ pub struct ProjectConfig<'a> {
     pub mirroring: NesMirroring,
     /// Storage backend for raw NES CIRAM source-of-truth.
     pub raw_ciram_backend: RawCiramBackend,
+    /// NES mapper number (drives runtime .ifdef paths).
+    pub mapper: u16,
 }
 
 #[derive(Debug)]
@@ -217,6 +222,7 @@ fn sms_asm_content(
 ) -> String {
     let rom_banks = cfg.rom_kib / 16;
     let runtime_includes = build_runtime_includes(runtime_s_files);
+    let mapper_define = format!(".define NES_MAPPER {}", cfg.mapper);
     let mirroring_define = match cfg.mirroring {
         NesMirroring::Vertical => ".define NES_MIRRORING_VERTICAL 1",
         NesMirroring::Horizontal => ".define NES_MIRRORING_HORIZONTAL 1",
@@ -252,6 +258,7 @@ fn sms_asm_content(
          .sdsctag 1.0,\"{title}\",\"NES-to-SMS translation\",\"auto\"\n\
          .bank 0 slot 0\n\
          \n\
+         {mapper_define}\n\
          {mirroring_define}\n\
          {raw_ciram_define}\n\
          \n\
@@ -280,6 +287,7 @@ fn sms_asm_content(
          .ends\n",
         rom_banks = rom_banks,
         title = cfg.title,
+        mapper_define = mapper_define,
         mirroring_define = mirroring_define,
         raw_ciram_define = raw_ciram_define,
         chr_size = assets.chr_4bpp.len(),
@@ -307,6 +315,31 @@ fn sms_asm_content(
              .incbin \"data/prg_low.bin\"\n\
              .ends\n",
         );
+    }
+
+    if let Some(banks) = &assets.prg_banks {
+        // Banked mappers: NES PRG bank k lives at SMS bank
+        // NES_PRG_BANK_BASE + k, pinned to slot 2. rt_mapper_write maps
+        // the selected bank into the window; data_prg_low aliases bank 0
+        // so game-agnostic runtime restore paths keep working.
+        const NES_PRG_BANK_BASE: u32 = 36;
+        out.push_str(&format!(
+            "\n.define NES_PRG_BANK_BASE {NES_PRG_BANK_BASE}\n\
+             .define NES_PRG_BANK_MASK {}\n",
+            banks.len().next_power_of_two() - 1
+        ));
+        for (k, _) in banks.iter().enumerate() {
+            let bank = NES_PRG_BANK_BASE + k as u32;
+            out.push_str(&format!(
+                "\n.bank {bank} slot 2\n\
+                 .org $0000\n\
+                 .section \"data_prg_bank_{k}\" force\n\
+                 data_prg_bank_{k}:\n\
+                 .incbin \"data/prg_bank_{k}.bin\"\n\
+                 .ends\n"
+            ));
+        }
+        out.push_str("\n.define data_prg_low data_prg_bank_0\n");
     }
 
     if assets.prg_high.is_some() {
@@ -379,6 +412,11 @@ fn emit_data_files(
     }
     if let Some(prg_high) = &assets.prg_high {
         fs::write(data_dir.join("prg_high.bin"), prg_high)?;
+    }
+    if let Some(banks) = &assets.prg_banks {
+        for (k, b) in banks.iter().enumerate() {
+            fs::write(data_dir.join(format!("prg_bank_{k}.bin")), b)?;
+        }
     }
     if let Some(chr_nes) = &assets.chr_nes {
         fs::write(data_dir.join("chr.nes"), chr_nes)?;
@@ -474,6 +512,7 @@ mod tests {
 
     fn minimal_assets() -> ProjectAssets {
         ProjectAssets {
+            prg_banks: None,
             chr_4bpp: vec![0u8; 32],
             palette: [0u8; 32],
             nametable: None,
@@ -486,6 +525,7 @@ mod tests {
 
     fn minimal_cfg() -> ProjectConfig<'static> {
         ProjectConfig {
+            mapper: 0,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -539,6 +579,7 @@ mod tests {
         let out = unique_dir("sms_proj_assets");
         let build = minimal_build();
         let assets = ProjectAssets {
+            prg_banks: None,
             chr_4bpp: vec![0xAB; 64],
             palette: [0x55; 32],
             nametable: Some(vec![0u8; 1792]),
@@ -581,6 +622,7 @@ mod tests {
         let build = minimal_build();
         let assets = minimal_assets();
         let cfg = ProjectConfig {
+            mapper: 0,
             rom_kib: 32,
             region: 0x4C,
             title: "TOOLONGTITLE", // 12 chars
@@ -600,6 +642,7 @@ mod tests {
         let build = minimal_build();
         let assets = minimal_assets();
         let cfg = ProjectConfig {
+            mapper: 0,
             rom_kib: 17,
             region: 0x4C,
             title: "TEST",
@@ -619,6 +662,7 @@ mod tests {
         let build = minimal_build();
         let assets = minimal_assets();
         let cfg = ProjectConfig {
+            mapper: 0,
             rom_kib: 64,
             region: 0x4C,
             title: "BANKS4",
@@ -680,6 +724,7 @@ mod tests {
         let build = minimal_build();
         let assets = minimal_assets();
         let cfg = ProjectConfig {
+            mapper: 0,
             rom_kib: 8,
             region: 0x4C,
             title: "TEST",
@@ -722,6 +767,7 @@ mod tests {
         let build = minimal_build();
         let assets = minimal_assets();
         let cfg = ProjectConfig {
+            mapper: 0,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -744,6 +790,7 @@ mod tests {
         let build = minimal_build();
         let assets = minimal_assets();
         let cfg = ProjectConfig {
+            mapper: 0,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -766,6 +813,7 @@ mod tests {
         let build = minimal_build();
         let assets = minimal_assets();
         let cfg = ProjectConfig {
+            mapper: 0,
             rom_kib: 64,
             region: 0x4C,
             title: "TEST",

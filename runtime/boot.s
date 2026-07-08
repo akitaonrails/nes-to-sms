@@ -124,6 +124,7 @@ boot_main:
   ld  ($cb28), a
   ld  ($cb29), a            ; overrun flag (see irq_handler pacing read)
   ld  ($cb2a), a            ; projected window start column (ntmap.s)
+  ld  ($cb62), a            ; NES PRG bank shadow (banked mappers; 0 = bank 0)
 
   ; I/O port control: configure both controller ports as inputs (TR/TH
   ; lines included). Real SMS games write $3F=$FF at boot; without it,

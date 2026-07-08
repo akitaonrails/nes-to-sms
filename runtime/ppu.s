@@ -673,8 +673,7 @@ _ppu_r_ppudata:
   ld   l, a
   ld   a, (hl)
   ld   ($cb11), a
-  ld   a, :data_prg_low
-  ld   ($ffff), a
+  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
   call _ppu_r_inc_addr
   ld   a, c
   jp   _ppu_r_done
