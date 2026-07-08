@@ -191,3 +191,26 @@ evidence demands it).
 freely-licensed homebrew NROM title; if unavailable, the item is
 blocked on the user supplying a ROM (documented, not silently
 dropped).
+
+## Phase H2 (2026-07-06): target ≤5.0× for clean GPGX-500% play — REACHED
+
+| Milestone | avg × budget |
+|-----------|--------------|
+| Post-E.5c materializer baseline | 7.04× |
+| H.8 dead-flag lean paths (result-only ADC/SBC, bare shifts, inc/dec (hl), no-op CMP) | 6.66× |
+| H.10 inline branchless ALU bodies at flag-live sites (+512 KiB ROM, asset banks 24-30) | 6.29× |
+| Compact far dispatch via slot-0 rt_far_gate (+ two-pass placement freeze, vgs round-robin eviction with verified memo) | 5.70× |
+| Inline high-PRG reads at emission sites | 5.53× |
+| Hidden-sprite fast path in rt_sat_resolve (~50/64 slots skip the full resolve) | **4.98×** |
+
+Hard lessons recorded: slot-1 code must never switch $FFFE (bank swaps
+under the PC — gate through slot 0); frozen section maps must freeze
+PLACEMENT, not just the near/far decisions; snapshot section indices
+are offset by program-internal sections (compare transitions, not
+absolutes); bank-immediate references are external and must not feed
+the unresolved-stub generator; the hidden-sprite full resolve was a
+step-timing relic from before the frame-level oracle.
+
+Next phase (agreed with the user): register residency — keep 6502
+X/Y (and provably-private zero-page bytes) in Z80 registers across
+basic blocks. That is the path from ~5× toward real-time.

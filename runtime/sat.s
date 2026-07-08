@@ -333,25 +333,19 @@ _vgs_hit:
 ; software palette/flip variants into VRAM scratch as needed. Clobbers AF, BC,
 ; DE, HL.
 rt_sat_resolve:
-  ; H.3 (optimizer plan): the variant pool PERSISTS across frames — CHR
-  ; is static on NROM, so a generated (tile, attr) variant stays valid
-  ; forever. Regenerating every frame made do_sprite_variant ~12% of
-  ; all execution. The pool now only flushes when it fills (see
-  ; _vgs_miss), amortizing generation to first-appearance only.
+  ; H.3: the variant pool persists across frames (see _vgs_miss).
+  ; H2: hidden sprites (raw Y >= $CF — most of the 64 slots in typical
+  ; frames) take a fast path: their resolved value is never uploaded
+  ; (phase-1 compaction skips them by Y), so the old "preserve timing"
+  ; full resolve for hidden slots was pure waste.
   ld   hl, $c900             ; OAM staging
   ld   de, SAT_RESOLVED
   ld   b, 64
 _res_loop:
-  push bc                    ; save sprite counter
+  push bc
   ld   a, (hl)               ; raw NES Y
-  cp   $cf                   ; hidden/off-screen? preserve timing but don't allocate
-  jr   nc, _res_mark_hidden
-  ld   a, $01
-  jr   _res_mark_store
-_res_mark_hidden:
-  xor  a
-_res_mark_store:
-  ld   (SAT_VISIBLE_FLAG), a
+  cp   $cf
+  jr   nc, _res_hidden
   inc  hl                    ; -> tile
   ld   a, (hl)               ; A = NES tile
   inc  hl                    ; -> attr
@@ -360,34 +354,15 @@ _res_mark_store:
   inc  hl                    ; -> next entry Y
   call rt_map_sprite_tile    ; A = mapped rel tile (preserves BC, DE, HL)
   ld   c, a                  ; C = rel tile (default resolved value)
-  ld   a, c
   cp   SAT_BLANK_REL         ; blank tile? leave transparent, no variant
   jr   z, _res_store
   ld   a, b
   and  $c3                   ; palette bits + H/V flip; ignore priority bit 5
   jr   z, _res_store         ; base palette, no flip -> use mapped tile
-  ld   b, a                  ; B = variant attr key if variants are safe
-  ld   a, ($cb08)            ; PPUCTRL shadow: runtime uses bit3 => SMS base $0000
+  ld   b, a                  ; B = variant attr key
+  ld   a, ($cb08)            ; PPUCTRL bit3 => SMS base $0000: no safe scratch
   bit  3, a
-  jr   nz, _res_store         ; $0000 base has no safe aligned variant scratch
-  ld   a, (SAT_VISIBLE_FLAG)
-  or   a
-  jr   nz, _res_visible_variant
-  ; Hidden/off-screen sprites preserve comparable VBlank timing when variant
-  ; scratch is safe, but restore scratch_next and the base tile afterward so
-  ; they cannot exhaust the visible sprite variant cache.
-  push bc                    ; save attr key + base mapped tile
-  push de
-  push hl
-  ld   a, (SAT_SCRATCH_NEXT)
-  push af
-  call variant_get_scratch
-  pop  af
-  ld   (SAT_SCRATCH_NEXT), a
-  pop  hl
-  pop  de
-  pop  bc
-  jr   _res_store
+  jr   nz, _res_store
 _res_visible_variant:
   ; Memo probe: DE = SAT_RESOLVED+i and the tables are 64-aligned, so E
   ; doubles as the sprite index.
@@ -470,7 +445,19 @@ _res_store:
   inc  de
   pop  bc
   dec  b
-  jp   nz, _res_loop         ; body outgrew djnz's 8-bit range (memo verify)
+  jp   nz, _res_loop
+  ret
+_res_hidden:
+  ld   a, SAT_BLANK_REL
+  ld   (de), a               ; resolved value unused for hidden slots
+  inc  de
+  inc  hl
+  inc  hl
+  inc  hl
+  inc  hl
+  pop  bc
+  dec  b
+  jp   nz, _res_loop
   ret
 
 ; ─── rt_sat_upload ────────────────────────────────────────────────────────────
