@@ -506,13 +506,26 @@ _irq_skip_translated_nmi:
   ; line INT can be pending, so nothing is lost.
   ;
   ; The read also tells us whether THIS handler overran (bit 7 = a frame INT
-  ; is already pending again). Record it in $CB29: while overrunning, the
-  ; next frame's scroll presentation must not arm the sprite-0 split — the
-  ; line IRQ would be swallowed right here and the whole frame would render
-  ; at the status-bar scroll (the alternating double-image seen in play).
+  ; is already pending again). $CB29 is a STICKY overrun counter: an overrun
+  ; sets it to 60; a fit frame decrements it. The scroll presentation only
+  ; arms the sprite-0 split when the counter is zero. Without hysteresis,
+  ; frames alternating right at the budget line flip-flopped between split
+  ; mode (whose swallowed line IRQ rendered the whole frame at the status-
+  ; bar scroll) and direct mode — a fast blink between two scroll states
+  ; (field report: 'interleaving frames from way behind/ahead').
   in  a, ($bf)
   and $80
+  jr  z, _pace_fit
+  ld  a, 60
   ld  ($cb29), a
+  jr  _pace_done
+_pace_fit:
+  ld  a, ($cb29)
+  or  a
+  jr  z, _pace_done
+  dec a
+  ld  ($cb29), a
+_pace_done:
 
   pop de
   ; Phase R: X/Y may have changed in the translated NMI; the interrupted
