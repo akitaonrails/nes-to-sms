@@ -471,7 +471,9 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
     };
     let cfg = ProjectConfig {
-        rom_kib: 304,
+        // 512 KiB: H.10 body inlining grew translated code past the old
+        // 304 KiB layout (mappers address up to 512 KiB natively).
+        rom_kib: 512,
         region: 0x4C,
         title: truncate_title(&prof.rom.name),
         mirroring,

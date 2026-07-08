@@ -262,7 +262,7 @@ fn sms_asm_content(
          ; Each asset lives in its own dedicated bank, pinned to slot 2 so\n\
          ; the symbol value is a clean slot-2 logical address ($8000-$BFFF).\n\
          ; boot.s switches the right bank into slot 2 before reading.\n\
-         .bank 12 slot 2\n\
+         .bank 24 slot 2\n\
          .org $0000\n\
          .section \"data_chr\" force\n\
          data_chr:\n\
@@ -272,7 +272,7 @@ fn sms_asm_content(
          \n\
          .define data_chr_size {chr_size}\n\
          \n\
-         .bank 13 slot 2\n\
+         .bank 25 slot 2\n\
          .org $0000\n\
          .section \"data_palette\" force\n\
          data_palette:\n\
@@ -288,7 +288,7 @@ fn sms_asm_content(
     if has_nametable {
         out.push_str(
             "\n\
-             .bank 14 slot 2\n\
+             .bank 26 slot 2\n\
              .org $0000\n\
              .section \"data_nametable\" force\n\
              data_nametable:\n\
@@ -300,7 +300,7 @@ fn sms_asm_content(
     if assets.prg_low.is_some() {
         out.push_str(
             "\n\
-             .bank 15 slot 2\n\
+             .bank 27 slot 2\n\
              .org $0000\n\
              .section \"data_prg_low\" force\n\
              data_prg_low:\n\
@@ -312,7 +312,7 @@ fn sms_asm_content(
     if assets.prg_high.is_some() {
         out.push_str(
             "\n\
-             .bank 18 slot 2\n\
+             .bank 30 slot 2\n\
              .org $0000\n\
              .section \"data_prg_high\" force\n\
              data_prg_high:\n\
@@ -324,7 +324,7 @@ fn sms_asm_content(
     if assets.chr_nes.is_some() {
         out.push_str(
             "\n\
-             .bank 16 slot 2\n\
+             .bank 28 slot 2\n\
              .org $0000\n\
              .section \"data_chr_nes\" force\n\
              data_chr_nes:\n\
@@ -336,7 +336,7 @@ fn sms_asm_content(
     if assets.chr_maps.is_some() {
         out.push_str(
             "\n\
-             .bank 17 slot 2\n\
+             .bank 29 slot 2\n\
              .org $0000\n\
              .section \"data_chr_maps\" force\n\
              data_chr_maps:\n\

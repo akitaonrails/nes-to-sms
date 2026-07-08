@@ -219,6 +219,171 @@ fn emit_set_nz_inline(p: &mut z80_emit::Program) {
     p.ld_a_l();
 }
 
+/// H.10: inline flag-computing ALU bodies at flag-live sites. Mirrors the
+/// branchless helper bodies in runtime/flags.s exactly, minus call/ret and
+/// register-save overhead: at IR-op granularity only A (and the shadow
+/// state) survive an op, so B/C/E/HL are free scratch. The Z80 F layout
+/// maps to 6502 P with S->N and C->C in place; Z moves bit6->bit1 (3x
+/// rlca), V (P/V) bit2->bit6 (4x rlca).
+
+/// A = A + B + shadowC; shadow N/V/Z/C updated. Clobbers B?no(B kept as
+/// operand input, untouched)/C/E/HL.
+fn emit_adc_flags_inline(p: &mut z80_emit::Program) {
+    p.ld_e_a();
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.rrca();
+    p.ld_a_e();
+    p.adc_a_b();
+    p.ld_c_a();
+    p.push_af();
+    p.pop_hl();
+    p.ld_a_l();
+    p.and_imm(0x81);
+    p.ld_h_a();
+    p.ld_a_l();
+    p.and_imm(0x40);
+    p.rlca();
+    p.rlca();
+    p.rlca();
+    p.or_h();
+    p.ld_h_a();
+    p.ld_a_l();
+    p.and_imm(0x04);
+    p.rlca();
+    p.rlca();
+    p.rlca();
+    p.rlca();
+    p.or_h();
+    p.ld_h_a();
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.and_imm(0x3C);
+    p.or_h();
+    p.ld_abs_a(sms_layout::SHADOW_P);
+    p.ld_a_c();
+}
+
+/// A = A - B - (1-shadowC); shadow N/V/Z/C updated (6502 borrow polarity).
+fn emit_sbc_flags_inline(p: &mut z80_emit::Program) {
+    p.ld_e_a();
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.rrca();
+    p.ccf();
+    p.ld_a_e();
+    p.sbc_a_b();
+    p.ld_c_a();
+    p.push_af();
+    p.pop_hl();
+    p.ld_a_l();
+    p.and_imm(0x81);
+    p.xor_imm(0x01);
+    p.ld_h_a();
+    p.ld_a_l();
+    p.and_imm(0x40);
+    p.rlca();
+    p.rlca();
+    p.rlca();
+    p.or_h();
+    p.ld_h_a();
+    p.ld_a_l();
+    p.and_imm(0x04);
+    p.rlca();
+    p.rlca();
+    p.rlca();
+    p.rlca();
+    p.or_h();
+    p.ld_h_a();
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.and_imm(0x3C);
+    p.or_h();
+    p.ld_abs_a(sms_layout::SHADOW_P);
+    p.ld_a_c();
+}
+
+/// CMP A vs B: shadow N/Z/C updated, A preserved.
+fn emit_cmp_flags_inline(p: &mut z80_emit::Program) {
+    p.ld_c_a();
+    p.sub_b();
+    p.push_af();
+    p.pop_hl();
+    p.ld_a_l();
+    p.and_imm(0x81);
+    p.xor_imm(0x01);
+    p.ld_h_a();
+    p.ld_a_l();
+    p.and_imm(0x40);
+    p.rlca();
+    p.rlca();
+    p.rlca();
+    p.or_h();
+    p.ld_h_a();
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.and_imm(0x7C);
+    p.or_h();
+    p.ld_abs_a(sms_layout::SHADOW_P);
+    p.ld_a_c();
+}
+
+/// CPX/CPY: like CMP but comparing a shadow register; A preserved via E.
+fn emit_cpxy_flags_inline(p: &mut z80_emit::Program, shadow: u16) {
+    p.ld_e_a();
+    p.ld_a_abs(shadow);
+    p.sub_b();
+    p.push_af();
+    p.pop_hl();
+    p.ld_a_l();
+    p.and_imm(0x81);
+    p.xor_imm(0x01);
+    p.ld_h_a();
+    p.ld_a_l();
+    p.and_imm(0x40);
+    p.rlca();
+    p.rlca();
+    p.rlca();
+    p.or_h();
+    p.ld_h_a();
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.and_imm(0x7C);
+    p.or_h();
+    p.ld_abs_a(sms_layout::SHADOW_P);
+    p.ld_a_e();
+}
+
+/// LSR A with live flags: C = old bit0, N = 0, Z via the $3E00 table.
+fn emit_lsr_a_flags_inline(p: &mut z80_emit::Program) {
+    p.srl_a();
+    p.ld_e_a();
+    p.sbc_a_a();
+    p.and_imm(0x01);
+    p.ld_l_e();
+    p.ld_h_imm(0x3E);
+    p.or_hl_ptr();
+    p.ld_h_a();
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.and_imm(0x7C);
+    p.or_h();
+    p.ld_abs_a(sms_layout::SHADOW_P);
+    p.ld_a_e();
+}
+
+/// ASL A with live flags: C = old bit7, N/Z via the table.
+fn emit_asl_a_flags_inline(p: &mut z80_emit::Program) {
+    p.add_a_a();
+    p.ld_e_a();
+    p.sbc_a_a();
+    p.and_imm(0x01);
+    p.ld_l_e();
+    p.ld_h_imm(0x3E);
+    p.or_hl_ptr();
+    p.ld_h_a();
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.and_imm(0x7C);
+    p.or_h();
+    p.ld_abs_a(sms_layout::SHADOW_P);
+    p.ld_a_e();
+}
+
+/// H.4: inline 6502 push
+
 /// H.4: inline 6502 push
 
 /// H.4: inline 6502 push — A to $C100+S, S decremented. A preserved.
@@ -2340,7 +2505,7 @@ pub fn lower_routine(
                     );
                 } else {
                     program.ld_b_imm(*v);
-                    program.call(ADC_A_VIA_SHADOW);
+                    emit_adc_flags_inline(program);
                 }
             }
 
@@ -2375,7 +2540,7 @@ pub fn lower_routine(
                     );
                 } else {
                     emit_mem_to_b(program, addr, *region);
-                    program.call(ADC_A_VIA_SHADOW);
+                    emit_adc_flags_inline(program);
                 }
             }
 
@@ -2413,7 +2578,7 @@ pub fn lower_routine(
                     );
                 } else {
                     program.ld_b_imm(*v);
-                    program.call(SBC_A_VIA_SHADOW);
+                    emit_sbc_flags_inline(program);
                 }
             }
 
@@ -2450,7 +2615,7 @@ pub fn lower_routine(
                     );
                 } else {
                     emit_mem_to_b(program, addr, *region);
-                    program.call(SBC_A_VIA_SHADOW);
+                    emit_sbc_flags_inline(program);
                 }
             }
 
@@ -2592,7 +2757,7 @@ pub fn lower_routine(
                     );
                 } else {
                     program.ld_b_imm(*v);
-                    program.call(CMP_A_VIA_SHADOW);
+                    emit_cmp_flags_inline(program);
                 }
             }
 
@@ -2611,7 +2776,7 @@ pub fn lower_routine(
                     );
                 } else {
                     emit_mem_to_b(program, addr, *region);
-                    program.call(CMP_A_VIA_SHADOW);
+                    emit_cmp_flags_inline(program);
                 }
             }
 
@@ -2634,7 +2799,7 @@ pub fn lower_routine(
                     );
                 } else {
                     program.ld_b_imm(*v);
-                    program.call(CPX_A);
+                    emit_cpxy_flags_inline(program, SHADOW_X);
                 }
             }
 
@@ -2656,7 +2821,7 @@ pub fn lower_routine(
                     );
                 } else {
                     emit_mem_to_b(program, addr, *region);
-                    program.call(CPX_A);
+                    emit_cpxy_flags_inline(program, SHADOW_X);
                 }
             }
 
@@ -2677,7 +2842,7 @@ pub fn lower_routine(
                     );
                 } else {
                     program.ld_b_imm(*v);
-                    program.call(CPY_A);
+                    emit_cpxy_flags_inline(program, SHADOW_Y);
                 }
             }
 
@@ -2699,7 +2864,7 @@ pub fn lower_routine(
                     );
                 } else {
                     emit_mem_to_b(program, addr, *region);
-                    program.call(CPY_A);
+                    emit_cpxy_flags_inline(program, SHADOW_Y);
                 }
             }
 
@@ -2732,7 +2897,7 @@ pub fn lower_routine(
                         direct_cond_to_z80,
                     );
                 } else {
-                    program.call(ASL_A);
+                    emit_asl_a_flags_inline(program);
                 }
             }
 
@@ -2756,7 +2921,7 @@ pub fn lower_routine(
                         direct_cond_to_z80,
                     );
                 } else {
-                    program.call(LSR_A);
+                    emit_lsr_a_flags_inline(program);
                 }
             }
 
