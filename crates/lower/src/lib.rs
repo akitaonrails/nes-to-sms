@@ -3745,9 +3745,9 @@ mod tests {
             targets: vec!["L_a".to_string(), "L_b".to_string()],
         }]);
 
-        assert!(build.asm.contains("call rt_far_call"));
-        assert!(build.asm.contains("; → L_a"));
-        assert!(build.asm.contains("; → L_b"));
+        assert!(build.asm.contains("call rt_far_gate"));
+        assert!(build.asm.contains("ld de,L_a"));
+        assert!(build.asm.contains("ld de,L_b"));
         assert!(build.asm.contains("ret"));
         assert!(!build.asm.contains("call rt_far_jmp"));
     }
@@ -3805,8 +3805,9 @@ mod tests {
         // they work regardless of which bank holds the target. The asm
         // listing should mention both the trampoline call and the target
         // (in a `; → L_8200` comment).
-        assert!(build.asm.contains("call rt_far_call"));
-        assert!(build.asm.contains("L_8200"));
+        // H2: cross-bank JSRs use the compact slot-0 gate with immediates.
+        assert!(build.asm.contains("call rt_far_gate"));
+        assert!(build.asm.contains("ld de,L_8200"));
     }
 
     // -------------------------------------------------------------------

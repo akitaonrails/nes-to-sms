@@ -1053,18 +1053,14 @@ impl Program {
     /// block decode.
     fn emit_far_gate(&mut self, label: &str, jump: bool) {
         self.emit_bytes_asm(&[0x32, 0x15, 0xCB], "  ld ($cb15),a");
-        // ld de, TARGET — 16-bit label immediate.
-        let section_idx = self.current;
-        let offset = self.sections[self.current].len() + 1;
+        // ld de, TARGET — 16-bit label immediate. Text-only (binary bytes
+        // stay zero): cross-section transfers are never executed in the
+        // validation emulator, and a binary patch would hard-error on
+        // targets only WLA can resolve (profile stubs, other sections).
         self.sec().push_byte(0x11);
         self.sec().push_byte(0x00);
         self.sec().push_byte(0x00);
         self.sec().push_asm(format!("  ld de,{label}"));
-        self.patches.push(Patch {
-            label: label.to_string(),
-            section_idx,
-            kind: PatchKind::Abs16 { offset },
-        });
         // ld a, :TARGET — bank immediate (binary placeholder; validation
         // never executes cross-section transfers).
         self.emit_bytes_asm(&[0x3E, 0x00], &format!("  ld a,:{label}"));
