@@ -73,6 +73,46 @@ name = "func_C0C0"
 # Ground-truth window entries: reference oracle, 1500 frames,
 # JSR/JMP operands + jmp-(ind) landings, keyed by live bank.
 
+[[function]]
+addr = 0xc232
+name = "func_C232"
+
+[[function]]
+addr = 0xc299
+name = "func_C299"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Ground-truth window entries ONLY (reference oracle, 3600 frames).
+# Subject-trap-derived entries are forbidden: divergence artifacts
+# annotate garbage roots that decode into BRK/JAM data-walks.
+
 [[bank_entry]]
 bank = 0
 addr = 0x800a
@@ -83,7 +123,19 @@ addr = 0x8052
 
 [[bank_entry]]
 bank = 0
+addr = 0x8067
+
+[[bank_entry]]
+bank = 0
 addr = 0x80a5
+
+[[bank_entry]]
+bank = 0
+addr = 0x80ac
+
+[[bank_entry]]
+bank = 0
+addr = 0x80d2
 
 [[bank_entry]]
 bank = 0
@@ -104,6 +156,10 @@ addr = 0x8112
 [[bank_entry]]
 bank = 0
 addr = 0x811c
+
+[[bank_entry]]
+bank = 0
+addr = 0x8134
 
 [[bank_entry]]
 bank = 0
@@ -156,6 +212,14 @@ addr = 0x84d2
 [[bank_entry]]
 bank = 0
 addr = 0x8562
+
+[[bank_entry]]
+bank = 0
+addr = 0x85c2
+
+[[bank_entry]]
+bank = 0
+addr = 0x86d7
 
 [[bank_entry]]
 bank = 0
@@ -275,6 +339,14 @@ addr = 0x8c95
 
 [[bank_entry]]
 bank = 6
+addr = 0x8588
+
+[[bank_entry]]
+bank = 6
+addr = 0x85fb
+
+[[bank_entry]]
+bank = 6
 addr = 0x8867
 
 [[bank_entry]]
@@ -331,7 +403,15 @@ addr = 0x970b
 
 [[bank_entry]]
 bank = 6
+addr = 0x9757
+
+[[bank_entry]]
+bank = 6
 addr = 0x9782
+
+[[bank_entry]]
+bank = 6
+addr = 0x97aa
 
 [[bank_entry]]
 bank = 6
@@ -463,6 +543,10 @@ addr = 0x9ece
 
 [[bank_entry]]
 bank = 6
+addr = 0x9f1c
+
+[[bank_entry]]
+bank = 6
 addr = 0x9f7a
 
 [[bank_entry]]
@@ -492,6 +576,10 @@ addr = 0xa17d
 [[bank_entry]]
 bank = 6
 addr = 0xa1d0
+
+[[bank_entry]]
+bank = 6
+addr = 0xa1e5
 
 [[bank_entry]]
 bank = 6
@@ -559,6 +647,34 @@ addr = 0xa63a
 
 [[bank_entry]]
 bank = 6
+addr = 0xa64c
+
+[[bank_entry]]
+bank = 6
+addr = 0xa659
+
+[[bank_entry]]
+bank = 6
+addr = 0xa688
+
+[[bank_entry]]
+bank = 6
+addr = 0xa708
+
+[[bank_entry]]
+bank = 6
+addr = 0xa727
+
+[[bank_entry]]
+bank = 6
+addr = 0xa764
+
+[[bank_entry]]
+bank = 6
+addr = 0xa824
+
+[[bank_entry]]
+bank = 6
 addr = 0xa825
 
 [[bank_entry]]
@@ -617,138 +733,37 @@ addr = 0xb9d6
 bank = 6
 addr = 0xb9fc
 
+# VRAM queue drain inside the $803C gap (jmp-(ind) target; verified real
+# code by hand: sta $2007 / lda $0700,y loop).
 [[bank_entry]]
 bank = 0
-addr = 0x80d2
+addr = 0x803c
 
 [[bank_entry]]
 bank = 0
 addr = 0x8041
 
+# Bank-6 sub-task engine (jsr $CA6D at $9369; table $936C).
 [[bank_entry]]
-bank = 0
-addr = 0x820d
+bank = 6
+addr = 0x9363
 
-[[bank_entry]]
-bank = 0
-addr = 0x803e
-
-[[function]]
-addr = 0xc232
-name = "func_C232"
-
-[[function]]
-addr = 0xc299
-name = "func_C299"
+[[jump_engine]]
+caller = 0x9369
+targets = ["L_b6_9380", "L_b6_9482", "L_b6_9511", "L_b6_9539", "L_b6_9586", "L_b6_965B", "L_b6_9720", "L_b6_9757", "L_b6_97AA", "L_b6_97F2"]
 
 [[bank_entry]]
-bank = 0
-addr = 0xa824
+bank = 6
+addr = 0x9586
 
 [[bank_entry]]
-bank = 0
-addr = 0xa824
+bank = 6
+addr = 0x9720
 
 [[bank_entry]]
-bank = 0
-addr = 0xa824
+bank = 6
+addr = 0x93d9
 
 [[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
-
-[[bank_entry]]
-bank = 0
-addr = 0xa824
+bank = 6
+addr = 0xaae1

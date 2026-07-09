@@ -148,10 +148,21 @@ The handler now runs the translated NMI with interrupts enabled
 runs 790+ frames, draws its license screen into the nametable
 (FIRST PIXELS — garbled patterns), and wedges on a (0,$A824)
 dispatch the reference never executes (upstream divergence).
-Remaining: (a) CHR-RAM BG pattern-table select — CV1 uses table
-$1000 (PPUCTRL bit 4); the identity tile mapping needs the +256
-offset; (b) the $A824 upstream fork; then the license/title screens
-and the level-1 parity route. Also new this round: oversize
+Update: table select was already PPUCTRL-bit4-aware; the garble was
+the VARIANT POOL rebaking from the blank build-time CHR asset —
+CHR-RAM builds (NES_CHR_RAM define) now read the base tile back from
+VRAM (planes 0/1 = the uploaded 2bpp) into a staging buffer.
+ANNOTATION DISCIPLINE (hard rule): subject-trap-derived bank entries
+are FORBIDDEN — divergence artifacts annotate garbage roots that
+decode into BRK/JAM data-walks. Only reference-harvest entries
+(FD_LOG_BANK_ENTRIES; now also logs jmp-(ind) landings and RAM_EXEC)
+plus hand-verified bytes may be added. Current wedge: after 793
+frames (license screen fully drawn in CIRAM) the subject dispatches
+jmp-(ind) to zp $0032 — the reference NEVER executes RAM (1200-frame
+probe) — a corrupt-pointer upstream divergence. NEXT: write-fork at
+the deepest matching frame (FD anchored; subject pcs resolve via
+sms.sym). Then the license/title screens and the level-1 parity
+route. Also new this round: oversize
 data-walk stubs (mis-rooted lifts up to 90 KiB get loud trap stubs),
 wrap-safe + post-emit section rotation, snapshot keys for banked
 units, indirect-landing ground-truth harvest (136 entries).

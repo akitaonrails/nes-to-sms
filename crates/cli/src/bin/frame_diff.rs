@@ -644,6 +644,9 @@ fn run_reference(
                     );
                 }
             }
+            if log_bank_entries && cpu.pc < 0x2000 {
+                eprintln!("RAM_EXEC pc=${:04X} bank={}", cpu.pc, bus.prg_bank);
+            }
             if log_bank_entries {
                 // Ground truth for [[bank_entry]]: JSR/JMP whose operand
                 // lands in the switchable window, keyed by the mapped bank.

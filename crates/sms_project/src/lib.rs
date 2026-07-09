@@ -62,6 +62,9 @@ pub struct ProjectConfig<'a> {
     pub raw_ciram_backend: RawCiramBackend,
     /// NES mapper number (drives runtime .ifdef paths).
     pub mapper: u16,
+    /// CHR-RAM cart: patterns upload at runtime; variant regeneration
+    /// reads back from VRAM instead of the (blank) data_chr asset.
+    pub chr_ram: bool,
 }
 
 #[derive(Debug)]
@@ -237,6 +240,9 @@ fn sms_asm_content(
         24
     };
     let mut mapper_define = format!(".define NES_MAPPER {}", cfg.mapper);
+    if cfg.chr_ram {
+        mapper_define.push_str("\n.define NES_CHR_RAM 1");
+    }
     if let Some(banks) = &assets.prg_banks {
         mapper_define.push_str(&format!(
             "\n.define NES_PRG_BANK_BASE {NES_PRG_BANK_BASE}\n.define NES_PRG_BANK_MASK {}",
@@ -547,6 +553,7 @@ mod tests {
     fn minimal_cfg() -> ProjectConfig<'static> {
         ProjectConfig {
             mapper: 0,
+            chr_ram: false,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -644,6 +651,7 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            chr_ram: false,
             rom_kib: 32,
             region: 0x4C,
             title: "TOOLONGTITLE", // 12 chars
@@ -664,6 +672,7 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            chr_ram: false,
             rom_kib: 17,
             region: 0x4C,
             title: "TEST",
@@ -684,6 +693,7 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            chr_ram: false,
             rom_kib: 64,
             region: 0x4C,
             title: "BANKS4",
@@ -746,6 +756,7 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            chr_ram: false,
             rom_kib: 8,
             region: 0x4C,
             title: "TEST",
@@ -789,6 +800,7 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            chr_ram: false,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -812,6 +824,7 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            chr_ram: false,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -835,6 +848,7 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            chr_ram: false,
             rom_kib: 64,
             region: 0x4C,
             title: "TEST",

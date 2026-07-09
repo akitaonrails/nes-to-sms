@@ -86,6 +86,70 @@ _gv_p3_zero:
   ld   a, h
   or   $40
   out  ($bf), a
+.ifdef NES_CHR_RAM
+  ; CHR-RAM: the build-time data_chr asset is blank — the real pattern
+  ; bytes live in VRAM (uploaded through $2007 at runtime). Read the
+  ; base tile's planes 0/1 back from VRAM into a 16-byte staging buffer
+  ; first (source reads and dest writes share the VDP address register).
+  push bc
+  ld   a, (BGV_SLOT)         ; recompute the BASE tile source address:
+  ld   a, c                  ; C still holds the base slot
+  ld   l, a
+  ld   h, $00
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl                ; HL = base*32 (VRAM)
+  ld   a, l
+  out  ($bf), a
+  ld   a, h
+  and  $3f                   ; read command (bit6 clear)
+  out  ($bf), a
+  ld   de, $cb63             ; staging buffer ($CB63-$CB72)
+  ld   b, 8
+_gvr_read_row:
+  in   a, ($be)              ; plane 0
+  ld   (de), a
+  inc  de
+  in   a, ($be)              ; plane 1
+  ld   (de), a
+  inc  de
+  in   a, ($be)              ; skip plane 2
+  in   a, ($be)              ; skip plane 3
+  djnz _gvr_read_row
+  pop  bc
+  ; re-set the DEST address (clobbered by the source reads)
+  ld   a, (BGV_SLOT)
+  ld   l, a
+  ld   h, $00
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  ld   a, l
+  out  ($bf), a
+  ld   a, h
+  or   $40
+  out  ($bf), a
+  ld   hl, $cb63
+  ld   b, 8
+_gvr_emit_row:
+  ld   a, (hl)               ; plane 0 (low NES bitplane)
+  out  ($be), a
+  inc  hl
+  ld   a, (hl)               ; plane 1
+  out  ($be), a
+  inc  hl
+  ld   a, (BGV_P2)
+  out  ($be), a              ; plane 2 = S bit 0
+  ld   a, (BGV_P3)
+  out  ($be), a              ; plane 3 = S bit 1
+  djnz _gvr_emit_row
+  call rt_restore_prg_window
+  ret
+.else
   ; map data_chr bank for the source reads
   ld   a, :data_chr
   ld   ($ffff), a
@@ -107,6 +171,7 @@ _gv_row:
   djnz _gv_row
   call rt_restore_prg_window   ; current NES PRG window (banked-aware)
   ret
+.endif
 
 ; ─── rt_bg_get_variant ──────────────────────────────────────────────────────
 ; Resolve (base slot, S) to a bg pool slot, generating + caching on first use.

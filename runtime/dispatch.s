@@ -254,6 +254,13 @@ _bd_miss:
   ld   ($cb1c), a
   ld   a, ($cb62)
   ld   ($cb1a), a           ; live NES bank at miss time (diagnostics)
+  ld   hl, $0000
+  add  hl, sp
+  ld   a, (hl)
+  ld   ($cb73), a           ; Z80 caller return address (diagnostics)
+  inc  hl
+  ld   a, (hl)
+  ld   ($cb74), a
   ld   a, $e2               ; distinct marker: banked-dispatch miss
   ld   ($cb1d), a
   jp   rt_unresolved_jsr_flash
