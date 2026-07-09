@@ -288,14 +288,21 @@ rt_nt_route_tile_write:
   or   b
   cp   4
   jr   nc, _nrt_col_check
-  ; Rows 0-3 are the status-bar band: the fold slots always display the
-  ; first nametable there (split-fixed HUD). NT-A writes render; NT-B
-  ; writes (streamed column tops) must NEVER reach VRAM or they garble
-  ; the HUD — raw-store only.
+  ; Rows 0-3 are the status-bar band: the fold slots display the page
+  ; the game has SELECTED (PPUCTRL bits 0-1 -> the $2400 bit). SMB shows
+  ; NT-A there (streamed NT-B column tops must never garble the HUD);
+  ; CV1 renders whole screens from NT-B. Writes to the selected page
+  ; render; the other page raw-stores only.
+  ld   a, ($cb08)
+  and  $01
+  rlca
+  rlca                      ; PPUCTRL NT select bit0 -> bit 2 ($2400 bit)
+  ld   b, a
   ld   a, d
   and  $04
+  cp   b
   jr   z, _nrt_in
-  or   a                    ; carry clear: NT-B row 0-3 -> raw only
+  or   a                    ; carry clear: non-selected page row 0-3 -> raw only
   ret
 _nrt_col_check:
   ; column = (D bit2) * 32 | (E & $1F)   (vertical mirroring: $24xx = page 1)

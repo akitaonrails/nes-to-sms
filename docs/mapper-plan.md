@@ -162,17 +162,29 @@ tools/cv1_verified_loop.py now decodes both.) STATUS: ALL TRANSLATION
 TRAPS CLEAR — CV1 boots, uploads CHR-RAM byte-perfectly (tile $F2
 verified against the reference's new CHR-RAM ground-truth store),
 draws its license screen into CIRAM, and runs with no traps.
-REMAINING, precisely isolated:
-1. BG VARIANT POOL degenerates on CHR-RAM builds: the mapped SMS NT
-   holds tile $001 repeated where raw CIRAM has the correct glyph
-   indices — every (base, S) resolves to one pool slot. Suspects:
-   pool base/size derived from the build-time CHR budget (blank for
-   CHR-RAM), memo keying (runtime/chrmap.s, sat.s memo tables).
-   Note: the trace VDP now implements VRAM reads (the variant
-   readback was getting zeros in-harness before).
-2. Frame stall at ~706: the subject holds at the license screen
-   while the reference advances (input/timer wait to diagnose).
-3. Then: license/logo/title visuals, demo, level-1 parity route. Also new this round: oversize
+RENDERING DIAGNOSIS (full chain, verified cell-by-cell):
+1. The license screen's mapped NT cells read tile $001 =
+   variant(base 0, S3): the ATTR rewrite resolved with a ZERO
+   BGV_BSHADOW because the tile writes never took the mapped path.
+   The variant pool itself is HEALTHY (cache populated, ~194 slots).
+2. CV1 renders whole screens from NT-B ($2400) via PPUCTRL select;
+   writes can happen while the select differs. The HUD-band rule is
+   now page-aware (PPUCTRL bit0), but write-time gating is
+   insufficient in principle.
+3. The window model ($CB2A, 64-col space) materializes only columns
+   ENTERING on scroll deltas, and only with rendering ON
+   (mat_sched render=off does nothing). Full-page-flip games (CV1
+   license/menus) never get the alternate page materialized.
+4. DESIGN NEEDED (next session): on PPUCTRL NT-select change and on
+   rendering-enable, enqueue full-window re-materialization from raw
+   CIRAM — the projector/materializer machinery exists; it needs
+   these two triggers. Raw CIRAM is already byte-correct (glyphs
+   verified), CHR uploads byte-perfect, so materialization alone
+   should produce the license/logo/title screens.
+5. Also: ppu_mask stays $00 in the clean-room build (earlier
+   polluted builds reached $1E) — find what the game waits on before
+   enabling rendering (likely its VRAM-queue completion state).
+6. Then: title/demo visuals and the level-1 parity route. Also new this round: oversize
 data-walk stubs (mis-rooted lifts up to 90 KiB get loud trap stubs),
 wrap-safe + post-emit section rotation, snapshot keys for banked
 units, indirect-landing ground-truth harvest (136 entries).

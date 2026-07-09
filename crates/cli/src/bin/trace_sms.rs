@@ -3247,6 +3247,21 @@ fn main() {
     bus.finish_bgv_runtime_recompute_frame();
     bus.finish_d3xx_tile_dirty_frame();
     bus.finish_ram_migration_frame();
+    if let Ok(spec) = std::env::var("SMS_DUMP_RAM") {
+        if let Some((a, l)) = spec.split_once(':') {
+            if let (Ok(a), Ok(l)) = (
+                usize::from_str_radix(a.trim_start_matches("0x"), 16),
+                usize::from_str_radix(l.trim_start_matches("0x"), 16),
+            ) {
+                let base = a - 0xC000;
+                let hex: Vec<String> = bus.ram[base..base + l]
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect();
+                println!("RAM ${a:04X}: {}", hex.join(" "));
+            }
+        }
+    }
     if let Ok(spec) = std::env::var("SMS_DUMP_VRAM") {
         if let Some((a, l)) = spec.split_once(':') {
             if let (Ok(a), Ok(l)) = (
