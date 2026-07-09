@@ -194,13 +194,23 @@ rt_indirect_jmp:
 ; restore on return included). Miss -> loud trap ($CB1D=$E2, target in
 ; $CB1B/1C) — fail closed, never run raw NES bytes.
 rt_banked_dispatch:
+  di                        ; the table scan remaps slot 1 WITHOUT the
+                            ; $CB14 discipline — a nested handler would
+                            ; restore the caller's bank mid-scan and the
+                            ; table reads turn to garbage (phantom
+                            ; terminator). Interrupts return below.
   push de                   ; preserve resident X/Y through the search
   ld   a, ($cb14)
   push af                   ; caller's slot-1 bank (restored before far-gate)
   ld   a, :rt_dispatch_table
   ld   ($fffe), a
   ld   hl, rt_dispatch_table
+  xor  a
+  ld   ($cb7d), a           ; scan counter (diagnostics)
 _bd_loop:
+  ld   a, ($cb7d)
+  inc  a
+  ld   ($cb7d), a
   ld   e, (hl)              ; entry addr lo
   inc  hl
   ld   d, (hl)              ; entry addr hi
@@ -231,6 +241,13 @@ _bd_skip:
   inc  hl                   ; skip label hi
   jr   _bd_loop
 _bd_hit:
+  ; Diagnostics: remember the last matched (target, entry-bank).
+  ld   a, c
+  ld   ($cb7a), a
+  ld   a, b
+  ld   ($cb7b), a
+  ld   a, (hl)
+  ld   ($cb7c), a           ; matched entry's NES bank ($FF = fixed)
   inc  hl                   ; -> sms bank byte
   ld   a, (hl)
   inc  hl
@@ -243,6 +260,15 @@ _bd_hit:
   ld   ($fffe), a
   ld   a, e                 ; A = target's sms bank, BC = label
   pop  de                   ; restore resident X/Y
+  push af
+  ld   a, ($cb7e)
+  or   a
+  jr   nz, _bd_stay_di      ; inside the frame handler: keep DI
+  pop  af
+  ei
+  jp   rt_far_gate
+_bd_stay_di:
+  pop  af
   jp   rt_far_gate
 _bd_miss:
   pop  af
@@ -353,8 +379,24 @@ _ujsr_flash:
 ; Trap: BRK is used in NES programs to trigger the IRQ/BRK vector.
 ; For v1 we treat it as a fatal error (SMB never intentionally BRKs).
 ; Same trap as rt_unresolved_jsr.
+; NES BRK is a software interrupt: push state, vector through the IRQ
+; handler, RTI back. Games tolerate junk-code excursions this way
+; (CV1's task engine lands in data banks and recovers via BRK->RTI).
+; Model: far-call the translated IRQ vector and return to the caller
+; (the byte after the BRK). The 6502 B-flag/P-push subtleties are not
+; modeled — handlers that inspect the pushed P for the B bit would
+; need them (none of the current targets do).
 rt_brk:
-  jp   rt_unresolved_jsr
+  ld   a, ($cb14)
+  push af
+  ld   a, :translated_irq
+  ld   ($cb14), a
+  ld   ($fffe), a
+  call translated_irq
+  pop  af
+  ld   ($cb14), a
+  ld   ($fffe), a
+  ret
 
 ; ─── rt_read_indexed ──────────────────────────────────────────────────────────
 ; Read a byte at (HL + B).

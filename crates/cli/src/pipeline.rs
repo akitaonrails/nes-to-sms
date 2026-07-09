@@ -587,6 +587,11 @@ pub fn run(args: &Args) -> Result<String, Error> {
         // Translated NMI alias so runtime/boot.s stays game-agnostic.
         program.label("translated_nmi");
         program.jp(&format_label(vectors.nmi));
+        // Translated IRQ/BRK alias: NES BRK vectors through the IRQ
+        // handler and RTIs — a well-defined interrupt, not a crash.
+        // (CV1's engine tolerates junk task dispatches this way.)
+        program.label("translated_irq");
+        program.jp(&format_label(vectors.irq));
 
         let mut prev_mapped_section: Option<usize> = None;
         let mut lower_failures: Vec<String> = Vec::new();

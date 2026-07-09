@@ -619,6 +619,10 @@ fn run_reference(
     ];
 
     let log_bank_entries = std::env::var("FD_LOG_BANK_ENTRIES").is_ok();
+    let call_log_frame: Option<usize> = std::env::var("FD_LOG_CALLS")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let mut call_log: Vec<(usize, u8, u16, u16)> = Vec::new();
     let mut bank_entry_set: std::collections::BTreeSet<(u8, u16)> = Default::default();
     let mut nmi_latched = bus.nmi_enabled;
     let mut nmi_fires = 0usize;
@@ -652,6 +656,16 @@ fn run_reference(
                         "  [trace f{frame}] {name} (pc=${pc:04X}) A=${:02X} $06FC=${:02X} $07A2(demoT)=${:02X}",
                         cpu.a, bus.ram[0x06FC], bus.ram[0x07A2]
                     );
+                }
+            }
+            if let Some(cf) = call_log_frame {
+                if frame <= cf && call_log.len() < 400 && cpu.pc >= 0x8000 {
+                    let op = bus.prg_read(cpu.pc);
+                    if op == 0x20 {
+                        let t = bus.prg_read(cpu.pc.wrapping_add(1)) as u16
+                            | (bus.prg_read(cpu.pc.wrapping_add(2)) as u16) << 8;
+                        call_log.push((frame, bus.prg_bank, cpu.pc, t));
+                    }
                 }
             }
             if log_bank_entries && cpu.pc < 0x2000 {
@@ -704,6 +718,11 @@ fn run_reference(
         // subject, whose apu_frame_tick runs after the translated NMI.
         bus.apu_frame_tick();
         snaps.push(bus.ram);
+    }
+    if call_log_frame.is_some() {
+        for (f, b, pc, t) in &call_log {
+            eprintln!("CALL f{f} b{b} ${pc:04X} -> ${t:04X}");
+        }
     }
     if log_bank_entries {
         for (b, t) in &bank_entry_set {
@@ -921,7 +940,12 @@ fn nes_buttons_to_sms_dc(b: Buttons) -> u8 {
 // heavy frame can exceed 2M instructions; truncating a frame mid-handler
 // leaves IFF disabled so every later fire_irq is silently skipped and the
 // subject appears dead.
-const SUBJ_INSN_PER_FRAME: usize = 8_000_000;
+fn subj_insn_per_frame() -> usize {
+    std::env::var("FD_SUBJ_IPF")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8_000_000)
+}
 // Pre-roll keeps the original 2M chunk so the boot/init IRQ cadence — and
 // therefore the subject's first-NMI phase alignment against the reference —
 // stays identical to the calibrated behavior.
@@ -1125,13 +1149,22 @@ fn run_subject(
     );
     // Helper: report if the unresolved-jsr trap has fired ($CB1D=$E1)
     // and which routine id ($CB1B/$CB1C).
-    let report_trap = |bus: &SmsBus, when: &str| {
-        if bus.ram[0x0B1D] == 0xE1 {
+    let report_trap = |bus: &SmsBus, cpu: &z80_emu::Cpu, when: &str| {
+        if bus.ram[0x0B1D] & 0xF0 == 0xE0 && bus.ram[0x0B1D] != 0 {
             let id = bus.ram[0x0B1B] as u16 | ((bus.ram[0x0B1C] as u16) << 8);
-            eprintln!("  *** TRAP fired ({when}): unresolved routine id={id} ($CB1B)");
+            eprintln!(
+                "  *** TRAP ({when}): marker=${:02X} id=${id:04X} nes_bank={} disp_ret=${:04X} z80_pc=${:04X} sp=${:04X} last_hit=${:04X}@b{:02X}",
+                bus.ram[0x0B1D],
+                bus.ram[0x0B1A],
+                bus.ram[0x0B73] as u16 | (bus.ram[0x0B74] as u16) << 8,
+                cpu.pc,
+                cpu.sp,
+                bus.ram[0x0B7A] as u16 | (bus.ram[0x0B7B] as u16) << 8,
+                bus.ram[0x0B7C]
+            );
         }
     };
-    report_trap(&bus, "pre-roll");
+    report_trap(&bus, &cpu, "pre-roll");
 
     let debug_frame: Option<usize> = std::env::var("FD_DEBUG_FRAME")
         .ok()
@@ -1160,7 +1193,7 @@ fn run_subject(
         fire_irq(&mut cpu, &mut bus);
         let fired = cpu.pc == 0x0038;
         let mut nmi_done = !fired;
-        for _ in 0..SUBJ_INSN_PER_FRAME {
+        for _ in 0..subj_insn_per_frame() {
             if cpu.halted {
                 break;
             }
@@ -1184,7 +1217,7 @@ fn run_subject(
         }
         snaps.push(snap_nes_ram(&bus));
     }
-    report_trap(&bus, "after frames");
+    report_trap(&bus, &cpu, "after frames");
     if measure_nmi && !nmi_costs.is_empty() {
         let n = nmi_costs.len();
         let total: usize = nmi_costs.iter().sum();

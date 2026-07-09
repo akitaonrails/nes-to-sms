@@ -775,3 +775,31 @@ name = "func_E931"
 [[function]]
 addr = 0xe503
 name = "func_E503"
+
+[[function]]
+addr = 0xc4e7
+name = "func_C4E7"
+
+[[function]]
+addr = 0xc595
+name = "func_C595"
+
+[[function]]
+addr = 0xc823
+name = "func_C823"
+
+[[function]]
+addr = 0xc844
+name = "func_C844"
+
+[[bank_entry]]
+bank = 6
+addr = 0xa684
+
+[[bank_entry]]
+bank = 0
+addr = 0x80c2
+
+[[bank_entry]]
+bank = 0
+addr = 0x8141

@@ -289,14 +289,24 @@ rt_nt_route_tile_write:
   cp   4
   jr   nc, _nrt_col_check
 .ifdef NES_CHR_RAM
-  ; Rows 0-3 are the status-bar band. Write-time page gating is
-  ; unsound (PPUCTRL's select at write time need not match display
-  ; time — CV1 flips modes during column uploads). Band writes are
-  ; RAW-ONLY; the presentation re-materializes rows 0-3 from the
-  ; SELECTED page's raw CIRAM whenever the band is dirty ($CB78).
-  ld   a, $01
-  ld   ($cb78), a
-  or   a                    ; carry clear: raw only
+  ; Rows 0-3 are the status-bar band. Two mechanisms:
+  ;  - writes to the CURRENTLY-SELECTED page render immediately
+  ;    (write-through, correct while the select is stable);
+  ;  - writes to the other page raw-store only; a PPUCTRL select
+  ;    CHANGE sets $CB78 and the presentation re-materializes the
+  ;    whole band once from the newly selected page's raw CIRAM.
+  ; (Materializing on every dirty write starved the frame loop —
+  ; CV1 touches the band every frame.)
+  ld   a, ($cb08)
+  and  $01
+  rlca
+  rlca                      ; select bit 0 -> bit 2 ($2400 bit)
+  ld   b, a
+  ld   a, d
+  and  $04
+  cp   b
+  jr   z, _nrt_in
+  or   a                    ; carry clear: non-selected page -> raw only
   ret
 .else
   ; SMB-proven band rule: NT-A rows 0-3 render (fixed HUD); NT-B

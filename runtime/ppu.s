@@ -96,6 +96,21 @@ _ppu_w_ctrl:
   ;   bit 7:   NMI enable (we use frame INT, not NMI, so ignore)
   pop  af
   push af
+.ifdef NES_CHR_RAM
+  ; Nametable-select change: the band (rows 0-3) must re-materialize
+  ; from the newly selected page (see ntmap.s band rule).
+  push bc
+  ld   c, a
+  ld   a, ($cb08)
+  xor  c
+  and  $01
+  jr   z, _pwc_no_flip
+  ld   a, $01
+  ld   ($cb78), a
+_pwc_no_flip:
+  ld   a, c
+  pop  bc
+.endif
   ld   ($cb08), a
   call _ppu_sync_sprite_base
   call _ppu_sync_vdp_reg1

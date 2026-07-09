@@ -126,6 +126,7 @@ boot_main:
   ld  ($cb2a), a            ; projected window start column (ntmap.s)
   ld  ($cb62), a            ; NES PRG bank shadow (banked mappers; 0 = bank 0)
   ld  ($cb78), a            ; band-dirty flag (rows 0-3 re-materialization)
+  ld  ($cb7e), a            ; in-handler flag starts clear
 
   ; I/O port control: configure both controller ports as inputs (TR/TH
   ; lines included). Real SMS games write $3F=$FF at boot; without it,
@@ -330,6 +331,10 @@ boot_main:
 
 irq_handler:
   push af
+  ld  a, $01
+  ld  ($cb7e), a            ; in-handler flag (nesting-aware ei gating)
+  pop af
+  push af
   push hl
   push bc
   push de
@@ -508,9 +513,13 @@ _irq_call_translated_nmi:
   ; next frame INT can nest through this same handler. Games that gate
   ; re-entry via PPUCTRL bit 7 (SMB clears it first thing) are skipped
   ; by the $CB08 check on the nested entry — NES-equivalent either way.
+  xor a
+  ld  ($cb7e), a            ; leaving handler context (helpers may ei)
   ei
   call translated_nmi       ; jumps to the profile/ROM NMI vector
   di
+  ld  a, $01
+  ld  ($cb7e), a            ; back in handler context
   ; Phase R: the NMI may have changed X/Y — new truth back to the shadows.
   ld  a, d
   ld  ($cb00), a
@@ -567,6 +576,10 @@ _pace_done:
   pop bc
   pop hl
   pop af
+  push af
+  xor a
+  ld  ($cb7e), a            ; leaving handler
+  pop af
   ei
   ret
 
@@ -580,6 +593,10 @@ _irq_line_scroll_split:
   pop de
   pop bc
   pop hl
+  pop af
+  push af
+  xor a
+  ld  ($cb7e), a            ; leaving handler
   pop af
   ei
   ret

@@ -202,7 +202,26 @@ RENDERING DIAGNOSIS (full chain, verified cell-by-cell):
    c. Watch variant-pool thrash: band materialization re-resolves 128
       cells per dirty presentation; consider materialize-once-per-
       select-flip if the ring churns.
-7. Then: title/demo visuals and the level-1 parity route. Also new this round: oversize
+7. SESSION UPDATE (overnight): BRK-AS-INTERRUPT implemented — NES BRK
+   vectors through the IRQ handler and RTIs; CV1's engine TOLERATES
+   junk task dispatches this way on real hardware (bank-0 bytes at
+   task addresses are data ending in BRK). This killed the task-engine
+   stall: the subject now tracks the reference's task progression
+   ($18=1 in 3 frames, exactly like the ref). Also fixed: a
+   re-entrancy hole where nested handlers restored slot 1 mid-table-
+   scan ($CB14 not updated by the dispatch) — the scan is now DI-
+   bracketed with a $CB7E in-handler flag for nesting-aware EI; and
+   the band materializer starved the frame loop (CV1 dirties the band
+   every frame) — now write-through for the selected page + full
+   re-materialization only on PPUCTRL select CHANGE. Frames flow to
+   1500+ (logo checkpoint reached).
+   REMAINING: ppu_mask never enables in the TRACE harness (its
+   synthetic $2002 model; the FD harness subject DOES enable by
+   frame 6 — harness artifact, not translation); real-emulator
+   (Mednafen) 90s run still black — CV1 at 1x is slow, needs a longer
+   run or GPGX overclock to reach its screens. Next: longer real-emu
+   run / fix trace $2002 vblank model / then title+demo visuals and
+   the level-1 parity route. Also new this round: oversize
 data-walk stubs (mis-rooted lifts up to 90 KiB get loud trap stubs),
 wrap-safe + post-emit section rotation, snapshot keys for banked
 units, indirect-landing ground-truth harvest (136 entries).

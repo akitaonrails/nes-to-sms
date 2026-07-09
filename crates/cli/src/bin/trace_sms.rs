@@ -2849,13 +2849,14 @@ fn main() {
             let ret = bus.read(sp) as u16 | ((bus.read(sp.wrapping_add(1)) as u16) << 8);
             eprintln!(
                 "*** first trap at step {step}: unresolved_id=${id:04X} pc=${pc:04X} \
-                 ret=${ret:04X} (call at ${:04X}) slot1_bank={} slot2_bank={} nes_bank={} disp_ret=${:04X} ind_ptr=${:04X}",
+                 ret=${ret:04X} (call at ${:04X}) slot1_bank={} slot2_bank={} nes_bank={} disp_ret=${:04X} ind_ptr=${:04X} scans={}",
                 ret.wrapping_sub(3),
                 bus.slot_bank[1],
                 bus.slot_bank[2],
                 bus.ram[0x0B1A],
                 bus.ram[0x0B73] as u16 | (bus.ram[0x0B74] as u16) << 8,
                 bus.ram[0x0B75] as u16 | (bus.ram[0x0B76] as u16) << 8,
+                bus.ram[0x0B7D],
             );
         }
         if let Some(mw_pc) = mapped_log_pc {
