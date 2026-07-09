@@ -881,7 +881,11 @@ impl SmsBus {
             display_enabled_edge: false,
             psg_writes: 0,
             psg_log: Vec::new(),
-            vram: if real_pacing() { [0xFF; 0x4000] } else { [0; 0x4000] },
+            vram: if real_pacing() {
+                [0xFF; 0x4000]
+            } else {
+                [0; 0x4000]
+            },
             cram: [0; 0x20],
             vdp_regs: [0; 16],
             render_scroll_split: None,
@@ -2093,7 +2097,11 @@ fn run_search_steps(
             state.cpu.iff2 = false;
             state.cpu.halted = false;
             state.irqs_fired += 1;
-            state.next_irq_at = if real_pacing() { state.step + irq_period() } else { state.next_irq_at.saturating_add(IRQ_PERIOD) };
+            state.next_irq_at = if real_pacing() {
+                state.step + irq_period()
+            } else {
+                state.next_irq_at.saturating_add(IRQ_PERIOD)
+            };
         }
 
         if state.cpu.halted {
@@ -2770,7 +2778,13 @@ fn main() {
         load_mednafen_state(&path, &mut cpu, &mut bus);
         eprintln!(
             "LOADED STATE: PC=${:04X} SP=${:04X} task=${:02X} slot=[{},{},{}] iff1={}",
-            cpu.pc, cpu.sp, bus.ram[0x18], bus.slot_bank[0], bus.slot_bank[1], bus.slot_bank[2], cpu.iff1
+            cpu.pc,
+            cpu.sp,
+            bus.ram[0x18],
+            bus.slot_bank[0],
+            bus.slot_bank[1],
+            bus.slot_bank[2],
+            cpu.iff1
         );
     }
     let mut stack_watermark = Z80StackWatermark::new(cpu.sp);
@@ -2865,8 +2879,23 @@ fn main() {
         // control-transfer ring and halt.
         if std::env::var("SMS_TRAP_RAM_EXEC").is_ok() && pc >= 0xC000 && step > 300_000 {
             eprintln!("*** WILD JUMP: PC=${pc:04X} (RAM) at step {step}, irqs={irqs_fired}");
-            eprintln!("  SP=${:04X} last_pc=${:04X} last_op=${:02X}", cpu.sp, last_pc.unwrap_or(0), last_op.unwrap_or(0));
-            eprintln!("  stack: {}", (0..12).map(|i| format!("{:04X}", bus.read(cpu.sp.wrapping_add(i*2)) as u16 | (bus.read(cpu.sp.wrapping_add(i*2+1)) as u16) << 8)).collect::<Vec<_>>().join(" "));
+            eprintln!(
+                "  SP=${:04X} last_pc=${:04X} last_op=${:02X}",
+                cpu.sp,
+                last_pc.unwrap_or(0),
+                last_op.unwrap_or(0)
+            );
+            eprintln!(
+                "  stack: {}",
+                (0..12)
+                    .map(|i| format!(
+                        "{:04X}",
+                        bus.read(cpu.sp.wrapping_add(i * 2)) as u16
+                            | (bus.read(cpu.sp.wrapping_add(i * 2 + 1)) as u16) << 8
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
             eprintln!("  last 24 xfers:");
             for (k, f, t) in xfer_ring.iter().rev().take(24).rev() {
                 eprintln!("    {k} ${f:04X} -> ${t:04X}");
@@ -3252,7 +3281,11 @@ fn main() {
             cpu.halted = false;
             irqs_fired += 1;
             frame_cost_start = Some(cpu.cycles);
-            next_irq_at = if real_pacing() { step + irq_period() } else { next_irq_at.saturating_add(IRQ_PERIOD) };
+            next_irq_at = if real_pacing() {
+                step + irq_period()
+            } else {
+                next_irq_at.saturating_add(IRQ_PERIOD)
+            };
         }
 
         if cpu.halted {
@@ -6279,7 +6312,11 @@ fn load_mednafen_state(path: &str, cpu: &mut Cpu, bus: &mut SmsBus) {
         let name = &d[j..j + 32];
         if name[0] != 0 && name.iter().all(|&b| b == 0 || (32..127).contains(&b)) {
             let size = u32::from_le_bytes(d[j + 32..j + 36].try_into().unwrap()) as usize;
-            let nm: String = name.iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
+            let nm: String = name
+                .iter()
+                .take_while(|&&b| b != 0)
+                .map(|&b| b as char)
+                .collect();
             if size > 0 && j + 36 + size <= d.len() && nm.len() >= 3 {
                 chunks.insert(nm, (j + 36, size));
                 j += 36 + size;
@@ -6296,7 +6333,9 @@ fn load_mednafen_state(path: &str, cpu: &mut Cpu, bus: &mut SmsBus) {
         let mut j = off;
         while j + 5 < end {
             let nl = d[j] as usize;
-            if nl == 0 || nl > 24 { break; }
+            if nl == 0 || nl > 24 {
+                break;
+            }
             let name: String = d[j + 1..j + 1 + nl].iter().map(|&b| b as char).collect();
             let sz = u32::from_le_bytes(d[j + 1 + nl..j + 5 + nl].try_into().unwrap()) as usize;
             m.insert(name, d[j + 5 + nl..(j + 5 + nl + sz).min(d.len())].to_vec());
@@ -6308,14 +6347,26 @@ fn load_mednafen_state(path: &str, cpu: &mut Cpu, bus: &mut SmsBus) {
     let w16 = |v: &[u8]| u16::from_le_bytes([v[0], v[1]]);
     if let Some(&(o, sz)) = chunks.get("Z80") {
         let z = sub(o, sz);
-        let af = w16(&z["AF"]); cpu.a = (af >> 8) as u8; cpu.f = af as u8;
-        let bc = w16(&z["BC"]); cpu.b = (bc >> 8) as u8; cpu.c = bc as u8;
-        let de = w16(&z["DE"]); cpu.d = (de >> 8) as u8; cpu.e = de as u8;
-        let hl = w16(&z["HL"]); cpu.h = (hl >> 8) as u8; cpu.l = hl as u8;
-        cpu.af_shadow = w16(&z["AF_"]); cpu.bc_shadow = w16(&z["BC_"]);
-        cpu.de_shadow = w16(&z["DE_"]); cpu.hl_shadow = w16(&z["HL_"]);
-        cpu.sp = w16(&z["SP"]); cpu.pc = w16(&z["PC"]);
-        cpu.iff1 = z["IFF1"][0] != 0; cpu.iff2 = z["IFF2"][0] != 0;
+        let af = w16(&z["AF"]);
+        cpu.a = (af >> 8) as u8;
+        cpu.f = af as u8;
+        let bc = w16(&z["BC"]);
+        cpu.b = (bc >> 8) as u8;
+        cpu.c = bc as u8;
+        let de = w16(&z["DE"]);
+        cpu.d = (de >> 8) as u8;
+        cpu.e = de as u8;
+        let hl = w16(&z["HL"]);
+        cpu.h = (hl >> 8) as u8;
+        cpu.l = hl as u8;
+        cpu.af_shadow = w16(&z["AF_"]);
+        cpu.bc_shadow = w16(&z["BC_"]);
+        cpu.de_shadow = w16(&z["DE_"]);
+        cpu.hl_shadow = w16(&z["HL_"]);
+        cpu.sp = w16(&z["SP"]);
+        cpu.pc = w16(&z["PC"]);
+        cpu.iff1 = z["IFF1"][0] != 0;
+        cpu.iff2 = z["IFF2"][0] != 0;
     }
     if let Some(&(o, sz)) = chunks.get("MAIN") {
         let m = sub(o, sz);
@@ -6328,19 +6379,27 @@ fn load_mednafen_state(path: &str, cpu: &mut Cpu, bus: &mut SmsBus) {
     if let Some(&(o, sz)) = chunks.get("VDP") {
         let v = sub(o, sz);
         if let Some(vram) = v.get("vram") {
-            for (i, &b) in vram.iter().take(0x4000).enumerate() { bus.vram[i] = b; }
+            for (i, &b) in vram.iter().take(0x4000).enumerate() {
+                bus.vram[i] = b;
+            }
         }
         if let Some(cram) = v.get("cram") {
-            for (i, &b) in cram.iter().take(0x20).enumerate() { bus.cram[i] = b; }
+            for (i, &b) in cram.iter().take(0x20).enumerate() {
+                bus.cram[i] = b;
+            }
         }
         if let Some(reg) = v.get("reg") {
-            for (i, &b) in reg.iter().take(16).enumerate() { bus.vdp_regs[i] = b; }
+            for (i, &b) in reg.iter().take(16).enumerate() {
+                bus.vdp_regs[i] = b;
+            }
         }
     }
     if let Some(&(o, sz)) = chunks.get("CART") {
         let c = sub(o, sz);
         if let Some(sram) = c.get("sram") {
-            for (i, &b) in sram.iter().take(CART_RAM_SIZE).enumerate() { bus.cart_ram[i] = b; }
+            for (i, &b) in sram.iter().take(CART_RAM_SIZE).enumerate() {
+                bus.cart_ram[i] = b;
+            }
         }
         if let Some(fcr) = c.get("fcr") {
             // fcr[0]=$FFFC control, [1]=$FFFD slot0, [2]=$FFFE slot1, [3]=$FFFF slot2.

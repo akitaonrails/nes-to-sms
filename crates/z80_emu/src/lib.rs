@@ -6,6 +6,8 @@
 
 // ── Flag bits ────────────────────────────────────────────────────────────────
 pub const FLAG_C: u8 = 0x01; // carry
+pub const FLAG_X: u8 = 0x08; // undocumented (result bit 3)
+pub const FLAG_Y: u8 = 0x20; // undocumented (result bit 5)
 pub const FLAG_N: u8 = 0x02; // subtract
 pub const FLAG_PV: u8 = 0x04; // parity / overflow
 pub const FLAG_H: u8 = 0x10; // half-carry
@@ -233,6 +235,15 @@ impl Cpu {
 
     // ── ALU operations ────────────────────────────────────────────────────
 
+    /// Undocumented flag bits 5/3 copy result bits 5/3 (Z80 quirk that
+    /// real hardware and Mednafen implement; the 6502 flag-reconstruction
+    /// must NOT depend on them, but modeling them makes the emulator match
+    /// real hardware so such dependencies surface instead of being masked).
+    #[inline]
+    fn set_undoc(&mut self, result: u8) {
+        self.f = (self.f & !(FLAG_X | FLAG_Y)) | (result & (FLAG_X | FLAG_Y));
+    }
+
     fn alu_add(&mut self, operand: u8, with_carry: bool) {
         let cy = if with_carry && self.flag(FLAG_C) {
             1u8
@@ -251,6 +262,7 @@ impl Cpu {
         self.set_flag(FLAG_PV, overflow);
         // FLAG_N = 0
         self.set_flag(FLAG_C, result16 > 0xFF);
+        self.set_undoc(result);
         self.a = result;
     }
 
@@ -272,6 +284,7 @@ impl Cpu {
         self.set_flag(FLAG_PV, overflow);
         self.set_flag(FLAG_N, true);
         self.set_flag(FLAG_C, (a as u16) < (operand as u16) + cy as u16);
+        self.set_undoc(result);
         result
     }
 
@@ -283,6 +296,7 @@ impl Cpu {
         self.set_flag(FLAG_Z, a == 0);
         self.set_flag(FLAG_H, true);
         self.set_flag(FLAG_PV, parity(a));
+        self.set_undoc(a);
         // N=0, C=0
     }
 
@@ -294,6 +308,7 @@ impl Cpu {
         self.set_flag(FLAG_Z, a == 0);
         // H=0
         self.set_flag(FLAG_PV, parity(a));
+        self.set_undoc(a);
         // N=0, C=0
     }
 
@@ -305,6 +320,7 @@ impl Cpu {
         self.set_flag(FLAG_Z, a == 0);
         // H=0
         self.set_flag(FLAG_PV, parity(a));
+        self.set_undoc(a);
         // N=0, C=0
     }
 
@@ -327,6 +343,7 @@ impl Cpu {
         self.set_flag(FLAG_Z, result == 0);
         self.set_flag(FLAG_H, (val & 0x0F) == 0x0F);
         self.set_flag(FLAG_PV, val == 0x7F);
+        self.set_undoc(result);
         // FLAG_N = 0
         result
     }
@@ -340,6 +357,7 @@ impl Cpu {
         self.set_flag(FLAG_Z, result == 0);
         self.set_flag(FLAG_H, (val & 0x0F) == 0x00);
         self.set_flag(FLAG_PV, val == 0x80);
+        self.set_undoc(result);
         self.set_flag(FLAG_N, true);
         result
     }
@@ -447,6 +465,7 @@ impl Cpu {
                 self.set_flag(FLAG_Z, result == 0);
                 self.set_flag(FLAG_PV, parity(result));
                 self.set_flag(FLAG_C, carry_out);
+                self.set_undoc(result);
                 if r == 6 {
                     bus.write(self.hl(), result);
                 } else {
@@ -462,6 +481,7 @@ impl Cpu {
                 self.set_flag(FLAG_N, false);
                 self.set_flag(FLAG_S, n == 7 && !z);
                 self.set_flag(FLAG_PV, z);
+                self.set_undoc(val);
             }
             // ── 10nnnrrr: RES n,r ──────────────────────────────────────────
             2 => {

@@ -717,6 +717,12 @@ fn run_reference(
         // Length counters tick after the frame's NMI ran — matching the
         // subject, whose apu_frame_tick runs after the translated NMI.
         bus.apu_frame_tick();
+        if std::env::var("FD_WATCH_TASK").is_ok() && frame % 30 == 0 {
+            eprintln!(
+                "REF frame {frame}: task$18={:02X} $19={:02X} $0D={:02X}",
+                bus.ram[0x18], bus.ram[0x19], bus.ram[0x0D]
+            );
+        }
         snaps.push(bus.ram);
     }
     if call_log_frame.is_some() {

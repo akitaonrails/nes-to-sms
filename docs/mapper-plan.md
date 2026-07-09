@@ -376,3 +376,28 @@ rotate/shift P/V and undocumented 3/5 flag bits, block-op flags,
 timing — whichever the 6502->Z80 flag-reconstruction emitters lean
 on. Then re-verify CV1 on Mednafen and re-run the SMB gate (the fix
 may change z80_emu, so SMB parity must be re-confirmed).
+
+### CV1 hang: hypotheses ruled out empirically (this session)
+
+Using the SMS_LOAD_STATE transplant + cold-boot tests, the hang was
+narrowed but not pinned. RULED OUT: pacing (SMS_REAL_PACING 15K
+insn/frame still advances task 0), RAM init ($FF-fill still advances),
+undocumented Z80 flag bits 3/5 (z80_emu now models them accurately;
+CV1 still advances, and SMB stays byte-for-byte green so the codegen
+does not read them), and the hot-loop flag helpers (rt_ror_a,
+rt_dec_mem, BIT, CB rotates, ADD HL all audited). rt_ror_a HAS a
+latent bug — when the rotate's new carry is set, the carry-handling
+block clobbers A before `bit 7,a`, so the reconstructed 6502 N is
+always 0 in that case — but it is deterministic across emulators, so
+it is NOT the CV1 divergence (both z80_emu and Mednafen execute it
+identically). TODO: fix rt_ror_a N-flag anyway (correctness).
+
+z80_emu matches the 6502 reference (frame-diff green). So the CV1
+hang is a subtle z80_emu-vs-Mednafen divergence: an opcode z80_emu
+executes such that CV1 progresses, while a correct Z80 (Mednafen)
+hangs — meaning the GENERATED code is wrong on real hardware and
+z80_emu masks it. Pinning the exact opcode needs INSTRUCTION-LEVEL
+differential execution against a correct Z80: Mednafen's built-in
+debugger trace, or an independent reference Z80 core lockstepped with
+z80_emu on the task-0 path. That is the decisive next step; it cannot
+be done with the current offline toolset.
