@@ -241,7 +241,7 @@ fn sms_asm_content(
     };
     let mut mapper_define = format!(".define NES_MAPPER {}", cfg.mapper);
     if cfg.chr_ram {
-        mapper_define.push_str("\n.define NES_CHR_RAM 1");
+        mapper_define.push_str("\n.define NES_CHR_RAM 1\n.define CHR_RAM_SRAM_BASE $8800");
     }
     if let Some(banks) = &assets.prg_banks {
         mapper_define.push_str(&format!(

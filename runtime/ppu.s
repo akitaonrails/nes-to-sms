@@ -108,6 +108,24 @@ _ppu_w_ctrl:
   ld   a, $01
   ld   ($cb78), a
 _pwc_no_flip:
+  ; BG pattern-table switch (bit 4): variant cache keys are per-table
+  ; tile indices — flush FC so stale (other-table) slots don't serve.
+  ld   a, ($cb08)
+  xor  c
+  and  $10
+  jr   z, _pwc_no_tflip
+  push hl
+  push de
+  push bc
+  ld   hl, $d600
+  ld   de, $d601
+  ld   bc, $03ff
+  ld   (hl), $ff
+  ldir
+  pop  bc
+  pop  de
+  pop  hl
+_pwc_no_tflip:
   ld   a, c
   pop  bc
 .endif
@@ -332,19 +350,70 @@ _ppudata_direct_nametable_tile:
   jp   _ppudata_inc_addr
 
 _ppudata_pattern_write:
-  ; CHR-RAM (mapper plan M1): a $2007 write into pattern space
-  ; ($0000-$1FFF). NES tile row plane bytes are bit-identical to SMS
-  ; Mode-4 planes 0/1 (planes 2/3 stay zero from the blank CHR), so the
-  ; upload is a pure address transform:
-  ;   nes = tttttttttprrr (t=tile 0-511, p=plane, r=row)
-  ;   sms = tile*32 + row*4 + plane
-  ;       = ((nes & $FFF0) << 1) | ((nes & 7) << 2) | ((nes >> 3) & 1)
-  ; Tiles >= 448 ($1C00+) exceed the SMS pattern budget and are dropped.
-  ld   a, d
-  cp   $1c
-  jp   nc, _ppudata_discard_direct
+.ifndef NES_CHR_RAM
+  ; CHR-ROM carts never write pattern space meaningfully — discard.
+  jp   _ppudata_discard_direct
+.else
+  ; CHR-RAM (mapper plan M1, SRAM-mirror design): a $2007 write into
+  ; pattern space ($0000-$1FFF).
+  ;  1. Raw 2bpp byte -> cartridge-SRAM CHR mirror (CHR_RAM_SRAM_BASE
+  ;     + addr): the SOURCE for BG variant generation. No VRAM budget,
+  ;     no VDP port cost.
+  ;  2. Invalidate the tile's cached variants (FC[tile & $FF]) so the
+  ;     next NT reference regenerates from the new bytes.
+  ;  3. If the tile is in the SPRITE pattern table (PPUCTRL bit 3),
+  ;     copy-through to the fixed VRAM sprite region ($2000 + fold).
+  pop  af                    ; the data byte
+  ld   ($cb13), a            ; park it (transient scratch)
   push bc
-  ; C = ((nes & 7) << 2) | ((nes >> 3) & 1)
+  push de
+  push hl
+  ; --- 1. SRAM mirror store ---
+  ld   hl, CHR_RAM_SRAM_BASE
+  add  hl, de
+  call rt_raw_ciram_sram_enable
+  ld   a, ($cb13)
+  ld   (hl), a
+  call rt_raw_ciram_sram_disable
+  ; --- 2. FC invalidation: base = ((D:E) >> 4) & $FF ---
+  ld   a, e
+  rrca
+  rrca
+  rrca
+  rrca
+  and  $0f
+  ld   c, a
+  ld   a, d
+  rlca
+  rlca
+  rlca
+  rlca
+  and  $f0
+  or   c
+  ld   l, a
+  ld   h, $00
+  add  hl, hl
+  add  hl, hl                ; *4 (S variants per base)
+  ld   bc, $d600            ; BGV_CACHE (chrmap.s)
+  add  hl, bc
+  ld   a, $ff
+  ld   (hl), a
+  inc  hl
+  ld   (hl), a
+  inc  hl
+  ld   (hl), a
+  inc  hl
+  ld   (hl), a
+  ; --- 3. sprite copy-through when this write's table is the sprite table ---
+  ld   a, ($cb08)
+  and  $08                   ; PPUCTRL bit 3
+  rlca                       ; -> $10 (the table bit of the address)
+  ld   c, a
+  ld   a, d
+  and  $10
+  cp   c
+  jr   nz, _ppw_done
+  ; SMS sprite addr = $2000 + ((nes & $0FF0) << 1 | (nes & 7) << 2 | (nes >> 3) & 1)
   ld   a, e
   and  $07
   add  a, a
@@ -357,26 +426,33 @@ _ppudata_pattern_write:
   and  $01
   or   c
   ld   c, a
-  ; HL(sms) = (nes & $FFF0) << 1 | C
   ld   a, e
   and  $f0
   ld   l, a
-  ld   h, d
+  ld   a, d
+  and  $0f
+  ld   h, a
   add  hl, hl
   ld   a, l
   or   c
   ld   l, a
-  ; VDP write
+  ld   a, h
+  or   $20
+  ld   h, a
   ld   a, l
   out  ($bf), a
   ld   a, h
   and  $3f
   or   $40
   out  ($bf), a
-  pop  bc
-  pop  af                    ; the data byte
+  ld   a, ($cb13)
   out  ($be), a
+_ppw_done:
+  pop  hl
+  pop  de
+  pop  bc
   jp   _ppudata_inc_addr
+.endif
 
 _ppudata_discard_direct:
   pop  af                    ; non-nametable PPU writes are ignored for now

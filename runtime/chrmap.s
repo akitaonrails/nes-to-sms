@@ -87,39 +87,30 @@ _gv_p3_zero:
   or   $40
   out  ($bf), a
 .ifdef NES_CHR_RAM
-  ; CHR-RAM: the build-time data_chr asset is blank — the real pattern
-  ; bytes live in VRAM (uploaded through $2007 at runtime). Read the
-  ; base tile's planes 0/1 back from VRAM into a 16-byte staging buffer
-  ; first (source reads and dest writes share the VDP address register).
+  ; CHR-RAM: pattern sources live in the cartridge-SRAM mirror
+  ; (CHR_RAM_SRAM_BASE), maintained by the $2007 pattern-write path.
+  ; NES tile layout is PLANAR: 8 bytes plane 0, then 8 bytes plane 1.
+  ; Source = mirror + (BG table bit << 12) + base*16. Copy the 16
+  ; bytes to staging ($CB63 p0 rows, $CB6B p1 rows), then emit rows
+  ; interleaved with the S-plane fills.
   push bc
-  ld   a, (BGV_SLOT)         ; recompute the BASE tile source address:
-  ld   a, c                  ; C still holds the base slot
-  ld   l, a
-  ld   h, $00
+  ld   a, ($cb08)
+  and  $10                   ; PPUCTRL bit 4 = BG table
+  ld   h, a                  ; H:L = (table_bit<<8) | base
+  ld   l, c
   add  hl, hl
   add  hl, hl
   add  hl, hl
-  add  hl, hl
-  add  hl, hl                ; HL = base*32 (VRAM)
-  ld   a, l
-  out  ($bf), a
-  ld   a, h
-  and  $3f                   ; read command (bit6 clear)
-  out  ($bf), a
-  ld   de, $cb63             ; staging buffer ($CB63-$CB72)
-  ld   b, 8
-_gvr_read_row:
-  in   a, ($be)              ; plane 0
-  ld   (de), a
-  inc  de
-  in   a, ($be)              ; plane 1
-  ld   (de), a
-  inc  de
-  in   a, ($be)              ; skip plane 2
-  in   a, ($be)              ; skip plane 3
-  djnz _gvr_read_row
+  add  hl, hl                ; *16 -> table*4096 + base*16
+  ld   de, CHR_RAM_SRAM_BASE
+  add  hl, de
+  call rt_raw_ciram_sram_enable
+  ld   de, $cb63
+  ld   bc, 16
+  ldir                       ; staging <- 16 planar bytes
+  call rt_raw_ciram_sram_disable
   pop  bc
-  ; re-set the DEST address (clobbered by the source reads)
+  ; re-set the VDP DEST address (untouched above, but be explicit)
   ld   a, (BGV_SLOT)
   ld   l, a
   ld   h, $00
@@ -133,19 +124,23 @@ _gvr_read_row:
   ld   a, h
   or   $40
   out  ($bf), a
-  ld   hl, $cb63
+  ld   hl, $cb63             ; plane-0 rows; plane-1 at +8
   ld   b, 8
 _gvr_emit_row:
-  ld   a, (hl)               ; plane 0 (low NES bitplane)
+  ld   a, (hl)               ; plane 0 row
   out  ($be), a
-  inc  hl
-  ld   a, (hl)               ; plane 1
+  push bc
+  ld   bc, 8
+  add  hl, bc                ; -> plane 1 row
+  ld   a, (hl)
   out  ($be), a
-  inc  hl
   ld   a, (BGV_P2)
-  out  ($be), a              ; plane 2 = S bit 0
+  out  ($be), a
   ld   a, (BGV_P3)
-  out  ($be), a              ; plane 3 = S bit 1
+  out  ($be), a
+  ld   bc, -7                ; back to next plane-0 row
+  add  hl, bc
+  pop  bc
   djnz _gvr_emit_row
   call rt_restore_prg_window
   ret
@@ -352,6 +347,11 @@ rt_write_mapped_bg_tile:
   ld   c, a
   ld   ($cb17), de           ; SMS nametable low-byte address
 
+.ifdef NES_CHR_RAM
+  ; CHR-RAM: the base IS the NES tile index within the active BG table
+  ; (identity — sources live in the SRAM mirror, keyed by the same
+  ; index; the static ROM maps don't apply).
+.else
   ; base slot from the BG map
   ld   a, :data_chr_maps
   ld   ($ffff), a
@@ -370,6 +370,7 @@ _bgw_map_ready:
   ld   a, (hl)               ; base slot (bg tiles are 0-255)
   ld   c, a                  ; C = base slot
   call rt_restore_prg_window   ; current NES PRG window (banked-aware)
+.endif
 
   ; In nametable range: record the base slot for this cell (so a later
   ; attribute write can re-resolve the variant), then read the sub-palette S.
