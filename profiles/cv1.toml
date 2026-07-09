@@ -803,3 +803,15 @@ addr = 0x80c2
 [[bank_entry]]
 bank = 0
 addr = 0x8141
+
+[[bank_entry]]
+bank = 6
+addr = 0xa685
+
+[[bank_entry]]
+bank = 0
+addr = 0x815a
+
+[[bank_entry]]
+bank = 0
+addr = 0x816e

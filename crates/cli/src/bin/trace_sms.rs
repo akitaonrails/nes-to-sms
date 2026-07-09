@@ -630,6 +630,7 @@ struct SmsBus {
     /// Status byte returned by the next $BF read, used to distinguish injected
     /// frame IRQs (bit 7 set) from line IRQs (bit 7 clear).
     vdp_status_override: Option<u8>,
+    display_enabled_edge: bool,
     psg_writes: u64,
     psg_log: Vec<u8>,
     /// VRAM 16 KiB and CRAM 32 B (for inspection if needed).
@@ -866,6 +867,7 @@ impl SmsBus {
             io_log: Vec::new(),
             vdp_status_reads: 0,
             vdp_status_override: None,
+            display_enabled_edge: false,
             psg_writes: 0,
             psg_log: Vec::new(),
             vram: [0; 0x4000],
@@ -1848,6 +1850,9 @@ impl Bus for SmsBus {
                         // VDP register write: low nibble of high byte selects register.
                         let reg = value & 0x0F;
                         let val = self.vdp_addr_low;
+                        if reg == 1 && val & 0x40 != 0 && self.vdp_regs[1] & 0x40 == 0 {
+                            self.display_enabled_edge = true;
+                        }
                         self.vdp_regs[reg as usize] = val;
                         self.io_log.push(format!("vdp r{reg} = ${val:02X}"));
                     }
@@ -3136,6 +3141,15 @@ fn main() {
                     .map(|i| format!("{:02X}", bus.vram[0x3F80 + i]))
                     .collect();
                 eprintln!("SAT f{irqs_fired}: Y {}  XT {}", ys.join(" "), xt.join(" "));
+            }
+            if bus.display_enabled_edge {
+                bus.display_enabled_edge = false;
+                if let Ok(dir) = std::env::var("SMS_DUMP_ON_ENABLE") {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let path = format!("{dir}/enable_{irqs_fired:05}.ppm");
+                    let _ = dump_framebuffer_ppm(&bus, &path);
+                    eprintln!("DISPLAY-ON dump: {path}");
+                }
             }
             prev_frame_step = step;
             prev_frame_vram_writes = bus.vram_writes;
@@ -4440,6 +4454,15 @@ fn dump_route_checkpoint(
         bus.vdp_control_writes,
         bus.vdp_status_reads,
         bus.controller_reads
+    )?;
+    writeln!(
+        f,
+        "cram: {}",
+        bus.cram
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     )?;
     writeln!(
         f,

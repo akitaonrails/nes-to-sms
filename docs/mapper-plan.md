@@ -202,6 +202,28 @@ RENDERING DIAGNOSIS (full chain, verified cell-by-cell):
    c. Watch variant-pool thrash: band materialization re-resolves 128
       cells per dirty presentation; consider materialize-once-per-
       select-flip if the ring churns.
+6b. RENDER-PIPELINE ROOT CAUSE (definitive, end-of-session): CV1 sets
+   PPUCTRL bit4 (BG pattern table $1000) and uses table-1 tile
+   indices >= 192 (HUD text at $D0+). The CHR-RAM identity mapping
+   gives table 1 only 192 physical slots (SMS budget: ~440 tiles
+   total, table 0 took 256) — so those tiles were DROPPED at upload
+   ($1C00+ writes) and UNMAPPED (base 0) in the NT map: every text
+   cell rendered variant(0,S) = the solid tile. Verified end-to-end:
+   raw CIRAM rows hold the correct text; the assembled map0 is
+   perfect identity; map1[>=192] = 0.
+   DESIGN (next session): dynamic CHR-RAM tile allocation — a
+   512-entry NES-tile -> SMS-slot table in RAM (the $D300 candidate
+   region), assigned on first pattern upload; the $2007 pattern
+   write path redirects rows to the assigned slot, and the NT
+   mapping path consults the SAME table instead of the static map.
+   Games never use both full tables simultaneously, so ~440 slots
+   suffice. Also gives MMC3 CHR-banking a foundation (slot
+   assignment per (bank, tile)).
+   ALSO: display-enable edge captures (SMS_DUMP_ON_ENABLE=dir) show
+   CV1 cycling its screens with correct palettes — one full-screen
+   mosaic capture proves end-to-end rendering works modulo the tile
+   allocation above.
+
 7. SESSION UPDATE (overnight): BRK-AS-INTERRUPT implemented — NES BRK
    vectors through the IRQ handler and RTIs; CV1's engine TOLERATES
    junk task dispatches this way on real hardware (bank-0 bytes at
