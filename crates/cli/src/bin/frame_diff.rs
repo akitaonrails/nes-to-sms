@@ -650,6 +650,22 @@ fn run_reference(
                 let pc = cpu.pc;
                 if pc >= 0x8000 {
                     let op = bus.prg_read(pc);
+                    if op == 0x6C {
+                        // jmp (ind): log the LANDING (bank, target).
+                        let p = bus.prg_read(pc.wrapping_add(1)) as u16
+                            | (bus.prg_read(pc.wrapping_add(2)) as u16) << 8;
+                        let t = if p < 0x2000 {
+                            bus.ram[(p & 0x7FF) as usize] as u16
+                                | (bus.ram[((p.wrapping_add(1)) & 0x7FF) as usize] as u16) << 8
+                        } else if p >= 0x8000 {
+                            bus.prg_read(p) as u16 | (bus.prg_read(p.wrapping_add(1)) as u16) << 8
+                        } else {
+                            0
+                        };
+                        if (0x8000..0xC000).contains(&t) {
+                            bank_entry_set.insert((bus.prg_bank, t));
+                        }
+                    }
                     if op == 0x20 || op == 0x4C {
                         let t = bus.prg_read(pc.wrapping_add(1)) as u16
                             | (bus.prg_read(pc.wrapping_add(2)) as u16) << 8;

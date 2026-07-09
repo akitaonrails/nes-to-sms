@@ -139,10 +139,22 @@ routines (L_ECEA/EE35/EF43, ASL-heavy fixed-point) + per-lap bank
 switches + PPU reg writes — the shape of the logo animation task
 pumping forever. (zp),Y source reads verified sane ($889E bank 0,
 $FDD3 fixed). Init RAM snapshot matches the reference byte-for-byte;
-frame-0 write streams identical (58/58). NEXT PROBE: instrument Z80 SP
-at the three dispatcher entries — legit nested dispatch vs return-path
-corruption (far-gate/JumpEngine ret interplay). Then CHR-RAM visuals
-and the level-1 parity route.
+frame-0 write streams identical (58/58). RESOLVED: CV1's first NMI
+never RTIs BY DESIGN — the main flow lives inside it and later vblank
+NMIs re-enter through the $7F guard (NES NMIs are edge-triggered).
+The handler now runs the translated NMI with interrupts enabled
+(ei/call/di bracket); games that gate re-entry via PPUCTRL bit 7
+(SMB) skip at the $CB08 check — NES-equivalent either way. CV1 then
+runs 790+ frames, draws its license screen into the nametable
+(FIRST PIXELS — garbled patterns), and wedges on a (0,$A824)
+dispatch the reference never executes (upstream divergence).
+Remaining: (a) CHR-RAM BG pattern-table select — CV1 uses table
+$1000 (PPUCTRL bit 4); the identity tile mapping needs the +256
+offset; (b) the $A824 upstream fork; then the license/title screens
+and the level-1 parity route. Also new this round: oversize
+data-walk stubs (mis-rooted lifts up to 90 KiB get loud trap stubs),
+wrap-safe + post-emit section rotation, snapshot keys for banked
+units, indirect-landing ground-truth harvest (136 entries).
 
 ## M2 — MMC1
 

@@ -614,14 +614,35 @@ pub fn run(args: &Args) -> Result<String, Error> {
             // Compare map TRANSITIONS, not absolute indices: the snapshot's
             // section numbering includes program-internal sections, so its
             // index space is offset from our counter.
-            let mapped_section = section_map.get(&format_label(r.entry)).copied();
+            let snapshot_key = if r.name.starts_with("L_b") {
+                r.name.clone() // banked units are registered under their prefixed label
+            } else {
+                format_label(r.entry)
+            };
+            let mapped_section = section_map.get(&snapshot_key).copied();
             let should_rotate = match (mapped_section, prev_mapped_section) {
                 (Some(sec), Some(prev)) => sec != prev,
                 (Some(_), None) => false,
-                _ => program.current_addr().saturating_sub(section_base) >= SECTION_MAX_BYTES,
+                _ => {
+                    let cur = program.current_addr();
+                    // Wrapped past the 16 KiB slot = definitely rotate.
+                    cur < section_base || cur.saturating_sub(section_base) >= SECTION_MAX_BYTES
+                }
             };
             if mapped_section.is_some() {
                 prev_mapped_section = mapped_section;
+            }
+            if std::env::var("N2S_DEBUG_ROT").is_ok() {
+                eprintln!(
+                    "ROT?p{} {} cur=${:04X} base=${:04X} mapped={:?} prev={:?} rotate={}",
+                    if section_map.is_empty() { 1 } else { 2 },
+                    r.name,
+                    program.current_addr(),
+                    section_base,
+                    mapped_section,
+                    prev_mapped_section,
+                    should_rotate
+                );
             }
             if should_rotate {
                 section_idx += 1;
@@ -652,16 +673,58 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 defined_labels.insert(auto.clone());
             }
             if lifter_emits_auto {
-                defined_labels.insert(auto);
+                defined_labels.insert(auto.clone());
             }
             defined_labels.insert(r.name.clone());
             for bl in &r.branch_labels {
                 defined_labels.insert(bl.clone());
             }
 
-            match lower::lower_routine(&mut program, r, &opts) {
-                Ok(()) => {}
-                Err(e) => lower_failures.push(format!("${:04X} {}: {}", r.entry, r.name, e)),
+            // Oversize guard: a mis-rooted walk through data decodes into
+            // a colossal garbage 'routine' (10-90 KiB) that cannot fit a
+            // 16 KiB bank. Emit a loud trap stub instead — if it is ever
+            // really executed, the trap reports it like any other miss.
+            if std::env::var("N2S_DEBUG_ROT").is_ok() && r.ops.len() > 500 {
+                eprintln!("BIG ROUTINE {} ops={}", r.name, r.ops.len());
+            }
+            if r.ops.len() > 600 {
+                if lifter_emits_auto {
+                    // The ops (which carried the entry label) are not
+                    // lowered — define the label on the stub instead.
+                    program.label(&auto);
+                }
+                program.ld_a_imm(0xEE);
+                program.ld_abs_a(0xCB1B);
+                program.jp("rt_unresolved_jsr");
+                lower_failures.push(format!(
+                    "${:04X} {}: oversize ({} ops) — stubbed as data-walk",
+                    r.entry,
+                    r.name,
+                    r.ops.len()
+                ));
+            } else {
+                match lower::lower_routine(&mut program, r, &opts) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        lower_failures.push(format!("${:04X} {}: {}", r.entry, r.name, e))
+                    }
+                }
+            }
+            // Post-emit rotation: giants legitimately exceeding the
+            // boundary start a fresh section for the next routine.
+            {
+                let cur = program.current_addr();
+                if cur < section_base || cur.saturating_sub(section_base) >= SECTION_MAX_BYTES {
+                    section_idx += 1;
+                    program.section(&format!("generated_code_{section_idx}"));
+                    program.set_section_placement(
+                        TRANSLATED_BANK_BASE + section_idx as u8,
+                        TRANSLATED_SLOT,
+                    );
+                    program.org(0x4000);
+                    section_base = program.current_addr();
+                    prev_mapped_section = None;
+                }
             }
         }
 

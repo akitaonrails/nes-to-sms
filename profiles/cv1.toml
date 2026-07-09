@@ -70,6 +70,9 @@ name = "func_C0C0"
 # Ground-truth window entries harvested from the reference oracle
 # (FD_LOG_BANK_ENTRIES over 900 frames: boot/logo/title/demo).
 
+# Ground-truth window entries: reference oracle, 1500 frames,
+# JSR/JMP operands + jmp-(ind) landings, keyed by live bank.
+
 [[bank_entry]]
 bank = 0
 addr = 0x800a
@@ -120,6 +123,10 @@ addr = 0x81d3
 
 [[bank_entry]]
 bank = 0
+addr = 0x820f
+
+[[bank_entry]]
+bank = 0
 addr = 0x827c
 
 [[bank_entry]]
@@ -141,6 +148,10 @@ addr = 0x846a
 [[bank_entry]]
 bank = 0
 addr = 0x847d
+
+[[bank_entry]]
+bank = 0
+addr = 0x84d2
 
 [[bank_entry]]
 bank = 0
@@ -171,6 +182,102 @@ bank = 0
 addr = 0x876b
 
 [[bank_entry]]
+bank = 0
+addr = 0xb7dc
+
+[[bank_entry]]
+bank = 5
+addr = 0x8a85
+
+[[bank_entry]]
+bank = 5
+addr = 0x8aa2
+
+[[bank_entry]]
+bank = 5
+addr = 0x8acd
+
+[[bank_entry]]
+bank = 5
+addr = 0x8ada
+
+[[bank_entry]]
+bank = 5
+addr = 0x8af7
+
+[[bank_entry]]
+bank = 5
+addr = 0x8b08
+
+[[bank_entry]]
+bank = 5
+addr = 0x8b22
+
+[[bank_entry]]
+bank = 5
+addr = 0x8b2f
+
+[[bank_entry]]
+bank = 5
+addr = 0x8b41
+
+[[bank_entry]]
+bank = 5
+addr = 0x8b5f
+
+[[bank_entry]]
+bank = 5
+addr = 0x8b64
+
+[[bank_entry]]
+bank = 5
+addr = 0x8b70
+
+[[bank_entry]]
+bank = 5
+addr = 0x8b91
+
+[[bank_entry]]
+bank = 5
+addr = 0x8bb7
+
+[[bank_entry]]
+bank = 5
+addr = 0x8be4
+
+[[bank_entry]]
+bank = 5
+addr = 0x8bf9
+
+[[bank_entry]]
+bank = 5
+addr = 0x8c12
+
+[[bank_entry]]
+bank = 5
+addr = 0x8c1f
+
+[[bank_entry]]
+bank = 5
+addr = 0x8c2f
+
+[[bank_entry]]
+bank = 5
+addr = 0x8c38
+
+[[bank_entry]]
+bank = 5
+addr = 0x8c51
+
+[[bank_entry]]
+bank = 5
+addr = 0x8c95
+
+[[bank_entry]]
+bank = 6
+addr = 0x8867
+
+[[bank_entry]]
 bank = 6
 addr = 0x934c
 
@@ -180,7 +287,15 @@ addr = 0x9359
 
 [[bank_entry]]
 bank = 6
+addr = 0x9380
+
+[[bank_entry]]
+bank = 6
 addr = 0x9479
+
+[[bank_entry]]
+bank = 6
+addr = 0x9482
 
 [[bank_entry]]
 bank = 6
@@ -188,7 +303,39 @@ addr = 0x9502
 
 [[bank_entry]]
 bank = 6
+addr = 0x9511
+
+[[bank_entry]]
+bank = 6
+addr = 0x9539
+
+[[bank_entry]]
+bank = 6
+addr = 0x9578
+
+[[bank_entry]]
+bank = 6
+addr = 0x962c
+
+[[bank_entry]]
+bank = 6
+addr = 0x965b
+
+[[bank_entry]]
+bank = 6
+addr = 0x96c1
+
+[[bank_entry]]
+bank = 6
+addr = 0x970b
+
+[[bank_entry]]
+bank = 6
 addr = 0x9782
+
+[[bank_entry]]
+bank = 6
+addr = 0x97f2
 
 [[bank_entry]]
 bank = 6
@@ -204,7 +351,27 @@ addr = 0x98ab
 
 [[bank_entry]]
 bank = 6
+addr = 0x98f3
+
+[[bank_entry]]
+bank = 6
 addr = 0x98fe
+
+[[bank_entry]]
+bank = 6
+addr = 0x991c
+
+[[bank_entry]]
+bank = 6
+addr = 0x991f
+
+[[bank_entry]]
+bank = 6
+addr = 0x9938
+
+[[bank_entry]]
+bank = 6
+addr = 0x9944
 
 [[bank_entry]]
 bank = 6
@@ -240,6 +407,14 @@ addr = 0x9a64
 
 [[bank_entry]]
 bank = 6
+addr = 0x9a69
+
+[[bank_entry]]
+bank = 6
+addr = 0x9a6b
+
+[[bank_entry]]
+bank = 6
 addr = 0x9a71
 
 [[bank_entry]]
@@ -269,6 +444,14 @@ addr = 0x9bba
 [[bank_entry]]
 bank = 6
 addr = 0x9be3
+
+[[bank_entry]]
+bank = 6
+addr = 0x9c10
+
+[[bank_entry]]
+bank = 6
+addr = 0x9cbd
 
 [[bank_entry]]
 bank = 6
@@ -364,6 +547,10 @@ addr = 0xa38d
 
 [[bank_entry]]
 bank = 6
+addr = 0xa3ea
+
+[[bank_entry]]
+bank = 6
 addr = 0xa4aa
 
 [[bank_entry]]
@@ -404,6 +591,18 @@ addr = 0xae8c
 
 [[bank_entry]]
 bank = 6
+addr = 0xb7dc
+
+[[bank_entry]]
+bank = 6
+addr = 0xb823
+
+[[bank_entry]]
+bank = 6
+addr = 0xb859
+
+[[bank_entry]]
+bank = 6
 addr = 0xb99d
 
 [[bank_entry]]
@@ -419,21 +618,137 @@ bank = 6
 addr = 0xb9fc
 
 [[bank_entry]]
-bank = 6
-addr = 0xb7dc
+bank = 0
+addr = 0x80d2
 
 [[bank_entry]]
-bank = 6
-addr = 0xb823
+bank = 0
+addr = 0x8041
 
 [[bank_entry]]
-bank = 6
-addr = 0xb859
+bank = 0
+addr = 0x820d
 
 [[bank_entry]]
-bank = 6
-addr = 0xb8d2
+bank = 0
+addr = 0x803e
+
+[[function]]
+addr = 0xc232
+name = "func_C232"
+
+[[function]]
+addr = 0xc299
+name = "func_C299"
 
 [[bank_entry]]
-bank = 6
-addr = 0xb911
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824
+
+[[bank_entry]]
+bank = 0
+addr = 0xa824

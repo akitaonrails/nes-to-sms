@@ -491,7 +491,16 @@ _irq_call_translated_nmi:
   ld  a, :translated_nmi
   ld  ($cb14), a
   ld  ($fffe), a
+  ; NES NMIs are edge-triggered: a game whose NMI never RTIs (CV1's
+  ; main flow lives inside the first NMI; its $7F guard routes nested
+  ; entries to a light lag path) still receives every later vblank.
+  ; Match that: run the translated NMI with interrupts ENABLED so the
+  ; next frame INT can nest through this same handler. Games that gate
+  ; re-entry via PPUCTRL bit 7 (SMB clears it first thing) are skipped
+  ; by the $CB08 check on the nested entry — NES-equivalent either way.
+  ei
   call translated_nmi       ; jumps to the profile/ROM NMI vector
+  di
   ; Phase R: the NMI may have changed X/Y — new truth back to the shadows.
   ld  a, d
   ld  ($cb00), a
