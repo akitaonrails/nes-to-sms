@@ -127,6 +127,11 @@ boot_main:
   ld  ($cb62), a            ; NES PRG bank shadow (banked mappers; 0 = bank 0)
   ld  ($cb78), a            ; band-dirty flag (rows 0-3 re-materialization)
   ld  ($cb7e), a            ; in-handler flag starts clear
+  ld  ($cb7f), a            ; deferred FC-flush flag
+  ld  ($cbe6), a            ; dispatch MRU invalid
+  ld  ($cbe7), a            ; beacon: first-IRQ
+  ld  ($cbe8), a            ; beacon: first-NMI
+  ld  ($cbe9), a            ; translated-NMI nesting depth
 
   ; I/O port control: configure both controller ports as inputs (TR/TH
   ; lines included). Real SMS games write $3F=$FF at boot; without it,
@@ -316,6 +321,29 @@ boot_main:
   ld   ($cb14), a            ; mirror in bank shadow for rt_far_call
   ld   a, $01
   ld   ($cb28), a            ; runtime ready: irq_handler may do real work
+  ; SRAM self-test: the CHR mirror needs SRAM beyond the CIRAM 2 KiB.
+  ; Write/read-back at $8800; RED border + halt on failure.
+.ifdef NES_CHR_RAM
+  call rt_raw_ciram_sram_enable
+  ld   a, $5A
+  ld   ($8800), a
+  ld   a, ($8800)
+  cp   $5A
+  push af
+  call rt_raw_ciram_sram_disable
+  pop  af
+  jr   z, _sram_ok
+  ld   a, $03                ; RED: SRAM $8800 not usable
+  call rt_boot_beacon
+_sram_halt:
+  jr   _sram_halt
+_sram_ok:
+.endif
+  ; BEACON green: runtime init complete, entering translated reset.
+.ifdef NES_CHR_RAM
+  ld   a, $0C
+  call rt_boot_beacon
+.endif
   ; Phase R: establish X/Y residency (D = X, E = Y) from the shadows.
   ld   a, ($cb00)
   ld   d, a
@@ -329,10 +357,36 @@ boot_main:
 ; ─── irq_handler ──────────────────────────────────────────────────────────────
 .section "irq_handler" free
 
+; Boot beacon: A = border color (CRAM format); writes VDP reg 7 so the
+; overscan color reports boot progress on real emulators.
+rt_boot_beacon:
+  push af
+  ld   a, $11                ; CRAM index 17 (sprite palette entry 1)
+  out  ($bf), a
+  ld   a, $c0
+  out  ($bf), a              ; CRAM write command
+  pop  af
+  out  ($be), a              ; the color itself
+  ld   a, $01
+  out  ($bf), a
+  ld   a, $87                ; reg 7 = backdrop -> entry 17
+  out  ($bf), a
+  ret
+
 irq_handler:
   push af
   ld  a, $01
   ld  ($cb7e), a            ; in-handler flag (nesting-aware ei gating)
+.ifdef NES_CHR_RAM
+  ld  a, ($cbe7)
+  or  a
+  jr  nz, _hb_done
+  ld  a, $01
+  ld  ($cbe7), a
+  ld  a, $0C                ; BEACON cyan: first frame IRQ reached
+  call rt_boot_beacon
+_hb_done:
+.endif
   pop af
   push af
   push hl
@@ -425,10 +479,28 @@ _present_wait_vblank:
   jr  z, _present_no_reg1
   ld  b, 1
   call vdp_set_register
+.ifdef NES_CHR_RAM
+  ld  a, $3F                ; BEACON white: display-enable applied
+  call rt_boot_beacon
+.endif
   xor a
   ld  ($cb2d), a
 _present_no_reg1:
 .ifdef NES_CHR_RAM
+  ; Deferred variant-cache flush (BG table switched; see ppu.s).
+  ld  a, ($cb7f)
+  or  a
+  jr  z, _present_no_fcflush
+  xor a
+  ld  ($cb7f), a
+  push de
+  ld  hl, $d600
+  ld  de, $d601
+  ld  bc, $03ff
+  ld  (hl), $ff
+  ldir
+  pop de
+_present_no_fcflush:
   ; Dirty band (rows 0-3): re-materialize from the selected page's raw
   ; CIRAM (write-time page gating is unsound; see ntmap.s).
   ld  a, ($cb78)
@@ -515,6 +587,16 @@ _irq_call_translated_nmi:
   ; by the $CB08 check on the nested entry — NES-equivalent either way.
   xor a
   ld  ($cb7e), a            ; leaving handler context (helpers may ei)
+.ifdef NES_CHR_RAM
+  ld  a, ($cbe8)
+  or  a
+  jr  nz, _nb_done
+  ld  a, $01
+  ld  ($cbe8), a
+  ld  a, $0F                ; BEACON: first translated NMI
+  call rt_boot_beacon
+_nb_done:
+.endif
   ei
   call translated_nmi       ; jumps to the profile/ROM NMI vector
   di

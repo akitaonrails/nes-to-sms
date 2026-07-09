@@ -815,3 +815,15 @@ addr = 0x815a
 [[bank_entry]]
 bank = 0
 addr = 0x816e
+
+[[function]]
+addr = 0xe9ca
+name = "func_E9CA"
+
+[[bank_entry]]
+bank = 0
+addr = 0xb859
+
+[[function]]
+addr = 0xe8e4
+name = "func_E8E4"

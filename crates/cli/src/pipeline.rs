@@ -651,6 +651,12 @@ pub fn run(args: &Args) -> Result<String, Error> {
             }
             if should_rotate {
                 section_idx += 1;
+                if banked && section_idx > 11 {
+                    return Err(Error::Diagnostic(format!(
+                        "translated code overflows the banked 512K layout \
+                         (section {section_idx} > 11; banks 16+ hold PRG data)"
+                    )));
+                }
                 program.section(&format!("generated_code_{section_idx}"));
                 program.set_section_placement(
                     TRANSLATED_BANK_BASE + section_idx as u8,
@@ -915,10 +921,10 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
     };
     let cfg = ProjectConfig {
-        // NROM: 512 KiB (H.10 body inlining outgrew 304). Banked mappers:
-        // 1 MiB — NES PRG data banks sit at SMS banks 36+ (the Sega mapper
-        // addresses 64 banks; emulators handle 1 MiB fine).
-        rom_kib: if banked { 1024 } else { 512 },
+        // 512 KiB for everything: NROM translated uses banks 4-23;
+        // banked carts use translated 4-15 + PRG data 16-23 + assets
+        // 24-30 (1 MiB ROMs rendered black on real emulators).
+        rom_kib: 512,
         region: 0x4C,
         title: truncate_title(&prof.rom.name),
         mirroring,

@@ -109,22 +109,16 @@ _ppu_w_ctrl:
   ld   ($cb78), a
 _pwc_no_flip:
   ; BG pattern-table switch (bit 4): variant cache keys are per-table
-  ; tile indices — flush FC so stale (other-table) slots don't serve.
+  ; tile indices. Games toggle PPUCTRL constantly during uploads —
+  ; flush LAZILY (flag $CB7F; the presentation flushes once per frame
+  ; at most). Rendering is off during upload bursts, so a briefly
+  ; stale variant can't be seen.
   ld   a, ($cb08)
   xor  c
   and  $10
   jr   z, _pwc_no_tflip
-  push hl
-  push de
-  push bc
-  ld   hl, $d600
-  ld   de, $d601
-  ld   bc, $03ff
-  ld   (hl), $ff
-  ldir
-  pop  bc
-  pop  de
-  pop  hl
+  ld   a, $01
+  ld   ($cb7f), a
 _pwc_no_tflip:
   ld   a, c
   pop  bc

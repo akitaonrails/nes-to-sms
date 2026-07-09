@@ -194,6 +194,30 @@ rt_indirect_jmp:
 ; restore on return included). Miss -> loud trap ($CB1D=$E2, target in
 ; $CB1B/1C) — fail closed, never run raw NES bytes.
 rt_banked_dispatch:
+  ; MRU fast path: repeated dispatches to the same (bank, target) —
+  ; loops far-calling one routine — skip the table scan entirely.
+  ; $CBE0..$CBE6: tgt lo, tgt hi, nes bank, sms bank, label lo, label hi, valid.
+  ld   a, ($cbe6)
+  or   a
+  jr   z, _bd_slow
+  ld   a, ($cbe0)
+  cp   c
+  jr   nz, _bd_slow
+  ld   a, ($cbe1)
+  cp   b
+  jr   nz, _bd_slow
+  ld   a, ($cbe2)
+  ld   l, a
+  ld   a, ($cb62)
+  cp   l
+  jr   nz, _bd_slow
+  ld   a, ($cbe4)
+  ld   c, a
+  ld   a, ($cbe5)
+  ld   b, a
+  ld   a, ($cbe3)           ; A = sms bank, BC = label
+  jp   rt_far_gate
+_bd_slow:
   di                        ; the table scan remaps slot 1 WITHOUT the
                             ; $CB14 discipline — a nested handler would
                             ; restore the caller's bank mid-scan and the
@@ -241,11 +265,15 @@ _bd_skip:
   inc  hl                   ; skip label hi
   jr   _bd_loop
 _bd_hit:
-  ; Diagnostics: remember the last matched (target, entry-bank).
+  ; Diagnostics + MRU key: the matched (target, entry-bank).
   ld   a, c
   ld   ($cb7a), a
+  ld   ($cbe0), a
   ld   a, b
   ld   ($cb7b), a
+  ld   ($cbe1), a
+  ld   a, ($cb62)
+  ld   ($cbe2), a           ; keyed on the LIVE bank (what the fast path compares)
   ld   a, (hl)
   ld   ($cb7c), a           ; matched entry's NES bank ($FF = fixed)
   inc  hl                   ; -> sms bank byte
@@ -259,6 +287,14 @@ _bd_hit:
   ld   ($cb14), a
   ld   ($fffe), a
   ld   a, e                 ; A = target's sms bank, BC = label
+  ld   ($cbe3), a
+  ld   a, c
+  ld   ($cbe4), a
+  ld   a, b
+  ld   ($cbe5), a
+  ld   a, $01
+  ld   ($cbe6), a           ; MRU valid
+  ld   a, e
   pop  de                   ; restore resident X/Y
   push af
   ld   a, ($cb7e)

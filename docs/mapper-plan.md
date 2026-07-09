@@ -281,3 +281,29 @@ may land as "CV3-specific subset of MMC5".
 Per milestone: reference-bus mapper first; then trap-driven
 iteration to boot; then a recorded route with full-frame RAM parity;
 SMB three-route + Alter Ego regression on every commit.
+
+### Real-pacing investigation state (end of marathon session)
+
+Instrumented environments (trace, FD) run CV1 completely: task engine
+in lockstep with the reference, screens cycling, recognizable
+courtyard/intro renders. REAL emulators (Mednafen, GPGX) stall in
+early boot. Evidence chain from the boot beacons (border-color
+milestones, NES_CHR_RAM builds only) + savestate forensics:
+- boot entry, runtime-init, first frame IRQ, first translated NMI,
+  and the first PPUMASK-driven reg-1 application ALL fire;
+- the handler's SAT upload writes VRAM (savestate shows the SAT);
+- the game's OWN uploads (NT/pattern via $2007) never begin — VRAM
+  outside the SAT is empty at 40s;
+- SRAM at $8800 read/write self-test PASSES on Mednafen.
+So the game wedges between its first NMIs and its first PPUDATA
+burst — only under real pacing. The NMI nesting-depth gate (max 2
+in-flight translated NMIs, $CBE9) was added on principle (unbounded
+nesting under overrun = stack death) but did not resolve it.
+
+NEXT SESSION (the decisive tool): a pacing-hostile trace mode —
+real per-frame step budgets, level-held IRQ re-fire semantics, and
+$FF RAM init — to reproduce the stall inside the debuggable harness,
+then the usual forensics. Also: boot beacons + SRAM self-test stay
+(NES_CHR_RAM-guarded); MRU dispatch cache + deferred FC flush landed
+(boot ~2x faster); 512K compact banked layout (1 MiB was never the
+issue but compactness is safer across emulators).
