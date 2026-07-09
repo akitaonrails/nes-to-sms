@@ -2789,6 +2789,10 @@ fn main() {
     // Frame at which SMB first enabled NMI; scripts count from here.
     let mut script_frame_base: Option<usize> = None;
     let mut checkpoint_dump_failed = false;
+    let zpy_log_pc: Option<u16> = std::env::var("SMS_LOG_ZPY")
+        .ok()
+        .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+    let mut zpy_logged = 0usize;
     let mut prev_frame_step = 0usize;
     let mut prev_frame_vram_writes = 0u32;
     let mut prev_frame_cram_writes = 0u32;
@@ -2834,6 +2838,18 @@ fn main() {
                 bus.slot_bank[2],
                 bus.ram[0x0B1A],
             );
+        }
+        if let Some(zpy_pc) = zpy_log_pc {
+            if pc == zpy_pc && zpy_logged < 40 {
+                let zp = cpu.b;
+                let lo = bus.ram[zp as usize];
+                let hi = bus.ram[zp.wrapping_add(1) as usize];
+                eprintln!(
+                    "ZPY call #{zpy_logged}: zp=${zp:02X} ptr=${hi:02X}{lo:02X} Y=${:02X} bank62={:02X}",
+                    cpu.e, bus.ram[0x0B62]
+                );
+                zpy_logged += 1;
+            }
         }
         if first_ram_exec_step.is_none() && pc >= 0xC000 {
             first_ram_exec_step = Some((step, pc));

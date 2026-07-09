@@ -129,11 +129,20 @@ late .define compiled the mapper shim out entirely; rt_mapper_write
 clobbered A (broke the double-STA bus-conflict idiom).
 
 CV1 now: boots, uploads CHR, switches banks, dispatches its master
-task table (17 entries via the $CA6D jump engine). BLOCKED on a
-PPU-handshake poll inside a DI loop (L_ECEA/L_EE35/L_EF43 cycle,
-~2.6K iterations) — same class as SMB's sprite-0 handshake, needs
-CV1's specific $2002/vblank expectation modeled. Next work item,
-then CHR-RAM visuals verification and the level-1 parity route.
+task table. BLOCKED inside the FIRST real NMI: _irq_call_translated_nmi
+fires once and never returns. Forensics (SMS_LOG_ZPY + control-transfer
+ring + per-callee SMS_WATCH_PC): the NMI line runs L_C8CD once, then
+the task dispatcher L_C1E4 is entered THREE times (re-entry without
+completing the NMI), task 0 (L_b6_B7DC) entered once; L_CCEE (late in
+the NMI line) never reached. The endless cycle spans object-physics
+routines (L_ECEA/EE35/EF43, ASL-heavy fixed-point) + per-lap bank
+switches + PPU reg writes — the shape of the logo animation task
+pumping forever. (zp),Y source reads verified sane ($889E bank 0,
+$FDD3 fixed). Init RAM snapshot matches the reference byte-for-byte;
+frame-0 write streams identical (58/58). NEXT PROBE: instrument Z80 SP
+at the three dispatcher entries — legit nested dispatch vs return-path
+corruption (far-gate/JumpEngine ret interplay). Then CHR-RAM visuals
+and the level-1 parity route.
 
 ## M2 — MMC1
 
