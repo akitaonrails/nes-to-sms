@@ -2803,6 +2803,10 @@ fn main() {
         .ok()
         .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok());
     let mut zpy_logged = 0usize;
+    let mapped_log_pc: Option<u16> = std::env::var("SMS_LOG_MAPPED")
+        .ok()
+        .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+    let mut mapped_logged = 0usize;
     let mut prev_frame_step = 0usize;
     let mut prev_frame_vram_writes = 0u32;
     let mut prev_frame_cram_writes = 0u32;
@@ -2853,6 +2857,19 @@ fn main() {
                 bus.ram[0x0B73] as u16 | (bus.ram[0x0B74] as u16) << 8,
                 bus.ram[0x0B75] as u16 | (bus.ram[0x0B76] as u16) << 8,
             );
+        }
+        if let Some(mw_pc) = mapped_log_pc {
+            if pc == mw_pc && mapped_logged < 60 {
+                let de = (cpu.d as u16) << 8 | cpu.e as u16;
+                if (0x3780..0x37C0).contains(&de) && cpu.a != 0 && cpu.a != 0x40 {
+                    eprintln!(
+                        "MAPPED #{mapped_logged}: A=${:02X} DE=${de:04X} (cell {})",
+                        cpu.a,
+                        (de - 0x3700) / 2
+                    );
+                    mapped_logged += 1;
+                }
+            }
         }
         if let Some(zpy_pc) = zpy_log_pc {
             if pc == zpy_pc && zpy_logged < 40 {

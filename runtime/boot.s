@@ -125,6 +125,7 @@ boot_main:
   ld  ($cb29), a            ; overrun flag (see irq_handler pacing read)
   ld  ($cb2a), a            ; projected window start column (ntmap.s)
   ld  ($cb62), a            ; NES PRG bank shadow (banked mappers; 0 = bank 0)
+  ld  ($cb78), a            ; band-dirty flag (rows 0-3 re-materialization)
 
   ; I/O port control: configure both controller ports as inputs (TR/TH
   ; lines included). Real SMS games write $3F=$FF at boot; without it,
@@ -422,6 +423,15 @@ _present_wait_vblank:
   xor a
   ld  ($cb2d), a
 _present_no_reg1:
+.ifdef NES_CHR_RAM
+  ; Dirty band (rows 0-3): re-materialize from the selected page's raw
+  ; CIRAM (write-time page gating is unsound; see ntmap.s).
+  ld  a, ($cb78)
+  or  a
+  jr  z, _present_band_clean
+  call rt_nt_materialize_band
+_present_band_clean:
+.endif
   call rt_sat_upload
   ; Project columns entering the visible window (E.5c) with the same
   ; playfield scroll the apply below will present: post pair when the

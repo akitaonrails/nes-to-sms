@@ -181,10 +181,28 @@ RENDERING DIAGNOSIS (full chain, verified cell-by-cell):
    these two triggers. Raw CIRAM is already byte-correct (glyphs
    verified), CHR uploads byte-perfect, so materialization alone
    should produce the license/logo/title screens.
-5. Also: ppu_mask stays $00 in the clean-room build (earlier
-   polluted builds reached $1E) — find what the game waits on before
-   enabling rendering (likely its VRAM-queue completion state).
-6. Then: title/demo visuals and the level-1 parity route. Also new this round: oversize
+5. IMPLEMENTED (guarded behind NES_CHR_RAM; SMB path byte-identical):
+   teleport/page-flip full-window materialization (delta >= 5 now
+   projects all 32 columns, rows 0-27, instead of bailing) and
+   present-time BAND materialization (rows 0-3 raw-only at write
+   time + $CB78 dirty flag; rt_nt_materialize_band projects the
+   SELECTED page's rows 0-3, cols 0-31). _nt_project_col gained an
+   end-row parameter ($CB79) with _all/_band variants.
+6. CURRENT STATE: checkpoints render ALL BLACK — possibly CORRECT: at
+   frame ~706 CV1 sits stalled after the license fade-out (CRAM dark).
+   The earlier 'garbled fragments' were stale pre-materialization
+   VRAM. NEXT SESSION, in order:
+   a. THE STALL: the subject freezes post-license while the reference
+      advances (ref reaches ram[$18]=1 in 3 frames; subject never).
+      Hunt the wait byte: FD write-fork near the last matching frame;
+      ppu_mask never enables in the subject.
+   b. Verify rendering on a LIT frame once the stall clears (dump
+      CRAM at checkpoint time to confirm palette state first —
+      SMS_DUMP_RAM works for RAM; add a CRAM dump if needed).
+   c. Watch variant-pool thrash: band materialization re-resolves 128
+      cells per dirty presentation; consider materialize-once-per-
+      select-flip if the ring churns.
+7. Then: title/demo visuals and the level-1 parity route. Also new this round: oversize
 data-walk stubs (mis-rooted lifts up to 90 KiB get loud trap stubs),
 wrap-safe + post-emit section rotation, snapshot keys for banked
 units, indirect-landing ground-truth harvest (136 entries).

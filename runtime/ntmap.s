@@ -288,22 +288,25 @@ rt_nt_route_tile_write:
   or   b
   cp   4
   jr   nc, _nrt_col_check
-  ; Rows 0-3 are the status-bar band: the fold slots display the page
-  ; the game has SELECTED (PPUCTRL bits 0-1 -> the $2400 bit). SMB shows
-  ; NT-A there (streamed NT-B column tops must never garble the HUD);
-  ; CV1 renders whole screens from NT-B. Writes to the selected page
-  ; render; the other page raw-stores only.
-  ld   a, ($cb08)
-  and  $01
-  rlca
-  rlca                      ; PPUCTRL NT select bit0 -> bit 2 ($2400 bit)
-  ld   b, a
+.ifdef NES_CHR_RAM
+  ; Rows 0-3 are the status-bar band. Write-time page gating is
+  ; unsound (PPUCTRL's select at write time need not match display
+  ; time — CV1 flips modes during column uploads). Band writes are
+  ; RAW-ONLY; the presentation re-materializes rows 0-3 from the
+  ; SELECTED page's raw CIRAM whenever the band is dirty ($CB78).
+  ld   a, $01
+  ld   ($cb78), a
+  or   a                    ; carry clear: raw only
+  ret
+.else
+  ; SMB-proven band rule: NT-A rows 0-3 render (fixed HUD); NT-B
+  ; column tops raw-store only.
   ld   a, d
   and  $04
-  cp   b
   jr   z, _nrt_in
-  or   a                    ; carry clear: non-selected page row 0-3 -> raw only
+  or   a
   ret
+.endif
 _nrt_col_check:
   ; column = (D bit2) * 32 | (E & $1F)   (vertical mirroring: $24xx = page 1)
   ld   a, d
@@ -351,7 +354,7 @@ rt_nt_project_scroll:
   and  $3f
   ret  z
   cp   5
-  ret  nc                   ; teleport/left scroll: the game redraws itself
+  jr   nc, _nps_teleport    ; page flip/teleport: window content is raw-only
   ld   d, a                 ; D = entering-column count (1-4)
   ld   a, b
   add  a, 32
@@ -367,14 +370,76 @@ _nps_loop:
   dec  d
   jr   nz, _nps_loop
   ret
+_nps_teleport:
+  ; The window moved by 5+ columns at once (PPUCTRL page flip or a
+  ; teleport). The screen the game drew there went through RAW stores
+  ; only (out-of-window at write time) — materialize the ENTIRE window
+  ; from raw CIRAM, including the rows 0-3 band. ~896 mapped writes:
+  ; fine with rendering off (page flips happen behind disabled video);
+  ; a one-frame overrun otherwise.
+  ld   a, ($cb2a)           ; new window start
+  ld   d, 32
+_npt_loop:
+  push af
+  push de
+  call _nt_project_col_all
+  pop  de
+  pop  af
+  inc  a
+  and  $3f
+  dec  d
+  jr   nz, _npt_loop
+  ret
+
+; rt_nt_materialize_band — project rows 0-3, columns 0-31 of the
+; PPUCTRL-SELECTED page from raw CIRAM into the folded band (called
+; from the presentation when $CB78 is set; the band shows scroll 0).
+; Clobbers: AF, BC, DE, HL.
+rt_nt_materialize_band:
+  xor  a
+  ld   ($cb78), a
+  ld   a, ($cb08)
+  and  $01
+  rrca
+  rrca
+  rrca                      ; select bit 0 -> bit 5 (= column 32)
+  ld   d, 32
+_nmb_loop:
+  push af
+  push de
+  call _nt_project_col_band
+  pop  de
+  pop  af
+  inc  a
+  dec  d
+  jr   nz, _nmb_loop
+  ret
 
 ; _nt_project_col — copy rows 4-27 of one column from raw CIRAM into the
 ; folded VRAM window through the CHR mapper (keeps shadows coherent).
-; Entry: A = column (0-63). Clobbers: AF, BC, DE, HL.
+; _nt_project_col_all — same, rows 0-27 (page-flip materialization).
+; _nt_project_col_band — rows 0-3 only (band re-materialization).
+; Entry: A = column (0-63). Clobbers: AF, BC, DE, HL. End row in $CB79.
+_nt_project_col_band:
+  ld   ($cb2b), a
+  xor  a
+  ld   ($cb2c), a
+  ld   a, 4
+  ld   ($cb79), a
+  jr   _npc_row
+_nt_project_col_all:
+  ld   ($cb2b), a
+  xor  a
+  ld   ($cb2c), a
+  ld   a, 28
+  ld   ($cb79), a
+  jr   _npc_row
 _nt_project_col:
   ld   ($cb2b), a
   ld   a, 4
   ld   ($cb2c), a
+  ld   a, 28
+  ld   ($cb79), a
 _npc_row:
   ; DE = NES tile address for (row, col)
   ld   a, ($cb2b)
@@ -423,7 +488,8 @@ _npc_row:
   ld   a, ($cb2c)
   inc  a
   ld   ($cb2c), a
-  cp   28
+  ld   hl, $cb79
+  cp   (hl)
   jr   c, _npc_row
 
   ; Re-apply the column's attributes from the raw attr shadow: the tile
