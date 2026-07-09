@@ -2763,6 +2763,16 @@ fn main() {
     let mut cpu = Cpu::new();
     cpu.pc = 0x0000;
     cpu.sp = 0xDFF0;
+    // SMS_LOAD_STATE=<mednafen .mcs>: transplant a real-emulator crash
+    // state into z80_emu and run forward — divergence localizes CPU
+    // emulation differences; stuck-state reproduces the real hang.
+    if let Ok(path) = std::env::var("SMS_LOAD_STATE") {
+        load_mednafen_state(&path, &mut cpu, &mut bus);
+        eprintln!(
+            "LOADED STATE: PC=${:04X} SP=${:04X} task=${:02X} slot=[{},{},{}] iff1={}",
+            cpu.pc, cpu.sp, bus.ram[0x18], bus.slot_bank[0], bus.slot_bank[1], bus.slot_bank[2], cpu.iff1
+        );
+    }
     let mut stack_watermark = Z80StackWatermark::new(cpu.sp);
 
     // PC histogram + last-100 ring buffer.
@@ -6258,6 +6268,90 @@ fn write_checkpoint_sat_diagnostics<W: std::io::Write>(
 /// so we can verify what the SMS *would* show without needing mednafen.
 /// Handles background nametable, scroll, and a coarse line-scroll split; sprites
 /// are overlaid after the background pass.
+fn load_mednafen_state(path: &str, cpu: &mut Cpu, bus: &mut SmsBus) {
+    // Expects an ALREADY-DECOMPRESSED Mednafen state (gunzip the .mcs
+    // first: `gzip -dc state.mcs > state.raw`).
+    let d = std::fs::read(path).expect("state file");
+    // Top-level chunks: 32-byte name + u32 LE size.
+    let mut chunks: std::collections::HashMap<String, (usize, usize)> = Default::default();
+    let mut j = 8;
+    while j + 36 < d.len() {
+        let name = &d[j..j + 32];
+        if name[0] != 0 && name.iter().all(|&b| b == 0 || (32..127).contains(&b)) {
+            let size = u32::from_le_bytes(d[j + 32..j + 36].try_into().unwrap()) as usize;
+            let nm: String = name.iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
+            if size > 0 && j + 36 + size <= d.len() && nm.len() >= 3 {
+                chunks.insert(nm, (j + 36, size));
+                j += 36 + size;
+                continue;
+            }
+        }
+        j += 1;
+    }
+    // Sub-chunks: 1-byte name-len + name + u32 LE size + data.
+    let sub = |off: usize, size: usize| -> std::collections::HashMap<String, Vec<u8>> {
+        let mut out = Default::default();
+        let mut m: std::collections::HashMap<String, Vec<u8>> = out;
+        let end = off + size;
+        let mut j = off;
+        while j + 5 < end {
+            let nl = d[j] as usize;
+            if nl == 0 || nl > 24 { break; }
+            let name: String = d[j + 1..j + 1 + nl].iter().map(|&b| b as char).collect();
+            let sz = u32::from_le_bytes(d[j + 1 + nl..j + 5 + nl].try_into().unwrap()) as usize;
+            m.insert(name, d[j + 5 + nl..(j + 5 + nl + sz).min(d.len())].to_vec());
+            j += 5 + nl + sz;
+        }
+        out = m;
+        out
+    };
+    let w16 = |v: &[u8]| u16::from_le_bytes([v[0], v[1]]);
+    if let Some(&(o, sz)) = chunks.get("Z80") {
+        let z = sub(o, sz);
+        let af = w16(&z["AF"]); cpu.a = (af >> 8) as u8; cpu.f = af as u8;
+        let bc = w16(&z["BC"]); cpu.b = (bc >> 8) as u8; cpu.c = bc as u8;
+        let de = w16(&z["DE"]); cpu.d = (de >> 8) as u8; cpu.e = de as u8;
+        let hl = w16(&z["HL"]); cpu.h = (hl >> 8) as u8; cpu.l = hl as u8;
+        cpu.af_shadow = w16(&z["AF_"]); cpu.bc_shadow = w16(&z["BC_"]);
+        cpu.de_shadow = w16(&z["DE_"]); cpu.hl_shadow = w16(&z["HL_"]);
+        cpu.sp = w16(&z["SP"]); cpu.pc = w16(&z["PC"]);
+        cpu.iff1 = z["IFF1"][0] != 0; cpu.iff2 = z["IFF2"][0] != 0;
+    }
+    if let Some(&(o, sz)) = chunks.get("MAIN") {
+        let m = sub(o, sz);
+        if let Some(ram) = m.get("RAM") {
+            for (i, &b) in ram.iter().take(0x2000).enumerate() {
+                bus.ram[i] = b; // $C000-$DFFF
+            }
+        }
+    }
+    if let Some(&(o, sz)) = chunks.get("VDP") {
+        let v = sub(o, sz);
+        if let Some(vram) = v.get("vram") {
+            for (i, &b) in vram.iter().take(0x4000).enumerate() { bus.vram[i] = b; }
+        }
+        if let Some(cram) = v.get("cram") {
+            for (i, &b) in cram.iter().take(0x20).enumerate() { bus.cram[i] = b; }
+        }
+        if let Some(reg) = v.get("reg") {
+            for (i, &b) in reg.iter().take(16).enumerate() { bus.vdp_regs[i] = b; }
+        }
+    }
+    if let Some(&(o, sz)) = chunks.get("CART") {
+        let c = sub(o, sz);
+        if let Some(sram) = c.get("sram") {
+            for (i, &b) in sram.iter().take(CART_RAM_SIZE).enumerate() { bus.cart_ram[i] = b; }
+        }
+        if let Some(fcr) = c.get("fcr") {
+            // fcr[0]=$FFFC control, [1]=$FFFD slot0, [2]=$FFFE slot1, [3]=$FFFF slot2.
+            bus.mapper_control = fcr[0];
+            bus.slot_bank[0] = fcr[1];
+            bus.slot_bank[1] = fcr[2];
+            bus.slot_bank[2] = fcr[3];
+        }
+    }
+}
+
 fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
     use std::io::Write;
     const W: usize = 256;

@@ -343,3 +343,36 @@ SMS_REAL_PACING hostile trace mode (15K insn/frame, boolean pending,
 $FF RAM), which found + cleared one real lag-path trap (0,$820D); the
 presentation re-entrancy guard ($CBEA); boot beacons + SRAM
 self-test; MRU dispatch cache; NMI depth gate; 512K compact layout.
+
+### BREAKTHROUGH: the real-emulator hang is a CPU-emulation divergence
+
+Built SMS_LOAD_STATE=<raw mednafen state> in trace-sms: transplants a
+Mednafen savestate (RAM, VRAM, CRAM, cart SRAM, bank latches, full
+Z80 regs) into z80_emu and runs forward. (Gunzip the .mcs first;
+parser = named chunks MAIN/Z80/VDP/CART.)
+
+DECISIVE RESULT: transplanting Mednafen's STUCK state (task counter
+$18 = 0, frozen there for 30s across 10 savestates) and running
+forward, MY emulator ADVANCES the task to 1. So z80_emu, given
+Mednafen's exact state, makes progress Mednafen never does — the hang
+is a **CPU-emulation divergence**, not data/pacing/RNG. z80_emu
+executes some instruction differently from Mednafen's accurate Z80,
+and on that difference CV1 progresses in-harness but hangs on real
+hardware. This is the 'trace-green != Mednafen-correct' class: a
+flag/opcode bug (in the generated flag-reconstruction, or in
+z80_emu) that z80_emu and the generator happen to AGREE on, so the
+frame-diff oracle — which uses z80_emu as its subject — structurally
+cannot see it. (The 4 anchor-phase byte diffs are unrelated noise.)
+
+Corollary: EVERY translated game shares whatever this is; CV1 just
+exercises the path SMB doesn't.
+
+NEXT (the real fix): differential Z80 execution against an
+INDEPENDENT reference Z80 (vendor/port a known-correct core), lock-
+step against z80_emu on the CV1 task-0 code path; first divergent
+instruction = the bug. Candidates to scrutinize first: DAA, the
+rotate/shift P/V and undocumented 3/5 flag bits, block-op flags,
+16-bit ADC/SBC (ED-prefixed) flags, and EI/interrupt-acceptance
+timing — whichever the 6502->Z80 flag-reconstruction emitters lean
+on. Then re-verify CV1 on Mednafen and re-run the SMB gate (the fix
+may change z80_emu, so SMB parity must be re-confirmed).
