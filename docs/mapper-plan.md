@@ -307,3 +307,39 @@ then the usual forensics. Also: boot beacons + SRAM self-test stay
 (NES_CHR_RAM-guarded); MRU dispatch cache + deferred FC flush landed
 (boot ~2x faster); 512K compact banked layout (1 MiB was never the
 issue but compactness is safer across emulators).
+
+### SMOKING GUN (marathon session close): Z80 executes RAM on Mednafen
+
+A Mednafen savestate taken 60s into a real-emulator run: the Z80 PC
+is $F314 — which is RAM ($C000-$DFFF mirrored), and disassembles as
+data, not code. The Z80 has jumped into RAM and is executing garbage.
+The emulated 6502 task counter ($18) is still 0 — the game never
+reached task 1. This is a REAL CRASH specific to real emulators; no
+harness (trace, FD, even the new SMS_REAL_PACING hostile mode)
+reproduces it — they idealize whatever triggers the wild jump.
+
+Candidate causes (next-session hunt, in rough priority):
+1. A far-gate / rt_far_gate corruption path that only fires under a
+   specific bank/interrupt interleaving the harness never hits — a
+   bad $CB14/$FFFE/$FFFF interaction pushing a garbage return.
+2. rt_brk / translated_irq returning to a corrupted address (the
+   BRK-as-interrupt path is new and manipulates the stack).
+3. Stack overflow into low RAM under sustained real-pacing overrun
+   (the depth gate caps NMI nesting but far-call/dispatch nesting is
+   uncapped) — SP was $30DD in the savestate (healthy there, but a
+   transient dip could corrupt).
+4. Uninitialized RAM read the harness zero-fills but real HW leaves
+   as $FF (the hostile mode $FF-fills but didn't trigger it).
+
+TOOL TO BUILD FIRST: a Z80 execution-address guard in the trace
+(trap the instant PC leaves ROM slots 0-2 / enters $C000+), then run
+under every pacing/RNG/input permutation until it fires; OR transplant
+the Mednafen savestate's full state (RAM+regs+bank latches) into
+z80_emu and single-step forward from the crash edge. The savestate
+parser (docs: gzip + named chunks MAIN/Z80/VDP/CART) already works.
+
+What DID land this session and holds (SMB byte-for-byte): the
+SMS_REAL_PACING hostile trace mode (15K insn/frame, boolean pending,
+$FF RAM), which found + cleared one real lag-path trap (0,$820D); the
+presentation re-entrancy guard ($CBEA); boot beacons + SRAM
+self-test; MRU dispatch cache; NMI depth gate; 512K compact layout.

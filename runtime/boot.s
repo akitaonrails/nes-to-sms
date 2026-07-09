@@ -132,6 +132,7 @@ boot_main:
   ld  ($cbe7), a            ; beacon: first-IRQ
   ld  ($cbe8), a            ; beacon: first-NMI
   ld  ($cbe9), a            ; translated-NMI nesting depth
+  ld  ($cbea), a            ; presentation-in-progress guard
 
   ; I/O port control: configure both controller ports as inputs (TR/TH
   ; lines included). Real SMS games write $3F=$FF at boot; without it,
@@ -468,6 +469,18 @@ _irq_runtime_ready:
   ; flicker in heavy scenes). If the beam is in the active area, wait for
   ; the next VBlank start before touching VRAM. The main thread is idle
   ; under sustained overrun, so the wait costs nothing real.
+  ; PRESENTATION RE-ENTRANCY GUARD: with a main-in-NMI game, every
+  ; per-frame handler is nested inside the resident NMI. If a nested
+  ; handler interrupts an IN-PROGRESS presentation (or its vblank
+  ; wait), doing another full presentation here livelocks the machine:
+  ; the wait burns a frame with DI, so an INT is always pending and
+  ; the interrupted code advances one instruction per frame. Skip
+  ; presentation entirely in that case (the outer one completes).
+  ld  a, ($cbea)
+  or  a
+  jp  nz, _present_skip_all
+  ld  a, $01
+  ld  ($cbea), a
 _present_wait_vblank:
   in  a, ($7e)               ; V-counter
   cp  $e0
@@ -526,7 +539,10 @@ _irq_proj_go:
   call rt_nt_project_scroll
   call _apply_frame_scroll
   call vbuf_flush
+  xor a
+  ld  ($cbea), a            ; presentation complete (re-entrancy guard clear)
 
+_present_skip_all:
   ; Start each translated NMI before the approximated sprite-0 hit point.
   ; SMB first waits for PPUSTATUS bit 6 to clear, then waits for it to set.
   ; The status reader advances this phase on polling so those barriers can

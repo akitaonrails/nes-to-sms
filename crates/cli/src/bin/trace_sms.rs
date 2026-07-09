@@ -19,6 +19,17 @@ const BANK_SIZE: usize = 0x4000;
 const CART_RAM_SIZE: usize = 0x8000;
 const RAM_SIZE: usize = 0x2000;
 const IRQ_PERIOD: usize = 60_000;
+
+/// SMS_REAL_PACING=1: hostile, hardware-honest pacing — ~15K
+/// instructions per frame (≈59,736 T-states at ~4 T/instruction),
+/// boolean pending semantics (missed frame INTs don't queue), and
+/// $FF-initialized RAM. Reproduces real-emulator stalls in-harness.
+fn real_pacing() -> bool {
+    std::env::var("SMS_REAL_PACING").is_ok()
+}
+fn irq_period() -> usize {
+    if real_pacing() { 15_000 } else { IRQ_PERIOD }
+}
 const RT_PPU_WRITE_FALLBACK_ADDR: u16 = 0x0068;
 const D3XX_TILE_DIRTY_BITMAP_BYTES: usize = 240;
 const D3XX_ATTR_DIRTY_BITMAP_BYTES: usize = 16;
@@ -870,7 +881,7 @@ impl SmsBus {
             display_enabled_edge: false,
             psg_writes: 0,
             psg_log: Vec::new(),
-            vram: [0; 0x4000],
+            vram: if real_pacing() { [0xFF; 0x4000] } else { [0; 0x4000] },
             cram: [0; 0x20],
             vdp_regs: [0; 16],
             render_scroll_split: None,
@@ -2082,7 +2093,7 @@ fn run_search_steps(
             state.cpu.iff2 = false;
             state.cpu.halted = false;
             state.irqs_fired += 1;
-            state.next_irq_at = state.next_irq_at.saturating_add(IRQ_PERIOD);
+            state.next_irq_at = if real_pacing() { state.step + irq_period() } else { state.next_irq_at.saturating_add(IRQ_PERIOD) };
         }
 
         if state.cpu.halted {
@@ -2100,7 +2111,7 @@ fn run_late_route_search(rom_path: &PathBuf, base_events: &[(usize, u8)]) {
         cpu: Cpu::new(),
         bus: SmsBus::new(rom, 0xFF),
         step: 0,
-        next_irq_at: IRQ_PERIOD,
+        next_irq_at: irq_period(),
         irqs_fired: 0,
         next_button_event: 0,
     };
@@ -2423,7 +2434,7 @@ fn run_end_route_search(rom_path: &PathBuf, base_events: &[(usize, u8)]) {
         cpu: Cpu::new(),
         bus: SmsBus::new(rom, 0xFF),
         step: 0,
-        next_irq_at: IRQ_PERIOD,
+        next_irq_at: irq_period(),
         irqs_fired: 0,
         next_button_event: 0,
     };
@@ -2784,7 +2795,7 @@ fn main() {
     let mut xfer_ring: Vec<(&'static str, u16, u16)> = Vec::with_capacity(256);
 
     // Inject an IRQ every 60k steps (roughly one "frame" of Z80 work).
-    let mut next_irq_at = IRQ_PERIOD;
+    let mut next_irq_at = irq_period();
     let mut line_irq_at: Option<usize> = None;
     let mut irqs_fired = 0usize;
     let mut line_irqs_fired = 0usize;
@@ -2838,6 +2849,20 @@ fn main() {
         let ret_hi = bus.read(cpu.sp.wrapping_add(1)) as u16;
         bus.watch_ret = ret_lo | (ret_hi << 8);
         let op = bus.read(pc);
+        // Wild-jump detector: legitimate execution is only ROM/SRAM
+        // slots 0-2 ($0000-$BFFF). PC in RAM ($C000+) means the Z80
+        // jumped into garbage — the real-emulator crash. Report the
+        // control-transfer ring and halt.
+        if std::env::var("SMS_TRAP_RAM_EXEC").is_ok() && pc >= 0xC000 && step > 300_000 {
+            eprintln!("*** WILD JUMP: PC=${pc:04X} (RAM) at step {step}, irqs={irqs_fired}");
+            eprintln!("  SP=${:04X} last_pc=${:04X} last_op=${:02X}", cpu.sp, last_pc.unwrap_or(0), last_op.unwrap_or(0));
+            eprintln!("  stack: {}", (0..12).map(|i| format!("{:04X}", bus.read(cpu.sp.wrapping_add(i*2)) as u16 | (bus.read(cpu.sp.wrapping_add(i*2+1)) as u16) << 8)).collect::<Vec<_>>().join(" "));
+            eprintln!("  last 24 xfers:");
+            for (k, f, t) in xfer_ring.iter().rev().take(24).rev() {
+                eprintln!("    {k} ${f:04X} -> ${t:04X}");
+            }
+            std::process::exit(7);
+        }
         if first_translated_step.is_none() && (0x4000..=0x7FFF).contains(&pc) {
             first_translated_step = Some(step);
         }
@@ -3217,7 +3242,7 @@ fn main() {
             cpu.halted = false;
             irqs_fired += 1;
             frame_cost_start = Some(cpu.cycles);
-            next_irq_at = next_irq_at.saturating_add(IRQ_PERIOD);
+            next_irq_at = if real_pacing() { step + irq_period() } else { next_irq_at.saturating_add(IRQ_PERIOD) };
         }
 
         if cpu.halted {
