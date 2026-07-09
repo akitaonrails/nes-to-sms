@@ -156,13 +156,23 @@ ANNOTATION DISCIPLINE (hard rule): subject-trap-derived bank entries
 are FORBIDDEN — divergence artifacts annotate garbage roots that
 decode into BRK/JAM data-walks. Only reference-harvest entries
 (FD_LOG_BANK_ENTRIES; now also logs jmp-(ind) landings and RAM_EXEC)
-plus hand-verified bytes may be added. Current wedge: after 793
-frames (license screen fully drawn in CIRAM) the subject dispatches
-jmp-(ind) to zp $0032 — the reference NEVER executes RAM (1200-frame
-probe) — a corrupt-pointer upstream divergence. NEXT: write-fork at
-the deepest matching frame (FD anchored; subject pcs resolve via
-sms.sym). Then the license/title screens and the level-1 parity
-route. Also new this round: oversize
+plus hand-verified bytes may be added. (The 'zp $0032' reading was a
+diagnostic bug: E1 trap ids are LIST INDICES, E2 ids are addresses —
+tools/cv1_verified_loop.py now decodes both.) STATUS: ALL TRANSLATION
+TRAPS CLEAR — CV1 boots, uploads CHR-RAM byte-perfectly (tile $F2
+verified against the reference's new CHR-RAM ground-truth store),
+draws its license screen into CIRAM, and runs with no traps.
+REMAINING, precisely isolated:
+1. BG VARIANT POOL degenerates on CHR-RAM builds: the mapped SMS NT
+   holds tile $001 repeated where raw CIRAM has the correct glyph
+   indices — every (base, S) resolves to one pool slot. Suspects:
+   pool base/size derived from the build-time CHR budget (blank for
+   CHR-RAM), memo keying (runtime/chrmap.s, sat.s memo tables).
+   Note: the trace VDP now implements VRAM reads (the variant
+   readback was getting zeros in-harness before).
+2. Frame stall at ~706: the subject holds at the license screen
+   while the reference advances (input/timer wait to diagnose).
+3. Then: license/logo/title visuals, demo, level-1 parity route. Also new this round: oversize
 data-walk stubs (mis-rooted lifts up to 90 KiB get loud trap stubs),
 wrap-safe + post-emit section rotation, snapshot keys for banked
 units, indirect-landing ground-truth harvest (136 entries).

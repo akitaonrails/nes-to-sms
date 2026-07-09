@@ -165,6 +165,7 @@ rt_indirect_jmp:
   ; Phase R note: DE is the resident X/Y pair — this helper is a JMP
   ; (control transfer), so X/Y must SURVIVE into the target. Use BC for
   ; the pointer instead.
+  ld   ($cb75), hl          ; diagnostics: the POINTER's address
   ld   c, (hl)              ; low byte of target
   inc  hl
   ld   b, (hl)              ; high byte of target

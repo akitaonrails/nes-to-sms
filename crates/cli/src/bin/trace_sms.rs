@@ -1761,8 +1761,18 @@ impl Bus for SmsBus {
     }
     fn in_port(&mut self, port: u8) -> u8 {
         match port & 0xC1 {
-            // VDP data port $BE — read VRAM through latch (not implemented).
-            0x80 => 0x00,
+            // VDP data port $BE — VRAM read through the address latch
+            // (post-increment; the real HW read-buffer prefetch collapses
+            // to a direct read for sequential access, which is what the
+            // CHR-RAM variant readback does).
+            0x80 => {
+                let addr = ((self.vdp_addr_high as u16) << 8) | self.vdp_addr_low as u16;
+                let v = self.vram[(addr & 0x3FFF) as usize];
+                let new = addr.wrapping_add(1);
+                self.vdp_addr_high = (new >> 8) as u8;
+                self.vdp_addr_low = (new & 0xFF) as u8;
+                v
+            }
             // VDP status / control port $BF — return VBlank flag bit toggling.
             0x81 => {
                 self.vdp_status_reads += 1;
@@ -2835,12 +2845,13 @@ fn main() {
             let ret = bus.read(sp) as u16 | ((bus.read(sp.wrapping_add(1)) as u16) << 8);
             eprintln!(
                 "*** first trap at step {step}: unresolved_id=${id:04X} pc=${pc:04X} \
-                 ret=${ret:04X} (call at ${:04X}) slot1_bank={} slot2_bank={} nes_bank={} disp_ret=${:04X}",
+                 ret=${ret:04X} (call at ${:04X}) slot1_bank={} slot2_bank={} nes_bank={} disp_ret=${:04X} ind_ptr=${:04X}",
                 ret.wrapping_sub(3),
                 bus.slot_bank[1],
                 bus.slot_bank[2],
                 bus.ram[0x0B1A],
                 bus.ram[0x0B73] as u16 | (bus.ram[0x0B74] as u16) << 8,
+                bus.ram[0x0B75] as u16 | (bus.ram[0x0B76] as u16) << 8,
             );
         }
         if let Some(zpy_pc) = zpy_log_pc {
@@ -3236,6 +3247,30 @@ fn main() {
     bus.finish_bgv_runtime_recompute_frame();
     bus.finish_d3xx_tile_dirty_frame();
     bus.finish_ram_migration_frame();
+    if let Ok(spec) = std::env::var("SMS_DUMP_VRAM") {
+        if let Some((a, l)) = spec.split_once(':') {
+            if let (Ok(a), Ok(l)) = (
+                usize::from_str_radix(a.trim_start_matches("0x"), 16),
+                usize::from_str_radix(l.trim_start_matches("0x"), 16),
+            ) {
+                let hex: Vec<String> = bus.vram[a..a + l]
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect();
+                println!("VRAM ${a:04X}: {}", hex.join(" "));
+            }
+        }
+    }
+    if let Ok(t) = std::env::var("SMS_DUMP_TILE") {
+        if let Ok(tile) = usize::from_str_radix(t.trim_start_matches("0x"), 16) {
+            let base = tile * 32;
+            let hex: Vec<String> = bus.vram[base..base + 32]
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect();
+            println!("VRAM tile {tile:03X}: {}", hex.join(" "));
+        }
+    }
     println!("=== trace-sms summary ===");
     println!("ROM: {}", rom_path.display());
     println!("steps run: {taken}");

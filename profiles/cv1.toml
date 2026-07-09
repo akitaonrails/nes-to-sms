@@ -767,3 +767,11 @@ addr = 0x93d9
 [[bank_entry]]
 bank = 6
 addr = 0xaae1
+
+[[function]]
+addr = 0xe931
+name = "func_E931"
+
+[[function]]
+addr = 0xe503
+name = "func_E503"

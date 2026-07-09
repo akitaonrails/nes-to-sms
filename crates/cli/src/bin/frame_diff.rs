@@ -228,6 +228,8 @@ struct NesBus {
     last_pc: u16,
     /// UxROM: selected 16 KiB bank at $8000-$BFFF.
     prg_bank: u8,
+    /// CHR-RAM store for pattern-space $2007 writes (ground truth).
+    chr_ram: Vec<u8>,
 }
 
 impl NesBus {
@@ -275,6 +277,7 @@ impl NesBus {
             watch_bank_log: Vec::new(),
             last_pc: 0,
             prg_bank: 0,
+            chr_ram: vec![0u8; 0x3000],
         }
     }
 
@@ -417,6 +420,13 @@ impl oracle_6502::Bus for NesBus {
                     }
                 }
                 if reg == 0x2007 {
+                    // CHR-RAM model: store pattern-space writes so the
+                    // subject's uploaded tiles can be compared against
+                    // ground truth (FD_DUMP_CHRRAM).
+                    let a = self.ppu_addr & 0x3FFF;
+                    if (a as usize) < self.chr_ram.len() {
+                        self.chr_ram[a as usize] = value;
+                    }
                     // Writes advance the VRAM address like reads do.
                     let inc = if self.ppu_ctrl & 0x04 != 0 { 32 } else { 1 };
                     self.ppu_addr = self.ppu_addr.wrapping_add(inc);
@@ -698,6 +708,26 @@ fn run_reference(
     if log_bank_entries {
         for (b, t) in &bank_entry_set {
             eprintln!("BANK_ENTRY bank={b} addr=0x{t:04x}");
+        }
+    }
+    if std::env::var("FD_DUMP_NT").is_ok() {
+        for row in 6..14 {
+            let base = 0x2000 + row * 32;
+            let hex: Vec<String> = bus.chr_ram[base..base + 32]
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect();
+            eprintln!("REF NT row {row:02}: {}", hex.join(" "));
+        }
+    }
+    if let Ok(t) = std::env::var("FD_DUMP_CHRRAM") {
+        if let Ok(tile) = usize::from_str_radix(t.trim_start_matches("0x"), 16) {
+            let base = tile * 16;
+            let hex: Vec<String> = bus.chr_ram[base..base + 16]
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect();
+            eprintln!("CHRRAM tile {tile:03X}: {}", hex.join(" "));
         }
     }
     eprintln!(
