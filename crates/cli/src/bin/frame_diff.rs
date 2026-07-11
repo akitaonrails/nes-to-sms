@@ -778,7 +778,6 @@ struct SmsBus {
     // capturing the CPU PC at the time of the write.
     watch: Option<Vec<u16>>,
     watch_log: Vec<(u16, u8, u16)>,
-    watch_bank_log: Vec<u8>,
     last_pc: u16,
 }
 
@@ -791,7 +790,6 @@ impl SmsBus {
             port_dc: 0xFF,
             watch: None,
             watch_log: Vec::new(),
-            watch_bank_log: Vec::new(),
             last_pc: 0,
         }
     }
@@ -1401,6 +1399,94 @@ fn main() {
             eprint!(" {:02X}", subj_snaps[f][addr]);
         }
         eprintln!();
+    }
+
+    // Gameplay-focused differential: the broad RAM diff can be dominated by
+    // score/audio/bookkeeping bytes. This summarizes the player and progression
+    // variables that decide whether a route is still semantically aligned.
+    if std::env::var("FD_KEY_SUMMARY").is_ok() {
+        const KEY_ADDRS: &[(usize, &str)] = &[
+            (0x000D, "UserData"),
+            (0x000E, "Player_State"),
+            (0x0057, "Player_X_Speed"),
+            (0x006D, "Player_Page"),
+            (0x0086, "Player_X"),
+            (0x009F, "Player_Y_Speed"),
+            (0x00CE, "Player_Y"),
+            (0x06FC, "Player_State2"),
+            (0x075A, "NumberOfLives"),
+            (0x075C, "WorldNumber"),
+            (0x0760, "AreaNumber"),
+            (0x0770, "OperMode"),
+            (0x0772, "OperMode_Task"),
+        ];
+
+        let lo = frames.min(ref_snaps.len()).min(subj_snaps.len());
+        let mut first_key_div: Option<(usize, usize, &'static str, u8, u8)> = None;
+        'frames: for f in 0..lo {
+            for &(addr, name) in KEY_ADDRS {
+                let rv = ref_snaps[f][addr];
+                let sv = subj_snaps[f][addr];
+                if rv != sv {
+                    first_key_div = Some((f, addr, name, rv, sv));
+                    break 'frames;
+                }
+            }
+        }
+        match first_key_div {
+            Some((f, addr, name, rv, sv)) => eprintln!(
+                "  [key summary] first gameplay-key divergence: frame={f} ${addr:04X} {name} ref=${rv:02X} subj=${sv:02X}"
+            ),
+            None => eprintln!("  [key summary] gameplay keys match across {lo} frames"),
+        }
+
+        let sample_frames = std::env::var("FD_KEY_FRAMES")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .filter_map(|p| p.trim().parse::<usize>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| vec![416, 720, 1120, 1328, 1510, 1531, 1600, 1736, 1906]);
+        for f in sample_frames.into_iter().filter(|&f| f < lo) {
+            let r = &ref_snaps[f];
+            let s = &subj_snaps[f];
+            eprintln!(
+                "  [key @{f}] ref x={:02X}:{:02X} spd={:02X} y={:02X} yspd={:02X} state={:02X} pstate={:02X} mode={:02X}:{:02X} wla={:02X}{:02X}{:02X} lives={:02X} ud={:02X}",
+                r[0x006D],
+                r[0x0086],
+                r[0x0057],
+                r[0x00CE],
+                r[0x009F],
+                r[0x000E],
+                r[0x06FC],
+                r[0x0770],
+                r[0x0772],
+                r[0x075F],
+                r[0x075C],
+                r[0x0760],
+                r[0x075A],
+                r[0x000D]
+            );
+            eprintln!(
+                "  [key @{f}] subj x={:02X}:{:02X} spd={:02X} y={:02X} yspd={:02X} state={:02X} pstate={:02X} mode={:02X}:{:02X} wla={:02X}{:02X}{:02X} lives={:02X} ud={:02X}",
+                s[0x006D],
+                s[0x0086],
+                s[0x0057],
+                s[0x00CE],
+                s[0x009F],
+                s[0x000E],
+                s[0x06FC],
+                s[0x0770],
+                s[0x0772],
+                s[0x075F],
+                s[0x075C],
+                s[0x0760],
+                s[0x075A],
+                s[0x000D]
+            );
+        }
     }
 
     // Sprite-data differential: dump $0200-$023F (16 OAM entries: Y,tile,

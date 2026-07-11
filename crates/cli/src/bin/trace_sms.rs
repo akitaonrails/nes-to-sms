@@ -815,6 +815,63 @@ struct WatchWrite {
     vertical_force: u8,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ReturnPtrWatchEvent {
+    old_ptr: u16,
+    new_ptr: u16,
+    transition: ReturnPtrTransition,
+    frame_base: Option<u16>,
+    write: WatchWrite,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReturnPtrTransition {
+    Push4,
+    Pop4,
+    BridgePush,
+    BridgePop,
+    FullPop,
+    D4xxAlarm,
+    D3fcAlarm,
+    UnalignedAlarm,
+    OtherDeltaAlarm,
+}
+
+impl ReturnPtrTransition {
+    const ALL: [Self; 9] = [
+        Self::Push4,
+        Self::Pop4,
+        Self::BridgePush,
+        Self::BridgePop,
+        Self::FullPop,
+        Self::D4xxAlarm,
+        Self::D3fcAlarm,
+        Self::UnalignedAlarm,
+        Self::OtherDeltaAlarm,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Push4 => "push +4",
+            Self::Pop4 => "pop -4",
+            Self::BridgePush => "bridge push D3F8->D500",
+            Self::BridgePop => "bridge pop D500->D3F8",
+            Self::FullPop => "full pop D600->D5FC",
+            Self::D4xxAlarm => "ALARM D4xx",
+            Self::D3fcAlarm => "ALARM D3FC",
+            Self::UnalignedAlarm => "ALARM unaligned",
+            Self::OtherDeltaAlarm => "ALARM other delta",
+        }
+    }
+
+    fn is_alarm(self) -> bool {
+        matches!(
+            self,
+            Self::D4xxAlarm | Self::D3fcAlarm | Self::UnalignedAlarm | Self::OtherDeltaAlarm
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 struct NtExplicitSExample {
     ppu_addr: u16,
@@ -1728,9 +1785,11 @@ impl Bus for SmsBus {
             }
             0xE000..=0xFFFB => {
                 let value = self.ram[(addr - 0xE000) as usize];
-                self.record_ram_migration_access(addr - 0x2000, RamMigrationAccessKind::Read);
-                if self.watches_read(addr) {
-                    self.watch_read_log.push(self.watch_entry(addr, value));
+                let canonical_addr = addr - 0x2000;
+                self.record_ram_migration_access(canonical_addr, RamMigrationAccessKind::Read);
+                if self.watches_read(canonical_addr) {
+                    self.watch_read_log
+                        .push(self.watch_entry(canonical_addr, value));
                 }
                 value
             } // mirror
@@ -1767,7 +1826,11 @@ impl Bus for SmsBus {
             }
             0xE000..=0xFFFB => {
                 self.ram[(addr - 0xE000) as usize] = value;
-                self.record_ram_migration_access(addr - 0x2000, RamMigrationAccessKind::Write);
+                let canonical_addr = addr - 0x2000;
+                self.record_ram_migration_access(canonical_addr, RamMigrationAccessKind::Write);
+                if self.watches_write(canonical_addr) {
+                    self.watch_log.push(self.watch_entry(canonical_addr, value));
+                }
             }
             0xFFFC..=0xFFFF => {
                 // Mapper registers also write through to the RAM mirror.
@@ -2079,7 +2142,7 @@ fn run_search_steps(
         state.bus.watch_bank1 = state.bus.slot_bank[1];
         state.bus.watch_sp = state.cpu.sp;
 
-        if state.step >= state.next_irq_at && state.cpu.iff1 {
+        if state.step >= state.next_irq_at && state.cpu.iff1 && state.cpu.ei_pending == 0 {
             while state.next_button_event < button_events.len()
                 && state.irqs_fired >= button_events[state.next_button_event].0
             {
@@ -2838,6 +2901,13 @@ fn main() {
     let mut next_checkpoint = 0usize;
     // Frame at which SMB first enabled NMI; scripts count from here.
     let mut script_frame_base: Option<usize> = None;
+    // Game frames actually delivered to the translated NMI. Injections that
+    // land while a handler is still running (heavy frames overrun the 60K-step
+    // injection period) are swallowed by the runtime's own gates — NES
+    // edge-trigger semantics, the designed overrun pacing — so they must not
+    // advance the script clock: routes are recorded on the NES frame timeline
+    // (frame-diff drives one NMI per frame and never overruns).
+    let mut game_frames: usize = 0;
     let mut checkpoint_dump_failed = false;
     let zpy_log_pc: Option<u16> = std::env::var("SMS_LOG_ZPY")
         .ok()
@@ -2858,6 +2928,9 @@ fn main() {
     let mut materializer_policy_sims = MaterializerPolicySim::new_all();
     let dump_each_frame_to = std::env::var("SMS_DUMP_EACH_FRAME").ok();
     let stop_on_fall = std::env::var("SMS_STOP_ON_FALL")
+        .ok()
+        .is_some_and(|v| v != "0");
+    let abort_bad_sp = std::env::var("SMS_ABORT_BAD_SP")
         .ok()
         .is_some_and(|v| v != "0");
     let mut first_fall_snapshot: Option<FallSnapshot> = None;
@@ -3046,7 +3119,11 @@ fn main() {
             xfer_ring.push(("ret", pc, to));
         }
 
-        if inject_irq && step < next_irq_at && line_irq_at.is_some_and(|at| step >= at) && cpu.iff1
+        if inject_irq
+            && step < next_irq_at
+            && line_irq_at.is_some_and(|at| step >= at)
+            && cpu.iff1
+            && cpu.ei_pending == 0
         {
             // Simulate a VDP line interrupt. It shares the IM1 vector with the
             // frame interrupt, but the status byte has bit 7 clear, so the
@@ -3068,15 +3145,30 @@ fn main() {
 
         // Right before injecting the next IRQ, snapshot the framebuffer
         // so we can see how the screen evolves frame by frame.
-        if inject_irq && step >= next_irq_at && cpu.iff1 {
+        if inject_irq && step >= next_irq_at && cpu.iff1 && cpu.ei_pending == 0 {
             // Script frames count from SMB's NMI enable ($CB08 bit 7) — the
             // same convention frame-diff uses — so one recorded script
             // drives both harnesses identically regardless of how many
             // boot-time IRQ frames precede translated init.
-            if script_frame_base.is_none() && bus.ram[0x0B08] & 0x80 != 0 {
-                script_frame_base = Some(irqs_fired);
+            // Mirror the runtime's translated-NMI gates (boot.s irq_handler):
+            // bit7 of $CB08 (PPUCTRL NMI enable), $CB1A (NMI-started latch),
+            // $CA11 (nesting depth, max 2). Only injections that will actually
+            // run the translated NMI count as game frames.
+            let nmi_enable = bus.ram[0x0B08] & 0x80 != 0;
+            let nmi_started = bus.ram[0x0B1A] != 0;
+            let nmi_depth = bus.ram[0x0A11];
+            let runs_translated_nmi = if nmi_enable {
+                nmi_depth < 2
+            } else {
+                nmi_started && nmi_depth == 0
+            };
+            if script_frame_base.is_none() && nmi_enable {
+                script_frame_base = Some(game_frames);
             }
-            let script_frame = script_frame_base.map(|base| irqs_fired - base);
+            let script_frame = script_frame_base.map(|base| game_frames - base);
+            if runs_translated_nmi {
+                game_frames += 1;
+            }
             while next_button_event < button_events.len()
                 && script_frame.is_some_and(|f| f >= button_events[next_button_event].0)
             {
@@ -3261,7 +3353,7 @@ fn main() {
                 }
             }
         }
-        if inject_irq && step >= next_irq_at && cpu.iff1 {
+        if inject_irq && step >= next_irq_at && cpu.iff1 && cpu.ei_pending == 0 {
             // Simulate a maskable interrupt: push PC, jump to $0038 (IM1).
             if interrupt_at_step.is_none() {
                 interrupt_at_step = Some(step);
@@ -3307,6 +3399,7 @@ fn main() {
                 taken += 1;
                 if let Some(start) = frame_cost_start
                     && cpu.iff1
+                    && cpu.ei_pending == 0
                 {
                     frame_costs.push(cpu.cycles.saturating_sub(start));
                     frame_cost_start = None;
@@ -3322,9 +3415,18 @@ fn main() {
                     materializer_render_before,
                 );
                 runtime_materializer_monitor.observe_after_step(op, cpu.sp);
+                if abort_bad_sp && cpu.sp < 0xDD80 {
+                    eprintln!(
+                        "SMS_ABORT_BAD_SP: step={step} pc=${pc:04X} op=${op:02X} sp_after=${:04X} ret_after=${:04X} bank1=${:02X}",
+                        cpu.sp,
+                        bus.read(cpu.sp) as u16 | ((bus.read(cpu.sp.wrapping_add(1)) as u16) << 8),
+                        bus.slot_bank[1]
+                    );
+                    break;
+                }
                 if bus.vdp_regs[0] & 0x10 == 0 {
                     line_irq_at = None;
-                } else if inject_irq && cpu.iff1 && line_irq_at.is_none() {
+                } else if inject_irq && cpu.iff1 && cpu.ei_pending == 0 && line_irq_at.is_none() {
                     // R10 is loaded with one less than the target raster line.
                     // Convert that to a coarse instruction-step delay; this is
                     // not cycle-accurate, but it lets checkpoint rendering see
@@ -3684,6 +3786,12 @@ fn main() {
                     write.player_state
                 );
             }
+        }
+        if bus
+            .watch_write_range
+            .is_some_and(|(start, end)| start <= 0xCB76 && end >= 0xCB77)
+        {
+            print_translated_return_pointer_watch(&bus.watch_log);
         }
     }
     if bus.watch_read_addr.is_some() || bus.watch_read_range.is_some() {
@@ -4337,6 +4445,211 @@ fn print_ram_range(label: &str, ram: &[u8; RAM_SIZE], start: u16, end: u16) {
         }
         addr = addr.wrapping_add(16);
     }
+}
+
+fn reconstruct_return_ptr_watch_events(writes: &[WatchWrite]) -> Vec<ReturnPtrWatchEvent> {
+    let writes = writes
+        .iter()
+        .copied()
+        .filter(|write| matches!(write.addr, 0xCB76 | 0xCB77))
+        .collect::<Vec<_>>();
+    let mut events = Vec::new();
+    let mut low = 0x00u8;
+    let mut high = 0xD3u8;
+    let mut ptr = u16::from_le_bytes([low, high]);
+    let mut i = 0usize;
+    while i < writes.len() {
+        let write = writes[i];
+        match write.addr {
+            0xCB76 => {
+                let old_ptr = ptr;
+                low = write.value;
+                if let Some(next) = writes.get(i + 1).copied() {
+                    if next.step == write.step && next.addr == 0xCB77 {
+                        high = next.value;
+                        ptr = u16::from_le_bytes([low, high]);
+                        events.push(ReturnPtrWatchEvent {
+                            old_ptr,
+                            new_ptr: ptr,
+                            transition: classify_return_ptr_transition(old_ptr, ptr),
+                            frame_base: return_ptr_frame_base(old_ptr, ptr),
+                            write: next,
+                        });
+                        i += 2;
+                        continue;
+                    }
+                }
+                ptr = u16::from_le_bytes([low, high]);
+                events.push(ReturnPtrWatchEvent {
+                    old_ptr,
+                    new_ptr: ptr,
+                    transition: classify_return_ptr_transition(old_ptr, ptr),
+                    frame_base: return_ptr_frame_base(old_ptr, ptr),
+                    write,
+                });
+            }
+            0xCB77 => {
+                let old_ptr = ptr;
+                high = write.value;
+                ptr = u16::from_le_bytes([low, high]);
+                events.push(ReturnPtrWatchEvent {
+                    old_ptr,
+                    new_ptr: ptr,
+                    transition: classify_return_ptr_transition(old_ptr, ptr),
+                    frame_base: return_ptr_frame_base(old_ptr, ptr),
+                    write,
+                });
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    events
+}
+
+fn classify_return_ptr_transition(old_ptr: u16, new_ptr: u16) -> ReturnPtrTransition {
+    if (old_ptr & 0xFF00) == 0xD400 || (new_ptr & 0xFF00) == 0xD400 {
+        return ReturnPtrTransition::D4xxAlarm;
+    }
+    if old_ptr == 0xD3FC || new_ptr == 0xD3FC {
+        return ReturnPtrTransition::D3fcAlarm;
+    }
+    if old_ptr & 0x0003 != 0 || new_ptr & 0x0003 != 0 {
+        return ReturnPtrTransition::UnalignedAlarm;
+    }
+    match (old_ptr, new_ptr) {
+        (0xD3F8, 0xD500) => ReturnPtrTransition::BridgePush,
+        (0xD500, 0xD3F8) => ReturnPtrTransition::BridgePop,
+        (0xD600, 0xD5FC) => ReturnPtrTransition::FullPop,
+        _ if new_ptr == old_ptr.wrapping_add(4) => ReturnPtrTransition::Push4,
+        _ if new_ptr.wrapping_add(4) == old_ptr => ReturnPtrTransition::Pop4,
+        _ => ReturnPtrTransition::OtherDeltaAlarm,
+    }
+}
+
+fn return_ptr_frame_base(old_ptr: u16, new_ptr: u16) -> Option<u16> {
+    match classify_return_ptr_transition(old_ptr, new_ptr) {
+        ReturnPtrTransition::Push4 | ReturnPtrTransition::BridgePush => Some(old_ptr),
+        ReturnPtrTransition::Pop4
+        | ReturnPtrTransition::BridgePop
+        | ReturnPtrTransition::FullPop => Some(new_ptr),
+        _ => None,
+    }
+}
+
+fn print_translated_return_pointer_watch(writes: &[WatchWrite]) {
+    let events = reconstruct_return_ptr_watch_events(writes);
+    let final_ptr = events.last().map(|event| event.new_ptr).unwrap_or(0xD300);
+    let high_water_ptr = events.iter().map(|event| event.new_ptr).max();
+    let high_water =
+        high_water_ptr.and_then(|ptr| events.iter().find(|event| event.new_ptr == ptr));
+    let first_invalid = events.iter().find(|event| event.transition.is_alarm());
+
+    println!("Translated return pointer watch:");
+    println!("  event count: {}", events.len());
+    println!("  final pointer: ${final_ptr:04X}");
+    if let Some(event) = high_water {
+        println!(
+            "  high-water pointer: ${:04X} first reached at step {} pc=${:04X} bank1=${:02X} sp=${:04X} ret=${:04X}",
+            event.new_ptr,
+            event.write.step,
+            event.write.pc,
+            event.write.bank1,
+            event.write.sp,
+            event.write.ret
+        );
+    } else {
+        println!("  high-water pointer: none");
+    }
+    if let Some(event) = first_invalid {
+        println!(
+            "  first invalid transition: ${:04X}->${:04X} {} at step {} pc=${:04X} bank1=${:02X} sp=${:04X} ret=${:04X}",
+            event.old_ptr,
+            event.new_ptr,
+            event.transition.label(),
+            event.write.step,
+            event.write.pc,
+            event.write.bank1,
+            event.write.sp,
+            event.write.ret
+        );
+    } else {
+        println!("  first invalid transition: none");
+    }
+
+    println!("  transition counts:");
+    for transition in ReturnPtrTransition::ALL {
+        let count = events
+            .iter()
+            .filter(|event| event.transition == transition)
+            .count();
+        println!("    {:<24} {count}", transition.label());
+    }
+
+    for threshold in [0xD3F8u16, 0xD500, 0xD580, 0xD5C0, 0xD5F0, 0xD600] {
+        if let Some(event) = events.iter().find(|event| event.new_ptr >= threshold) {
+            println!(
+                "  first >= ${threshold:04X}: step {} ${:04X}->${:04X} {} pc=${:04X} bank1=${:02X} sp=${:04X} ret=${:04X} ppos={:02X}:{:02X} y={:02X}:{:02X} st={:02X}",
+                event.write.step,
+                event.old_ptr,
+                event.new_ptr,
+                event.transition.label(),
+                event.write.pc,
+                event.write.bank1,
+                event.write.sp,
+                event.write.ret,
+                event.write.ppage,
+                event.write.px,
+                event.write.ypage,
+                event.write.py,
+                event.write.player_state,
+            );
+        } else {
+            println!("  first >= ${threshold:04X}: none");
+        }
+    }
+
+    println!("  first 20 pointer events:");
+    for event in events.iter().take(20) {
+        print_return_ptr_watch_event(event);
+    }
+    if events.len() > 20 {
+        println!("  last 40 pointer events:");
+        for event in events
+            .iter()
+            .rev()
+            .take(40)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            print_return_ptr_watch_event(event);
+        }
+    }
+}
+
+fn print_return_ptr_watch_event(event: &ReturnPtrWatchEvent) {
+    let frame_base = event
+        .frame_base
+        .map(|addr| format!(" frame_base=${addr:04X}"))
+        .unwrap_or_default();
+    println!(
+        "    step {}: ${:04X}->${:04X} {}{} pc=${:04X} bank1=${:02X} sp=${:04X} ret=${:04X} ppos={:02X}:{:02X} y={:02X}:{:02X} st={:02X}",
+        event.write.step,
+        event.old_ptr,
+        event.new_ptr,
+        event.transition.label(),
+        frame_base,
+        event.write.pc,
+        event.write.bank1,
+        event.write.sp,
+        event.write.ret,
+        event.write.ppage,
+        event.write.px,
+        event.write.ypage,
+        event.write.py,
+        event.write.player_state,
+    );
 }
 
 fn print_watch_tail(label: &str, entries: &[WatchWrite]) {
