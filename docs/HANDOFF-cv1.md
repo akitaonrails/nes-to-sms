@@ -1,132 +1,122 @@
-# Handoff: Castlevania 1 (CV1) — real-emulator hang
+# Handoff: Castlevania 1 (CV1) — real-emulator boot wild-jump
 
-Last updated: 2026-07-09. Branch: master. All work committed; SMB
-byte-for-byte green throughout (three acceptance routes, 375 tests).
+Last updated: 2026-07-11. Branch: master. SMB fully green throughout
+(three parity routes byte-for-byte, 1-1-clear trace acceptance 4/4,
+395 tests, Alter Ego generates + assembles).
 
 ## One-line status
 
-CV1 (mapper 2 / UxROM, CHR-RAM) is **feature-complete in the
-instrumented harness but HANGS on real emulators** (GPGX, Mednafen).
-The hang is diagnosed down to a single-opcode CPU-emulation
-divergence but the exact opcode is not yet pinned. SMB is done and
-plays. CV1 does not.
+The old "CPU-emulation divergence" class is **FIXED and verified
+gone** (z80-diff lockstep clean; transplant now agrees with
+Mednafen). CV1 still fails on real emulators, but the blocker is now
+sharply narrowed: **a wild jump into work RAM during early init on
+Mednafen** (not reproducible in-harness), likely causing an infinite
+reboot cycle.
 
-## Exactly what is pending (the ONE blocker)
+## What changed since the last handoff (all committed)
 
-CV1 boots, runs its init, and then **livelocks in its first game task
-("task 0", the copyright/intro)** — the 6502 task counter at NES RAM
-`$18` never leaves 0 on a real emulator. On a real NES it reaches 1
-within ~30 frames without any input, so advancing is correct and the
-hang is a bug.
+- z80_emu accuracy: MEMPTR/WZ, CP/BIT undocumented bits 3/5, EI
+  semantics. Plus the external session's indexed ADC/SBC codegen fix
+  (A preserved on native stack; rt_read_indexed clobbers BC).
+- `z80-diff` (cargo feature `z80-diff`): locksteps z80_emu against
+  rustzx-z80. CLI: `z80-diff --rom out/cv1/sms.sms --state <raw
+  mednafen state> --sym out/cv1/sms.sym --steps N`.
+- Runtime perf: SMB 4.7x -> 0.43x budget. A stackless-rotate carry
+  bug (RNG killer) was found and fixed via frame-diff parity.
+- trace-sms script clock: counts delivered game frames (mirrors the
+  boot.s NMI gates), not raw injections — overrun-swallowed frames no
+  longer desync routes.
+- 512K layout rebalanced: translated 4-16, PRG data 17-24 (base is
+  `sms_project::NES_PRG_BANK_BASE = 17`), assets 25-31. The perf
+  rework grew CV1's translated code past the old 12-bank budget.
+- boot.s: three `jr` to `_irq_skip_translated_nmi` became `jp`
+  (out of 8-bit range under NES_CHR_RAM).
 
-Proven facts (do not re-litigate):
-- It is a **CPU-emulation divergence**, not data/pacing/timing.
-  Evidence: `SMS_LOAD_STATE` transplants a real Mednafen crash state
-  (RAM+VRAM+CRAM+cart SRAM+bank latches+Z80 regs) into `z80_emu` and
-  runs forward — from Mednafen's *identical* stuck state, `z80_emu`
-  ADVANCES the task. So `z80_emu` executes some instruction
-  differently from Mednafen's accurate Z80.
-- The real-6502 reference (`frame-diff`) advances task 0 without
-  input → advancing is correct → the GENERATED Z80 code is wrong on
-  real hardware, and `z80_emu` masks it. This is the
-  "trace-green ≠ Mednafen-correct" class.
-- `z80_emu` matches the 6502 reference (frame-diff is green except 4
-  benign anchor-phase bytes), so frame-diff **structurally cannot**
-  see this bug: it uses `z80_emu` as its own subject.
-- Localized to the task-0 loop, which cycles through runtime helpers
-  `rt_ror_a` ($0x1010), `rt_dec_mem` ($0x111E), `rt_read_zp_ptr_y`
-  ($0x0E62), `_dispatch_remap_de` ($0x0DA4) and translated branches
-  `JP P`/`JP Z` in bank 6 around $60F7-$6220 (SMS addresses; see
-  `out/cv1/sms.sym`).
+## Evidence chain for the new diagnosis (do not re-derive)
 
-Ruled out empirically (do not repeat these):
-- Pacing: `SMS_REAL_PACING=1` (15K insn/frame, boolean pending) still
-  advances.
-- RAM init: `$FF`-fill (hostile mode) still advances.
-- Undocumented Z80 flags 3/5: `z80_emu` now models them; CV1 still
-  advances and SMB stays green, so codegen doesn't read them.
-- Hot-loop flag helpers audited: `rt_dec_mem` correct; `rt_ror_a` has
-  a LATENT bug (when the rotate's new carry is set, the carry-handling
-  block clobbers A before `bit 7,a`, so reconstructed 6502 N is wrongly
-  0) — but it is deterministic across emulators, so NOT this
-  divergence. Fix it anyway for correctness (see TODOs).
+From a Mednafen savestate at 90s (`out/cv1_state_new.mc0`; gunzip →
+`/tmp/cv1_new.raw`):
+
+1. Task counter NES `$18` = 0 (work-RAM offset 0x18 of MAIN/RAM).
+2. `z80-diff` lockstep from that state: **2,000,000 steps, zero
+   divergence** — z80_emu matches rustzx exactly on this path.
+3. `SMS_LOAD_STATE` transplant into trace-sms: task **stays 0** — the
+   old "z80_emu advances where Mednafen hangs" proof no longer
+   reproduces. Both CPUs agree now; the CPU-divergence class is dead.
+4. The savestate Z80 PC = **$CE0A — inside work RAM**, IFF1=1, IM1,
+   not halted. RAM there is zeros (Z80 NOP slide). $CE0A falls in the
+   $CC00-$D2FF nametable sub-palette shadow, which a healthy
+   in-harness run fills with a `00 03` pattern; on Mednafen it is
+   empty because the game never wrote its nametables.
+5. Runtime state in the same snapshot: $CB28 ready=1, $CB1A
+   started=1, $CA11 depth=1 (normal: CV1's first NMI is resident),
+   $CB08=$B0 (NMI enable set), VDP reg1=$B2 (frame INT enabled,
+   display OFF), **$CB2D=$B2 deferred reg-1 write pending and never
+   applied** — so no top-level frame IRQ ran presentation after that
+   write. Zero page nearly empty; palette CRAM only has the beacon
+   grayscale; SRAM head zeros.
+6. Reading: execution wild-jumped into zeroed RAM, NOP-slides toward
+   $E000+ (RAM mirror), wraps to $0000 (boot), **reboots** — an
+   endless boot cycle. The all-white screen is the display-enable
+   beacon backdrop, repainted every cycle.
+7. In-harness from reset (even `SMS_REAL_PACING=1`): task advances
+   0→1→2→5. The wild jump does NOT reproduce in trace-sms.
 
 ## THE decisive next step
 
-Pin the divergent opcode via **instruction-level differential
-execution against a correct Z80**. Two options:
+Find the wild-jump origin on Mednafen. It happens in the first
+seconds of boot/init. Options, in order of expected payoff:
 
-1. **Mednafen debugger trace (fastest).** Mednafen has a built-in
-   debugger with execution logging. Drive it (headless via xdotool,
-   or a config) to dump a Z80 instruction trace of CV1's first
-   ~3M instructions. Then run `z80_emu` on the same ROM from the same
-   start and diff the two PC/flag streams. First divergence = the bug.
-   The savestate parser (gzip + named chunks MAIN/Z80/VDP/CART, see
-   `load_mednafen_state` in `crates/cli/src/bin/trace_sms.rs`) already
-   works and can align states.
+1. **Diagnostic ROM build**: increment an unused RAM byte ($CB40) at
+   boot entry (reboot counter), and log the last dispatch
+   (bank,addr) + last jump-indirect target into fixed RAM bytes.
+   Run Mednafen 10s, savestate, read the counters. Confirms the
+   reboot cycle and localizes which dispatch/jump goes wild.
+2. **Early savestate bisection**: savestates at 2s/4s/8s; find the
+   first snapshot with wild PC or wiped zp; diff runtime state
+   against a healthy in-harness dump at the same phase
+   (`SMS_DUMP_RAM=0xC000:0x2000`).
+3. **Mednafen debugger trace** of the first ~2M instructions, diffed
+   against a trace-sms PC log from reset.
 
-2. **Vendor an independent reference Z80 core** (e.g. a known-correct
-   Rust Z80 crate, or port one) and lockstep it against `z80_emu`
-   instruction-by-instruction on the task-0 path; assert equal
-   registers+flags after each step. First mismatch = the bug. This is
-   the more robust long-term tool (also catches future divergences).
-
-Once the opcode is known, the fix is usually a few lines in
-`crates/z80_emu/src/lib.rs` (if `z80_emu` is wrong) OR in the flag-
-reconstruction emitters / runtime helpers (if the generated code is
-wrong). After the fix: re-verify CV1 on Mednafen AND re-run the full
-SMB gate (the fix likely touches `z80_emu`, which the oracle uses).
-
-## Tools already built for this (all committed)
-
-- `SMS_LOAD_STATE=<raw mednafen state>` — transplant a savestate into
-  `z80_emu`. Gunzip the `.mcs` first: `gzip -dc s.mcs > s.raw`.
-- `SMS_REAL_PACING=1` — hostile pacing (15K insn/frame, `$FF` RAM).
-- `SMS_TRAP_RAM_EXEC=1` — halt+dump when the Z80 executes from RAM.
-- `SMS_DUMP_ON_ENABLE=<dir>` — framebuffer PPM at each display-enable
-  edge (CV1 hides transitions behind display-off).
-- `SMS_WATCH_ADDR=0xC018` — watch the task counter ($18).
-- `FD_WATCH_TASK=1` (frame-diff) — log the reference's $18/$19/$0D.
-- Boot beacons in `runtime/boot.s` (NES_CHR_RAM-guarded): border/
-  backdrop colors mark boot milestones (green = entering translated
-  reset, white = display-enable applied). Consider stripping for a
-  "clean-looking" build (`grep rt_boot_beacon runtime/boot.s`).
+Suspect classes (the harness models these differently from Mednafen):
+VDP status/pending semantics at the exact moment translated code
+reads $BF mid-init; V-counter values during init loops; the first
+frame-INT arriving at a different instruction than the harness's
+step-60000 injection, interrupting an init window that isn't
+re-entrant (a DI-bracket gap); port $DC/$3F input levels (trace-sms
+does not model $3F — Mednafen forces levels until $3F is written).
 
 ## How to reproduce / observe
 
-- Build CV1: `cargo run --release -p nes_to_sms --bin nes-to-sms -- "<CV1.nes>" profiles/cv1.toml out/cv1 --runtime runtime`
-  then `docker compose run --rm --user root --workdir /work poc bash -lc 'cd out/cv1 && make'`.
-  (CV1 ROM: `/mnt/terachad/Emulators/EmuDeck/roms/nes/Castlevania (USA) (Rev 1).nes`.)
-- See it advance in-harness: `SMS_WATCH_ADDR=0xC018 target/release/trace-sms out/cv1/sms.sms --steps 40000000` → task goes 0→1→2→5.
-- See it hang for real: `docker/run_gpgx.sh out/cv1/sms.sms` (or a
-  Mednafen recording) → boots, beacons, then blank/frozen.
+- Build CV1: `cargo run --release -p nes_to_sms --bin nes-to-sms --
+  "/mnt/terachad/Emulators/EmuDeck/roms/nes/Castlevania (USA) (Rev 1).nes"
+  profiles/cv1.toml out/cv1 --runtime runtime`, then
+  `docker compose run --rm --user root --workdir /work poc bash -lc
+  'cd out/cv1 && make'`.
+- Headless Mednafen + recording (in the poc container): Xvfb +
+  `mednafen -sound 0 -force_module sms -qtrecord out.mov rom.sms`;
+  savestate via `xdotool key --window $WINID F5`, lands in
+  `$HOME/.mednafen/mcs/*.mc0` (gzip).
+- In-harness healthy reference: `SMS_WATCH_ADDR=0xC018
+  target/release/trace-sms out/cv1/sms.sms --steps 60000000` (task
+  0→1→2→5), `SMS_PC_PROFILE=1` for hot loops,
+  `SMS_DUMP_RAM=0xC000:0x2000` for state dumps.
+- Savestate parsing: gzip → `MDFNSVST` header; sections
+  `[32-byte name][u32 len]` (MAIN/Z80/CART/PSG/VDP/PIO); chunks
+  `[u8 namelen][name][u32 len][data]`. Task = MAIN/RAM offset 0x18.
 
-## Secondary TODOs (not the blocker)
+## Secondary TODOs
 
-- Fix `rt_ror_a` N-flag-when-carry-set (correctness; `runtime/flags.s`).
-- The 4 benign anchor-phase divergent bytes ($000F/$0010/$004D/$00A9)
-  — cosmetic, chase only after the hang.
-- Once CV1 renders: record a CV1 acceptance route (its parity gate,
-  like SMB's three) and add it to `profiles/cv1/acceptance/`.
-- Strip or keep boot beacons per preference.
+- rt_ror_a N-flag latent bug: verify whether the external stackless
+  rewrite superseded it (`runtime/flags.s`).
+- 4 benign anchor-phase divergent bytes ($000F/$0010/$004D/$00A9).
+- CV1 acceptance route once it renders; strip-or-keep boot beacons.
+- 13 lower failures in the CV1 build are the known benign data-walk
+  class (JAM/AHX/ANE/oversize → trap stubs).
 
 ## After CV1: the mapper ladder (docs/mapper-plan.md)
 
-CV1 done → Gradius (mapper 3 / CNROM) → Blaster Master (1 / MMC1) →
-Bonk's Adventure (4 / MMC3) → Marble Madness (7 / AxROM) →
-Castlevania III (5 / MMC5). The banked-dispatch, CHR-RAM-SRAM-mirror,
-re-entrant-NMI, and BRK-as-interrupt machinery built for CV1 is
-generic and carries forward. **Hard rule: every mapper-phase commit
-must pass the full SMB gate (3 routes byte-for-byte + 375 tests) and
-keep Alter Ego building.** No ROMs committed to the repo.
-
-## Key files
-
-- `crates/z80_emu/src/lib.rs` — the Z80 emulator (likely fix site).
-- `crates/cli/src/bin/trace_sms.rs` — trace harness + `SMS_LOAD_STATE`.
-- `crates/cli/src/bin/frame_diff.rs` — 6502 differential oracle.
-- `runtime/flags.s`, `runtime/dispatch.s`, `runtime/ppu.s`,
-  `runtime/ntmap.s`, `runtime/chrmap.s`, `runtime/boot.s` — runtime.
-- `crates/lower/src/lib.rs` — 6502→Z80 codegen + flag emitters.
-- `profiles/cv1.toml` — CV1 profile (ground-truth bank entries).
-- `docs/mapper-plan.md` — full mapper phase log + this diagnosis.
+CV1 → Gradius (CNROM) → Blaster Master (MMC1) → Bonk's (MMC3) →
+Marble Madness (AxROM) → CV3 (MMC5). Hard rule: every commit passes
+the full SMB gate + Alter Ego builds. No ROMs in the repo.

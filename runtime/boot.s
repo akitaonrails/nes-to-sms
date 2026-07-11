@@ -590,7 +590,7 @@ _present_skip_all:
   jr  nz, _irq_mark_nmi_started
   ld  a, ($cb1a)
   or  a
-  jr  z, _irq_skip_translated_nmi
+  jp  z, _irq_skip_translated_nmi
   ; Once the translated NMI has started, keep the frame driver alive for
   ; top-level IRQs even if the game temporarily clears PPUCTRL.NMI (SMB does
   ; this during its VRAM update). Nested frame IRQs are different: NES would not
@@ -599,7 +599,7 @@ _present_skip_all:
   ; bit is clear, skip this translated NMI body.
   ld  a, ($ca11)
   or  a
-  jr  nz, _irq_skip_translated_nmi
+  jp  nz, _irq_skip_translated_nmi
   jr  _irq_call_translated_nmi
 
 _irq_mark_nmi_started:
@@ -612,7 +612,7 @@ _irq_call_translated_nmi:
   ; death for call-heavy code such as SMB.
   ld  a, ($ca11)
   cp  2
-  jr  nc, _irq_skip_translated_nmi
+  jp  nc, _irq_skip_translated_nmi
 
   ; Phase R: reload resident X/Y for the translated NMI.
   ld  a, ($cb00)

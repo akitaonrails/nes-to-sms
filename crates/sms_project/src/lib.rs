@@ -46,11 +46,11 @@ pub enum RawCiramBackend {
     SramSlot2,
 }
 
-// Compact layout: translated code 4-15, NES PRG data banks 16-23
-// (8 x 16 KiB = 128 KiB carts like CV1), assets 24-30 — all within
+// Compact layout: translated code 4-16, NES PRG data banks 17-24
+// (8 x 16 KiB = 128 KiB carts like CV1), assets 25-31 — all within
 // 512 KiB, which every emulator's Sega-mapper path handles (1 MiB
 // support is spotty: both GPGX and Mednafen rendered black).
-const NES_PRG_BANK_BASE: u32 = 16;
+pub const NES_PRG_BANK_BASE: u32 = 17;
 
 #[derive(Debug, Clone)]
 pub struct ProjectConfig<'a> {

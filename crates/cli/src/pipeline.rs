@@ -650,10 +650,14 @@ pub fn run(args: &Args) -> Result<String, Error> {
             }
             if should_rotate {
                 section_idx += 1;
-                if banked && section_idx > 11 {
+                let max_section =
+                    sms_project::NES_PRG_BANK_BASE - TRANSLATED_BANK_BASE as u32 - 1;
+                if banked && section_idx > max_section {
                     return Err(Error::Diagnostic(format!(
                         "translated code overflows the banked 512K layout \
-                         (section {section_idx} > 11; banks 16+ hold PRG data)"
+                         (section {section_idx} > {max_section}; banks \
+                         {}+ hold PRG data)",
+                        sms_project::NES_PRG_BANK_BASE
                     )));
                 }
                 program.section(&format!("generated_code_{section_idx}"));
