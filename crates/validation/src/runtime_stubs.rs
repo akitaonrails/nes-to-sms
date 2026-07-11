@@ -33,6 +33,9 @@ pub const REQUIRED_HELPERS: &[&str] = &[
     "rt_controller_read",
     "rt_mapper_write",
     "rt_indirect_jmp",
+    "rt_translated_rts",
+    "rt_translated_call_gate",
+    "rt_translated_tail_gate",
     "rt_unresolved_jsr",
     "rt_brk",
     "rt_asl_a",
@@ -79,6 +82,9 @@ pub fn emit_runtime_helpers(p: &mut Program) {
     emit_write_indexed(p);
     emit_read_zp_ptr_y(p);
     emit_write_zp_ptr_y(p);
+    emit_translated_rts(p);
+    emit_halt_stub(p, "rt_translated_call_gate");
+    emit_halt_stub(p, "rt_translated_tail_gate");
     // Hardware helpers — RET stubs. Routines that touch hardware are
     // skipped by `classify_routine` and never reach these.
     emit_ret_stub(p, "rt_ppu_write");
@@ -93,6 +99,73 @@ pub fn emit_runtime_helpers(p: &mut Program) {
     emit_halt_stub(p, "rt_unresolved_jsr");
     emit_halt_stub(p, "rt_brk");
     p.comment("─── end runtime helpers ───");
+}
+
+fn emit_translated_rts(p: &mut Program) {
+    p.label("rt_translated_rts");
+    p.ld_c_a();
+    p.ld_hl_abs(0xCB76);
+    p.ld_abs_hl(0xCB73);
+    p.ld_a_h();
+    p.cp_imm(0xD3);
+    p.jr_z("_validation_tr_rts_check_seg0");
+    p.cp_imm(0xD5);
+    p.jr_z("_validation_tr_rts_check_seg1");
+    p.cp_imm(0xD6);
+    p.jr_nz("_validation_tr_rts_underflow");
+    p.ld_a_l();
+    p.or_a();
+    p.jr_nz("_validation_tr_rts_underflow");
+    p.ld_hl_imm(0xD5FC);
+    p.jr("_validation_tr_rts_pop_frame");
+    p.label("_validation_tr_rts_check_seg0");
+    p.ld_a_l();
+    p.cp_imm(0x01);
+    p.jr_c("_validation_tr_rts_underflow");
+    p.cp_imm(0xF9);
+    p.jr_nc("_validation_tr_rts_underflow");
+    p.and_imm(0x03);
+    p.jr_nz("_validation_tr_rts_underflow");
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.jr("_validation_tr_rts_pop_frame");
+    p.label("_validation_tr_rts_check_seg1");
+    p.ld_a_l();
+    p.or_a();
+    p.jr_z("_validation_tr_rts_bridge");
+    p.and_imm(0x03);
+    p.jr_nz("_validation_tr_rts_underflow");
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.jr("_validation_tr_rts_pop_frame");
+    p.label("_validation_tr_rts_bridge");
+    p.ld_hl_imm(0xD3F8);
+    p.label("_validation_tr_rts_pop_frame");
+    p.ld_hl_ptr_c();
+    p.inc_hl();
+    p.ld_c_hl_ptr();
+    p.inc_hl();
+    p.ld_b_hl_ptr();
+    p.inc_hl();
+    p.ld_a_hl_ptr();
+    p.ld_abs_a(0xCB14);
+    p.ld_abs_a(0xFFFE);
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.ld_a_hl_ptr();
+    p.ld_abs_hl(0xCB76);
+    p.ld_h_b();
+    p.ld_l_c();
+    p.jp_hl();
+    p.label("_validation_tr_rts_underflow");
+    p.ld_a_imm(0xE3);
+    p.ld_abs_a(0xCB1D);
+    p.halt();
 }
 
 fn emit_ret_stub(p: &mut Program, name: &str) {

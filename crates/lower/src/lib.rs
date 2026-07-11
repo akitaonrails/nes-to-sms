@@ -23,6 +23,26 @@ pub mod sms_layout {
     pub const SAT_STAGING: u16 = 0xC900;
     pub const FRAME_COUNTER: u16 = 0xCB04;
     pub const TEMP_W: u16 = 0xCB10; // 16-bit scratch
+    pub const LOWER_SAVED_A: u16 = 0xCB27; // lowerer spill byte; LD A,(nn) preserves flags
+    pub const PPU_SCROLL_TOGGLE: u16 = 0xCB0B;
+    pub const PPU_CTRL: u16 = 0xCB08;
+    pub const PPU_SCROLL_X: u16 = 0xCB0C;
+    pub const PPU_SCROLL_Y: u16 = 0xCB0D;
+    pub const PPU_VBLANK_FLAG: u16 = 0xCB05;
+    pub const PPU_MASK: u16 = 0xCB09;
+    pub const PPUADDR_TOGGLE: u16 = 0xCB0E;
+    pub const PPU_SPRITE0_PHASE: u16 = 0xCB12;
+    pub const PPU_WRITE_VALUE: u16 = 0xCB18;
+    pub const PPU_IFF_RESTORE: u16 = 0xCB19;
+    pub const SPLIT_SCROLL_FLAGS: u16 = 0xCB20;
+    pub const SPLIT_PRE_X: u16 = 0xCB21;
+    pub const SPLIT_PRE_Y: u16 = 0xCB22;
+    pub const SPLIT_POST_X: u16 = 0xCB23;
+    pub const SPLIT_POST_Y: u16 = 0xCB24;
+    pub const PENDING_VDP_REG1: u16 = 0xCB2D;
+    pub const CHR_NT_REBUILD_DIRTY: u16 = 0xCB78;
+    pub const CHR_VARIANT_FLUSH_PENDING: u16 = 0xCB7F;
+    pub const PPU_WRITE_CONTINUATION: u16 = 0xD3FC;
 }
 
 // ---------------------------------------------------------------------------
@@ -32,6 +52,7 @@ pub mod sms_layout {
 /// Symbolic runtime labels the lowering pass references.
 pub mod runtime_symbols {
     pub const PPU_WRITE: &str = "rt_ppu_write";
+    pub const PPU_WRITE_CONT: &str = "rt_ppu_write_cont";
     pub const PPU_READ: &str = "rt_ppu_read";
     pub const OAM_DMA: &str = "rt_oam_dma";
     pub const APU_WRITE: &str = "rt_apu_write";
@@ -66,6 +87,7 @@ pub mod runtime_symbols {
     pub const CPX_A: &str = "rt_cpx_a";
     pub const CPY_A: &str = "rt_cpy_a";
     pub const UNRESOLVED_JSR: &str = "rt_unresolved_jsr";
+    pub const TRANSLATED_RTS: &str = "rt_translated_rts";
     pub const BRK: &str = "rt_brk";
     pub const FAR_CALL: &str = "rt_far_call";
     pub const FAR_JMP: &str = "rt_far_jmp";
@@ -438,6 +460,84 @@ fn emit_asl_a_flags_inline(p: &mut z80_emit::Program) {
     p.ld_a_c();
 }
 
+/// ROL A with live flags: result rotates through shadow C; new C is old bit 7.
+fn emit_rol_a_flags_inline(p: &mut z80_emit::Program) {
+    let have_c = p.fresh_label("rol_a_have_c");
+    let no_n = p.fresh_label("rol_a_no_n");
+    let no_z = p.fresh_label("rol_a_no_z");
+
+    p.ld_b_a();
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.rrca();
+    p.ld_a_b();
+    p.rl_a();
+    p.ld_c_a();
+    p.ld_b_imm(0x00);
+    p.jr_nc(&have_c);
+    p.ld_b_imm(0x01);
+    p.label(&have_c);
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.and_imm(0x7C);
+    p.or_b();
+    p.ld_b_a();
+    p.ld_a_c();
+    p.bit_a(7);
+    p.jr_z(&no_n);
+    p.ld_a_b();
+    p.or_imm(0x80);
+    p.ld_b_a();
+    p.label(&no_n);
+    p.ld_a_c();
+    p.or_a();
+    p.jr_nz(&no_z);
+    p.ld_a_b();
+    p.or_imm(0x02);
+    p.ld_b_a();
+    p.label(&no_z);
+    p.ld_a_b();
+    p.ld_abs_a(sms_layout::SHADOW_P);
+    p.ld_a_c();
+}
+
+/// ROR A with live flags: result rotates through shadow C; new C is old bit 0.
+fn emit_ror_a_flags_inline(p: &mut z80_emit::Program) {
+    let have_c = p.fresh_label("ror_a_have_c");
+    let no_n = p.fresh_label("ror_a_no_n");
+    let no_z = p.fresh_label("ror_a_no_z");
+
+    p.ld_b_a();
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.rrca();
+    p.ld_a_b();
+    p.rr_a();
+    p.ld_c_a();
+    p.ld_b_imm(0x00);
+    p.jr_nc(&have_c);
+    p.ld_b_imm(0x01);
+    p.label(&have_c);
+    p.ld_a_abs(sms_layout::SHADOW_P);
+    p.and_imm(0x7C);
+    p.or_b();
+    p.ld_b_a();
+    p.ld_a_c();
+    p.bit_a(7);
+    p.jr_z(&no_n);
+    p.ld_a_b();
+    p.or_imm(0x80);
+    p.ld_b_a();
+    p.label(&no_n);
+    p.ld_a_c();
+    p.or_a();
+    p.jr_nz(&no_z);
+    p.ld_a_b();
+    p.or_imm(0x02);
+    p.ld_b_a();
+    p.label(&no_z);
+    p.ld_a_b();
+    p.ld_abs_a(sms_layout::SHADOW_P);
+    p.ld_a_c();
+}
+
 /// H.4: inline 6502 push
 
 /// H.4: inline 6502 push
@@ -497,7 +597,12 @@ fn emit_ldxy_mem(
     target: IdxReg,
 ) {
     use ir::{AddrExpr, MemRegion};
-    program.push_af();
+    // Keep translated LDX/LDY memory loads off the native Z80 stack. The old
+    // `push af`/`pop bc` spill could cross the hard $DD80 stack guard in deep
+    // NMI/update call chains. A RAM spill is safe here because Z80 `ld a,(nn)`
+    // does not alter flags, so the N/Z result from emit_set_nz_inline remains
+    // live for a following 6502 branch.
+    program.ld_abs_a(sms_layout::LOWER_SAVED_A);
     match (addr, region) {
         (AddrExpr::ZpConst(z), MemRegion::ZeroPage) => {
             program.ld_a_abs(sms_layout::NES_ZP_BASE + *z as u16);
@@ -506,8 +611,12 @@ fn emit_ldxy_mem(
             program.ld_a_abs(nes_ram_addr_to_sms(*a));
         }
         (AddrExpr::Const(a), MemRegion::PpuReg | MemRegion::PpuMirror) => {
-            program.ld_b_imm((*a & 0x0007) as u8);
-            program.call(runtime_symbols::PPU_READ);
+            if (*a & 0x0007) == 2 {
+                emit_ppu_status_read_inline(program);
+            } else {
+                program.ld_b_imm((*a & 0x0007) as u8);
+                program.call(runtime_symbols::PPU_READ);
+            }
         }
         (AddrExpr::Const(a), MemRegion::PrgRom) if *a < 0xC000 => {
             program.ld_a_abs(*a);
@@ -564,16 +673,38 @@ fn emit_ldxy_mem(
     }
     target.store_from_a(program);
     emit_set_nz_inline(program);
-    // `push af` saved caller A in the high byte. Pop into BC and restore
-    // only A, leaving the N/Z flags produced by SET_NZ_A live for a
-    // following 6502 branch (e.g. LDY mem; BEQ).
-    program.pop_bc();
-    program.ld_a_b();
+    program.ld_a_abs(sms_layout::LOWER_SAVED_A);
 }
 
 fn restore_a_keep_flags_after_push_af(program: &mut z80_emit::Program) {
     program.pop_bc();
     program.ld_a_b();
+}
+
+/// Inline 6502 BIT with B = memory operand and A = accumulator.
+/// Updates shadow N/V/Z, preserves A, and avoids the native-stack cost of a
+/// runtime helper call in deep translated call chains. Clobbers C/H/native flags.
+fn emit_bit_mem_inline(program: &mut z80_emit::Program) {
+    let no_z = program.fresh_label("bit_no_z");
+    let after_z = program.fresh_label("bit_after_z");
+
+    program.ld_c_a(); // preserve accumulator
+    program.and_b(); // Z := (A & M) == 0
+    program.jr_nz(&no_z);
+    program.ld_a_abs(sms_layout::SHADOW_P);
+    program.and_imm(0b0011_1101); // clear N, V, Z
+    program.or_imm(0b0000_0010); // set Z
+    program.jr(&after_z);
+    program.label(&no_z);
+    program.ld_a_abs(sms_layout::SHADOW_P);
+    program.and_imm(0b0011_1101); // clear N, V, Z
+    program.label(&after_z);
+    program.ld_h_a(); // H = P with updated Z
+    program.ld_a_b();
+    program.and_imm(0b1100_0000); // N/V come from memory operand bits 7/6
+    program.or_h();
+    program.ld_abs_a(sms_layout::SHADOW_P);
+    program.ld_a_c(); // restore accumulator; LD does not alter flags
 }
 
 /// Common emission for STX/STY into any supported addressing mode.
@@ -714,7 +845,6 @@ fn parse_label_addr(label: &str) -> Option<u16> {
 /// Emit a load of a ValueSrc into Z80 A.  Used by hardware write ops.
 fn emit_value_src_to_a(p: &mut z80_emit::Program, src: &ir::ValueSrc) {
     use ir::ValueSrc;
-    use sms_layout::*;
     match src {
         ValueSrc::A => {}
         ValueSrc::X => {
@@ -737,6 +867,347 @@ fn emit_value_src_to_a(p: &mut z80_emit::Program, src: &ir::ValueSrc) {
             }
         }
     }
+}
+
+/// Inline the stackless `$2005 PPUSCROLL` write path.
+///
+/// Entry/exit: A is the 6502 accumulator value being stored and is restored on
+/// exit. The emulated 6502 flags live in `SHADOW_P`; native Z80 flags are scratch.
+/// This avoids a native `call rt_ppu_write` frame in SMB's deepest translated NMI
+/// chains while keeping the same RAM latch/split-scroll side effects as
+/// `runtime/ppu.s`'s `_ppu_w_scroll` body.
+fn emit_ppu_scroll_write_inline(p: &mut z80_emit::Program) {
+    use sms_layout::*;
+
+    let scroll_y = p.fresh_label("ppu_scroll_y");
+    let capture_post = p.fresh_label("ppu_scroll_post");
+    let clear_toggle = p.fresh_label("ppu_scroll_clear_toggle");
+    let restore_a = p.fresh_label("ppu_scroll_restore_a");
+
+    p.comment("inline STA $2005 PPUSCROLL (stackless)");
+    p.ld_abs_a(PPU_WRITE_VALUE);
+    p.ld_a_abs(PPU_SCROLL_TOGGLE);
+    p.or_a();
+    p.jr_nz(&scroll_y);
+
+    // First write = X scroll.
+    p.ld_a_abs(PPU_WRITE_VALUE);
+    p.ld_abs_a(PPU_SCROLL_X);
+    p.ld_a_imm(1);
+    p.ld_abs_a(PPU_SCROLL_TOGGLE);
+    p.ld_a_abs(PPU_WRITE_VALUE);
+    p.jr(&restore_a);
+
+    // Second write = Y scroll, then capture the completed pair as pre/post split.
+    p.label(&scroll_y);
+    p.ld_a_abs(PPU_WRITE_VALUE);
+    p.ld_abs_a(PPU_SCROLL_Y);
+    p.ld_a_abs(SPLIT_SCROLL_FLAGS);
+    p.and_imm(1);
+    p.jr_nz(&capture_post);
+
+    p.ld_a_abs(PPU_SCROLL_X);
+    p.ld_abs_a(SPLIT_PRE_X);
+    p.ld_a_abs(PPU_SCROLL_Y);
+    p.ld_abs_a(SPLIT_PRE_Y);
+    p.ld_hl_imm(SPLIT_SCROLL_FLAGS);
+    p.set_n_hl_ptr(1);
+    p.jr(&clear_toggle);
+
+    p.label(&capture_post);
+    p.ld_a_abs(PPU_SCROLL_X);
+    p.ld_abs_a(SPLIT_POST_X);
+    p.ld_a_abs(PPU_SCROLL_Y);
+    p.ld_abs_a(SPLIT_POST_Y);
+    p.ld_hl_imm(SPLIT_SCROLL_FLAGS);
+    p.set_n_hl_ptr(2);
+
+    p.label(&clear_toggle);
+    p.xor_a();
+    p.ld_abs_a(PPU_SCROLL_TOGGLE);
+
+    p.label(&restore_a);
+    p.ld_a_abs(PPU_WRITE_VALUE);
+}
+
+/// Inline the stackless `$2000 PPUCTRL` write path.
+///
+/// Entry/exit: A is the 6502 accumulator value being stored and is restored on
+/// exit. DE is preserved because this inline path never touches it; BC/HL and
+/// native flags are scratch. The VDP register-6 control-port pair keeps the
+/// same DI/EI guard as `rt_ppu_write` without adding a native call frame.
+fn emit_ppu_ctrl_write_inline(p: &mut z80_emit::Program, chr_ram: bool) {
+    use sms_layout::*;
+
+    let was_disabled = p.fresh_label("ppu_ctrl_was_disabled");
+    let body = p.fresh_label("ppu_ctrl_body");
+    let no_nt_flip = p.fresh_label("ppu_ctrl_no_nt_flip");
+    let no_tile_flip = p.fresh_label("ppu_ctrl_no_tile_flip");
+    let sprite_base_0000 = p.fresh_label("ppu_ctrl_sprite_base_0000");
+    let sprite_base_set = p.fresh_label("ppu_ctrl_sprite_base_set");
+    let display_done = p.fresh_label("ppu_ctrl_reg1_display_done");
+    let sprite_done = p.fresh_label("ppu_ctrl_reg1_sprite_done");
+    let done_no_ei = p.fresh_label("ppu_ctrl_done_no_ei");
+    let restore_a = p.fresh_label("ppu_ctrl_restore_a");
+
+    p.comment("inline STA $2000 PPUCTRL (stackless)");
+    p.ld_abs_a(PPU_WRITE_VALUE);
+    p.ld_a_i();
+    p.di();
+    p.jp_po(&was_disabled);
+    p.ld_a_imm(1);
+    p.ld_abs_a(PPU_IFF_RESTORE);
+    p.jr(&body);
+    p.label(&was_disabled);
+    p.xor_a();
+    p.ld_abs_a(PPU_IFF_RESTORE);
+
+    p.label(&body);
+    p.ld_a_abs(PPU_WRITE_VALUE);
+    p.ld_c_a();
+
+    if chr_ram {
+        // Runtime NES_CHR_RAM side effects: nametable-page flips and pattern-
+        // table flips mark deferred rebuild/variant-flush work.
+        p.ld_a_abs(PPU_CTRL);
+        p.xor_c();
+        p.and_imm(0x01);
+        p.jr_z(&no_nt_flip);
+        p.ld_a_imm(1);
+        p.ld_abs_a(CHR_NT_REBUILD_DIRTY);
+        p.label(&no_nt_flip);
+
+        p.ld_a_abs(PPU_CTRL);
+        p.xor_c();
+        p.and_imm(0x10);
+        p.jr_z(&no_tile_flip);
+        p.ld_a_imm(1);
+        p.ld_abs_a(CHR_VARIANT_FLUSH_PENDING);
+        p.label(&no_tile_flip);
+    }
+
+    p.ld_a_c();
+    p.ld_abs_a(PPU_CTRL);
+
+    // Mirror NES PPUCTRL bit 3 into SMS VDP register 6.
+    p.bit_a(3);
+    p.jr_nz(&sprite_base_0000);
+    p.ld_a_imm(0xff);
+    p.jr(&sprite_base_set);
+    p.label(&sprite_base_0000);
+    p.ld_a_imm(0xfb);
+    p.label(&sprite_base_set);
+    p.out_a(0xbf);
+    p.ld_a_imm(0x86);
+    p.out_a(0xbf);
+
+    emit_ppu_reg1_latch_inline(p, &display_done, &sprite_done);
+
+    p.ld_a_abs(PPU_IFF_RESTORE);
+    p.or_a();
+    p.jr_z(&done_no_ei);
+    p.ei();
+    p.jr(&restore_a);
+    p.label(&done_no_ei);
+    p.label(&restore_a);
+    p.ld_a_abs(PPU_WRITE_VALUE);
+}
+
+/// Inline the stackless `$2001 PPUMASK` write path.
+///
+/// Stores the mask shadow and refreshes the deferred SMS VDP register-1 latch.
+/// The small DI/EI guard mirrors `rt_ppu_write`'s interrupt behavior without a
+/// call frame.
+fn emit_ppu_mask_write_inline(p: &mut z80_emit::Program) {
+    use sms_layout::*;
+
+    let was_disabled = p.fresh_label("ppu_mask_was_disabled");
+    let body = p.fresh_label("ppu_mask_body");
+    let display_done = p.fresh_label("ppu_mask_reg1_display_done");
+    let sprite_done = p.fresh_label("ppu_mask_reg1_sprite_done");
+    let done_no_ei = p.fresh_label("ppu_mask_done_no_ei");
+    let restore_a = p.fresh_label("ppu_mask_restore_a");
+
+    p.comment("inline STA $2001 PPUMASK (stackless)");
+    p.ld_abs_a(PPU_WRITE_VALUE);
+    p.ld_a_i();
+    p.di();
+    p.jp_po(&was_disabled);
+    p.ld_a_imm(1);
+    p.ld_abs_a(PPU_IFF_RESTORE);
+    p.jr(&body);
+    p.label(&was_disabled);
+    p.xor_a();
+    p.ld_abs_a(PPU_IFF_RESTORE);
+
+    p.label(&body);
+    p.ld_a_abs(PPU_WRITE_VALUE);
+    p.ld_abs_a(PPU_MASK);
+    emit_ppu_reg1_latch_inline(p, &display_done, &sprite_done);
+
+    p.ld_a_abs(PPU_IFF_RESTORE);
+    p.or_a();
+    p.jr_z(&done_no_ei);
+    p.ei();
+    p.jr(&restore_a);
+    p.label(&done_no_ei);
+    p.label(&restore_a);
+    p.ld_a_abs(PPU_WRITE_VALUE);
+}
+
+fn emit_ppu_reg1_latch_inline(p: &mut z80_emit::Program, display_done: &str, sprite_done: &str) {
+    use sms_layout::*;
+
+    // Compose SMS VDP register 1 from PPUCTRL/PPUMASK and defer the actual VDP
+    // write to the vblank-aligned presentation path, matching runtime/ppu.s.
+    p.ld_a_imm(0xb0);
+    p.ld_c_a();
+    p.ld_a_abs(PPU_MASK);
+    p.and_imm(0x18);
+    p.jr_z(display_done);
+    p.ld_a_c();
+    p.or_imm(0x40);
+    p.ld_c_a();
+    p.label(display_done);
+    p.ld_a_abs(PPU_CTRL);
+    p.bit_a(5);
+    p.jr_z(sprite_done);
+    p.ld_a_c();
+    p.or_imm(0x02);
+    p.ld_c_a();
+    p.label(sprite_done);
+    p.ld_a_c();
+    p.ld_abs_a(PENDING_VDP_REG1);
+}
+
+fn emit_ppu_write_callless(program: &mut z80_emit::Program, reg: u8) {
+    use runtime_symbols::*;
+    use sms_layout::*;
+
+    let cont = program.fresh_label("ppu_write_cont");
+    program.ld_b_imm(reg);
+    program.ld_hl_label(&cont);
+    program.ld_abs_hl(PPU_WRITE_CONTINUATION);
+    program.jp(PPU_WRITE_CONT);
+    program.label(&cont);
+}
+
+/// Inline the stackless `$2002 PPUSTATUS` read path.
+///
+/// Entry/exit: A is replaced with the status byte. DE (resident translated X/Y)
+/// is preserved; BC/HL/native flags are scratch. This mirrors
+/// `runtime/ppu.s`'s `_ppu_r_status` side effects and keeps the `rt_ppu_read`
+/// DI/EI critical-section semantics without placing another return address on
+/// the native Z80 stack in the deepest translated-NMI chains.
+fn emit_ppu_status_read_inline(p: &mut z80_emit::Program) {
+    use sms_layout::*;
+
+    let was_disabled = p.fresh_label("ppu_status_was_disabled");
+    let body = p.fresh_label("ppu_status_body");
+    let no_vblank = p.fresh_label("ppu_status_no_vblank");
+    let sprite0 = p.fresh_label("ppu_status_sprite0");
+    let arm_sprite0 = p.fresh_label("ppu_status_arm_sprite0");
+    let finish = p.fresh_label("ppu_status_finish");
+    let done = p.fresh_label("ppu_status_done");
+
+    p.comment("inline LDA/LDX/LDY $2002 PPUSTATUS (stackless)");
+    p.ld_a_i();
+    p.di();
+    p.jp_po(&was_disabled);
+    p.ld_a_imm(1);
+    p.ld_abs_a(PPU_IFF_RESTORE);
+    p.jr(&body);
+    p.label(&was_disabled);
+    p.xor_a();
+    p.ld_abs_a(PPU_IFF_RESTORE);
+
+    p.label(&body);
+    p.ld_a_abs(PPU_VBLANK_FLAG);
+    p.ld_c_a();
+    p.xor_a();
+    p.ld_abs_a(PPU_VBLANK_FLAG);
+    p.ld_abs_a(PPU_SCROLL_TOGGLE);
+    p.ld_abs_a(PPUADDR_TOGGLE);
+
+    p.ld_a_c();
+    p.or_a();
+    p.jr_z(&no_vblank);
+    p.ld_c_imm(0x80);
+    p.jr(&sprite0);
+    p.label(&no_vblank);
+    p.ld_c_imm(0x00);
+
+    p.label(&sprite0);
+    p.ld_a_abs(PPU_MASK);
+    p.and_imm(0x18);
+    p.jr_z(&finish);
+    p.ld_a_abs(PPU_SPRITE0_PHASE);
+    p.or_a();
+    p.jr_z(&arm_sprite0);
+    p.ld_hl_imm(SPLIT_SCROLL_FLAGS);
+    p.set_n_hl_ptr(0);
+    p.ld_a_c();
+    p.or_imm(0x40);
+    p.ld_c_a();
+    p.jr(&finish);
+
+    p.label(&arm_sprite0);
+    p.ld_a_imm(1);
+    p.ld_abs_a(PPU_SPRITE0_PHASE);
+
+    p.label(&finish);
+    p.ld_a_abs(PPU_IFF_RESTORE);
+    p.or_a();
+    p.ld_a_c();
+    p.jr_z(&done);
+    p.ei();
+    p.label(&done);
+}
+
+/// Inline SMB-style `LDA $4016,X` controller polling.
+///
+/// X=0 reads controller 1 through the serial latch; X!=0 returns 0 without
+/// advancing the controller-1 shift index. Mirrors `runtime/input.s` while
+/// avoiding a call frame in deep translated update/NMI chains. Preserves DE;
+/// clobbers AF/BC/native flags.
+fn emit_controller_read_indexed_x_inline(p: &mut z80_emit::Program) {
+    let read_p1 = p.fresh_label("ctrl_read_p1");
+    let shift_done = p.fresh_label("ctrl_read_shift_done");
+    let shift_loop = p.fresh_label("ctrl_read_shift");
+    let open = p.fresh_label("ctrl_read_open");
+    let done = p.fresh_label("ctrl_read_done");
+
+    p.comment("inline LDA $4016,X controller read (stackless)");
+    p.ld_a_d();
+    p.or_a();
+    p.jr_z(&read_p1);
+    p.xor_a();
+    p.jr(&done);
+
+    p.label(&read_p1);
+    p.ld_a_abs(0xCB07);
+    p.cp_imm(8);
+    p.jr_nc(&open);
+    p.ld_b_a();
+    p.ld_a_b();
+    p.or_a();
+    p.ld_a_abs(0xCB06);
+    p.jr_z(&shift_done);
+    p.label(&shift_loop);
+    p.rrca();
+    p.djnz(&shift_loop);
+    p.label(&shift_done);
+    p.and_imm(0x01);
+    p.ld_c_a();
+    p.ld_a_abs(0xCB07);
+    p.inc_a();
+    p.ld_abs_a(0xCB07);
+    p.ld_a_c();
+    p.jr(&done);
+
+    p.label(&open);
+    p.ld_a_imm(1);
+    p.label(&done);
 }
 
 /// Attempt to resolve a constant AddrExpr to an SMS RAM address.
@@ -802,13 +1273,17 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
                 p.ld_b_a();
                 p.pop_af();
             } else {
-                p.ld_c_a();
+                // rt_read_indexed returns the operand in A and clobbers BC, so
+                // do not park the 6502 accumulator in C here. Flag-live ADC/SBC
+                // call this path and need the original A after the indexed read
+                // (SMB's DigitsMathRoutine: ADC $07D7,Y).
+                p.push_af();
                 p.ld_hl_imm(indexed_base_to_sms(*base, region));
                 p.ld_a_d();
                 p.ld_b_a();
                 p.call(indexed_read_runtime(*base, region));
                 p.ld_b_a();
-                p.ld_a_c();
+                p.pop_af();
             }
         }
         AddrExpr::AbsIndexedY(base) => {
@@ -831,13 +1306,15 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
                 p.ld_b_a();
                 p.pop_af();
             } else {
-                p.ld_c_a();
+                // rt_read_indexed clobbers BC; preserve the accumulator on the
+                // native stack instead of in C.
+                p.push_af();
                 p.ld_hl_imm(indexed_base_to_sms(*base, region));
                 p.ld_a_e_reg();
                 p.ld_b_a();
                 p.call(indexed_read_runtime(*base, region));
                 p.ld_b_a();
-                p.ld_a_c();
+                p.pop_af();
             }
         }
         AddrExpr::ZpIndexedX(zp) => {
@@ -861,11 +1338,12 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
             p.ld_a_c();
         }
         AddrExpr::IndirectY(zp) => {
-            p.ld_c_a();
+            // rt_read_zp_ptr_y also clobbers BC; preserve A across the helper.
+            p.push_af();
             p.ld_b_imm(*zp);
             p.call(READ_ZP_PTR_Y);
             p.ld_b_a();
-            p.ld_a_c();
+            p.pop_af();
         }
         AddrExpr::IndirectX(_zp) => {
             p.comment("WARN: IndirectX mem read not yet fully implemented");
@@ -952,7 +1430,6 @@ fn emit_hl_for_rw_mem(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir
 /// update live, since downstream code in another routine may rely on
 /// it (the 6502 callee may see the caller's NZ state via PHP/PLP).
 fn nz_flags_live_after(ops: &[ir::Op], i: usize) -> bool {
-    use ir::Op;
     for op in ops.iter().skip(i + 1) {
         // Reads NZ? → live.
         if reads_nz(op) {
@@ -1428,10 +1905,10 @@ fn cmp_cond_to_z80(cond: &ir::Cond) -> Option<Z80Cond> {
     })
 }
 
-/// Emit a branch on a Z80 native flag, handling cross-section (far)
+/// Emit a branch on a Z80 native flag, handling cross-section translated
 /// targets the same way `Op::BranchIf` does: for a far target, invert
-/// the condition to skip past a `far_jmp`. Conditional jumps don't
-/// clobber flags, so chained native branches off one `cp` stay valid.
+/// the condition to skip past a translated tail jump. Conditional jumps
+/// don't clobber flags, so chained native branches off one `cp` stay valid.
 fn emit_native_branch(
     program: &mut z80_emit::Program,
     routine: &ir::Routine,
@@ -1446,7 +1923,7 @@ fn emit_native_branch(
     } else {
         let skip = program.fresh_label("br_skip");
         cond.invert().jp(program, &skip);
-        program.far_jmp(target);
+        program.translated_tail_jmp(target);
         program.label(&skip);
     }
 }
@@ -2256,7 +2733,7 @@ pub fn lower_routine(
                         emit_prg_high_read_direct(program, *a);
                     }
                     (AddrExpr::AbsIndexedX(0x4016), MemRegion::ApuIo) => {
-                        program.call(CONTROLLER_READ_INDEXED_X);
+                        emit_controller_read_indexed_x_inline(program);
                     }
                     (AddrExpr::AbsIndexedX(base), _) => {
                         if let Some(sms) = indexed_direct_base(*base, *region) {
@@ -2334,14 +2811,14 @@ pub fn lower_routine(
             // the new register value, then restore only A so the new flags
             // remain live for a following branch.
             Op::LdxImm(v) => {
-                program.push_af();
-                program.ld_a_imm(*v);
-                program.ld_d_a_reg();
                 if nz_live[op_idx] {
+                    program.push_af();
+                    program.ld_a_imm(*v);
+                    program.ld_d_a_reg();
                     emit_set_nz_inline(program);
                     restore_a_keep_flags_after_push_af(program);
                 } else {
-                    program.pop_af();
+                    program.ld_d_imm(*v);
                 }
             }
 
@@ -2350,14 +2827,14 @@ pub fn lower_routine(
             }
 
             Op::LdyImm(v) => {
-                program.push_af();
-                program.ld_a_imm(*v);
-                program.ld_e_a_reg();
                 if nz_live[op_idx] {
+                    program.push_af();
+                    program.ld_a_imm(*v);
+                    program.ld_e_a_reg();
                     emit_set_nz_inline(program);
                     restore_a_keep_flags_after_push_af(program);
                 } else {
-                    program.pop_af();
+                    program.ld_e_imm(*v);
                 }
             }
 
@@ -2990,7 +3467,7 @@ pub fn lower_routine(
             // ------------------------------------------------------------------
             Op::BitMem { addr, region } => {
                 emit_mem_to_b(program, addr, *region);
-                program.call(BIT_MEM);
+                emit_bit_mem_inline(program);
             }
 
             // ------------------------------------------------------------------
@@ -3048,7 +3525,7 @@ pub fn lower_routine(
             }
 
             Op::RolA => {
-                program.call(ROL_A);
+                emit_rol_a_flags_inline(program);
             }
 
             Op::RolMem { addr, region } => {
@@ -3057,7 +3534,7 @@ pub fn lower_routine(
             }
 
             Op::RorA => {
-                program.call(ROR_A);
+                emit_ror_a_flags_inline(program);
             }
 
             Op::RorMem { addr, region } => {
@@ -3190,7 +3667,7 @@ pub fn lower_routine(
                     } else {
                         program.jp_nz(&skip);
                     }
-                    program.far_jmp(target);
+                    program.translated_tail_jmp(target);
                     program.label(&skip);
                 }
             }
@@ -3201,19 +3678,20 @@ pub fn lower_routine(
             Op::Jmp { target } => {
                 // Translated-label JMPs can cross banks (e.g., JMP $8745
                 // from InitScreen lands in IncSubtask which may be
-                // pinned to a different code bank). Use far_jmp so slot
-                // 1 is mapped correctly. Runtime helpers (rt_*) live in
-                // bank 0 and are reachable via plain jp.
+                // pinned to a different code bank). Use the translated tail
+                // gate so no native far-gate return frame is left behind.
+                // Runtime helpers (rt_*) live in bank 0 and are reachable via
+                // plain jp.
                 if target.starts_with("rt_") {
                     program.jp(target);
                 } else {
-                    program.far_jmp(target);
+                    program.translated_tail_jmp(target);
                 }
             }
 
             Op::JmpIndirect { addr } => {
                 program.ld_hl_imm(*addr);
-                program.call(INDIRECT_JMP);
+                program.jp(INDIRECT_JMP);
             }
 
             Op::Jsr { target } => {
@@ -3236,7 +3714,7 @@ pub fn lower_routine(
                 if target.starts_with("rt_") {
                     program.call(target);
                 } else {
-                    program.far_call(target);
+                    program.translated_call(target);
                 }
             }
 
@@ -3251,13 +3729,9 @@ pub fn lower_routine(
             // chosen target's RTS returns to the caller of the routine that
             // invoked JumpEngine, not to the inline table.
             //
-            // On Z80 we cannot tail `far_jmp` across generated banks here:
-            // if the target RTS returns to the caller, slot 1 would still be
-            // mapped to the target bank and the return PC would execute in
-            // the wrong bank. Emit `far_call target; ret` for each selected
-            // arm instead. `far_call` restores the caller bank, and the extra
-            // ret consumes this routine's call frame, matching JumpEngine's
-            // tail-dispatch semantics.
+            // On Z80 this must be a software tail bank jump: do not leave a
+            // native far-call helper return frame behind. The target's own
+            // `RTS` unwinds via the translated-call continuation stack.
             Op::JumpEngineCall { targets } => {
                 if targets.is_empty() {
                     program.comment("JumpEngineCall with empty targets — unreachable".to_string());
@@ -3267,22 +3741,20 @@ pub fn lower_routine(
                     // different bank. We emit a chain of:
                     //   cp $i
                     //   jp nz, <skip_label>
-                    //   far_call target
-                    //   ret
+                    //   same-section: jp target
+                    //   cross-section: switch bank; jp target
                     //   skip_label:
                     // For the final entry, we drop the cp/jp_nz and just
                     // dispatch unconditionally.
                     let n = targets.len();
                     for (i, target) in targets.iter().enumerate() {
                         if i + 1 == n {
-                            program.far_call(target);
-                            program.ret();
+                            program.translated_tail_jmp(target);
                         } else {
                             let skip = program.fresh_label("je_skip");
                             program.cp_imm(i as u8);
                             program.jp_nz(&skip);
-                            program.far_call(target);
-                            program.ret();
+                            program.translated_tail_jmp(target);
                             program.label(&skip);
                         }
                     }
@@ -3290,7 +3762,7 @@ pub fn lower_routine(
             }
 
             Op::Rts => {
-                program.ret();
+                program.jp(TRANSLATED_RTS);
             }
 
             Op::Rti => {
@@ -3304,13 +3776,24 @@ pub fn lower_routine(
             // ------------------------------------------------------------------
             Op::PpuWrite { reg, value } => {
                 emit_value_src_to_a(program, value);
-                program.ld_b_imm(*reg);
-                program.call(PPU_WRITE);
+                match *reg {
+                    0 => {
+                        let chr_ram = opts.profile.map(|p| p.rom.chr_kib == 0).unwrap_or(false);
+                        emit_ppu_ctrl_write_inline(program, chr_ram);
+                    }
+                    1 => emit_ppu_mask_write_inline(program),
+                    5 => emit_ppu_scroll_write_inline(program),
+                    _ => emit_ppu_write_callless(program, *reg),
+                }
             }
 
             Op::PpuRead { reg } => {
-                program.ld_b_imm(*reg);
-                program.call(PPU_READ);
+                if *reg == 2 {
+                    emit_ppu_status_read_inline(program);
+                } else {
+                    program.ld_b_imm(*reg);
+                    program.call(PPU_READ);
+                }
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
                 }
@@ -3351,7 +3834,10 @@ pub fn lower_routine(
                 // Computed jump via the 6502 stack (PHA hi / PHA lo / RTS):
                 // pop lo then hi from the shadow stack, target+1, and go
                 // through the runtime banked dispatcher (fail-closed).
-                program.call("rt_rts_dispatch");
+                // Tail helper entry avoids leaving this translated routine's
+                // native helper return frame; runtime dispatches through the
+                // tail-only banked dispatcher rather than rt_far_gate.
+                program.jp("rt_rts_dispatch");
             }
 
             Op::MapperWrite { addr, value } => {
@@ -3428,6 +3914,7 @@ mod tests {
             POP_6502,
             INDIRECT_JMP,
             PPU_WRITE,
+            PPU_WRITE_CONT,
             PPU_READ,
             OAM_DMA,
             APU_WRITE,
@@ -3452,6 +3939,10 @@ mod tests {
             INC_MEM,
             DEC_MEM,
             UNRESOLVED_JSR,
+            "rt_unresolved_jsr_flash",
+            TRANSLATED_RTS,
+            "rt_translated_call_gate",
+            "rt_translated_tail_gate",
             BRK,
             FAR_CALL,
             FAR_JMP,
@@ -3483,13 +3974,13 @@ mod tests {
         assert!(build.bytes.contains(&0x3E));
         let idx = build.bytes.iter().position(|&b| b == 0x3E).unwrap();
         assert_eq!(build.bytes[idx + 1], 0x42);
-        // ret = C9
-        assert!(build.bytes.contains(&0xC9));
+        // translated RTS tails through the software continuation helper.
+        assert!(build.asm.contains("jp rt_translated_rts"));
         // call rt_set_nz_a present
         // H.1c: shadow-NZ update is inlined (table at $3E00).
         assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
         assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
-        assert!(build.asm.contains("ret"));
+        assert!(build.asm.contains("jp rt_translated_rts"));
     }
 
     // -------------------------------------------------------------------
@@ -3555,6 +4046,30 @@ mod tests {
     // PpuWrite
     // -------------------------------------------------------------------
     #[test]
+    fn ppu_write_reg0_inline() {
+        let build = lower_and_finish(vec![Op::PpuWrite {
+            reg: 0,
+            value: ValueSrc::A,
+        }]);
+        assert!(build.asm.contains("inline STA $2000 PPUCTRL"));
+        assert!(!build.asm.contains("call rt_ppu_write"));
+        assert!(build.asm.contains("ld ($CB08),a"));
+        assert!(build.asm.contains("out ($BF),a"));
+    }
+
+    #[test]
+    fn ppu_write_reg1_inline() {
+        let build = lower_and_finish(vec![Op::PpuWrite {
+            reg: 1,
+            value: ValueSrc::A,
+        }]);
+        assert!(build.asm.contains("inline STA $2001 PPUMASK"));
+        assert!(!build.asm.contains("call rt_ppu_write"));
+        assert!(build.asm.contains("ld ($CB09),a"));
+        assert!(build.asm.contains("ld ($CB2D),a"));
+    }
+
+    #[test]
     fn ppu_write_reg6_a() {
         let build = lower_and_finish(vec![Op::PpuWrite {
             reg: 6,
@@ -3562,7 +4077,24 @@ mod tests {
         }]);
         // ld b,$06 = 06 06
         assert!(build.bytes.windows(2).any(|w| w == [0x06, 0x06]));
-        assert!(build.asm.contains("call rt_ppu_write"));
+        assert!(build.asm.contains("jp rt_ppu_write_cont"));
+        assert!(!build.asm.contains("call rt_ppu_write"));
+    }
+
+    #[test]
+    fn rol_a_inlines_without_runtime_call() {
+        let build = lower_and_finish(vec![Op::RolA]);
+        assert!(build.asm.contains("rl a"));
+        assert!(build.asm.contains("ld ($CB03),a"));
+        assert!(!build.asm.contains("call rt_rol_a"));
+    }
+
+    #[test]
+    fn ror_a_inlines_without_runtime_call() {
+        let build = lower_and_finish(vec![Op::RorA]);
+        assert!(build.asm.contains("rr a"));
+        assert!(build.asm.contains("ld ($CB03),a"));
+        assert!(!build.asm.contains("call rt_ror_a"));
     }
 
     // -------------------------------------------------------------------
@@ -3571,12 +4103,19 @@ mod tests {
     #[test]
     fn ppu_read_reg2() {
         let build = lower_and_finish(vec![Op::PpuRead { reg: 2 }]);
-        // ld b,$02 = 06 02
-        assert!(build.bytes.windows(2).any(|w| w == [0x06, 0x02]));
-        assert!(build.asm.contains("call rt_ppu_read"));
+        assert!(build.asm.contains("ld a,i"));
+        assert!(!build.asm.contains("call rt_ppu_read"));
         // H.1c: shadow-NZ update is inlined (table at $3E00).
         assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
         assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
+    }
+
+    #[test]
+    fn ppu_read_reg7_still_calls_runtime() {
+        let build = lower_and_finish(vec![Op::PpuRead { reg: 7 }]);
+        // ld b,$07 = 06 07
+        assert!(build.bytes.windows(2).any(|w| w == [0x06, 0x07]));
+        assert!(build.asm.contains("call rt_ppu_read"));
     }
 
     // -------------------------------------------------------------------
@@ -3600,6 +4139,16 @@ mod tests {
         // H.1c: shadow-NZ update is inlined (table at $3E00).
         assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
         assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
+    }
+
+    #[test]
+    fn lda_4016_indexed_x_inlines_controller_read() {
+        let build = lower_and_finish(vec![Op::LdaMem {
+            addr: AddrExpr::AbsIndexedX(0x4016),
+            region: MemRegion::ApuIo,
+        }]);
+        assert!(build.asm.contains("inline LDA $4016,X controller read"));
+        assert!(!build.asm.contains("call rt_controller_read_indexed_x"));
     }
 
     // -------------------------------------------------------------------
@@ -3639,6 +4188,30 @@ mod tests {
         // + the F-map merge into shadow P), no helper call.
         assert!(build.asm.contains("adc a,b"));
         assert!(build.asm.contains("and $3C"));
+    }
+
+    #[test]
+    fn adc_abs_indexed_y_runtime_read_preserves_accumulator() {
+        let build = lower_and_finish(vec![Op::AdcMem {
+            // $07D7,Y can cross the directly folded $C000-$C7FF RAM window,
+            // so it must use rt_read_indexed. The helper clobbers BC; saving
+            // A in C here corrupted SMB's DigitsMathRoutine (ADC $07D7,Y).
+            addr: AddrExpr::AbsIndexedY(0x07D7),
+            region: MemRegion::Ram,
+        }]);
+
+        let call = build
+            .asm
+            .find("call rt_read_indexed")
+            .expect("indexed ADC should call rt_read_indexed");
+        let before = &build.asm[..call];
+        let after = &build.asm[call..];
+        assert!(
+            before.contains("push af"),
+            "A must be stacked before helper"
+        );
+        assert!(after.contains("pop af"), "A must be restored after helper");
+        assert!(after.contains("adc a,b"), "operand should remain in B");
     }
 
     // -------------------------------------------------------------------
@@ -3747,7 +4320,10 @@ mod tests {
         assert!(build.bytes.windows(3).any(|w| w == [0x21, 0xA9, 0xC1]));
         assert!(build.asm.contains("ld b,(hl)"));
         assert!(!build.asm.contains("WARN: unresolved mem-to-B mode"));
-        assert!(build.asm.contains("call rt_bit_mem"));
+        assert!(!build.asm.contains("call rt_bit_mem"));
+        assert!(build.asm.contains("ld c,a"));
+        assert!(build.asm.contains("and b"));
+        assert!(build.asm.contains("ld ($CB03),a"));
     }
 
     // -------------------------------------------------------------------
@@ -3844,8 +4420,9 @@ mod tests {
         // H.1c: shadow-NZ update is inlined (table at $3E00).
         assert!(build.asm.contains("and $7D"), "inline NZ sequence missing");
         assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
-        assert!(build.asm.contains("pop bc"));
-        assert!(build.asm.contains("ld a,b"));
+        assert!(build.asm.contains("ld ($CB27),a"));
+        assert!(build.asm.contains("ld a,($CB27)"));
+        assert!(!build.asm.contains("pop bc"));
     }
 
     #[test]
@@ -3864,16 +4441,28 @@ mod tests {
     }
 
     #[test]
-    fn jump_engine_call_uses_bank_restoring_call_then_ret() {
-        let build = lower_and_finish(vec![Op::JumpEngineCall {
-            targets: vec!["L_a".to_string(), "L_b".to_string()],
-        }]);
+    fn jump_engine_call_uses_tail_bank_jump_without_ret() {
+        let routine = make_routine(
+            "test_routine",
+            vec![Op::JumpEngineCall {
+                targets: vec!["L_a".to_string(), "L_b".to_string()],
+            }],
+        );
+        let mut prog = z80_emit::Program::new();
+        define_runtime_stubs(&mut prog);
+        prog.org(0x0000);
+        prog.label("L_a");
+        prog.label("L_b");
+        lower_routine(&mut prog, &routine, &LowerOptions::default()).unwrap();
+        let build = prog.finish().unwrap();
+        let test_asm = build.asm.split(".org $0000").last().unwrap_or(&build.asm);
 
-        assert!(build.asm.contains("call rt_far_gate"));
-        assert!(build.asm.contains("ld bc,L_a"));
-        assert!(build.asm.contains("ld bc,L_b"));
-        assert!(build.asm.contains("ret"));
-        assert!(!build.asm.contains("call rt_far_jmp"));
+        assert!(test_asm.contains("jp L_a"));
+        assert!(test_asm.contains("jp L_b"));
+        assert!(!test_asm.contains("jp rt_far_gate_cont"));
+        assert!(!test_asm.contains("call rt_far_call"));
+        assert!(!test_asm.contains("ret"));
+        assert!(!test_asm.contains("call rt_far_jmp"));
     }
 
     // -------------------------------------------------------------------
@@ -3909,7 +4498,7 @@ mod tests {
     // Jsr with label (no profile)
     // -------------------------------------------------------------------
     #[test]
-    fn jsr_emits_call_label() {
+    fn jsr_emits_software_translated_call() {
         let routine = make_routine(
             "test_routine",
             vec![
@@ -3925,13 +4514,61 @@ mod tests {
         prog.org(0x0000);
         lower_routine(&mut prog, &routine, &LowerOptions::default()).unwrap();
         let build = prog.finish().unwrap();
-        // Translated-label JSRs go through the bank-aware trampoline so
-        // they work regardless of which bank holds the target. The asm
-        // listing should mention both the trampoline call and the target
-        // (in a `; → L_8200` comment).
-        // H2: cross-bank JSRs use the compact slot-0 gate with immediates.
-        assert!(build.asm.contains("call rt_far_gate"));
+        assert!(build.asm.contains("ld bc,_tr_cont_"));
         assert!(build.asm.contains("ld bc,L_8200"));
+        assert!(build.asm.contains("ld a,:L_8200"));
+        assert!(build.asm.contains("jp rt_translated_call_gate"));
+        assert!(!build.asm.contains("call L_8200"));
+        assert!(!build.asm.contains("jp rt_far_gate_cont"));
+        assert!(!build.asm.contains("$cb15"));
+        assert!(!build.asm.contains("$fffe"));
+        assert!(build.asm.contains("ld a,$E4"));
+    }
+
+    #[test]
+    fn translated_jmp_uses_tail_gate_not_far_jmp() {
+        let routine = make_routine(
+            "test_routine",
+            vec![Op::Jmp {
+                target: "L_9000".to_string(),
+            }],
+        );
+        let mut prog = z80_emit::Program::new();
+        define_runtime_stubs(&mut prog);
+        prog.org(0x0000);
+        lower_routine(&mut prog, &routine, &LowerOptions::default()).unwrap();
+        prog.label("L_9000");
+        let build = prog.finish().unwrap();
+        assert!(build.asm.contains("jp rt_translated_tail_gate"));
+        assert!(!build.asm.contains("jp rt_far_gate"));
+        assert!(!build.asm.contains("call rt_far_call"));
+        assert!(!build.asm.contains("$cb15"));
+        assert!(!build.asm.contains("$fffe"));
+    }
+
+    #[test]
+    fn native_cross_branch_uses_tail_gate_not_far_jmp() {
+        let routine = make_routine(
+            "test_routine",
+            vec![
+                Op::LdaImm(0x80),
+                Op::BranchIf {
+                    cond: Cond::Negative,
+                    target: "L_9000".to_string(),
+                },
+                Op::Rts,
+            ],
+        );
+        let mut prog = z80_emit::Program::new();
+        define_runtime_stubs(&mut prog);
+        prog.org(0x0000);
+        lower_routine(&mut prog, &routine, &LowerOptions::default()).unwrap();
+        prog.label("L_9000");
+        let build = prog.finish().unwrap();
+        assert!(build.asm.contains("jp rt_translated_tail_gate"));
+        assert!(!build.asm.contains("jp rt_far_gate"));
+        assert!(!build.asm.contains("$cb15"));
+        assert!(!build.asm.contains("$fffe"));
     }
 
     // -------------------------------------------------------------------
@@ -3979,6 +4616,23 @@ runtime_label = "rt_replacement"
         assert!(!build.asm.contains("call L_8200"));
     }
 
+    #[test]
+    fn runtime_helper_jsr_still_native_call() {
+        let build = lower_and_finish(vec![Op::Jsr {
+            target: "rt_push6502".to_string(),
+        }]);
+        assert!(build.asm.contains("call rt_push6502"));
+        assert!(!build.asm.contains("ld bc,_tr_cont_"));
+    }
+
+    #[test]
+    fn rti_still_native_ret() {
+        let build = lower_and_finish(vec![Op::Rti]);
+        assert!(build.asm.contains("call rt_pop6502"));
+        assert!(build.asm.contains("ret"));
+        assert!(!build.asm.contains("jp rt_translated_rts"));
+    }
+
     // -------------------------------------------------------------------
     // JmpIndirect
     // -------------------------------------------------------------------
@@ -3987,7 +4641,7 @@ runtime_label = "rt_replacement"
         let build = lower_and_finish(vec![Op::JmpIndirect { addr: 0x3000 }]);
         // ld hl,$3000 = 21 00 30
         assert!(build.bytes.windows(3).any(|w| w == [0x21, 0x00, 0x30]));
-        assert!(build.asm.contains("call rt_indirect_jmp"));
+        assert!(build.asm.contains("jp rt_indirect_jmp"));
     }
 
     // -------------------------------------------------------------------

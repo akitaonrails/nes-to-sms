@@ -655,6 +655,20 @@ fn run_z80_with_prg(
     bus.write(sms_layout::SHADOW_S, init.sp);
     bus.write(sms_layout::SHADOW_P, init.p);
 
+    // Seed one translated-call continuation frame for the routine's final
+    // software RTS. The continuation is a validation sentinel RET at $3FFF;
+    // rt_translated_rts jumps there after restoring A/bank and popping the
+    // software frame, so the harness no longer depends on the routine ending
+    // in a native Z80 RET.
+    bus.write(0xD300, init.a); // frame[0] scratch/entry A
+    bus.write(0xD301, 0xFF); // continuation low
+    bus.write(0xD302, 0x3F); // continuation high
+    bus.write(0xD303, 0x01); // return bank shadow
+    bus.write(0xCB76, 0x04); // TR_RET_PTR = $D304 next-free
+    bus.write(0xCB77, 0xD3);
+    bus.write(0xCB14, 0x01);
+    bus.write(0x3FFF, 0xC9); // validation_ret_stub: ret
+
     let mut cpu = z80_emu::Cpu::new();
     cpu.pc = entry;
     cpu.a = init.a;
@@ -662,9 +676,9 @@ fn run_z80_with_prg(
     cpu.e = init.y;
     // F: irrelevant; lowered code reads/writes shadow P, not native F.
     cpu.sp = 0xDFFE;
-    // Push a sentinel return: when the routine RETs, PC = $FFFE which is
-    // outside the routine. run_until_ret stops on first RET that pops
-    // below initial depth.
+    // The seeded translated continuation above lands on a sentinel RET at
+    // $3FFF. RTI/runtime RET paths can still return natively to the same stop
+    // condition when a focused test exercises them.
     // Conservative Z80 expands one 6502 op into 10–40 Z80 instructions
     // (helpers, push/pop, shadow updates). Give it 10× the 6502 budget.
     let _ = cpu.run_until_ret(&mut bus, 2_000_000);

@@ -93,7 +93,7 @@ fn pipeline_runs_on_minimal_reset_only_rom() {
     );
     // H.1c: the shadow-NZ update is inlined via the $3E00 table.
     assert!(asm.contains("and $7D"), "missing inline NZ update");
-    assert!(asm.contains("ret"));
+    assert!(asm.contains("jp rt_translated_rts"));
 }
 
 #[test]
@@ -131,14 +131,13 @@ fn pipeline_handles_branch_and_jsr() {
     assert!(asm.contains("L_8000:"));
     assert!(asm.contains("L_8010:"));
     assert!(asm.contains("L_8002:"), "internal branch label missing");
-    // Translated-label JSRs go through the bank-aware trampoline when
-    // the target lives in another section. For same-section targets
-    // (this synthetic test puts both routines in section 0) the lower
-    // pass downgrades to a plain `call L_8010` after the two-pass
-    // label_section seeding. Accept either form.
+    // Translated-label JSRs use the generic software continuation stack,
+    // not a native call or rt_far_gate_cont.
     assert!(
-        asm.contains("call rt_far_call ; → L_8010") || asm.contains("call L_8010"),
-        "JSR did not lower to a recognised call form"
+        asm.contains("jp L_8010")
+            && asm.contains("ld bc,_tr_cont_")
+            && !asm.contains("jp rt_far_gate_cont"),
+        "JSR did not lower to a software continuation call"
     );
     // BNE lowers via `ld hl,$CB03; bit 1,(hl); jp z/nz` so A is preserved.
     let lower_asm = asm.to_ascii_lowercase();
@@ -180,7 +179,7 @@ fn pipeline_routes_ppu_and_oam_writes() {
 
     let asm = std::fs::read_to_string(out_path.join("generated/translated.asm")).unwrap();
     assert!(
-        asm.contains("call rt_ppu_write"),
+        asm.contains("jp rt_ppu_write_cont"),
         "PPU write did not route to runtime"
     );
     assert!(

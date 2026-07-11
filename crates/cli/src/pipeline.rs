@@ -6,7 +6,6 @@ use std::path::Path;
 use analysis::nes_rom_like;
 use lower::LowerOptions;
 use sms_project::{NesMirroring, ProjectAssets, ProjectConfig, RawCiramBackend};
-use z80_emit::Program;
 
 use crate::Args;
 
@@ -820,7 +819,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             eprintln!("map[{l}] = {:?}", section_map.get(l));
         }
     }
-    let (mut program, lower_failures, unresolved) = emit_translated(&section_map)?;
+    let (program, lower_failures, unresolved) = emit_translated(&section_map)?;
 
     let mut build = program.finish()?;
     // Post-process the asm listing for WLA-DX:
@@ -1436,6 +1435,7 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_push6502",
     "rt_pop6502",
     "rt_ppu_write",
+    "rt_ppu_write_cont",
     "rt_ppu_read",
     "rt_oam_dma",
     "rt_apu_write",
@@ -1448,8 +1448,12 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_restore_prg_window",
     "rt_banked_dispatch",
     "rt_rts_dispatch",
+    "rt_translated_rts",
+    "rt_translated_call_gate",
+    "rt_translated_tail_gate",
     "rt_indirect_jmp",
     "rt_unresolved_jsr",
+    "rt_unresolved_jsr_flash",
     "rt_brk",
     "rt_asl_a",
     "rt_asl_mem",

@@ -361,6 +361,11 @@ impl Program {
     pub fn ld_a_l(&mut self) {
         self.emit1(0x7D, "ld a,l");
     }
+    pub fn ld_a_i(&mut self) {
+        self.sec().push_byte(0xED);
+        self.sec().push_byte(0x57);
+        self.sec().push_asm("  ld a,i".to_string());
+    }
 
     pub fn ld_b_a(&mut self) {
         self.emit1(0x47, "ld b,a");
@@ -979,6 +984,9 @@ impl Program {
     pub fn jp(&mut self, label: &str) {
         self.emit_jp_like(0xC3, label, format!("jp {}", label));
     }
+    pub fn jp_hl(&mut self) {
+        self.emit1(0xE9, "jp (hl)");
+    }
     pub fn jp_z(&mut self, label: &str) {
         self.emit_jp_like(0xCA, label, format!("jp z,{}", label));
     }
@@ -1052,12 +1060,164 @@ impl Program {
         self.emit_far_gate(label, false);
     }
 
+    /// Tail-dispatch to a translated subroutine whose own RTS should return to
+    /// this routine's caller (SMB-style JumpEngine semantics). Same-section
+    /// targets can be a native `jp`, avoiding one Z80 return address on the
+    /// native stack. Cross-section targets still need `far_call; ret` so the
+    /// caller bank is restored before consuming this routine's call frame.
+    pub fn far_tail_dispatch(&mut self, label: &str) {
+        if self.label_section.get(label) == Some(&self.current) {
+            self.jp(label);
+        } else {
+            self.far_call(label);
+            self.ret();
+        }
+    }
+
+    /// Translated 6502 `JSR` using the software continuation stack at
+    /// $D300-$D3FB. This never uses the native Z80 call/ret stack and never
+    /// routes through `rt_far_gate_cont`.
+    pub fn translated_call(&mut self, label: &str) {
+        let cont = self.fresh_label("tr_cont");
+        let overflow = self.fresh_label("tr_call_overflow");
+
+        self.emit_translated_call_frame(&cont, &overflow);
+        if self.label_section.get(label) == Some(&self.current) {
+            self.ld_a_hl_ptr();
+            self.jp(label);
+        } else {
+            self.ld_bc_label(label);
+            self.emit_bytes_asm(&[0x3E, 0x00], &format!("  ld a,:{label}"));
+            self.jp("rt_translated_call_gate");
+            self.referenced_labels.insert(label.to_string());
+        }
+        self.label(&overflow);
+        self.ld_a_imm(0xE4);
+        self.ld_abs_a(0xCB1D);
+        self.jp("rt_unresolved_jsr_flash");
+        self.label(&cont);
+        self.referenced_labels.insert(label.to_string());
+    }
+
+    /// Tail jump to a translated label, switching slot 1 for cross-section
+    /// targets without leaving a native helper return frame behind.
+    pub fn translated_tail_jmp(&mut self, label: &str) {
+        if self.label_section.get(label) == Some(&self.current) {
+            self.jp(label);
+        } else {
+            self.ld_h_a();
+            self.ld_bc_label(label);
+            self.emit_bytes_asm(&[0x3E, 0x00], &format!("  ld a,:{label}"));
+            self.jp("rt_translated_tail_gate");
+            self.referenced_labels.insert(label.to_string());
+        }
+    }
+
+    fn emit_translated_call_frame(&mut self, cont: &str, overflow: &str) {
+        // Keep entry A in C until frame[0] is filled; do not use global scratch.
+        self.ld_c_a();
+        let bridge = self.fresh_label("tr_push_bridge");
+        let seg0 = self.fresh_label("tr_push_seg0");
+        let seg1 = self.fresh_label("tr_push_seg1");
+        let full_check = self.fresh_label("tr_push_full_check");
+        let normal = self.fresh_label("tr_push_normal");
+        let fill = self.fresh_label("tr_push_fill");
+
+        // Store diagnostic attempted=old_ptr+4 first. Then validate old_ptr;
+        // invalid pointers fail closed instead of corrupting D3FC/D4xx.
+        self.ld_hl_abs(0xCB76);
+        self.inc_hl();
+        self.inc_hl();
+        self.inc_hl();
+        self.inc_hl();
+        self.ld_abs_hl(0xCB73);
+        self.dec_hl();
+        self.dec_hl();
+        self.dec_hl();
+        self.dec_hl(); // HL = old pointer
+        self.ld_a_h();
+        self.cp_imm(0xD3);
+        self.jr_z(&seg0);
+        self.cp_imm(0xD5);
+        self.jr_z(&seg1);
+        self.cp_imm(0xD6);
+        self.jr_z(&full_check);
+        self.jr(overflow);
+
+        self.label(&seg0);
+        self.ld_a_l();
+        self.cp_imm(0xF9);
+        self.jr_nc(overflow); // D3FC is reserved PPU continuation scratch.
+        self.and_imm(0x03);
+        self.jr_nz(overflow);
+        self.ld_a_l();
+        self.cp_imm(0xF8);
+        self.jr_z(&bridge);
+        self.jr(&normal);
+
+        self.label(&seg1);
+        self.ld_a_l();
+        self.cp_imm(0xFD);
+        self.jr_nc(overflow);
+        self.and_imm(0x03);
+        self.jr_nz(overflow);
+        self.jr(&normal);
+
+        self.label(&full_check);
+        self.ld_a_l();
+        self.or_a();
+        self.jr_z(overflow); // old ptr D600: diagnostic attempted D604.
+        self.jr(overflow);
+
+        self.label(&normal);
+        // Reserve first, then fill old frame base (attempted - 4).
+        self.inc_hl();
+        self.inc_hl();
+        self.inc_hl();
+        self.inc_hl();
+        self.ld_abs_hl(0xCB76);
+        self.dec_hl();
+        self.dec_hl();
+        self.dec_hl();
+        self.dec_hl();
+        self.jr(&fill);
+
+        self.label(&bridge);
+        // old ptr D3F8: attempted diagnostic D3FC, but publish bridge D500 and
+        // fill the real frame at D3F8. Never publish/use D3FC as next-free.
+        self.ld_hl_imm(0xD500);
+        self.ld_abs_hl(0xCB76);
+        self.ld_hl_imm(0xD3F8);
+
+        self.label(&fill);
+        self.ld_hl_ptr_c();
+        self.inc_hl();
+        self.ld_bc_label(cont);
+        self.ld_hl_ptr_c();
+        self.inc_hl();
+        self.ld_hl_ptr_b();
+        self.inc_hl();
+        self.ld_a_abs(0xCB14);
+        self.ld_hl_ptr_a();
+        self.dec_hl();
+        self.dec_hl();
+        self.dec_hl();
+    }
+
     /// Compact far dispatch (H2): target address and bank are immediates,
-    /// transferred through the slot-0 rt_far_gate shim (switching $FFFE
+    /// transferred through the slot-0 far-gate shims (switching $FFFE
     /// from slot-1 code would swap the executing bank under the PC — the
     /// gate must run from slot 0). Saves the trampoline's inline data
     /// block decode.
+    ///
+    /// Cross-section calls use an explicit continuation label and `jp
+    /// rt_far_gate_cont`, not `call rt_far_gate`: the target still returns via
+    /// a native `_far_after_cont` trampoline, but the caller continuation lives
+    /// in the far-gate RAM LIFO instead of consuming another native stack word.
+    /// Far JMPs keep the old gate because their continuation is already the
+    /// original caller's native return address.
     fn emit_far_gate(&mut self, label: &str, jump: bool) {
+        let cont = (!jump).then(|| self.fresh_label("far_cont"));
         self.emit_bytes_asm(&[0x32, 0x15, 0xCB], "  ld ($cb15),a");
         // ld de, TARGET — 16-bit label immediate. Text-only (binary bytes
         // stay zero): cross-section transfers are never executed in the
@@ -1074,7 +1234,10 @@ impl Program {
         if jump {
             self.emit_bytes_asm(&[0xC3, 0x00, 0x00], "  jp rt_far_gate");
         } else {
-            self.emit_bytes_asm(&[0xCD, 0x00, 0x00], "  call rt_far_gate");
+            let cont = cont.as_deref().expect("call continuation label");
+            self.ld_hl_label(cont);
+            self.emit_bytes_asm(&[0xC3, 0x00, 0x00], "  jp rt_far_gate_cont");
+            self.label(cont);
         }
         self.referenced_labels.insert(label.to_string());
     }
@@ -1142,29 +1305,6 @@ impl Program {
         self.emit_far_gate(label, true);
     }
 
-    fn emit_far(&mut self, target: &str, dispatcher: &str) {
-        let section_idx = self.current;
-        let offset = self.sections[self.current].len() + 1;
-        self.sec().push_byte(0xCD);
-        self.sec().push_byte(0x00);
-        self.sec().push_byte(0x00);
-        self.sec()
-            .push_asm(format!("  call {} ; → {}", dispatcher, target));
-        self.patches.push(Patch {
-            label: dispatcher.to_string(),
-            section_idx,
-            kind: PatchKind::Abs16 { offset },
-        });
-        self.sec().push_byte(0x00);
-        self.sec().push_byte(0x00);
-        self.sec().push_byte(0x00);
-        self.sec().push_asm(format!("  .dw {}", target));
-        self.sec().push_asm(format!("  .db :{}", target));
-        // Track the target so unresolved_labels() picks it up if no
-        // routine defines it (e.g., profile-only names like
-        // PrimaryGameSetup that aren't backed by a lift).
-        self.referenced_labels.insert(target.to_string());
-    }
     pub fn call_z(&mut self, label: &str) {
         self.emit_jp_like(0xCC, label, format!("call z,{}", label));
     }
@@ -1474,6 +1614,27 @@ mod tests {
                 0x21, 0x34, 0x12, 0x01, 0xCD, 0xAB, 0x11, 0x00, 0x00, 0x31, 0xFE, 0xDF
             ]
         );
+    }
+
+    #[test]
+    fn translated_call_emits_segment_bridge_logic() {
+        let mut p = Program::new();
+        p.org(0x4000);
+        p.translated_call("target");
+        p.label("target");
+        p.ret();
+        p.label("rt_unresolved_jsr_flash");
+        p.ret();
+        p.label("rt_translated_call_gate");
+        p.ret();
+        let b = p.finish().unwrap();
+        assert!(b.asm.contains("ld hl,$D500"), "missing bridge publish");
+        assert!(b.asm.contains("ld hl,$D3F8"), "missing bridge frame base");
+        assert!(b.asm.contains("ld hl,($CB76)"));
+        assert!(b.asm.contains("ld ($CB73),hl"));
+        assert!(b.asm.contains("jp rt_translated_call_gate"));
+        assert!(!b.asm.contains("$D3FC),hl"));
+        assert!(!b.asm.to_ascii_lowercase().contains("$cb15"));
     }
 
     #[test]
