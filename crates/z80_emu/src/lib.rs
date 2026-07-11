@@ -107,11 +107,16 @@ pub struct Cpu {
     pub l: u8,
     pub sp: u16,
     pub pc: u16,
+    /// Hidden WZ/MEMPTR register. Most code cannot read it directly, but real
+    /// Z80 BIT n,(HL) copies flags 5/3 from MEMPTR high byte, so translated
+    /// code that later PUSHes AF can observe it.
+    pub memptr: u16,
     pub halted: bool,
     pub iff1: bool,
     pub iff2: bool,
-    /// Delayed interrupt enable countdown for EI. Real Z80 enables IFF1/2 only
-    /// after the instruction following EI has executed, making `ei; ret` safe.
+    /// Interrupt-acceptance inhibit countdown for EI. Real Z80 makes IFF1/2
+    /// visible after EI, but maskable interrupts are not accepted until after
+    /// the following instruction has executed, making `ei; ret` safe.
     pub ei_pending: u8,
     // Shadow register set (used by EX AF,AF' and EXX). Stored as 16-bit
     // for convenience even though the real Z80 has independent halves.
@@ -139,6 +144,7 @@ impl Cpu {
             l: 0,
             sp: 0,
             pc: 0,
+            memptr: 0,
             halted: false,
             iff1: false,
             iff2: false,
@@ -328,6 +334,9 @@ impl Cpu {
         let a = self.a;
         // Run sub but restore A
         self.alu_sub(operand, false);
+        // Unlike SUB/SBC, CP copies undocumented flags 5/3 from the operand,
+        // not from the subtraction result.
+        self.f = (self.f & !(FLAG_X | FLAG_Y)) | (operand & (FLAG_X | FLAG_Y));
         // Z should reflect (a == operand), which sub already does correctly
         self.a = a;
     }
@@ -481,7 +490,13 @@ impl Cpu {
                 self.set_flag(FLAG_N, false);
                 self.set_flag(FLAG_S, n == 7 && !z);
                 self.set_flag(FLAG_PV, z);
-                self.set_undoc(val);
+                if r == 6 {
+                    // On a real Z80, BIT n,(HL) copies undocumented X/Y flags
+                    // from the high byte of hidden WZ/MEMPTR, not the byte read.
+                    self.set_undoc((self.memptr >> 8) as u8);
+                } else {
+                    self.set_undoc(val);
+                }
             }
             // ── 10nnnrrr: RES n,r ──────────────────────────────────────────
             2 => {
@@ -542,22 +557,28 @@ impl Cpu {
 
             // ── ld (bc),a ─────────────────────────────────────────────
             0x02 => {
-                bus.write(self.bc(), self.a);
+                let addr = self.bc();
+                bus.write(addr, self.a);
+                self.memptr = (addr.wrapping_add(1) & 0x00FF) | ((self.a as u16) << 8);
             }
             // ── ld a,(bc) ─────────────────────────────────────────────
             0x0A => {
                 let addr = self.bc();
                 self.a = bus.read(addr);
+                self.memptr = addr.wrapping_add(1);
             }
 
             // ── ld (de),a ─────────────────────────────────────────────
             0x12 => {
-                bus.write(self.de(), self.a);
+                let addr = self.de();
+                bus.write(addr, self.a);
+                self.memptr = (addr.wrapping_add(1) & 0x00FF) | ((self.a as u16) << 8);
             }
             // ── ld a,(de) ─────────────────────────────────────────────
             0x1A => {
                 let addr = self.de();
                 self.a = bus.read(addr);
+                self.memptr = addr.wrapping_add(1);
             }
 
             // ── ld (nn),hl ────────────────────────────────────────────
@@ -565,23 +586,27 @@ impl Cpu {
                 let nn = self.fetch_word(bus);
                 bus.write(nn, self.l);
                 bus.write(nn.wrapping_add(1), self.h);
+                self.memptr = nn.wrapping_add(1);
             }
             // ── ld hl,(nn) ────────────────────────────────────────────
             0x2A => {
                 let nn = self.fetch_word(bus);
                 self.l = bus.read(nn);
                 self.h = bus.read(nn.wrapping_add(1));
+                self.memptr = nn.wrapping_add(1);
             }
 
             // ── ld (nn),a ─────────────────────────────────────────────
             0x32 => {
                 let nn = self.fetch_word(bus);
                 bus.write(nn, self.a);
+                self.memptr = nn.wrapping_add(1) | ((self.a as u16) << 8);
             }
             // ── ld a,(nn) ─────────────────────────────────────────────
             0x3A => {
                 let nn = self.fetch_word(bus);
                 self.a = bus.read(nn);
+                self.memptr = nn.wrapping_add(1);
             }
 
             // ── inc rr ────────────────────────────────────────────────
@@ -729,6 +754,7 @@ impl Cpu {
                 self.set_flag(FLAG_C, out);
                 self.set_flag(FLAG_H, false);
                 self.set_flag(FLAG_N, false);
+                self.set_undoc(self.a);
             }
             // ── RRCA ──────────────────────────────────────────────────
             0x0F => {
@@ -738,6 +764,7 @@ impl Cpu {
                 self.set_flag(FLAG_C, out);
                 self.set_flag(FLAG_H, false);
                 self.set_flag(FLAG_N, false);
+                self.set_undoc(self.a);
             }
             // ── RLA ───────────────────────────────────────────────────
             0x17 => {
@@ -748,6 +775,7 @@ impl Cpu {
                 self.set_flag(FLAG_C, out);
                 self.set_flag(FLAG_H, false);
                 self.set_flag(FLAG_N, false);
+                self.set_undoc(self.a);
             }
             // ── RRA ───────────────────────────────────────────────────
             0x1F => {
@@ -758,6 +786,7 @@ impl Cpu {
                 self.set_flag(FLAG_C, out);
                 self.set_flag(FLAG_H, false);
                 self.set_flag(FLAG_N, false);
+                self.set_undoc(self.a);
             }
 
             // ── ADD HL,rr ────────────────────────────────────────────
@@ -765,6 +794,7 @@ impl Cpu {
             // S, Z, PV unchanged. (We track C/H/N; leave S/Z/PV.)
             0x09 | 0x19 | 0x29 | 0x39 => {
                 let hl = self.hl() as u32;
+                self.memptr = self.hl().wrapping_add(1);
                 let rr = match op {
                     0x09 => self.bc() as u32,
                     0x19 => self.de() as u32,
@@ -778,6 +808,7 @@ impl Cpu {
                 let halfc = ((hl & 0x0FFF) + (rr & 0x0FFF)) > 0x0FFF;
                 self.set_flag(FLAG_H, halfc);
                 self.set_flag(FLAG_N, false);
+                self.set_undoc(((sum >> 8) & 0xFF) as u8);
             }
 
             // ── DJNZ e ────────────────────────────────────────────────
@@ -786,6 +817,7 @@ impl Cpu {
                 self.b = self.b.wrapping_sub(1);
                 if self.b != 0 {
                     self.pc = self.pc.wrapping_add(e as u16);
+                    self.memptr = self.pc;
                 }
             }
 
@@ -793,12 +825,14 @@ impl Cpu {
             0x18 => {
                 let e = self.fetch_disp(bus);
                 self.pc = self.pc.wrapping_add(e as u16);
+                self.memptr = self.pc;
             }
             // ── JR NZ,e ───────────────────────────────────────────────
             0x20 => {
                 let e = self.fetch_disp(bus);
                 if !self.flag(FLAG_Z) {
                     self.pc = self.pc.wrapping_add(e as u16);
+                    self.memptr = self.pc;
                 }
             }
             // ── JR Z,e ────────────────────────────────────────────────
@@ -806,6 +840,7 @@ impl Cpu {
                 let e = self.fetch_disp(bus);
                 if self.flag(FLAG_Z) {
                     self.pc = self.pc.wrapping_add(e as u16);
+                    self.memptr = self.pc;
                 }
             }
             // ── JR NC,e ───────────────────────────────────────────────
@@ -813,6 +848,7 @@ impl Cpu {
                 let e = self.fetch_disp(bus);
                 if !self.flag(FLAG_C) {
                     self.pc = self.pc.wrapping_add(e as u16);
+                    self.memptr = self.pc;
                 }
             }
             // ── JR C,e ────────────────────────────────────────────────
@@ -820,6 +856,7 @@ impl Cpu {
                 let e = self.fetch_disp(bus);
                 if self.flag(FLAG_C) {
                     self.pc = self.pc.wrapping_add(e as u16);
+                    self.memptr = self.pc;
                 }
             }
 
@@ -828,6 +865,7 @@ impl Cpu {
                 self.set_flag(FLAG_C, true);
                 self.set_flag(FLAG_H, false);
                 self.set_flag(FLAG_N, false);
+                self.set_undoc(self.a);
             }
             // ── CCF ───────────────────────────────────────────────────
             0x3F => {
@@ -835,6 +873,7 @@ impl Cpu {
                 self.set_flag(FLAG_H, old_c);
                 self.set_flag(FLAG_C, !old_c);
                 self.set_flag(FLAG_N, false);
+                self.set_undoc(self.a);
             }
 
             // ── ld r,r' (block 0x40..0x7F, excl 0x76) ────────────────
@@ -895,41 +934,49 @@ impl Cpu {
             0xC0 => {
                 if !self.flag(FLAG_Z) {
                     self.pc = self.pop_word(bus);
+                    self.memptr = self.pc;
                 }
             }
             0xC8 => {
                 if self.flag(FLAG_Z) {
                     self.pc = self.pop_word(bus);
+                    self.memptr = self.pc;
                 }
             }
             0xD0 => {
                 if !self.flag(FLAG_C) {
                     self.pc = self.pop_word(bus);
+                    self.memptr = self.pc;
                 }
             }
             0xD8 => {
                 if self.flag(FLAG_C) {
                     self.pc = self.pop_word(bus);
+                    self.memptr = self.pc;
                 }
             }
             0xE0 => {
                 if !self.flag(FLAG_PV) {
                     self.pc = self.pop_word(bus);
+                    self.memptr = self.pc;
                 }
             }
             0xE8 => {
                 if self.flag(FLAG_PV) {
                     self.pc = self.pop_word(bus);
+                    self.memptr = self.pc;
                 }
             }
             0xF0 => {
                 if !self.flag(FLAG_S) {
                     self.pc = self.pop_word(bus);
+                    self.memptr = self.pc;
                 }
             }
             0xF8 => {
                 if self.flag(FLAG_S) {
                     self.pc = self.pop_word(bus);
+                    self.memptr = self.pc;
                 }
             }
 
@@ -957,59 +1004,69 @@ impl Cpu {
                 if !self.flag(FLAG_Z) {
                     self.pc = nn;
                 }
+                self.memptr = nn;
             }
             0xCA => {
                 let nn = self.fetch_word(bus);
                 if self.flag(FLAG_Z) {
                     self.pc = nn;
                 }
+                self.memptr = nn;
             }
             0xD2 => {
                 let nn = self.fetch_word(bus);
                 if !self.flag(FLAG_C) {
                     self.pc = nn;
                 }
+                self.memptr = nn;
             }
             0xDA => {
                 let nn = self.fetch_word(bus);
                 if self.flag(FLAG_C) {
                     self.pc = nn;
                 }
+                self.memptr = nn;
             }
             0xE2 => {
                 let nn = self.fetch_word(bus);
                 if !self.flag(FLAG_PV) {
                     self.pc = nn;
                 }
+                self.memptr = nn;
             }
             0xEA => {
                 let nn = self.fetch_word(bus);
                 if self.flag(FLAG_PV) {
                     self.pc = nn;
                 }
+                self.memptr = nn;
             }
             0xF2 => {
                 let nn = self.fetch_word(bus);
                 if !self.flag(FLAG_S) {
                     self.pc = nn;
                 }
+                self.memptr = nn;
             } // JP P,nn
             0xFA => {
                 let nn = self.fetch_word(bus);
                 if self.flag(FLAG_S) {
                     self.pc = nn;
                 }
+                self.memptr = nn;
             } // JP M,nn
 
             // ── JP nn ─────────────────────────────────────────────────
             0xC3 => {
                 let nn = self.fetch_word(bus);
                 self.pc = nn;
+                self.memptr = nn;
             }
 
             // ── CALL cc,nn ────────────────────────────────────────────
             0xC4 => {
                 let nn = self.fetch_word(bus);
+                self.memptr = nn;
                 if !self.flag(FLAG_Z) {
                     self.push_word(bus, self.pc);
                     self.pc = nn;
@@ -1017,6 +1074,7 @@ impl Cpu {
             }
             0xCC => {
                 let nn = self.fetch_word(bus);
+                self.memptr = nn;
                 if self.flag(FLAG_Z) {
                     self.push_word(bus, self.pc);
                     self.pc = nn;
@@ -1080,6 +1138,7 @@ impl Cpu {
             // ── RET ───────────────────────────────────────────────────
             0xC9 => {
                 self.pc = self.pop_word(bus);
+                self.memptr = self.pc;
             }
 
             // ── CB prefix ─────────────────────────────────────────────
@@ -1092,17 +1151,21 @@ impl Cpu {
                 let nn = self.fetch_word(bus);
                 self.push_word(bus, self.pc);
                 self.pc = nn;
+                self.memptr = self.pc;
             }
 
             // ── IN A,(n) ──────────────────────────────────────────────
             0xDB => {
                 let n = self.fetch_byte(bus);
+                let acc = self.a;
                 self.a = bus.in_port(n);
+                self.memptr = ((acc as u16) << 8).wrapping_add(n as u16).wrapping_add(1);
             }
             // ── OUT (n),A ─────────────────────────────────────────────
             0xD3 => {
                 let n = self.fetch_byte(bus);
                 bus.out_port(n, self.a);
+                self.memptr = (n as u16).wrapping_add(1) | ((self.a as u16) << 8);
             }
 
             // ── EI / DI ───────────────────────────────────────────────
@@ -1112,6 +1175,8 @@ impl Cpu {
                 self.ei_pending = 0;
             }
             0xFB => {
+                self.iff1 = true;
+                self.iff2 = true;
                 self.ei_pending = 2;
             }
 
@@ -1171,6 +1236,7 @@ impl Cpu {
                 bus.write(self.sp.wrapping_add(1), self.h);
                 self.l = lo;
                 self.h = hi;
+                self.memptr = self.hl();
             }
 
             // ── JP (HL) ──────────────────────────────────────────────
@@ -1195,12 +1261,15 @@ impl Cpu {
                     // by the runtime's VDP critical-section lock). We model
                     // no I/R registers; A := 0. S/Z from A, H/N cleared.
                     0x57 | 0x5F => {
+                        let old_c = self.f & FLAG_C;
                         self.a = 0;
+                        self.f = old_c;
                         self.set_flag(FLAG_S, false);
                         self.set_flag(FLAG_Z, true);
                         self.set_flag(FLAG_H, false);
                         self.set_flag(FLAG_N, false);
                         self.set_flag(FLAG_PV, self.iff2);
+                        self.set_undoc(self.a);
                     }
                     // RETN ($45) / RETI ($4D): like RET but with IFF
                     // semantics. For trace purposes, treat as RET.
@@ -1209,6 +1278,7 @@ impl Cpu {
                         let hi = bus.read(self.sp.wrapping_add(1));
                         self.sp = self.sp.wrapping_add(2);
                         self.pc = ((hi as u16) << 8) | lo as u16;
+                        self.memptr = self.pc;
                         self.iff1 = self.iff2;
                         self.ei_pending = 0;
                     }
@@ -1239,6 +1309,7 @@ impl Cpu {
                         };
                         bus.write(addr, (val & 0xFF) as u8);
                         bus.write(addr.wrapping_add(1), (val >> 8) as u8);
+                        self.memptr = addr.wrapping_add(1);
                     }
                     // LD BC,(nn) ($4B), DE,(nn) ($5B), HL,(nn) ($6B), SP,(nn) ($7B)
                     0x4B | 0x5B | 0x6B | 0x7B => {
@@ -1255,10 +1326,12 @@ impl Cpu {
                             0x7B => self.sp = val,
                             _ => unreachable!(),
                         }
+                        self.memptr = addr.wrapping_add(1);
                     }
                     // SBC HL,rr — 16-bit subtract with carry.
                     0x42 | 0x52 | 0x62 | 0x72 => {
                         let hl = self.hl() as i32;
+                        self.memptr = self.hl().wrapping_add(1);
                         let rr = match ed {
                             0x42 => self.bc() as i32,
                             0x52 => self.de() as i32,
@@ -1283,6 +1356,7 @@ impl Cpu {
                     // ADC HL,rr — 16-bit add with carry.
                     0x4A | 0x5A | 0x6A | 0x7A => {
                         let hl = self.hl() as u32;
+                        self.memptr = self.hl().wrapping_add(1);
                         let rr = match ed {
                             0x4A => self.bc() as u32,
                             0x5A => self.de() as u32,
@@ -1345,6 +1419,7 @@ impl Cpu {
                         bus.out_port(port, val);
                         self.set_hl(self.hl().wrapping_add(1));
                         self.b = self.b.wrapping_sub(1);
+                        self.memptr = self.bc().wrapping_add(1);
                         self.set_flag(FLAG_N, true);
                         self.set_flag(FLAG_Z, self.b == 0);
                         if ed == 0xB3 && self.b != 0 {
@@ -1355,9 +1430,11 @@ impl Cpu {
                     0xA2 | 0xB2 => {
                         let port = self.c;
                         let val = bus.in_port(port);
+                        let memptr = self.bc().wrapping_add(1);
                         bus.write(self.hl(), val);
                         self.set_hl(self.hl().wrapping_add(1));
                         self.b = self.b.wrapping_sub(1);
+                        self.memptr = memptr;
                         self.set_flag(FLAG_N, true);
                         self.set_flag(FLAG_Z, self.b == 0);
                         if ed == 0xB2 && self.b != 0 {
@@ -1371,6 +1448,7 @@ impl Cpu {
                         bus.out_port(port, val);
                         self.set_hl(self.hl().wrapping_sub(1));
                         self.b = self.b.wrapping_sub(1);
+                        self.memptr = self.bc().wrapping_sub(1);
                         self.set_flag(FLAG_N, true);
                         self.set_flag(FLAG_Z, self.b == 0);
                         if ed == 0xBB && self.b != 0 {
@@ -1380,9 +1458,11 @@ impl Cpu {
                     0xAA | 0xBA => {
                         let port = self.c;
                         let val = bus.in_port(port);
+                        let memptr = self.bc().wrapping_sub(1);
                         bus.write(self.hl(), val);
                         self.set_hl(self.hl().wrapping_sub(1));
                         self.b = self.b.wrapping_sub(1);
+                        self.memptr = memptr;
                         self.set_flag(FLAG_N, true);
                         self.set_flag(FLAG_Z, self.b == 0);
                         if ed == 0xBA && self.b != 0 {
@@ -1420,10 +1500,6 @@ impl Cpu {
 
         if self.ei_pending > 0 {
             self.ei_pending -= 1;
-            if self.ei_pending == 0 {
-                self.iff1 = true;
-                self.iff2 = true;
-            }
         }
 
         Ok(())
@@ -1884,6 +1960,23 @@ mod tests {
         assert!(cpu.f & FLAG_Z == 0);
     }
 
+    #[test]
+    fn test_cp_n_undocumented_flags_from_operand() {
+        // ld a,$D0; cp $CF; halt.  $D0-$CF=$01, but CP's undocumented
+        // flags 5/3 come from operand $CF, so X is set and Y is clear.
+        let (cpu, _) = run(&[0x3E, 0xD0, 0xFE, 0xCF, 0x76]);
+        assert_eq!(cpu.a, 0xD0, "A must not change after CP");
+        assert_eq!(cpu.af(), 0xD01A);
+    }
+
+    #[test]
+    fn test_cp_n_undocumented_y_from_operand() {
+        // ld a,$21; cp $20; halt.  Result is $01, but operand bit 5 is set.
+        let (cpu, _) = run(&[0x3E, 0x21, 0xFE, 0x20, 0x76]);
+        assert_eq!(cpu.a, 0x21, "A must not change after CP");
+        assert_eq!(cpu.f & (FLAG_X | FLAG_Y), FLAG_Y);
+    }
+
     // ── ADC / SBC ────────────────────────────────────────────────────────────
 
     #[test]
@@ -1969,6 +2062,19 @@ mod tests {
         assert_eq!(cpu.hl(), 0x00FF);
     }
 
+    #[test]
+    fn test_add_hl_rr_undocumented_flags_from_result_high_byte() {
+        let mut bus = FlatBus::new();
+        bus.load(0x0000, &[0x21, 0x00, 0x00, 0x11, 0xD3, 0xFD, 0x19, 0x76]); // hl=0; de=$fdd3; add hl,de
+        let mut cpu = Cpu::new();
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.hl(), 0xFDD3);
+        assert_eq!(cpu.f & (FLAG_X | FLAG_Y), FLAG_X | FLAG_Y);
+        assert_eq!(cpu.f & FLAG_N, 0);
+    }
+
     // ── Rotates ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -2003,6 +2109,32 @@ mod tests {
         let (cpu, _) = run(&[0x3E, 0x00, 0x37, 0x1F, 0x76]);
         assert_eq!(cpu.a, 0x80);
         assert!(cpu.f & FLAG_C == 0);
+    }
+
+    #[test]
+    fn test_accumulator_rotates_set_undocumented_flags_from_result() {
+        let mut bus = FlatBus::new();
+        bus.load(0x0000, &[0x3E, 0xA4, 0x0F, 0x07, 0x17, 0x1F, 0x76]);
+        let mut cpu = Cpu::new();
+        cpu.f = FLAG_Z | FLAG_PV | FLAG_X | FLAG_Y;
+
+        cpu.step(&mut bus).unwrap(); // ld a,$a4
+        cpu.step(&mut bus).unwrap(); // rrca -> $52, X/Y clear
+        assert_eq!(cpu.a, 0x52);
+        assert_eq!(cpu.f & (FLAG_X | FLAG_Y), 0);
+        assert_eq!(cpu.f & (FLAG_Z | FLAG_PV), FLAG_Z | FLAG_PV);
+
+        cpu.step(&mut bus).unwrap(); // rlca -> $a4, Y set
+        assert_eq!(cpu.a, 0xA4);
+        assert_eq!(cpu.f & (FLAG_X | FLAG_Y), FLAG_Y);
+
+        cpu.step(&mut bus).unwrap(); // rla with C=0 -> $48, X set
+        assert_eq!(cpu.a, 0x48);
+        assert_eq!(cpu.f & (FLAG_X | FLAG_Y), FLAG_X);
+
+        cpu.step(&mut bus).unwrap(); // rra with C=1 -> $a4, Y set
+        assert_eq!(cpu.a, 0xA4);
+        assert_eq!(cpu.f & (FLAG_X | FLAG_Y), FLAG_Y);
     }
 
     // ── CB-prefix shifts ──────────────────────────────────────────────────────
@@ -2060,6 +2192,29 @@ mod tests {
     }
 
     #[test]
+    fn test_bit_hl_undocumented_flags_from_address_high_byte() {
+        let mut bus = FlatBus::new();
+        bus.mem[0xCB03] = 0x00;
+        bus.load(0x0000, &[0x21, 0x03, 0xCB, 0xCB, 0x4E, 0x76]); // ld hl,0xCB03; bit 1,(hl)
+        let mut cpu = Cpu::new();
+        cpu.f = FLAG_X | FLAG_Y;
+        cpu.memptr = 0xEF04;
+        cpu.step(&mut bus).unwrap();
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.f & (FLAG_X | FLAG_Y), FLAG_X | FLAG_Y);
+        assert!(cpu.f & FLAG_Z != 0);
+        assert!(cpu.f & FLAG_H != 0);
+        assert!(cpu.f & FLAG_N == 0);
+    }
+
+    #[test]
+    fn test_jp_cc_updates_memptr_even_when_not_taken() {
+        let (cpu, _) = run(&[0x3E, 0x00, 0xB7, 0xC2, 0x04, 0xEF, 0x76]); // xor-ish OR A sets Z; jp nz,$ef04
+        assert_eq!(cpu.pc, 0x0007);
+        assert_eq!(cpu.memptr, 0xEF04);
+    }
+
+    #[test]
     fn test_set_res_a() {
         // ld a,0x00; set 0,a → A=0x01; res 0,a → A=0x00; halt
         let f_before;
@@ -2093,6 +2248,19 @@ mod tests {
         let (cpu, _) = run(&[0x37, 0x3F, 0x3F, 0x76]);
         assert!(cpu.f & FLAG_C != 0);
         assert!(cpu.f & FLAG_H == 0); // after second ccf H=prev C=0
+    }
+
+    #[test]
+    fn test_scf_ccf_undocumented_flags_from_a() {
+        let mut bus = FlatBus::new();
+        bus.load(0x0000, &[0x3E, 0x08, 0x37, 0x3F, 0x76]);
+        let mut cpu = Cpu::new();
+        cpu.f = FLAG_Y;
+        cpu.step(&mut bus).unwrap(); // ld a,$08
+        cpu.step(&mut bus).unwrap(); // scf
+        assert_eq!(cpu.f & (FLAG_X | FLAG_Y), FLAG_X);
+        cpu.step(&mut bus).unwrap(); // ccf
+        assert_eq!(cpu.f & (FLAG_X | FLAG_Y), FLAG_X);
     }
 
     #[test]
@@ -2323,6 +2491,24 @@ mod tests {
         assert!(steps >= 3);
     }
 
+    #[test]
+    fn test_ld_a_i_clears_undocumented_flags_and_preserves_carry() {
+        let mut bus = FlatBus::new();
+        bus.load(0x0000, &[0xED, 0x57, 0x76]); // ld a,i; halt
+        let mut cpu = Cpu::new();
+        cpu.f = FLAG_C | FLAG_X | FLAG_Y;
+        cpu.iff2 = true;
+
+        cpu.step(&mut bus).unwrap();
+
+        assert_eq!(cpu.a, 0x00);
+        assert_eq!(cpu.f & FLAG_C, FLAG_C, "LD A,I preserves carry");
+        assert_eq!(cpu.f & (FLAG_X | FLAG_Y), 0, "X/Y come from loaded A");
+        assert_eq!(cpu.f & FLAG_Z, FLAG_Z);
+        assert_eq!(cpu.f & FLAG_PV, FLAG_PV);
+        assert_eq!(cpu.f & (FLAG_H | FLAG_N), 0);
+    }
+
     // ── Unsupported opcodes ───────────────────────────────────────────────────
 
     #[test]
@@ -2400,8 +2586,8 @@ mod tests {
         let mut cpu = Cpu::new();
 
         cpu.step(&mut bus).unwrap(); // EI itself
-        assert!(!cpu.iff1);
-        assert!(!cpu.iff2);
+        assert!(cpu.iff1);
+        assert!(cpu.iff2);
         assert_eq!(cpu.ei_pending, 1);
 
         cpu.step(&mut bus).unwrap(); // following instruction

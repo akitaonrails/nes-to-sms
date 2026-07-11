@@ -82,6 +82,7 @@ dependencies = [
  "nes_rom",
  "oracle_6502",
  "profile",
+ "rustzx-z80",
  "sms_project",
  "validation",
  "z80_emit",
@@ -120,6 +121,12 @@ checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "rustzx-z80"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c75eeaab634ecd84e07fdb7c385efded6e86aed83c3935bb12a971e2139e7e2"
 
 [[package]]
 name = "serde"

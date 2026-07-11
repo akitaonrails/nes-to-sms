@@ -18,6 +18,14 @@ path = "src/bin/trace_sms.rs"
 name = "frame-diff"
 path = "src/bin/frame_diff.rs"
 
+[[bin]]
+name = "z80-diff"
+path = "src/bin/z80_diff.rs"
+required-features = ["z80-diff"]
+
+[features]
+z80-diff = ["dep:rustzx-z80"]
+
 [dependencies]
 nes_rom = { workspace = true }
 cpu6502 = { workspace = true }
@@ -31,6 +39,7 @@ sms_project = { workspace = true }
 oracle_6502 = { workspace = true }
 z80_emu = { workspace = true }
 validation = { workspace = true }
+rustzx-z80 = { version = "=0.16.0", optional = true }
 
 [[bin]]
 name = "replay-state"
