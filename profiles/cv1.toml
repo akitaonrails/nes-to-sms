@@ -7,6 +7,10 @@ mapper  = 2
 prg_kib = 128
 chr_kib = 0
 
+[input]
+mode = "action"          # button 1 = NES A (jump), button 2 = NES B (whip)
+pause_start = true       # SMS PAUSE button = NES Start (title start / pause)
+
 [vectors]
 nmi   = 0xc052
 reset = 0xc008

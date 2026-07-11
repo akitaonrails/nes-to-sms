@@ -39,6 +39,31 @@ pub struct Profile {
     /// manipulate the emulated 6502 stack.
     #[serde(default, rename = "jump_engine")]
     pub jump_engines: Vec<JumpEngineSite>,
+    /// Controller mapping policy. SMS pads have two buttons; NES has
+    /// four. `heuristic` (default) keeps the SMB behavior: a
+    /// title-mode RAM discriminator flips buttons between
+    /// Select/Start and A/B. `action` maps button 1 -> NES A and
+    /// button 2 -> NES B unconditionally; combined with
+    /// `pause_start`, the SMS PAUSE button injects a NES Start press
+    /// (CV1: title start + in-game pause).
+    #[serde(default)]
+    pub input: Input,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Input {
+    #[serde(default)]
+    pub mode: InputMode,
+    #[serde(default)]
+    pub pause_start: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputMode {
+    #[default]
+    Heuristic,
+    Action,
 }
 
 #[derive(Debug, Clone, Deserialize)]

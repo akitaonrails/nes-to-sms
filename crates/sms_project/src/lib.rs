@@ -69,6 +69,11 @@ pub struct ProjectConfig<'a> {
     /// CHR-RAM cart: patterns upload at runtime; variant regeneration
     /// reads back from VRAM instead of the (blank) data_chr asset.
     pub chr_ram: bool,
+    /// Controller mapping: false = SMB title-mode heuristic (default),
+    /// true = fixed button1->NES A, button2->NES B.
+    pub input_action: bool,
+    /// SMS PAUSE button injects a NES Start press (see input.s/boot.s).
+    pub input_pause_start: bool,
 }
 
 #[derive(Debug)]
@@ -244,6 +249,12 @@ fn sms_asm_content(
         24
     };
     let mut mapper_define = format!(".define NES_MAPPER {}", cfg.mapper);
+    if cfg.input_action {
+        mapper_define.push_str("\n.define INPUT_MODE_ACTION 1");
+    }
+    if cfg.input_pause_start {
+        mapper_define.push_str("\n.define INPUT_PAUSE_START 1");
+    }
     if cfg.chr_ram {
         mapper_define.push_str("\n.define NES_CHR_RAM 1\n.define CHR_RAM_SRAM_BASE $8800");
     }
@@ -558,6 +569,8 @@ mod tests {
         ProjectConfig {
             mapper: 0,
             chr_ram: false,
+            input_action: false,
+            input_pause_start: false,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -656,6 +669,8 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             chr_ram: false,
+            input_action: false,
+            input_pause_start: false,
             rom_kib: 32,
             region: 0x4C,
             title: "TOOLONGTITLE", // 12 chars
@@ -677,6 +692,8 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             chr_ram: false,
+            input_action: false,
+            input_pause_start: false,
             rom_kib: 17,
             region: 0x4C,
             title: "TEST",
@@ -698,6 +715,8 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             chr_ram: false,
+            input_action: false,
+            input_pause_start: false,
             rom_kib: 64,
             region: 0x4C,
             title: "BANKS4",
@@ -761,6 +780,8 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             chr_ram: false,
+            input_action: false,
+            input_pause_start: false,
             rom_kib: 8,
             region: 0x4C,
             title: "TEST",
@@ -805,6 +826,8 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             chr_ram: false,
+            input_action: false,
+            input_pause_start: false,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -829,6 +852,8 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             chr_ram: false,
+            input_action: false,
+            input_pause_start: false,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -853,6 +878,8 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             chr_ram: false,
+            input_action: false,
+            input_pause_start: false,
             rom_kib: 64,
             region: 0x4C,
             title: "TEST",

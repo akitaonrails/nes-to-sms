@@ -133,9 +133,21 @@ reset_entry:
   jp irq_handler
 
 .org $0066
+.ifdef INPUT_PAUSE_START
+  ; NMI = SMS pause button -> inject a NES Start press: arm a 4-frame
+  ; countdown that rt_controller_latch translates into Start held for
+  ; 4 frames then released (a clean press edge). $CB2E is free (the old
+  ; far-gate park moved to the native stack).
+  push af
+  ld  a, $04
+  ld  ($cb2e), a
+  pop af
+  retn
+.else
   ; NMI = SMS pause button.  Ignored for v1; RETN returns to the
   ; interrupted context without servicing.
   retn
+.endif
 
 ; ─── boot_main ────────────────────────────────────────────────────────────────
 .org $0068

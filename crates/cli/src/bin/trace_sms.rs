@@ -2705,6 +2705,8 @@ fn main() {
     let mut inject_irq = true;
     let mut controller_port_dc = 0xFF;
     let mut delayed_controller_port_dc: Option<u8> = None;
+    // SMS PAUSE button presses (Z80 NMI to $0066) at these script frames.
+    let mut pause_at_frames: Vec<usize> = Vec::new();
     let mut buttons_after_frame: Option<usize> = None;
     let mut button_events: Vec<(usize, u8)> = Vec::new();
     let mut expect_no_trap = false;
@@ -2789,6 +2791,11 @@ fn main() {
                 i += 1;
                 let value = args.get(i).expect("--pad1-raw hex value");
                 controller_port_dc = parse_hex_u8(value).expect("--pad1-raw expects hex byte");
+            }
+            "--pause-at-frame" => {
+                i += 1;
+                let value = args.get(i).expect("--pause-at-frame frame number");
+                pause_at_frames.push(value.parse::<usize>().expect("--pause-at-frame usize"));
             }
             other => {
                 eprintln!("unknown arg: {other}");
@@ -3190,6 +3197,19 @@ fn main() {
                 if script_frame.is_some_and(|f| f >= frame) {
                     bus.controller_port_dc = port;
                 }
+            }
+            if let Some(f) = script_frame
+                && pause_at_frames.contains(&f)
+            {
+                // SMS PAUSE = Z80 NMI: push PC, IFF1 -> IFF2, jump $0066.
+                cpu.sp = cpu.sp.wrapping_sub(2);
+                bus.write(cpu.sp, (cpu.pc & 0xFF) as u8);
+                bus.write(cpu.sp.wrapping_add(1), (cpu.pc >> 8) as u8);
+                cpu.iff2 = cpu.iff1;
+                cpu.iff1 = false;
+                cpu.halted = false;
+                cpu.pc = 0x0066;
+                eprintln!("PAUSE NMI injected at script frame {f}");
             }
             if let Some(ref dir) = dump_each_frame_to {
                 let _ = std::fs::create_dir_all(dir);

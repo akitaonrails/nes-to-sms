@@ -87,11 +87,19 @@ rt_controller_latch:
   ld   b, a                 ; B = raw inverted SMS byte
   ld   c, $00               ; C = NES byte being built
 
+.ifdef INPUT_MODE_ACTION
+  ; Profile input mode "action": fixed button 1 -> NES A, button 2 ->
+  ; NES B. Start comes from the SMS PAUSE button (INPUT_PAUSE_START).
+  ; The heuristic below reads SMB-specific RAM ($0770) and mis-mapped
+  ; buttons for other games (CV1's $0770 is ordinary game RAM).
+  jr   _latch_game_buttons
+.else
   ; SMB title mode needs Select/Start; gameplay needs A/B. Use $0770 as the
   ; coarse mode discriminator: 0 = title/menu, nonzero = in-game modes.
   ld   a, ($c770)
   or   a
   jr   nz, _latch_game_buttons
+.endif
 
   ; Select (NES bit 2) = SMS bit 4 in title mode.
   bit  4, b
@@ -128,6 +136,21 @@ _latch_no_a:
 _latch_no_b:
 
 _latch_buttons_done:
+.ifdef INPUT_PAUSE_START
+  ; SMS PAUSE pressed recently: the pause NMI ($0066) armed a small
+  ; countdown at $CB2E; while it runs, hold NES Start down. The counter
+  ; makes the press a clean multi-frame edge (press then release), which
+  ; is what new-press detectors need.
+  ld   a, ($cb2e)
+  or   a
+  jr   z, _latch_no_pause_start
+  dec  a
+  ld   ($cb2e), a
+  ld   a, c
+  or   %00001000            ; NES Start
+  ld   c, a
+_latch_no_pause_start:
+.endif
 
   ; Up (NES bit 4) = SMS bit 0.
   bit  0, b

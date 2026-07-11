@@ -934,6 +934,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
         raw_ciram_backend: RawCiramBackend::SramSlot2,
         mapper: prof.rom.mapper,
         chr_ram: image.chr.is_empty(),
+        input_action: prof.input.mode == profile::InputMode::Action,
+        input_pause_start: prof.input.pause_start,
     };
     sms_project::emit_project(&args.out, &build, &project_assets, &cfg, runtime_dir)?;
 
