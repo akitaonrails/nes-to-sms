@@ -137,10 +137,35 @@ _latch_no_b:
 
 _latch_buttons_done:
 .ifdef INPUT_PAUSE_START
-  ; SMS PAUSE pressed recently: the pause NMI ($0066) armed a small
-  ; countdown at $CB2E; while it runs, hold NES Start down. The counter
-  ; makes the press a clean multi-frame edge (press then release), which
-  ; is what new-press detectors need.
+  ; Chord fallback: some frontends do not route the SMS PAUSE button
+  ; (RetroArch/GPGX pause routing varies). Holding BOTH buttons for 30
+  ; consecutive frames (~half a second) arms the same Start injector.
+  ; No gameplay collision: jump+whip chords are transient. $CB2F is
+  ; the consecutive-hold counter; $FE = already fired (until release).
+  ld   a, b
+  and  %00110000
+  cp   %00110000
+  jr   nz, _latch_chord_reset
+  ld   a, ($cb2f)
+  cp   $fe
+  jr   z, _latch_chord_done  ; fired; wait for release
+  inc  a
+  ld   ($cb2f), a
+  cp   30
+  jr   c, _latch_chord_done
+  ld   a, $04
+  ld   ($cb2e), a            ; arm the Start injector below
+  ld   a, $fe
+  ld   ($cb2f), a
+  jr   _latch_chord_done
+_latch_chord_reset:
+  xor  a
+  ld   ($cb2f), a
+_latch_chord_done:
+  ; SMS PAUSE pressed recently (or the chord above): the pause NMI
+  ; ($0066) armed a small countdown at $CB2E; while it runs, hold NES
+  ; Start down. The counter makes the press a clean multi-frame edge
+  ; (press then release), which is what new-press detectors need.
   ld   a, ($cb2e)
   or   a
   jr   z, _latch_no_pause_start
