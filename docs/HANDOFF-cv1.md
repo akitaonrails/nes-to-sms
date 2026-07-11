@@ -81,14 +81,26 @@ classes, all fixed:
 
 ## Next phase (in order)
 
-1. **Rendering fidelity**: fix the garbled CHR-RAM intro (variant
-   materialization / sub-palette gaps for this screen class). Debug
-   in-harness — it reproduces there; FD_DUMP_CHRRAM/FD_DUMP_NT give
-   NES-side ground truth per frame.
-2. **Progression survey**: longer runs (game frames deliver slowly);
-   confirm title screen and demo render recognizably.
-3. **Speed**: profile the heavy frames (SMS_PC_PROFILE=1); apply the
-   Phase-R style residency/lowering work to CV1's hot paths.
+1. **Title letter polish** (the one open rendering bug). State:
+   the title renders recognizably (commits 61a4878 + 10859d7 fixed
+   the table-1 source overflow, added flush re-projection with the
+   $CA13 presented-table damper, and keyed generation+invalidation
+   to the latch) but five font tiles (133/134/135/152/153 — the
+   T/A/K-class letters of PUSH START KEY and the bottom text) end
+   ALL-ZERO in VRAM even though SMS_DUMP_SRAM shows real glyphs at
+   their table-1 mirror offsets. SMS_WATCH_VRAM=0x10E0:0x20 (slot
+   135) shows real glyph bytes written, then a later regeneration
+   writing zeros (pc ≈ $0F8C-$0F9E emit loop, bank1=8 context).
+   Working glyphs have nz=8 (plane-0 font rows). Next: stamp the
+   VRAM watch log with a step/write counter to order events against
+   flushes; find which trigger regenerates those five FC keys from
+   the wrong table (suspects: a regen while $CA13 still presented
+   table 0 late in the logo era with no later projection covering
+   those keys; the band materializer rows; BSHADOW path).
+2. **Gameplay visual pass**: press Start (PAUSE button or
+   trace-sms --pause-at-frame ~560-650) and survey level rendering.
+3. **Speed**: profile heavy frames (SMS_PC_PROFILE=1); Phase-R style
+   residency for CV1's hot paths.
 4. **CV1 acceptance route** + add to the regression gate.
 5. Strip-or-keep boot beacons; the 13 lower failures are the benign
    data-walk class (JAM/AHX/ANE/oversize → trap stubs).
