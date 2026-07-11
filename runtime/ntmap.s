@@ -3,11 +3,10 @@
 ; This is a scaffold for the runtime nametable-shadow materializer. It does not
 ; write a full CIRAM tile shadow yet because chrmap.s still uses $CC00-$D2FF
 ; as the authoritative folded SMS per-cell subpalette state. The old compact
-; $D300-$D3DF duplicate has been retired, and trace diagnostics currently
-; reserve $D300-$D3FF only as dirty metadata space: $D300-$D3EF can hold a
-; 1920-bit tile-dirty bitmap, and $D3F0-$D3FF can hold a 128-bit attr-dirty
-; bitmap. Callers may use the full helper only once the folded-shadow storage
-; collision is removed.
+; $D300-$D3DF duplicate has been retired. $D300-$D3FB and $D500-$D5FF now
+; belong to translated-call continuation frames, and $D3FC-$D3FE to PPU write
+; continuations, so callers may use the full helper only once replacement
+; folded-shadow storage is assigned.
 
 .define NT_ATTR_SHADOW $cb80
 .define RAW_CIRAM_BYTES $0800
@@ -108,14 +107,37 @@ rt_raw_ciram_sram_clear:
 
 ; Write one raw NES CIRAM byte into the SRAM backend.
 ; Entry: DE = NES PPU nametable/attribute address, A = byte.
-; Preserves: DE. Clobbers: AF, HL.
+; Preserves: DE. Clobbers: AF, BC, HL.
 rt_raw_ciram_sram_write:
-  push af
-  call rt_nt_ppuaddr_to_raw_ciram_sram
-  call rt_raw_ciram_sram_enable
-  pop  af
-  ld   (hl), a
-  jp   rt_raw_ciram_sram_disable
+  ld   c, a
+
+.ifdef NES_MIRRORING_VERTICAL
+  ld   a, d
+  and  $07                   ; raw high byte within 2 KiB CIRAM
+  add  a, (RAW_CIRAM_SRAM_BASE >> 8)
+  ld   h, a
+  ld   l, e
+.endif
+
+.ifdef NES_MIRRORING_HORIZONTAL
+  ld   a, d
+  and  $03                   ; raw low 1 KiB offset high bits
+  ld   h, a
+  ld   a, d
+  and  $08                   ; raw bit 11 selects CIRAM page 1
+  srl  a                     ; move bit 3 -> bit 2
+  or   h
+  add  a, (RAW_CIRAM_SRAM_BASE >> 8)
+  ld   h, a
+  ld   l, e
+.endif
+
+  ld   a, RAW_CIRAM_SRAM_CTRL
+  ld   ($fffc), a
+  ld   (hl), c
+  xor  a
+  ld   ($fffc), a
+  ret
 
 ; Read one raw NES CIRAM byte from the SRAM backend.
 ; Entry: DE = NES PPU nametable/attribute address.
@@ -144,7 +166,28 @@ rt_raw_ciram_sram_read:
 ; Preserves: DE.
 ; Clobbers: AF, HL.
 rt_nt_attr_shadow_addr:
-  call rt_nt_ppuaddr_to_ciram   ; HL = $CC00 + mirrored CIRAM offset
+  ; Inline rt_nt_ppuaddr_to_ciram. Attribute updates can run from the nested
+  ; frame path where every extra call frame matters.
+  ld   a, d
+
+.ifdef NES_MIRRORING_VERTICAL
+  and  $07                   ; raw high byte within 2 KiB CIRAM
+  add  a, $cc
+  ld   h, a
+  ld   l, e
+.endif
+
+.ifdef NES_MIRRORING_HORIZONTAL
+  and  $03                   ; raw low 1 KiB offset high bits
+  ld   h, a
+  ld   a, d
+  and  $08                   ; raw bit 11 selects CIRAM page 1
+  srl  a                     ; move bit 3 -> bit 2
+  or   h
+  add  a, $cc
+  ld   h, a
+  ld   l, e
+.endif
 
   ld   a, l
   and  $3f                      ; attribute byte within CIRAM page
@@ -166,12 +209,49 @@ rt_nt_attr_shadow_addr:
 ; Write one NES attribute byte into the compact mirrored attribute shadow.
 ; Entry: DE = NES PPU attribute address, A = attr byte.
 ; Preserves: DE.
-; Clobbers: AF, HL.
+; Clobbers: AF, BC, HL.
 rt_nt_write_attr_shadow:
-  push af
-  call rt_nt_attr_shadow_addr
-  pop  af
-  ld   (hl), a
+  ; Inline rt_nt_attr_shadow_addr. This helper is reached from the nested
+  ; translated-NMI upload path; saving A with push/pop plus the helper call can
+  ; cross the native stack guard. BC is caller-dead on both runtime call sites.
+  ld   c, a
+  ld   a, d
+
+.ifdef NES_MIRRORING_VERTICAL
+  and  $07                   ; raw high byte within 2 KiB CIRAM
+  add  a, $cc
+  ld   h, a
+  ld   l, e
+.endif
+
+.ifdef NES_MIRRORING_HORIZONTAL
+  and  $03                   ; raw low 1 KiB offset high bits
+  ld   h, a
+  ld   a, d
+  and  $08                   ; raw bit 11 selects CIRAM page 1
+  srl  a                     ; move bit 3 -> bit 2
+  or   h
+  add  a, $cc
+  ld   h, a
+  ld   l, e
+.endif
+
+  ld   a, l
+  and  $3f                   ; attribute byte within CIRAM page
+  ld   l, a
+
+  ld   a, h
+  sub  $cc
+  and  $04                   ; mirrored CIRAM page bit
+  add  a, a
+  add  a, a
+  add  a, a
+  add  a, a                  ; $04 -> $40
+  or   l
+  add  a, $80                ; base low byte of NT_ATTR_SHADOW
+  ld   l, a
+  ld   h, $cb
+  ld   (hl), c
   ret
 
 ; Derive the NES background subpalette S for a tile from the compact mirrored
@@ -272,7 +352,36 @@ _nt_attr_shadow_shift_done:
 ;        carry CLEAR -> out-of-window: raw-store only, caller skips VRAM.
 ; Preserves: DE. Clobbers: AF, HL, BC.
 rt_nt_route_tile_write:
-  call rt_raw_ciram_sram_write
+  ; Inline rt_raw_ciram_sram_write in the hottest $2007 tile path. The helper
+  ; call frame alone can cross the native stack guard during nested frame work.
+  ld   c, a
+
+.ifdef NES_MIRRORING_VERTICAL
+  ld   a, d
+  and  $07                   ; raw high byte within 2 KiB CIRAM
+  add  a, (RAW_CIRAM_SRAM_BASE >> 8)
+  ld   h, a
+  ld   l, e
+.endif
+
+.ifdef NES_MIRRORING_HORIZONTAL
+  ld   a, d
+  and  $03                   ; raw low 1 KiB offset high bits
+  ld   h, a
+  ld   a, d
+  and  $08                   ; raw bit 11 selects CIRAM page 1
+  srl  a                     ; move bit 3 -> bit 2
+  or   h
+  add  a, (RAW_CIRAM_SRAM_BASE >> 8)
+  ld   h, a
+  ld   l, e
+.endif
+
+  ld   a, RAW_CIRAM_SRAM_CTRL
+  ld   ($fffc), a
+  ld   (hl), c
+  xor  a
+  ld   ($fffc), a
   ; row = ((D & 3) << 3) | (E >> 5); rows 0-3 (status region) always render.
   ld   a, e
   rlca
@@ -477,7 +586,7 @@ _npc_row:
   or   $20
   ld   d, a
   call rt_raw_ciram_sram_read   ; A = raw tile (preserves DE)
-  push af
+  ld   ($cb13), a               ; park raw tile without spending native stack
   ; fold to the SMS table: $3700 + ((DE - $2000) & $3FF) * 2
   ld   a, d
   and  $03
@@ -493,7 +602,7 @@ _npc_row:
   and  $3f
   or   $40
   out  ($bf), a
-  pop  af
+  ld   a, ($cb13)
   call rt_write_mapped_bg_tile
   ld   a, ($cb2c)
   inc  a

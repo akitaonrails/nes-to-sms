@@ -28,7 +28,7 @@
 ;                       b3/b4 sweep-reload p1/p2, b5 tri linear-reload
 ;   $CB55        triangle linear counter
 ;   $CB56-$CB5D  PSG cache: tone0 lo/hi, tone1 lo/hi, tone2 lo/hi,
-;                noise ctrl byte, (pad)
+;                noise ctrl byte, frame-loop temp
 ;   $CB5E-$CB61  PSG attenuation cache ch0..ch3
 ;
 ; rt_mapper_write discards all writes (NROM has no mapper registers).
@@ -46,6 +46,7 @@
 .define APU_FLAGS    $CB54
 .define TRI_LINEAR   $CB55
 .define PSG_CACHE    $CB56
+.define APU_FRAME_TMP $CB5D
 .define PSG_ATTN     $CB5E
 .define PSG_PORT     $7F
 ; Triangle loudness, derived from the NES APU mixer curves (nesdev):
@@ -62,11 +63,24 @@
 ; ─── rt_apu_write ─────────────────────────────────────────────────────────────
 ; Entry: A = value, HL = NES register address ($4000-$4017).
 ; Stores to the shadow and applies NES write side effects.
+; Preserves AF and DE. Clobbers BC and HL. Keep this shallow: translated code
+; can reach APU writes while the native stack is at the frame/NMI low-water.
 rt_apu_write:
-  push af
-  push hl
-  push bc
   ld   b, a                 ; B = value
+  ; Preserve caller AF without spending native stack. Like the PPU wrappers,
+  ; capture the prior interrupt state and keep interrupts disabled while
+  ; alternate AF owns caller flags; otherwise an IRQ-side PPU write could reuse
+  ; alternate AF and corrupt the preserved store flags.
+  ex   af, af'
+  ld   a, i                 ; P/V := IFF2
+  di
+  jp   po, _aw_iff_disabled
+  ld   a, $01
+  jr   _aw_iff_recorded
+_aw_iff_disabled:
+  xor  a
+_aw_iff_recorded:
+  ld   (APU_FRAME_TMP), a
   ; Bounds: only $4000-$4017.
   ld   a, h
   cp   $40
@@ -94,13 +108,18 @@ rt_apu_write:
   cp   $0B
   jr   z, _aw_len_tri
   cp   $0F
-  jr   z, _aw_len_noise
+  jp   z, _aw_len_noise
   cp   $15
-  jr   z, _aw_enable
+  jp   z, _aw_enable
 _aw_done:
-  pop  bc
-  pop  hl
-  pop  af
+  ld   a, (APU_FRAME_TMP)
+  or   a
+  jr   z, _aw_done_no_ei
+  ex   af, af'
+  ei
+  ret
+_aw_done_no_ei:
+  ex   af, af'
   ret
 
 _aw_sweep1:
@@ -118,7 +137,20 @@ _aw_len1:
   ld   a, (APU_SHADOW+$15)
   bit  0, a
   jr   z, _aw_len1_env
-  call _len_lookup          ; B(value)>>3 -> A = length
+  ; Inline B(value)>>3 -> length-table lookup. A helper call spends the word
+  ; saved by dropping BC preservation and can cross the stack guard.
+  ld   a, b
+  rrca
+  rrca
+  rrca
+  and  $1f
+  ld   hl, _apu_length_table
+  add  a, l
+  ld   l, a
+  jr   nc, _aw_len1_no_carry
+  inc  h
+_aw_len1_no_carry:
+  ld   a, (hl)
   ld   (LEN_P1), a
 _aw_len1_env:
   ld   hl, APU_FLAGS
@@ -129,7 +161,18 @@ _aw_len2:
   ld   a, (APU_SHADOW+$15)
   bit  1, a
   jr   z, _aw_len2_env
-  call _len_lookup
+  ld   a, b
+  rrca
+  rrca
+  rrca
+  and  $1f
+  ld   hl, _apu_length_table
+  add  a, l
+  ld   l, a
+  jr   nc, _aw_len2_no_carry
+  inc  h
+_aw_len2_no_carry:
+  ld   a, (hl)
   ld   (LEN_P2), a
 _aw_len2_env:
   ld   hl, APU_FLAGS
@@ -141,7 +184,18 @@ _aw_len_tri:
   ld   a, (APU_SHADOW+$15)
   bit  2, a
   jr   z, _aw_len_tri_lin
-  call _len_lookup
+  ld   a, b
+  rrca
+  rrca
+  rrca
+  and  $1f
+  ld   hl, _apu_length_table
+  add  a, l
+  ld   l, a
+  jr   nc, _aw_len_tri_no_carry
+  inc  h
+_aw_len_tri_no_carry:
+  ld   a, (hl)
   ld   (LEN_TRI), a
 _aw_len_tri_lin:
   ld   hl, APU_FLAGS
@@ -152,7 +206,18 @@ _aw_len_noise:
   ld   a, (APU_SHADOW+$15)
   bit  3, a
   jr   z, _aw_len_noise_env
-  call _len_lookup
+  ld   a, b
+  rrca
+  rrca
+  rrca
+  and  $1f
+  ld   hl, _apu_length_table
+  add  a, l
+  ld   l, a
+  jr   nc, _aw_len_noise_no_carry
+  inc  h
+_aw_len_noise_no_carry:
+  ld   a, (hl)
   ld   (LEN_NOISE), a
 _aw_len_noise_env:
   ld   hl, APU_FLAGS
@@ -244,31 +309,124 @@ _ar_zero:
 ; Called once per video frame from irq_handler. Approximates the NES 240 Hz
 ; frame sequencer with 4 quarter-frame and 2 half-frame ticks, then updates
 ; the PSG.
+; Clobbers AF, BC, DE, HL. irq_handler already saved the interrupted register
+; set, so keeping a second outer save set here only burns scarce nested stack.
 apu_frame_tick:
-  push af
-  push bc
-  push de
-  push hl
-
   ; ---- 4 quarter frames: envelopes + triangle linear counter ----
-  ld   b, 4
+  ld   a, 4
+  ld   (APU_FRAME_TMP), a
 _qf_loop:
-  push bc
-  ld   hl, ENV_P1
   ld   a, (APU_SHADOW+$00)
   ld   d, a
-  ld   c, 0
-  call _env_tick
-  ld   hl, ENV_P2
+  ; Inline _env_tick for pulse 1 (env-start bit 0). The call frame alone can
+  ; cross the native stack guard in deep translated NMI chains.
+  ld   hl, APU_FLAGS
+  bit  0, (hl)
+  jr   z, _qf_p1_run
+  res  0, (hl)
+  ld   hl, ENV_P1
+  ld   a, d
+  and  $0F
+  ld   (hl), a
+  inc  hl
+  ld   (hl), 15
+  jr   _qf_p1_done
+_qf_p1_run:
+  ld   hl, ENV_P1
+  ld   a, (hl)
+  or   a
+  jr   z, _qf_p1_fire
+  dec  (hl)
+  jr   _qf_p1_done
+_qf_p1_fire:
+  ld   a, d
+  and  $0F
+  ld   (hl), a
+  inc  hl
+  ld   a, (hl)
+  or   a
+  jr   z, _qf_p1_loop
+  dec  (hl)
+  jr   _qf_p1_done
+_qf_p1_loop:
+  bit  5, d
+  jr   z, _qf_p1_done
+  ld   (hl), 15
+_qf_p1_done:
+
   ld   a, (APU_SHADOW+$04)
   ld   d, a
-  ld   c, 1
-  call _env_tick
-  ld   hl, ENV_NOISE
+  ; Inline _env_tick for pulse 2 (env-start bit 1).
+  ld   hl, APU_FLAGS
+  bit  1, (hl)
+  jr   z, _qf_p2_run
+  res  1, (hl)
+  ld   hl, ENV_P2
+  ld   a, d
+  and  $0F
+  ld   (hl), a
+  inc  hl
+  ld   (hl), 15
+  jr   _qf_p2_done
+_qf_p2_run:
+  ld   hl, ENV_P2
+  ld   a, (hl)
+  or   a
+  jr   z, _qf_p2_fire
+  dec  (hl)
+  jr   _qf_p2_done
+_qf_p2_fire:
+  ld   a, d
+  and  $0F
+  ld   (hl), a
+  inc  hl
+  ld   a, (hl)
+  or   a
+  jr   z, _qf_p2_loop
+  dec  (hl)
+  jr   _qf_p2_done
+_qf_p2_loop:
+  bit  5, d
+  jr   z, _qf_p2_done
+  ld   (hl), 15
+_qf_p2_done:
+
   ld   a, (APU_SHADOW+$0C)
   ld   d, a
-  ld   c, 2
-  call _env_tick
+  ; Inline _env_tick for noise (env-start bit 2).
+  ld   hl, APU_FLAGS
+  bit  2, (hl)
+  jr   z, _qf_n_run
+  res  2, (hl)
+  ld   hl, ENV_NOISE
+  ld   a, d
+  and  $0F
+  ld   (hl), a
+  inc  hl
+  ld   (hl), 15
+  jr   _qf_n_done
+_qf_n_run:
+  ld   hl, ENV_NOISE
+  ld   a, (hl)
+  or   a
+  jr   z, _qf_n_fire
+  dec  (hl)
+  jr   _qf_n_done
+_qf_n_fire:
+  ld   a, d
+  and  $0F
+  ld   (hl), a
+  inc  hl
+  ld   a, (hl)
+  or   a
+  jr   z, _qf_n_loop
+  dec  (hl)
+  jr   _qf_n_done
+_qf_n_loop:
+  bit  5, d
+  jr   z, _qf_n_done
+  ld   (hl), 15
+_qf_n_done:
   ; Triangle linear counter.
   ld   hl, APU_FLAGS
   bit  5, (hl)
@@ -291,13 +449,16 @@ _lin_ctrl:
   ld   hl, APU_FLAGS
   res  5, (hl)
 _lin_done:
-  pop  bc
-  djnz _qf_loop
+  ld   hl, APU_FRAME_TMP
+  dec  (hl)
+  jr   z, _qf_done
+  jp   _qf_loop
+_qf_done:
 
   ; ---- 2 half frames: length counters + sweeps ----
-  ld   b, 2
+  ld   a, 2
+  ld   (APU_FRAME_TMP), a
 _hf_loop:
-  push bc
   ld   a, (APU_SHADOW+$00)
   bit  5, a
   ld   hl, LEN_P1
@@ -318,16 +479,12 @@ _hf_loop:
   call _sweep_tick
   ld   c, 1
   call _sweep_tick
-  pop  bc
-  djnz _hf_loop
+  ld   hl, APU_FRAME_TMP
+  dec  (hl)
+  jr   nz, _hf_loop
 
   ; ---- Output stage ----
-  call _psg_update
-  pop  hl
-  pop  de
-  pop  bc
-  pop  af
-  ret
+  jp   _psg_update             ; tail-call: save one native frame in IRQ path
 
 ; HL -> length counter byte; decrement if > 0.
 _len_tick:
@@ -340,7 +497,10 @@ _len_tick:
 ; Envelope tick. HL -> {divider, level}, D = channel volume register value,
 ; C = channel's env-start flag bit (0=p1, 1=p2, 2=noise).
 _env_tick:
-  push hl
+  ; Stackless: save envelope pointer in B:E. apu_frame_tick owns/clobbers
+  ; BC/DE/HL, and D must keep the volume register value.
+  ld   b, h
+  ld   e, l
   ld   hl, APU_FLAGS
   ld   a, c
   or   a
@@ -367,7 +527,8 @@ _et_start1:
 _et_start2:
   res  2, (hl)
 _et_restart:
-  pop  hl
+  ld   h, b
+  ld   l, e
   ld   a, d
   and  $0F
   ld   (hl), a              ; divider = V
@@ -375,7 +536,8 @@ _et_restart:
   ld   (hl), 15             ; level = 15
   ret
 _et_run:
-  pop  hl
+  ld   h, b
+  ld   l, e
   ld   a, (hl)
   or   a
   jr   z, _et_fire
@@ -418,7 +580,9 @@ _st_have:
   ld   hl, SWEEP_P2
 _st_div:
   ; Reload pending?
-  push hl
+  ; Stackless: save divider pointer in B:E while testing APU_FLAGS.
+  ld   b, h
+  ld   e, l
   ld   hl, APU_FLAGS
   ld   a, c
   or   a
@@ -428,7 +592,8 @@ _st_div:
 _st_rel2:
   bit  4, (hl)
 _st_relq:
-  pop  hl
+  ld   h, b
+  ld   l, e
   jr   z, _st_no_reload
   ; Reload: divider = sweep period; clear flag; skip applying this tick.
   ld   a, d
@@ -773,8 +938,8 @@ _pt_write:
   ret
 
 ; A = NES linear volume 0-15, C = PSG channel: map through the dB LUT.
+; Clobbers A, D, E, HL; preserves C.
 _psg_attn_vol:
-  push hl
   ld   hl, _vol_to_attn
   and  $0F
   add  a, l
@@ -783,12 +948,10 @@ _psg_attn_vol:
   inc  h
 _pav_nc:
   ld   a, (hl)
-  pop  hl
   ; fall through
 ; A = raw attenuation 0-15, C = channel: write if changed.
+; Clobbers A, D, E, HL; preserves C.
 _psg_attn_raw:
-  push hl
-  push de
   ld   e, a
   ld   a, c
   add  a, <PSG_ATTN
@@ -808,8 +971,6 @@ _psg_attn_raw:
   or   e
   out  (PSG_PORT), a
 _par_done:
-  pop  de
-  pop  hl
   ret
 
 _psg_attn_off:

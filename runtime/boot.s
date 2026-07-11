@@ -10,8 +10,14 @@
 ;   $C200-$C7FF  NES RAM mirror ($0200-$07FF)
 ;   $C800-$C8FF  VRAM update buffer
 ;   $C900-$C9FF  Sprite attribute staging (Y at $C900, X/tile at $C940)
+;   $CA08-$CA0E  Banked-dispatch MRU cache (dispatch.s)
+;   $CA0F        Beacon: first IRQ
+;   $CA10        Beacon: first translated NMI
+;   $CA11        Translated-NMI nesting depth
+;   $CA12        Presentation-in-progress guard
 ;   $CC00-$D2FF  SMS visible nametable high-byte shadow ($3700-$3DFF + $9500)
-;   $D300-$D3FF  Clean metadata reserve: 240 tile-dirty bits + 16 attr bits
+;   $D300-$D3FB  Translated-call continuation frames (dispatch.s)
+;   $D500-$D5FF  Translated-call continuation segment 1 (dispatch.s)
 ;   $CB00        Shadow X
 ;   $CB01        Shadow Y
 ;   $CB02        Shadow S (init $FD)
@@ -38,15 +44,28 @@
 ;   $CB2D        Deferred VDP reg-1 latch (0 = none; see ppu.s reg1 sync)
 ;   $CB2E/$CB2F  rt_far_gate target park (Phase R: BC carries far targets)
 ;   $CB20-$CB24  Split-scroll scheduler state (see runtime/ppu.s)
+;   $CB25-$CB26  Translated-NMI interrupted slot-1 bank by nesting depth
+;   $CB27        Lowerer temporary A spill for stackless LDX/LDY memory loads
 ;   $CB30-$CB61  APU->PSG shim state (see runtime/apu_stub.s)
+;   $CB73-$CB74  Translated-call diagnostics/scratch (dispatch.s)
+;   $CB76-$CB77  Translated-call return stack next-free pointer (dispatch.s)
+;   $D3FC-$D3FD  rt_ppu_write_cont continuation pointer; $D3FE cont-mode flag
+;   $D46C-$D471  Stackless rotate-memory helper scratch (runtime/flags.s)
+;   $D472-$D473  IRQ saved BC (keeps one word off native stack)
+;   $D474        IRQ VDP status scratch (keeps ready check off native stack)
+;   $D475-$D476  IRQ saved HL (keeps one word off native stack)
+;   $D477-$D478  IRQ saved AF (keeps one word off native stack after save)
+;   $D479-$D47C  rt_oam_dma AF/HL save (sat.s)
+;   $D47D-$D47E  Far slot-1 bank stack next-free pointer (dispatch.s)
+;   $D4C0-$D4FF  Far slot-1 bank/continuation stack entries (dispatch.s)
 ;   $CB80-$CBFF  Raw mirrored NES attribute shadow (2 CIRAM pages × 64 bytes)
 ;   $CB13-$CB1F  13-byte scratch ("temp w")
 ;   $CB1D        Runtime trap marker for trace-sms diagnostics
-;   Z80 SP lives at $DFF0, grows down — never touches $C100-$C1FF.
-;   SP must stay below $DFFC: the Sega mapper registers $FFFC-$FFFF are
-;   RAM-mirrored at $DFFC-$DFFF, so stack pushes at $DFFC-$DFFF reprogram
-;   slot-0/SRAM banking under the running code (observed under Mednafen;
-;   the standard SMS convention is SP=$DFF0 for exactly this reason).
+;   Z80 SP starts at $DFFC and grows down — never touches $C100-$C1FF.
+;   Z80 push/call pre-decrements SP, so the first write lands at $DFFA-$DFFB.
+;   The Sega mapper registers $FFFC-$FFFF are RAM-mirrored at $DFFC-$DFFF;
+;   stack writes must never reach those bytes or they reprogram banking under
+;   the running code.
 
 .define VDP_R0_BASE            $66   ; Mode 4 + top-row hscroll lock + left blank
 .define VDP_R0_LINE_IRQ_ON     $76   ; VDP_R0_BASE + IE1 line IRQ enable
@@ -110,8 +129,8 @@ reset_entry:
 .section "boot_main" free
 
 boot_main:
-  ld  sp, $dff0               ; native Z80 stack; below the $DFFC-$DFFF
-                              ; mapper-register RAM mirror (see header note)
+  ld  sp, $dffc               ; native Z80 stack; push pre-decrements below
+                              ; the $DFFC-$DFFF mapper mirror (see header note)
 
   ; Mark the runtime NOT ready: until boot finishes, any IRQ-handler entry
   ; (spurious RST $38, emulator power-on IFF quirks, stray VDP INT) must be
@@ -124,15 +143,21 @@ boot_main:
   ld  ($cb28), a
   ld  ($cb29), a            ; overrun flag (see irq_handler pacing read)
   ld  ($cb2a), a            ; projected window start column (ntmap.s)
+  ld  ($cb25), a            ; translated-NMI saved slot-1 bank depth 0
+  ld  ($cb26), a            ; translated-NMI saved slot-1 bank depth 1
   ld  ($cb62), a            ; NES PRG bank shadow (banked mappers; 0 = bank 0)
   ld  ($cb78), a            ; band-dirty flag (rows 0-3 re-materialization)
   ld  ($cb7e), a            ; in-handler flag starts clear
   ld  ($cb7f), a            ; deferred FC-flush flag
-  ld  ($cbe6), a            ; dispatch MRU invalid
-  ld  ($cbe7), a            ; beacon: first-IRQ
-  ld  ($cbe8), a            ; beacon: first-NMI
-  ld  ($cbe9), a            ; translated-NMI nesting depth
-  ld  ($cbea), a            ; presentation-in-progress guard
+  ld  ($ca0e), a            ; dispatch MRU invalid
+  ld  ($ca0f), a            ; beacon: first-IRQ
+  ld  ($ca10), a            ; beacon: first-NMI
+  ld  ($ca11), a            ; translated-NMI nesting depth
+  ld  ($ca12), a            ; presentation-in-progress guard
+  ld  hl, $d4c0
+  ld  ($d47d), hl           ; far-bank stack next-free pointer
+  ld  hl, $d300
+  ld  ($cb76), hl           ; translated-call return stack next-free pointer
 
   ; I/O port control: configure both controller ports as inputs (TR/TH
   ; lines included). Real SMS games write $3F=$FF at boot; without it,
@@ -279,11 +304,7 @@ boot_main:
   xor a
   call mem_fill
 
-  ; 11d. Build the horizontal-flip byte LUT (software sprite flipping; the SMS
-  ; VDP has no per-sprite flip bit). See runtime/sat.s.
-  call rt_build_hflip_lut
-
-  ; 11e. Init the background sub-palette variant cache to "unassigned" ($FF)
+  ; 11d. Init the background sub-palette variant cache to "unassigned" ($FF)
   ; and reset the variant pool allocator. See runtime/chrmap.s.
   ld  hl, $d600
   ld  bc, $0400             ; 1024 cache entries
@@ -375,27 +396,27 @@ rt_boot_beacon:
   ret
 
 irq_handler:
+  ld  ($d475), hl
   push af
+  pop hl
+  ld  ($d477), hl
   ld  a, $01
   ld  ($cb7e), a            ; in-handler flag (nesting-aware ei gating)
 .ifdef NES_CHR_RAM
-  ld  a, ($cbe7)
+  ld  a, ($ca0f)
   or  a
   jr  nz, _hb_done
   ld  a, $01
-  ld  ($cbe7), a
+  ld  ($ca0f), a
   ld  a, $0C                ; BEACON cyan: first frame IRQ reached
   call rt_boot_beacon
 _hb_done:
 .endif
-  pop af
-  push af
-  push hl
-  push bc
-  push de
+  ld  ($d472), bc
   ; Phase R: DE carries the resident 6502 X/Y of the interrupted thread.
-  ; Sync to the RAM shadows now; the handler body may clobber DE, and the
-  ; translated NMI reloads from the shadows below.
+  ; Sync to the RAM shadows now; exits restore DE from those shadows instead of
+  ; spending native stack on a saved DE word. The translated NMI may update the
+  ; shadows below, matching 6502 interrupt-visible X/Y behavior.
   ld  a, d
   ld  ($cb00), a
   ld  a, e
@@ -406,25 +427,29 @@ _hb_done:
   ; Bit 7 clear means a non-frame VDP IRQ; the only one we enable is the
   ; one-shot line split below.
   in  a, ($bf)
+  ld  ($d474), a
 
   ; Runtime-ready gate: if boot has not finished, this entry is spurious
   ; (stray RST $38 through linker fill bytes, emulator power-on IFF quirks,
   ; or a VDP INT that predates our setup). The status read above already
   ; acknowledged the VDP; leave WITHOUT `ei` so a spurious entry cannot
   ; enable interrupts behind boot's back.
-  push af
   ld  a, ($cb28)
   or  a
   jr  nz, _irq_runtime_ready
-  pop af
-  pop de
-  pop bc
-  pop hl
+  ld  a, ($cb00)
+  ld  d, a
+  ld  a, ($cb01)
+  ld  e, a
+  ld  bc, ($d472)
+  ld  hl, ($d477)
+  push hl
+  ld  hl, ($d475)
   pop af
   ret
 
 _irq_runtime_ready:
-  pop af
+  ld  a, ($d474)
   bit 7, a
   jp  z, _irq_line_scroll_split
 
@@ -476,11 +501,11 @@ _irq_runtime_ready:
   ; the wait burns a frame with DI, so an INT is always pending and
   ; the interrupted code advances one instruction per frame. Skip
   ; presentation entirely in that case (the outer one completes).
-  ld  a, ($cbea)
+  ld  a, ($ca12)
   or  a
   jp  nz, _present_skip_all
   ld  a, $01
-  ld  ($cbea), a
+  ld  ($ca12), a
 _present_wait_vblank:
   in  a, ($7e)               ; V-counter
   cp  $e0
@@ -522,7 +547,9 @@ _present_no_fcflush:
   call rt_nt_materialize_band
 _present_band_clean:
 .endif
-  call rt_sat_upload
+  ld  a, ($cb09)             ; PPUMASK
+  bit 4, a                   ; sprites enabled?
+  call nz, rt_sat_upload
   ; Project columns entering the visible window (E.5c) with the same
   ; playfield scroll the apply below will present: post pair when the
   ; split captured one this frame, else the live latch.
@@ -540,7 +567,7 @@ _irq_proj_go:
   call _apply_frame_scroll
   call vbuf_flush
   xor a
-  ld  ($cbea), a            ; presentation complete (re-entrancy guard clear)
+  ld  ($ca12), a            ; presentation complete (re-entrancy guard clear)
 
 _present_skip_all:
   ; Start each translated NMI before the approximated sprite-0 hit point.
@@ -564,6 +591,15 @@ _present_skip_all:
   ld  a, ($cb1a)
   or  a
   jr  z, _irq_skip_translated_nmi
+  ; Once the translated NMI has started, keep the frame driver alive for
+  ; top-level IRQs even if the game temporarily clears PPUCTRL.NMI (SMB does
+  ; this during its VRAM update). Nested frame IRQs are different: NES would not
+  ; re-enter its NMI while bit 7 is clear, and doing so grows the native Z80
+  ; call stack without bound. If we are already inside translated_nmi and the
+  ; bit is clear, skip this translated NMI body.
+  ld  a, ($ca11)
+  or  a
+  jr  nz, _irq_skip_translated_nmi
   jr  _irq_call_translated_nmi
 
 _irq_mark_nmi_started:
@@ -571,6 +607,13 @@ _irq_mark_nmi_started:
   ld  ($cb1a), a
 
 _irq_call_translated_nmi:
+  ; Bound translated-NMI nesting. CV1's first translated NMI is resident; later
+  ; frame IRQs may enter one light nested handler, but deeper re-entry is stack
+  ; death for call-heavy code such as SMB.
+  ld  a, ($ca11)
+  cp  2
+  jr  nc, _irq_skip_translated_nmi
+
   ; Phase R: reload resident X/Y for the translated NMI.
   ld  a, ($cb00)
   ld  d, a
@@ -583,14 +626,30 @@ _irq_call_translated_nmi:
   ; RTI at the end pops a matching byte. PC isn't pushed because the
   ; translated routine returns via Z80 ret to this irq_handler, not via
   ; an emulated jump-via-popped-PC.
+  ; Stackless inline rt_push6502 for shadow P. Calling the generic helper here
+  ; adds both a return address and helper register saves at the deepest native
+  ; stack point; the IRQ/NMI bridge only needs DE (resident X/Y) preserved.
   ld  a, ($cb03)            ; shadow P
-  call rt_push6502          ; push P onto emulated 6502 stack
+  ld  c, a
+  ld  a, ($cb02)            ; shadow S
+  ld  l, a
+  ld  h, $c1
+  ld  (hl), c               ; emulated 6502 stack write
+  dec a
+  ld  ($cb02), a            ; push decrements S
   ; The frame interrupt can arrive while translated code has bank-switched
   ; slot 1 for a far call/jump. `translated_nmi` lives in its own generated
-  ; bank, so save the current slot-1 bank, map the NMI bank, call it, then
-  ; restore the interrupted bank before returning.
+  ; bank, so save the current slot-1 bank by NMI nesting depth, map the NMI
+  ; bank, call it, then restore the interrupted bank before returning. Keep
+  ; this off the native stack: the translated NMI can run at stack low-water.
+  ld  a, ($ca11)
+  ld  hl, $cb25
+  or  a
+  jr  z, _irq_nmi_save_bank_slot
+  inc hl
+_irq_nmi_save_bank_slot:
   ld  a, ($cb14)
-  push af
+  ld  (hl), a
   ld  a, :translated_nmi
   ld  ($cb14), a
   ld  ($fffe), a
@@ -604,18 +663,29 @@ _irq_call_translated_nmi:
   xor a
   ld  ($cb7e), a            ; leaving handler context (helpers may ei)
 .ifdef NES_CHR_RAM
-  ld  a, ($cbe8)
+  ld  a, ($ca10)
   or  a
   jr  nz, _nb_done
   ld  a, $01
-  ld  ($cbe8), a
+  ld  ($ca10), a
   ld  a, $0F                ; BEACON: first translated NMI
   call rt_boot_beacon
 _nb_done:
 .endif
+  ld  a, ($ca11)
+  inc a
+  ld  ($ca11), a
   ei
   call translated_nmi       ; jumps to the profile/ROM NMI vector
   di
+  ld  a, ($ca11)
+  dec a
+  ld  ($ca11), a
+  ld  hl, $cb25
+  or  a
+  jr  z, _irq_nmi_restore_bank_slot
+  inc hl
+_irq_nmi_restore_bank_slot:
   ld  a, $01
   ld  ($cb7e), a            ; back in handler context
   ; Phase R: the NMI may have changed X/Y — new truth back to the shadows.
@@ -623,7 +693,7 @@ _nb_done:
   ld  ($cb00), a
   ld  a, e
   ld  ($cb01), a
-  pop af
+  ld  a, (hl)
   ld  ($cb14), a
   ld  ($fffe), a
 
@@ -664,19 +734,18 @@ _pace_fit:
   ld  ($cb29), a
 _pace_done:
 
-  pop de
   ; Phase R: X/Y may have changed in the translated NMI; the interrupted
   ; thread resumes with the new values (6502 semantics).
   ld  a, ($cb00)
   ld  d, a
   ld  a, ($cb01)
   ld  e, a
-  pop bc
-  pop hl
-  pop af
-  push af
   xor a
   ld  ($cb7e), a            ; leaving handler
+  ld  bc, ($d472)
+  ld  hl, ($d477)
+  push hl
+  ld  hl, ($d475)
   pop af
   ei
   ret
@@ -688,13 +757,16 @@ _irq_line_scroll_split:
   call _apply_post_scroll
   call _disable_line_irq
 
-  pop de
-  pop bc
-  pop hl
-  pop af
-  push af
+  ld  a, ($cb00)
+  ld  d, a
+  ld  a, ($cb01)
+  ld  e, a
   xor a
   ld  ($cb7e), a            ; leaving handler
+  ld  bc, ($d472)
+  ld  hl, ($d477)
+  push hl
+  ld  hl, ($d475)
   pop af
   ei
   ret
@@ -734,8 +806,7 @@ _apply_frame_scroll:
   bit 2, a
   jr  nz, _apply_frame_split_scroll
   call _apply_pre_or_live_scroll
-  call _disable_line_irq
-  ret
+  jp  _disable_line_irq
 
 _apply_playfield_direct:
   ; Out-of-vblank presentation: apply the post/playfield pair when one was
@@ -746,16 +817,12 @@ _apply_playfield_direct:
   ld  a, ($cb23)
   ld  c, a
   ld  a, ($cb24)
-  call _apply_scroll_pair_cx_ay
-  jr  _apd_done
+  jp  _apply_scroll_pair_then_disable
 _apd_live:
   ld  a, ($cb0c)
   ld  c, a
   ld  a, ($cb0d)
-  call _apply_scroll_pair_cx_ay
-_apd_done:
-  call _disable_line_irq
-  ret
+  jp  _apply_scroll_pair_then_disable
 
 _apply_frame_split_scroll:
   call _apply_pre_or_live_scroll
@@ -769,8 +836,7 @@ _apply_frame_split_scroll:
   add a, 7
   ld  b, 10
   call vdp_set_register
-  call _enable_line_irq
-  ret
+  jp  _enable_line_irq
 
 _apply_pre_or_live_scroll:
   ld  a, ($cb20)
@@ -797,28 +863,55 @@ _apply_post_scroll:
 
 _apply_scroll_pair_cx_ay:
   ; Entry: C = NES scroll X, A = NES scroll Y.
+  ; Stackless: IRQ presentation can run at native-stack low water.
   ld  e, a
   ld  a, c
   neg
-  ld  b, 8
-  call vdp_set_register
+  out ($bf), a
+  ld  a, $88                ; VDP reg 8 = horizontal scroll
+  out ($bf), a
   ld  a, e
-  ld  b, 9
-  call vdp_set_register
+  out ($bf), a
+  ld  a, $89                ; VDP reg 9 = vertical scroll
+  out ($bf), a
+  ld  a, e                  ; keep old helper's returned A = scroll Y
+  ret
+
+_apply_scroll_pair_then_disable:
+  ; Entry: C = NES scroll X, A = NES scroll Y.
+  ; Tail target for direct/out-of-vblank presentation: write the playfield
+  ; scroll pair and restore VDP reg0 without spending another return slot.
+  ld  e, a
+  ld  a, c
+  neg
+  out ($bf), a
+  ld  a, $88
+  out ($bf), a
+  ld  a, e
+  out ($bf), a
+  ld  a, $89
+  out ($bf), a
+  ld  a, VDP_R0_BASE
+  out ($bf), a
+  ld  a, $80                ; VDP reg 0
+  out ($bf), a
+  ld  a, e
   ret
 
 _enable_line_irq:
   ; VDP reg0 bit 4 enables line interrupts on top of the base display mode.
   ld  a, VDP_R0_LINE_IRQ_ON
-  ld  b, 0
-  call vdp_set_register
+  out ($bf), a
+  ld  a, $80                ; VDP reg 0
+  out ($bf), a
   ret
 
 _disable_line_irq:
   ; Restore the base R0 mode with line interrupts disabled.
   ld  a, VDP_R0_BASE
-  ld  b, 0
-  call vdp_set_register
+  out ($bf), a
+  ld  a, $80                ; VDP reg 0
+  out ($bf), a
   ret
 
 .ends

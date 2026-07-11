@@ -22,9 +22,12 @@
 ;   $CA00        bg variant pool next-free slot (0-255)
 ;   $CA01-$CA06  do_variant scratch (p2, p3, slot, src ptr lo/hi, attr S)
 ;   $CA07        ring-wrapped flag (0 until slots 64-255 have all been used)
+;   $CA08-$CA12  runtime guard/MRU bytes (boot.s/dispatch.s)
 ;   $CA40-$CAFF  reverse map for recycled slots 64-255: slot -> old base tile
 ;   $CC00-$D2FF  nametable shadow — active per-cell sub-palette S (0-3)
-;   $D300-$D3FF  clean metadata reserve: 240 tile-dirty bits + 16 attr bits
+;   $D300-$D3FB  translated-call continuation stack frames
+;   $D3FC-$D3FE  rt_ppu_write_cont continuation pointer/mode
+;   $D500-$D5FF  translated-call continuation stack segment 1
 ;   $D600-$D9FF  variant cache FC[base*4 + S] -> pool slot ($FF = unassigned)
 
 .define BGV_CACHE      $d600   ; FC[base*4+S] -> slot, 1024 bytes, $FF=empty
@@ -339,11 +342,8 @@ _bgv_base_addr:
 ; Write a background nametable entry. Entry: A = NES tile byte; the caller has
 ; set the VDP write address to the cell. Resolves the (base, S) variant and
 ; writes its slot as the tile, palette 0 (sub-palette baked into the pixels).
-; Preserves BC, DE, HL.
+; Clobbers AF, BC, DE, HL. Leaves data_prg_low mapped in slot 2.
 rt_write_mapped_bg_tile:
-  push hl
-  push de
-  push bc
   ld   c, a
   ld   ($cb17), de           ; SMS nametable low-byte address
 
@@ -369,7 +369,16 @@ _bgw_map_ready:
   add  hl, de
   ld   a, (hl)               ; base slot (bg tiles are 0-255)
   ld   c, a                  ; C = base slot
-  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
+  ; Inline rt_restore_prg_window in the hottest nametable write path to avoid
+  ; one more call frame while a translated NMI is nested under the frame IRQ.
+.ifdef NES_PRG_BANK_BASE
+  ld   a, ($cb62)
+  add  a, NES_PRG_BANK_BASE
+  ld   ($ffff), a
+.else
+  ld   a, :data_prg_low
+  ld   ($ffff), a
+.endif
 .endif
 
   ; In nametable range: record the base slot for this cell (so a later
@@ -380,9 +389,7 @@ _bgw_map_ready:
   jr   c, _bgw_s0
   cp   $40
   jr   nc, _bgw_s0
-  push bc                    ; save base slot (C)
-  call _bgv_base_addr        ; HL(low addr) -> base-shadow addr
-  pop  bc
+  call _bgv_base_addr        ; HL(low addr) -> base-shadow addr (preserves BC)
   ld   (hl), c               ; base-shadow[cell] = base slot
   ld   hl, ($cb17)
   call _bgv_sub_palette      ; A = S
@@ -406,10 +413,6 @@ _bgw_have_s:
   out  ($be), a              ; tile low byte = variant slot
   xor  a
   out  ($be), a              ; high byte = 0 (palette 0, tile bit 8 = 0)
-
-  pop  bc
-  pop  de
-  pop  hl
   ret
 
 ; ─── rt_write_mapped_bg_tile_s ──────────────────────────────────────────────
@@ -459,9 +462,7 @@ _bgw_s_map_ready:
   jr   c, _bgw_s_no_base_shadow
   cp   $3f
   jr   nc, _bgw_s_no_base_shadow
-  push bc                    ; save base slot (C)
-  call _bgv_base_addr        ; HL(low addr) -> base-shadow addr
-  pop  bc
+  call _bgv_base_addr        ; HL(low addr) -> base-shadow addr (preserves BC)
   ld   (hl), c               ; base-shadow[cell] = base slot
 _bgw_s_no_base_shadow:
   ld   a, ($cb16)
@@ -523,8 +524,8 @@ rt_write_mapped_bg_tile_s_noshadow:
 ; ─── rt_redraw_bg_cell_tile_s_noshadow ──────────────────────────────────────
 ; Helper-only scaffold for a future DA00-free attribute/materializer redraw.
 ; Redraw one SMS nametable cell from an explicit NES tile byte and subpalette
-; without reading/writing BGV_BSHADOW, folded $CC00 state, or the $D300-$D3FF
-; metadata reserve. Intentionally uncalled by current runtime paths.
+; without reading/writing BGV_BSHADOW, folded $CC00 state, or the $D3xx
+; continuation/diagnostic slots. Intentionally uncalled by current runtime paths.
 ;   Entry: A = NES tile byte, B = S (0..3), DE = SMS nametable high-byte address.
 ;          The corresponding tile low-byte address is DE-1.
 ;   Preserves BC, DE, HL. Clobbers AF. Leaves data_prg_low mapped in slot 2.

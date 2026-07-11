@@ -16,6 +16,12 @@
 ;   6502 V is set when the signed result overflows.
 ;   Z80 PV flag after ADC/SBC represents overflow when no BCD is in play.
 ;   We use `jp po` / `jp pe` to test the Z80 PV flag.
+;
+; Stackless rotate-memory scratch (kept out of $CB14/$CB15 bank state):
+;   $D46C-$D46D  saved HL
+;   $D46E-$D46F  saved BC
+;   $D470        rotate result byte
+;   $D471        saved IFF restore flag
 
 .section "flags" free
 
@@ -282,19 +288,18 @@ rt_rol_a:
   ld   a, b                  ; restore original A, preserving carry
   ; RL A: rotate left through carry.  Old bit 7 -> carry.  Old carry -> bit 0.
   rl   a
-  push af                   ; save result + Z80 carry (= new shadow C)
+  ld   c, a                  ; C = result
+  ld   b, $00                ; B = new shadow C bit
+  jr   nc, _rol_a_have_c
+  ld   b, %00000001
+_rol_a_have_c:
   ; Build new shadow P.
   ld   a, ($cb03)
   and  %01111100            ; clear N, Z, C
+  or   b
   ld   b, a
-  pop  af
-  push af
-  jr   nc, _rol_a_no_c
-  ld   a, b
-  or   %00000001
-  ld   b, a
-_rol_a_no_c:
   ; N from bit 7 of result.
+  ld   a, c
   bit  7, a
   jr   z, _rol_a_no_n
   ld   a, b
@@ -302,8 +307,7 @@ _rol_a_no_c:
   ld   b, a
 _rol_a_no_n:
   ; Z from result == 0.
-  pop  af
-  push af
+  ld   a, c
   or   a
   jr   nz, _rol_a_no_z
   ld   a, b
@@ -312,7 +316,7 @@ _rol_a_no_n:
 _rol_a_no_z:
   ld   a, b
   ld   ($cb03), a
-  pop  af                   ; result in A
+  ld   a, c                  ; result in A
   ret
 
 ; ─── rt_ror_a ─────────────────────────────────────────────────────────────────
@@ -324,25 +328,23 @@ rt_ror_a:
   rrca                      ; shadow C -> Z80 carry
   ld   a, b                  ; restore original A, preserving carry
   rr   a                    ; rotate right through carry; bit 0 -> carry; carry -> bit 7
-  push af
+  ld   c, a                  ; C = result
+  ld   b, $00                ; B = new shadow C bit
+  jr   nc, _ror_a_have_c
+  ld   b, %00000001
+_ror_a_have_c:
   ld   a, ($cb03)
   and  %01111100
+  or   b
   ld   b, a
-  pop  af
-  push af
-  jr   nc, _ror_a_no_c
-  ld   a, b
-  or   %00000001
-  ld   b, a
-_ror_a_no_c:
+  ld   a, c
   bit  7, a
   jr   z, _ror_a_no_n
   ld   a, b
   or   %10000000
   ld   b, a
 _ror_a_no_n:
-  pop  af
-  push af
+  ld   a, c
   or   a
   jr   nz, _ror_a_no_z
   ld   a, b
@@ -351,7 +353,7 @@ _ror_a_no_n:
 _ror_a_no_z:
   ld   a, b
   ld   ($cb03), a
-  pop  af
+  ld   a, c
   ret
 
 ; ─── rt_asl_mem ───────────────────────────────────────────────────────────────
@@ -439,9 +441,21 @@ _lsr_mem_no_z:
 ; ─── rt_rol_mem ───────────────────────────────────────────────────────────────
 ; 6502 ROL memory: rotate byte at (HL) left through shadow carry.
 rt_rol_mem:
-  push af                   ; preserve caller's A (restored at end)
-  push hl
-  push bc
+  ; Stackless: guard SP headroom by parking caller state in scratch RAM under
+  ; DI.  Alternate AF owns caller A+F until the return path.
+  ex   af, af'
+  ld   a, i                 ; P/V := IFF2 (1 = interrupts enabled)
+  di
+  jp   po, _rol_mem_was_disabled
+  ld   a, $01
+  ld   ($d471), a
+  jp   _rol_mem_body
+_rol_mem_was_disabled:
+  xor  a
+  ld   ($d471), a
+_rol_mem_body:
+  ld   ($d46c), hl
+  ld   ($d46e), bc
   ; Load shadow C into Z80 carry. Do NOT restore flags before the `rl`,
   ; or the carry we just extracted is lost (the old bug). `ld a,(hl)`
   ; does not affect flags, so the carry survives into the `rl`.
@@ -450,25 +464,26 @@ rt_rol_mem:
   ld   a, (hl)
   rl   a                    ; rotate through carry; old bit 7 -> Z80 carry; shadow C -> bit 0
   ld   (hl), a
-  push af                   ; save result + new carry
+  ld   ($d470), a            ; save result; Z80 carry still reflects old bit 7
+  ; Capture the new shadow-C NOW: `and` below would clear the Z80 carry
+  ; before a `jr nc` could test it (the RNG-killer bug — SMB's chained
+  ; ROR \$07A7,x shift register fed zero carry every link).
+  ld   c, $00
+  jr   nc, _rol_mem_have_c
+  ld   c, $01
+_rol_mem_have_c:
   ld   a, ($cb03)
   and  %01111100
+  or   c
   ld   b, a
-  pop  af
-  push af
-  jr   nc, _rol_mem_no_c
-  ld   a, b
-  or   %00000001
-  ld   b, a
-_rol_mem_no_c:
+  ld   a, ($d470)
   bit  7, a
   jr   z, _rol_mem_no_n
   ld   a, b
   or   %10000000
   ld   b, a
 _rol_mem_no_n:
-  pop  af
-  push af
+  ld   a, ($d470)
   or   a
   jr   nz, _rol_mem_no_z
   ld   a, b
@@ -477,19 +492,35 @@ _rol_mem_no_n:
 _rol_mem_no_z:
   ld   a, b
   ld   ($cb03), a
-  pop  af                   ; discard the juggled result+flags
-  pop  bc
-  pop  hl
-  pop  af                   ; restore caller's A
+  ld   bc, ($d46e)
+  ld   hl, ($d46c)
+  ld   a, ($d471)
+  or   a
+  jr   z, _rol_mem_return_disabled
+  ei
+_rol_mem_return_disabled:
+  ex   af, af'              ; restore caller's A+F
   ret
 
 ; ─── rt_ror_mem ───────────────────────────────────────────────────────────────
 ; 6502 ROR memory: rotate byte at (HL) right through shadow carry.
 ; Preserves caller's A.
 rt_ror_mem:
-  push af                   ; preserve caller's A (restored at end)
-  push hl
-  push bc
+  ; Stackless: guard SP headroom by parking caller state in scratch RAM under
+  ; DI.  Alternate AF owns caller A+F until the return path.
+  ex   af, af'
+  ld   a, i                 ; P/V := IFF2 (1 = interrupts enabled)
+  di
+  jp   po, _ror_mem_was_disabled
+  ld   a, $01
+  ld   ($d471), a
+  jp   _ror_mem_body
+_ror_mem_was_disabled:
+  xor  a
+  ld   ($d471), a
+_ror_mem_body:
+  ld   ($d46c), hl
+  ld   ($d46e), bc
   ; Load shadow C into Z80 carry. `rrca` rotates A (= shadow P) so bit 0
   ; (shadow C) lands in the Z80 carry; the rotated A is scratch. We must
   ; NOT pop/restore flags before the `rr` below, or the carry is lost.
@@ -498,25 +529,26 @@ rt_ror_mem:
   ld   a, (hl)              ; `ld` does not affect flags, carry preserved
   rr   a                    ; old bit 0 -> carry; shadow C -> bit 7
   ld   (hl), a
-  push af
+  ld   ($d470), a            ; save result; Z80 carry still reflects old bit 0
+  ; Capture the new shadow-C NOW: `and` below would clear the Z80 carry
+  ; before a `jr nc` could test it (the RNG-killer bug — SMB's chained
+  ; ROR \$07A7,x shift register fed zero carry every link).
+  ld   c, $00
+  jr   nc, _ror_mem_have_c
+  ld   c, $01
+_ror_mem_have_c:
   ld   a, ($cb03)
   and  %01111100
+  or   c
   ld   b, a
-  pop  af
-  push af
-  jr   nc, _ror_mem_no_c
-  ld   a, b
-  or   %00000001
-  ld   b, a
-_ror_mem_no_c:
+  ld   a, ($d470)
   bit  7, a
   jr   z, _ror_mem_no_n
   ld   a, b
   or   %10000000
   ld   b, a
 _ror_mem_no_n:
-  pop  af
-  push af
+  ld   a, ($d470)
   or   a
   jr   nz, _ror_mem_no_z
   ld   a, b
@@ -525,10 +557,14 @@ _ror_mem_no_n:
 _ror_mem_no_z:
   ld   a, b
   ld   ($cb03), a
-  pop  af                   ; discard the juggled result+flags
-  pop  bc
-  pop  hl
-  pop  af                   ; restore caller's A
+  ld   bc, ($d46e)
+  ld   hl, ($d46c)
+  ld   a, ($d471)
+  or   a
+  jr   z, _ror_mem_return_disabled
+  ei
+_ror_mem_return_disabled:
+  ex   af, af'              ; restore caller's A+F
   ret
 
 ; ─── rt_inc_mem ───────────────────────────────────────────────────────────────
@@ -597,45 +633,32 @@ _dec_mem_no_z:
 ; 6502 BIT: test A AND M.
 ; Entry: A = accumulator, B = M (the memory operand).
 ; Updates: shadow Z = ((A & B) == 0); shadow N = bit 7 of B; shadow V = bit 6 of B.
-; A is NOT written back.  B is preserved.
-; Uses D as scratch (saved/restored).
+; A is NOT written back.  B/DE/HL are preserved. C is scratch.
 rt_bit_mem:
-  push af
-  push bc
-  push de
-  ld   d, a                 ; D = accumulator (preserved across routine)
-  ld   e, b                 ; E = M operand
-  ; Build new shadow P: clear N (7), V (6), Z (1).
-  ld   a, ($cb03)
-  and  %00111101
-  ld   c, a                 ; C = P with N, V, Z cleared
+  ld   c, a                 ; preserve accumulator while testing A & M
   ; Z: (accumulator & M) == 0.
-  ld   a, d                 ; accumulator
-  and  e                    ; A & M
+  and  b                    ; A & M
   jr   nz, _bit_no_z
-  ld   a, c
+  ld   a, ($cb03)
+  and  %00111101            ; clear N, V, Z
   or   %00000010            ; set 6502 Z
-  ld   c, a
+  jr   _bit_after_z
 _bit_no_z:
+  ld   a, ($cb03)
+  and  %00111101            ; clear N, V, Z
+_bit_after_z:
   ; N = bit 7 of M.
-  bit  7, e
+  bit  7, b
   jr   z, _bit_no_n
-  ld   a, c
   or   %10000000
-  ld   c, a
 _bit_no_n:
   ; V = bit 6 of M.
-  bit  6, e
+  bit  6, b
   jr   z, _bit_no_v
-  ld   a, c
   or   %01000000
-  ld   c, a
 _bit_no_v:
-  ld   a, c
   ld   ($cb03), a
-  pop  de                   ; restore caller's DE
-  pop  bc                   ; restore caller's BC
-  pop  af                   ; restore caller's AF (A = accumulator)
+  ld   a, c                 ; restore accumulator
   ret
 
 .ends

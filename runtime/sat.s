@@ -39,8 +39,7 @@
 ; $0000 and could corrupt unrelated VRAM). A future base-aware allocator can
 ; reserve a safe $0000-base scratch window and re-enable variants there.
 ;
-; RAM scratch (free region above folded $CC00-$D2FF state and the $D300-$D3FF
-; dirty-metadata reserve):
+; RAM scratch:
 ;   $D400-$D43F  resolved SMS tile number per sprite (64 bytes)
 ;   $D440-$D44F  variant cache mapped-tile keys (16 bytes)
 ;   $D450-$D45F  variant cache attr keys (attr & $C3, 16 bytes)
@@ -50,8 +49,15 @@
 ;   $D464        current variant source tile key
 ;   $D465-$D467  current variant row temps (plane0, plane1, mask)
 ;   $D468        current OAM entry visible flag for resolve pass
+;   $D469        round-robin variant-cache victim cursor
+;   $D46A-$D46B  rt_oam_dma DE save (keeps helper off native stack)
+;   $D46C-$D471  stackless rotate-memory helper scratch (flags.s)
+;   $D472-$D478  IRQ saved BC/status/HL/AF scratch (boot.s)
+;   $D479-$D47C  rt_oam_dma AF/HL save (keeps helper off native stack)
+;   $D47D-$D47E  far slot-1 bank stack next-free pointer (dispatch.s)
 ;   $D480-$D4BF  compacted OAM attr byte per visible SAT entry (64 bytes)
-;   $D500-$D5FF  H-flip byte bit-reverse LUT (page-aligned), built at boot
+;   $D4C0-$D4FF  far slot-1 bank stack entries (dispatch.s)
+;   $D500-$D5FF  Translated-call continuation segment 1 (dispatch.s)
 ;
 ; Sprite VRAM slot layout (relative to VDP sprite base reg6 = $2000):
 ;   0..166   packed sprite patterns ($00-$A6)
@@ -75,46 +81,24 @@
 .define SAT_VARIANT_P1    $d466
 .define SAT_VARIANT_MASK  $d467
 .define SAT_VISIBLE_FLAG  $d468
-.define SAT_HFLIP_LUT     $d500   ; page-aligned: LUT[b] = SAT_HFLIP_LUT + b
-; H.7 per-sprite variant memo: sprite OAM entries rarely change between
-; frames, so cache each OAM slot's last (tile, attr) -> resolved answer
-; and skip the 16-entry pool scan on hits. The pool flush clears the
-; memo tile bytes (coherence: memo results index pool slots).
-.define SAT_MEMO_TILE     $da00   ; 64 bytes: last rel tile per sprite ($FF invalid)
-.define SAT_MEMO_ATTR     $da40   ; 64 bytes: last attr key per sprite
-.define SAT_MEMO_RES      $da80   ; 64 bytes: last resolved tile per sprite
-.define SAT_RR_VICTIM     $dac0   ; round-robin eviction cursor (H2)
+.define SAT_RR_VICTIM     $d469
+.define SAT_OAM_DMA_DE_SAVE $d46a
+.define SAT_OAM_DMA_AF_SAVE $d479
+.define SAT_OAM_DMA_HL_SAVE $d47b
 
 .section "sat" free
-
-; ─── rt_build_hflip_lut ────────────────────────────────────────────────────
-; Build the 256-entry horizontal-flip byte LUT at $D500: LUT[i] = bit-reverse(i)
-; (mirroring the 8 pixels of one 4bpp plane byte). Called once from boot.
-rt_build_hflip_lut:
-  ld   hl, SAT_HFLIP_LUT
-  ld   c, $00                ; i
-_bhl_loop:
-  ld   a, c
-  ld   b, 8
-  ld   d, $00                ; reversed accumulator
-_bhl_bit:
-  srl  a                     ; bit0 of i -> carry, 0 -> bit7
-  rl   d                     ; shift carry into d (MSB-first => reverse)
-  djnz _bhl_bit
-  ld   (hl), d
-  inc  hl
-  inc  c
-  jr   nz, _bhl_loop         ; until i wraps 0
-  ret
 
 ; ─── rt_oam_dma ───────────────────────────────────────────────────────────────
 ; Entry: A = high byte of source page in NES address space ($4014 write).
 ; Copies 256 bytes from SMS RAM $C000+(A<<8) to the OAM staging buffer $C900.
+; Preserves AF/HL/DE; clobbers BC. `BC` is scratch at hardware-op boundaries,
+; and saving AF/HL on native stack can cross the guard during nested NMI work.
 rt_oam_dma:
+  ld   (SAT_OAM_DMA_HL_SAVE), hl
   push af
-  push hl
-  push de
-  push bc
+  pop  hl
+  ld   (SAT_OAM_DMA_AF_SAVE), hl
+  ld   (SAT_OAM_DMA_DE_SAVE), de
   ld   h, a
   ld   l, $00
   ld   a, h
@@ -123,9 +107,10 @@ rt_oam_dma:
   ld   de, $c900             ; OAM staging
   ld   bc, $0100             ; 256 bytes
   ldir
-  pop  bc
-  pop  de
-  pop  hl
+  ld   de, (SAT_OAM_DMA_DE_SAVE)
+  ld   hl, (SAT_OAM_DMA_AF_SAVE)
+  push hl
+  ld   hl, (SAT_OAM_DMA_HL_SAVE)
   pop  af
   ret
 
@@ -193,15 +178,46 @@ _dof_no_v:
   ld   a, (SAT_VARIANT_ATTR)
   and  $40                   ; H-flip?
   jr   z, _dof_plain
-  ld   d, $d5                ; LUT page high byte (SAT_HFLIP_LUT = $D500)
-  ld   a, (hl)
-  ld   e, a
-  ld   a, (de)
+  ; Inline bit-reversal for H-flip. Stackless and preserves B (row counter)
+  ; and C (output row index): E is shifted right, A accumulates reversed bits.
+  ld   e, (hl)
+  xor  a
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
   ld   (SAT_VARIANT_P0), a
   inc  hl
-  ld   a, (hl)
-  ld   e, a
-  ld   a, (de)
+  ld   e, (hl)
+  xor  a
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
+  srl  e
+  rla
   ld   (SAT_VARIANT_P1), a
   jr   _dof_row_done
 _dof_plain:
@@ -237,7 +253,8 @@ _dof_p3_zero:
 _dof_p3_out:
   out  ($be), a
   inc  c
-  djnz _dof_row
+  dec  b
+  jp   nz, _dof_row
 
   call rt_restore_prg_window   ; current NES PRG window (banked-aware)
   ret
@@ -363,81 +380,12 @@ _res_loop:
   bit  3, a
   jr   nz, _res_store
 _res_visible_variant:
-  ; Memo probe: DE = SAT_RESOLVED+i and the tables are 64-aligned, so E
-  ; doubles as the sprite index.
-  push hl
-  ld   h, >SAT_MEMO_TILE
-  ld   l, e
-  ld   a, (hl)
-  cp   c                     ; same source tile as last time?
-  jr   nz, _res_memo_miss
-  ld   a, l
-  add  a, $40               ; -> SAT_MEMO_ATTR page offset
-  ld   l, a
-  ld   a, (hl)
-  cp   b                     ; same attr key?
-  jr   nz, _res_memo_miss_atl
-  ld   a, l
-  add  a, $40               ; -> SAT_MEMO_RES page offset
-  ld   l, a
-  ld   a, (hl)               ; A = memoized resolved tile
-  ; Verify the pool slot still holds this (tile, attr): round-robin
-  ; eviction reuses slots without clearing the memo.
-  sub  SAT_SCRATCH_BASE
-  cp   SAT_SCRATCH_COUNT
-  jr   nc, _res_memo_stale   ; not a scratch slot: stale by construction
-  push de
-  ld   e, a
-  ld   d, $00
-  ld   hl, SAT_VAR_TILE_KEYS
-  add  hl, de
-  ld   a, (hl)
-  cp   c                     ; slot's source tile still ours?
-  jr   nz, _res_memo_stale_de
-  ld   hl, SAT_VAR_ATTR_KEYS
-  add  hl, de
-  ld   a, (hl)
-  cp   b                     ; slot's attr key still ours?
-  jr   nz, _res_memo_stale_de
-  ld   a, e
-  add  a, SAT_SCRATCH_BASE
-  pop  de
-  ld   c, a                  ; C = verified resolved tile
-  pop  hl
-  jr   _res_store
-_res_memo_stale_de:
-  pop  de
-_res_memo_stale:
-  ; fall through to the miss path with L pointing at the RES table; the
-  ; miss path recomputes L from E, so just restore the tile-table offset.
-  push hl
-  pop  hl
-  ld   a, l
-  sub  $80                   ; RES page offset back to tile-table offset
-  ld   l, a
-  jr   _res_memo_miss
-_res_memo_miss_atl:
-  ld   a, l
-  sub  $40                   ; back to the tile-table offset
-  ld   l, a
-_res_memo_miss:
-  ; L = sprite index, H = >SAT_MEMO_TILE. Fill the memo after resolving.
-  push hl
+  push hl                    ; preserve OAM pointer
   push de
   call variant_get_scratch   ; C = src rel, B = attr key -> A = scratch rel
   pop  de
   pop  hl
-  ld   (hl), c               ; memo tile = source rel tile
   ld   c, a                  ; C = resolved
-  ld   a, l
-  add  a, $40               ; -> SAT_MEMO_ATTR page offset
-  ld   l, a
-  ld   (hl), b               ; memo attr
-  ld   a, l
-  add  a, $40               ; -> SAT_MEMO_RES page offset
-  ld   l, a
-  ld   (hl), c               ; memo result
-  pop  hl
 _res_store:
   ld   a, c
   ld   (de), a               ; resolved[i]

@@ -99,14 +99,16 @@ _vbuf_push_done:
 ; Entry: (none).  Called from irq_handler.
 ; Clobbers: AF, HL, BC, DE.
 vbuf_flush:
+  ; Fast empty path first. This runs every frame, often while nested inside
+  ; translated NMI code; saving all registers before discovering the buffer is
+  ; empty costs 8 stack bytes in the hottest stack-pressure path.
+  ld   a, ($c800)
+  or   a
+  ret  z
   push af
   push hl
   push bc
   push de
-  ; Check if buffer is empty.
-  ld   a, ($c800)
-  or   a
-  jp   z, _vbuf_flush_done  ; nothing to do
 
   ; HL = pointer into the buffer record area.
   ld   hl, $c801
@@ -210,7 +212,7 @@ _vbuf_flush_attribute_byte:
   ld   ($cb16), a            ; remaining byte count before consuming attr data
   ld   ($cb17), hl           ; source pointer to attr data byte
   ld   a, ($cb15)
-  call rt_nt_write_attr_shadow ; mirror queued attr write; preserves DE, clobbers AF/HL
+  call rt_nt_write_attr_shadow ; mirror queued attr write; preserves DE, clobbers AF/BC/HL
   ld   a, e
   sub  $c0
   ld   ($cb19), a            ; attr offset 0..63

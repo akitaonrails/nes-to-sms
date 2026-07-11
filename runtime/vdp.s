@@ -75,14 +75,14 @@ _vdp_init_table:
 ; ─── vdp_set_register ─────────────────────────────────────────────────────────
 ; Entry: A = value to write, B = register index (0..10).
 ; Writes the two-byte register command to the control port $BF.
-; Clobbers: none (preserves A and B via push/pop).
+; Preserves: A, B. Clobbers: C. Stackless for IRQ/presentation hot paths.
 vdp_set_register:
-  push af
+  ld   c, a
   out  ($bf), a             ; first byte = value
   ld   a, b
   or   $80                  ; second byte = $80 | register number
   out  ($bf), a
-  pop  af
+  ld   a, c
   ret
 
 ; ─── vdp_set_vram_addr ────────────────────────────────────────────────────────
@@ -203,4 +203,3 @@ _vdp_clr_cram_loop:
   ret
 
 .ends
-

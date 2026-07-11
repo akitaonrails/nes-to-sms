@@ -60,11 +60,9 @@
 ; ─── rt_controller_latch ──────────────────────────────────────────────────────
 ; Reads SMS port $DC, converts to NES button byte, stores at $CB06.
 ; Resets the serial read counter at $CB07 to 0.
-; Called from irq_handler once per VBlank.
+; Called from irq_handler once per VBlank. irq_handler already preserves AF/BC;
+; keep this helper stackless on the hot frame path.
 rt_controller_latch:
-  push af
-  push bc
-
   in   a, ($dc)             ; read SMS controller port 1 (active-low)
   cpl                       ; invert: now 1 = pressed, 0 = released
 
@@ -168,19 +166,17 @@ _latch_no_right:
   ld   ($cb06), a
   xor  a
   ld   ($cb07), a           ; reset bit-read index to 0
-
-  pop  bc
-  pop  af
   ret
 
 ; ─── rt_controller_strobe ─────────────────────────────────────────────────────
 ; Called when translated code writes $4016 (NES latch strobe).
 ; Resets the serial counter so the next read returns button A again.
 rt_controller_strobe:
-  push af
-  xor  a
-  ld   ($cb07), a
-  pop  af
+  ; STA $4016 preserves A and flags. Use an immediate memory store rather than
+  ; `xor a` plus AF save, because controller strobes can occur at native-stack
+  ; low-water inside translated update chains.
+  ld   hl, $cb07
+  ld   (hl), $00
   ret
 
 ; ─── rt_controller_read ───────────────────────────────────────────────────────
@@ -188,6 +184,8 @@ rt_controller_strobe:
 ; Entry: (none — uses $CB06 latch and $CB07 index).
 ; Exit:  A = 0 or 1 (button released or pressed).
 ; The bit-read index wraps at 8; reads 9+ return 1 (NES open-bus behavior).
+; Preserves DE (resident translated X/Y). Clobbers AF/BC. Keep stackless:
+; controller polling can happen inside nested translated-NMI work.
 rt_controller_read:
   ; Entry: A = port low byte ($16 = controller 1, $17 = controller 2).
   ; Controller 2 is unconnected for v1: return 0 WITHOUT touching the
@@ -198,8 +196,6 @@ rt_controller_read:
   xor  a
   ret
 _ctrl_read_p1:
-  push hl
-  push bc
   ld   a, ($cb07)           ; current bit index (0..7)
   cp   8
   jr   nc, _ctrl_read_open  ; index >= 8: return 1 (open-bus)
@@ -221,13 +217,10 @@ _ctrl_read_shift_done:
 
   ; Increment index for the next read. Avoid `inc (hl)` because the local
   ; trace emulator does not implement that Z80 opcode yet.
-  ld   hl, $cb07
-  ld   a, (hl)
+  ld   a, ($cb07)
   inc  a
-  ld   (hl), a
+  ld   ($cb07), a
   ld   a, c                 ; return sampled button bit, not incremented index
-  pop  bc
-  pop  hl
   ret
 
 ; ─── rt_controller_read_indexed_x ──────────────────────────────────────────────
@@ -244,8 +237,6 @@ rt_controller_read_indexed_x:
 _ctrl_read_open:
   ; NES open-bus: reads past 8 return 1.
   ld   a, 1
-  pop  bc
-  pop  hl
   ret
 
 .ends

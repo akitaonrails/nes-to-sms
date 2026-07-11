@@ -36,6 +36,8 @@
 ; SAT staging area at $C900 (see sat.s).
 ;
 ; rt_ppu_write: entry A = value, B = register index (0..7).
+; rt_ppu_write_cont: same, but returns by jumping to the continuation address
+; stored at $D3FC/$D3FD instead of consuming a native return frame.
 ; rt_ppu_read:  entry B = register index (0..7). Returns A.
 
 .section "ppu" free
@@ -46,24 +48,39 @@
 ; handler from interleaving with the control-port pairs / data bursts the
 ; register paths below may emit (see runtime/vdp.s).
 rt_ppu_write:
-  push af                   ; save value argument + caller flags
+  ex   af, af'              ; save value argument + caller flags without stack
+  xor  a
+  ld   ($d3fe), a            ; ordinary call path returns with `ret`
+  jp   _rt_ppu_write_entry
+
+rt_ppu_write_cont:
+  ex   af, af'              ; save value argument + caller flags without stack
+  ld   a, $01
+  ld   ($d3fe), a            ; continuation path returns with `jp (hl)`
+_rt_ppu_write_entry:
   ld   a, i                 ; P/V := IFF2 (1 = interrupts enabled)
   di                        ; atomic vs the frame IRQ handler from here
   jp   po, _pw_was_disabled
-  pop  af
-  call _rt_ppu_write_body
-  ei                        ; restore: interrupts were enabled at entry
-  ret
+  ld   a, $01
+  ld   ($cb19), a            ; _ppu_w_done must restore EI
+  ex   af, af'              ; restore value/flags for _rt_ppu_write_body
+  jp   _rt_ppu_write_body    ; tail-call: avoid one native stack frame
 _pw_was_disabled:
-  pop  af
-  call _rt_ppu_write_body
-  ret                       ; leave interrupts off (handler/nested context)
+  xor  a
+  ld   ($cb19), a            ; leave interrupts off (handler/nested context)
+  ex   af, af'              ; restore value/flags for _rt_ppu_write_body
+  jp   _rt_ppu_write_body    ; tail-call: avoid one native stack frame
 
 _rt_ppu_write_body:
-  push hl
-  push de
-  push bc
-  push af
+  ; Hot PPU writes run under the frame IRQ/NMI bridge, where the native stack is
+  ; at its tightest. Keep this body stackless: $CB18 holds the write value,
+  ; $CB19 records whether rt_ppu_write must restore EI, $CB1E/$CB1F preserve
+  ; resident translated X/Y (DE), and alternate AF owns the caller's A+F until
+  ; _ppu_w_done. Runtime code must not use alternate AF elsewhere while inside
+  ; this body.
+  ld   ($cb18), a
+  ld   ($cb1e), de
+  ex   af, af'
   ; Dispatch on register index in B.
   ld   a, b
   cp   0
@@ -94,12 +111,10 @@ _ppu_w_ctrl:
   ;   bit 4:   background pattern table
   ;   bit 5:   sprite size (0=8x8, 1=8x16)
   ;   bit 7:   NMI enable (we use frame INT, not NMI, so ignore)
-  pop  af
-  push af
+  ld   a, ($cb18)
 .ifdef NES_CHR_RAM
   ; Nametable-select change: the band (rows 0-3) must re-materialize
   ; from the newly selected page (see ntmap.s band rule).
-  push bc
   ld   c, a
   ld   a, ($cb08)
   xor  c
@@ -121,14 +136,8 @@ _pwc_no_flip:
   ld   ($cb7f), a
 _pwc_no_tflip:
   ld   a, c
-  pop  bc
 .endif
   ld   ($cb08), a
-  call _ppu_sync_sprite_base
-  call _ppu_sync_vdp_reg1
-  jp   _ppu_w_done
-
-_ppu_sync_sprite_base:
   ; Mirror NES PPUCTRL bit 3 into SMS VDP register 6. The current CHR pack
   ; places NES sprite table 1 in SMS slots $000-$0FF and sprite table 0 in
   ; slots $100-$1FF, so table switches must also switch the SMS sprite base.
@@ -139,9 +148,12 @@ _ppu_sync_sprite_base:
 _ppu_sprite_base_0000:
   ld   a, $fb                ; bit 2 = 0: sprite pattern base $0000
 _ppu_sprite_base_set:
-  ld   b, 6
-  call vdp_set_register
-  ret
+  ; Inline vdp_set_register in this hot PPUCTRL path: the helper's call frame
+  ; and AF save can cross the native stack guard during nested NMI work.
+  out  ($bf), a
+  ld   a, $86                ; register-write command for VDP reg 6
+  out  ($bf), a
+  jp   _ppu_sync_vdp_reg1
 
 _ppu_w_mask:
   ; $2001 PPUMASK: store to shadow and mirror rendering enable to SMS VDP
@@ -149,11 +161,9 @@ _ppu_w_mask:
   ; has a single display-enable bit, so display is on when either NES plane is
   ; enabled and off when both are disabled. This keeps blanking generic instead
   ; of relying on boot's initial always-on display state.
-  pop  af
-  push af
+  ld   a, ($cb18)
   ld   ($cb09), a
-  call _ppu_sync_vdp_reg1
-  jp   _ppu_w_done
+  jp   _ppu_sync_vdp_reg1
 
 _ppu_sync_vdp_reg1:
   ; Compose SMS VDP register 1 from NES PPU shadows:
@@ -186,7 +196,7 @@ _ppu_reg1_sprite_done:
   ; Applied once per frame in vblank, the off/on pair collapses.
   ld   a, c
   ld   ($cb2d), a
-  ret
+  jp   _ppu_w_done
 
 _ppu_w_status:
   ; $2002 is read-only; writes are ignored on real hardware.
@@ -194,21 +204,17 @@ _ppu_w_status:
 
 _ppu_w_oamaddr:
   ; $2003 OAMADDR: set OAM byte address.
-  pop  af
-  push af
+  ld   a, ($cb18)
   ld   ($cb0a), a
   jp   _ppu_w_done
 
 _ppu_w_oamdata:
   ; $2004 OAMDATA: write one byte to OAM staging at $C900 + oam_addr.
   ;   Auto-increment oam_addr after each write.
-  pop  af
-  push af
-  push af
   ld   a, ($cb0a)           ; current OAM address
   ld   l, a
   ld   h, $c9               ; $C900 + oam_addr
-  pop  af
+  ld   a, ($cb18)
   ld   (hl), a              ; write value
   ; Increment OAM addr (wraps at 256 within the page).
   ld   a, ($cb0a)
@@ -223,21 +229,18 @@ _ppu_w_scroll:
   ; A complete pair is also captured into the split-scroll scheduler. Pairs
   ; before PPUSTATUS returns sprite-0 hit are pre-split; pairs after are
   ; post-split. The last complete pair in each phase wins.
-  pop  af
-  push af
-  push af
   ld   a, ($cb0b)           ; scroll toggle
   or   a
   jr   nz, _ppu_w_scroll_y
   ; First write = X scroll.
-  pop  af
+  ld   a, ($cb18)
   ld   ($cb0c), a
   ld   a, 1
   ld   ($cb0b), a
   jp   _ppu_w_done
 _ppu_w_scroll_y:
   ; Second write = Y scroll.
-  pop  af
+  ld   a, ($cb18)
   ld   ($cb0d), a
   ld   a, ($cb20)
   bit  0, a
@@ -265,19 +268,16 @@ _ppu_w_ppuaddr:
   ; $2006 PPUADDR: double-write.
   ;   First write  (toggle=0): high byte → $CB0F; toggle becomes 1.
   ;   Second write (toggle=1): low byte  → $CB10; toggle becomes 0.
-  pop  af
-  push af
-  push af
   ld   a, ($cb0e)
   or   a
   jr   nz, _ppu_w_ppuaddr_lo
-  pop  af
+  ld   a, ($cb18)
   ld   ($cb0f), a           ; high byte
   ld   a, 1
   ld   ($cb0e), a
   jp   _ppu_w_done
 _ppu_w_ppuaddr_lo:
-  pop  af
+  ld   a, ($cb18)
   ld   ($cb10), a           ; low byte
   xor  a
   ld   ($cb0e), a
@@ -291,9 +291,6 @@ _ppu_w_ppudata:
   ; one-byte queued-buffer header wraps on SMB's 1 KiB title-screen clears
   ; (4 bytes of record metadata per NES byte), so direct writes are the safer
   ; first-pass behavior while translated code runs during VBlank.
-  pop  af
-  push af
-  push af                   ; data byte for the direct write path
   ld   a, ($cb0f)
   ld   d, a
   ld   a, ($cb10)
@@ -316,12 +313,92 @@ _ppu_w_ppudata:
 _ppudata_direct_nametable_tile:
   ; Window routing (E.5c): raw-store every tile write; only in-window
   ; columns reach the folded VRAM table (out-of-window columns are
-  ; projected later when they scroll in). Preserves DE; the data byte
-  ; stays on the stack for the write path below.
-  pop  af
-  push af
-  call rt_nt_route_tile_write
+  ; projected later when they scroll in). Preserves DE.
+  ld   a, ($cb18)
+  ; Inline rt_nt_route_tile_write in this hottest nested-NMI path. The helper
+  ; has no other runtime callers, and its call frame alone can cross the
+  ; native stack guard while SMB clears/materializes nametables.
+  ld   c, a
+
+.ifdef NES_MIRRORING_VERTICAL
+  ld   a, d
+  and  $07                   ; raw high byte within 2 KiB CIRAM
+  add  a, (RAW_CIRAM_SRAM_BASE >> 8)
+  ld   h, a
+  ld   l, e
+.endif
+
+.ifdef NES_MIRRORING_HORIZONTAL
+  ld   a, d
+  and  $03                   ; raw low 1 KiB offset high bits
+  ld   h, a
+  ld   a, d
+  and  $08                   ; raw bit 11 selects CIRAM page 1
+  srl  a                     ; move bit 3 -> bit 2
+  or   h
+  add  a, (RAW_CIRAM_SRAM_BASE >> 8)
+  ld   h, a
+  ld   l, e
+.endif
+
+  ld   a, RAW_CIRAM_SRAM_CTRL
+  ld   ($fffc), a
+  ld   (hl), c
+  xor  a
+  ld   ($fffc), a
+  ; row = ((D & 3) << 3) | (E >> 5); rows 0-3 (status region) always render.
+  ld   a, e
+  rlca
+  rlca
+  rlca
+  and  $07
+  ld   b, a
+  ld   a, d
+  and  $03
+  rlca
+  rlca
+  rlca
+  or   b
+  cp   4
+  jr   nc, _ppudata_tile_col_check
+.ifdef NES_CHR_RAM
+  ; Rows 0-3 are the status-bar band. Writes to the currently-selected page
+  ; render immediately; writes to the other page are raw-only.
+  ld   a, ($cb08)
+  and  $01
+  rlca
+  rlca                      ; select bit 0 -> bit 2 ($2400 bit)
+  ld   b, a
+  ld   a, d
+  and  $04
+  cp   b
+  jr   z, _ppudata_tile_in
+  jp   _ppudata_discard_direct
+.else
+  ; SMB-proven band rule: NT-A rows 0-3 render (fixed HUD); NT-B column tops
+  ; raw-store only.
+  ld   a, d
+  and  $04
+  jr   z, _ppudata_tile_in
+  jp   _ppudata_discard_direct
+.endif
+_ppudata_tile_col_check:
+  ; column = (D bit2) * 32 | (E & $1F)   (vertical mirroring: $24xx = page 1)
+  ld   a, d
+  and  $04
+  rlca
+  rlca
+  rlca                      ; bit 2 -> bit 5 (= 32)
+  ld   b, a
+  ld   a, e
+  and  $1f
+  or   b
+  ld   hl, $cb2a
+  sub  (hl)
+  and  $3f
+  cp   32
   jp   nc, _ppudata_discard_direct
+_ppudata_tile_in:
   ; DE = NES nametable byte. Convert `(DE - $2000) & $03FF` to
   ; SMS `$3700 + offset * 2` (224-line-mode name table base), write tile
   ; low byte and clear attrs.
@@ -339,7 +416,7 @@ _ppudata_direct_nametable_tile:
   and  $3f
   or   $40
   out  ($bf), a
-  pop  af
+  ld   a, ($cb18)
   call rt_write_mapped_bg_tile
   jp   _ppudata_inc_addr
 
@@ -357,7 +434,7 @@ _ppudata_pattern_write:
   ;     next NT reference regenerates from the new bytes.
   ;  3. If the tile is in the SPRITE pattern table (PPUCTRL bit 3),
   ;     copy-through to the fixed VRAM sprite region ($2000 + fold).
-  pop  af                    ; the data byte
+  ld   a, ($cb18)            ; the data byte
   ld   ($cb13), a            ; park it (transient scratch)
   push bc
   push de
@@ -449,8 +526,7 @@ _ppw_done:
 .endif
 
 _ppudata_discard_direct:
-  pop  af                    ; non-nametable PPU writes are ignored for now
-
+  ; non-nametable PPU writes are ignored for now
   jp   _ppudata_inc_addr
 
 _ppudata_direct_palette:
@@ -459,7 +535,7 @@ _ppudata_direct_palette:
   ; write it directly to the corresponding CRAM entry. This lets games load
   ; their own palettes through ordinary $2006/$2007 traffic instead of being
   ; stuck with the boot placeholder palette.
-  pop  af                    ; A = NES palette colour index
+  ld   a, ($cb18)            ; A = NES palette colour index
 
   ; P = NES palette index (low 5 bits). Read it from E (PPUADDR low) BEFORE the
   ; LUT lookup clobbers DE. Background tiles now bake the sub-palette into their
@@ -532,7 +608,7 @@ _pal_universal:
 _ppudata_direct_attribute:
   ; Attribute byte at $23C0/$27C0/$2BC0/$2FC0. Store to the raw attr shadow,
   ; then expand through the window-gated core below.
-  pop  af
+  ld   a, ($cb18)
   ld   ($cb15), a            ; attr byte
   call rt_nt_write_attr_shadow ; preserves DE; current folded rendering unchanged
   call _apply_attr_core
@@ -677,32 +753,53 @@ _ppudata_inc_done:
   jp   _ppu_w_done
 
 _ppu_w_done:
-  pop  af
-  pop  bc
-  pop  de
-  pop  hl
+  ld   de, ($cb1e)
+  ld   a, ($cb19)
+  or   a
+  jr   z, _ppu_w_maybe_return_disabled
+  ld   a, ($d3fe)
+  or   a
+  jr   nz, _ppu_w_return_cont_ei
+  ex   af, af'              ; restore caller A+flags
+  ei
   ret
+_ppu_w_return_cont_ei:
+  ld   hl, ($d3fc)
+  ex   af, af'              ; restore caller A+flags
+  ei
+  jp   (hl)
+_ppu_w_maybe_return_disabled:
+  ld   a, ($d3fe)
+  or   a
+  jr   nz, _ppu_w_return_cont_disabled
+  ex   af, af'              ; restore caller A+flags
+  ret
+_ppu_w_return_cont_disabled:
+  ld   hl, ($d3fc)
+  ex   af, af'              ; restore caller A+flags
+  jp   (hl)
 
 ; ─── rt_ppu_read ──────────────────────────────────────────────────────────────
 ; Entry: B = register index (0..7).
 ; Exit:  A = value.
 rt_ppu_read:
-  push af
+  ; Reads overwrite A/NZ; no need to preserve caller AF while probing IFF2.
   ld   a, i                 ; P/V := IFF2
   di
   jp   po, _pr_was_disabled
-  pop  af
-  call _rt_ppu_read_body
-  ei
-  ret
+  ld   a, $01
+  ld   ($cb19), a            ; _ppu_r_done must restore EI
+  jp   _rt_ppu_read_body     ; tail-call: avoid one native stack frame
 _pr_was_disabled:
-  pop  af
-  call _rt_ppu_read_body
-  ret
+  xor  a
+  ld   ($cb19), a            ; leave interrupts off (handler/nested context)
+  jp   _rt_ppu_read_body     ; tail-call: avoid one native stack frame
 _rt_ppu_read_body:
-  push hl
-  push bc
-  push de
+  ; Read helpers return A and may clobber BC/HL/native flags, but DE holds
+  ; resident translated X/Y and must survive. Keep the hot read body stackless.
+  ; $CB19 records whether the wrapper observed interrupts enabled and should
+  ; re-enable them on return.
+  ld   ($cb1e), de
   ld   a, b
   cp   2
   jp   z, _ppu_r_status
@@ -773,12 +870,11 @@ _ppu_r_oamdata:
   ld   a, ($cb0a)
   ld   l, a
   ld   h, $c9
-  ld   a, (hl)              ; read OAM byte
-  push af
+  ld   c, (hl)              ; read OAM byte
   ld   a, ($cb0a)
   inc  a
   ld   ($cb0a), a
-  pop  af
+  ld   a, c
   jp   _ppu_r_done
 
 _ppu_r_ppudata:
@@ -844,9 +940,14 @@ _ppu_r_inc1:
   ret
 
 _ppu_r_done:
-  pop  de
-  pop  bc
-  pop  hl
+  ld   de, ($cb1e)
+  ld   c, a
+  ld   a, ($cb19)
+  or   a
+  ld   a, c
+  jr   z, _ppu_r_done_no_ei
+  ei
+_ppu_r_done_no_ei:
   ret
 
 _nes_to_sms_palette:
