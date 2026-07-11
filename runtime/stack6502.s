@@ -20,15 +20,15 @@ rt_push6502:
   push hl
   push de
   ld   d, a                  ; preserve pushed value / caller A
-  ; Compute destination address: $C100 + S.
+  ; RESERVE the slot first (publish S-1), then write at old-S: the
+  ; write-then-publish order raced with the IRQ/NMI bridge frame push.
   ld   a, ($cb02)           ; load shadow S
-  ld   l, a                 ; low byte = S
+  dec  a
+  ld   ($cb02), a           ; publish S-1 (wraps within page)
+  inc  a
+  ld   l, a                 ; low byte = old S
   ld   h, $c1               ; high byte = $C1 → address $C100 + S
   ld   (hl), d              ; write value to emulated 6502 stack
-  ; Decrement shadow S (wraps within page: $00 - 1 = $FF).
-  ld   a, ($cb02)
-  dec  a
-  ld   ($cb02), a
   ld   a, d                 ; restore caller's A
   pop  de
   pop  hl
@@ -41,14 +41,18 @@ rt_push6502:
 rt_pop6502:
   push hl
   push bc
-  ; Increment shadow S first (6502 pull = pre-increment).
+  ; Read at S+1 BEFORE publishing the increment: once published, the
+  ; IRQ/NMI bridge may push its frame over the just-vacated slot.
   ld   a, ($cb02)
   inc  a
-  ld   ($cb02), a
-  ; Read from $C100 + new_S.
   ld   l, a
   ld   h, $c1
+  ld   c, a                 ; C = S+1 (to publish after the read)
   ld   a, (hl)              ; A = popped value
+  ld   b, a
+  ld   a, c
+  ld   ($cb02), a           ; publish S+1
+  ld   a, b
   pop  bc
   pop  hl
   ret

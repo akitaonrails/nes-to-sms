@@ -78,9 +78,16 @@ reset_entry:
   ; reset block overlaps it (wla-z80's MEM_INSERT warning; the collision
   ; corrupted the RST-08 trap bytes in earlier builds). SP init moved to
   ; boot_main to keep this block at 6 bytes.
+.ifdef DIAG_WILDJUMP
+  ; Diagnostic: route through the reset probe, which counts reboots and
+  ; freezes with full arrival context on the first anomalous re-entry.
+  di
+  jp diag_reset_probe
+.else
   di
   im 1
   jp boot_main
+.endif
 
 ; Padding bytes between $0006 and $0008 are handled by the linker filling
 ; with $FF (ROM erased value).  WLA-DX will fill the gap automatically.
@@ -111,9 +118,16 @@ reset_entry:
   halt
 
 .org $0030
+.ifdef DIAG_WILDJUMP
+  ; Wild-jump canary: scratch RAM is filled with $F7 (RST $30), so any
+  ; execution that strays into it lands here with the stray address on
+  ; the native stack. See rt_wildjump_diag.
+  jp rt_wildjump_diag
+.else
   ; RST 6 — unused.
   di
   halt
+.endif
 
 .org $0038
   jp irq_handler
@@ -366,6 +380,16 @@ _sram_ok:
   ld   a, $0C
   call rt_boot_beacon
 .endif
+.ifdef DIAG_WILDJUMP
+  ; Arm the wild-jump canary: fill the nametable sub-palette shadow (the
+  ; region a real-emulator run was caught executing, PC $CE0A) with $F7 =
+  ; RST $30. Legitimate writers overwrite their cells; readers only use
+  ; the low 2 bits (renders with wrong sub-palettes — diagnostic build).
+  ld   hl, $cc00
+  ld   bc, $0700
+  ld   a, $f7
+  call mem_fill
+.endif
   ; Phase R: establish X/Y residency (D = X, E = Y) from the shadows.
   ld   a, ($cb00)
   ld   d, a
@@ -378,6 +402,76 @@ _sram_ok:
 
 ; ─── irq_handler ──────────────────────────────────────────────────────────────
 .section "irq_handler" free
+
+.ifdef DIAG_WILDJUMP
+; Reset-arrival probe. Confirmed: on Mednafen the machine re-enters $0000
+; ~80 times/minute (endless reboot cycle) without ever executing the RAM
+; canary — so the arrival is a native `ret` through a zeroed stack word or
+; a computed `jp` with a zeroed pointer. Freeze on the FIRST re-entry
+; (count 2; power-on is 1) with the arrival context:
+;   $CA20  reboot counter        $CA22  HL at entry (jp (hl) source)
+;   $CA24  SP at entry           $CA27  A at entry
+;   $CA28  16 stack bytes from SP-8 (the word a `ret` just popped sits
+;          at SP-2/SP-1)         $CA38  BC   $CA3A  DE at entry
+diag_reset_probe:
+  ld  ($ca27), a             ; A at entry, before anything clobbers it
+  ld  ($ca22), hl
+  ld  hl, $0000
+  add hl, sp
+  ld  ($ca24), hl
+  ld  a, ($ca20)
+  inc a
+  ld  ($ca20), a
+  cp  $02
+  jr  nz, _drp_boot
+  ld  ($ca38), bc
+  ld  ($ca3a), de
+  ld  hl, ($ca24)
+  ld  bc, $fff8
+  add hl, bc                 ; HL = SP - 8
+  ld  de, $ca28
+  ld  bc, $0010
+  ldir
+  im  1
+  ld  a, $03                 ; RED backdrop: reboot arrival captured
+  call rt_boot_beacon
+_drp_halt:
+  di
+  halt
+  jr  _drp_halt
+_drp_boot:
+  im  1
+  jp  boot_main
+
+; Wild-jump breadcrumb trap. Reached via the $F7 (RST $30) canary fill:
+; execution strayed into scratch RAM. Record everything a savestate needs
+; to reconstruct the jump, paint the backdrop red, and freeze — a Mednafen
+; F5 state then carries the whole story:
+;   $CA20  reboot counter (incremented at each boot_main entry)
+;   $CA21  wild-jump counter
+;   $CA22  wild-exec address + 1 (the RST return address)
+;   $CA24  native SP at trap time
+;   $CA28  top 16 bytes of the native stack (return-address chain)
+rt_wildjump_diag:
+  di
+  pop  hl
+  ld   ($ca22), hl
+  ld   hl, $0000
+  add  hl, sp
+  ld   ($ca24), hl
+  ld   de, $ca28
+  ld   bc, $0010
+  ldir
+  ld   a, ($ca21)
+  inc  a
+  ld   ($ca21), a
+  ld   a, $03                ; RED backdrop: wild jump caught
+  call rt_boot_beacon
+_wjd_halt:
+  di
+  halt
+  jr   _wjd_halt
+.endif
 
 ; Boot beacon: A = border color (CRAM format); writes VDP reg 7 so the
 ; overscan color reports boot progress on real emulators.
@@ -396,10 +490,17 @@ rt_boot_beacon:
   ret
 
 irq_handler:
-  ld  ($d475), hl
+  ; Save the interrupted context on the NATIVE STACK. The handler is
+  ; re-entrant (nested translated-NMI entries, skip entries, the line
+  ; split); the old fixed save words ($D472/$D475/$D477) were single-slot,
+  ; so ANY second entry before the first exit clobbered the outer
+  ; context's registers — the outer thread then resumed with the inner's
+  ; BC/HL (observed as garbage rt_rti dispatches in SMB free-run and as
+  ; CV1's jp-$0000 reboot loop on Mednafen, where skip entries carry
+  ; zeroed BC/HL).
+  push hl
   push af
-  pop hl
-  ld  ($d477), hl
+  push bc
   ld  a, $01
   ld  ($cb7e), a            ; in-handler flag (nesting-aware ei gating)
 .ifdef NES_CHR_RAM
@@ -412,7 +513,6 @@ irq_handler:
   call rt_boot_beacon
 _hb_done:
 .endif
-  ld  ($d472), bc
   ; Phase R: DE carries the resident 6502 X/Y of the interrupted thread.
   ; Sync to the RAM shadows now; exits restore DE from those shadows instead of
   ; spending native stack on a saved DE word. The translated NMI may update the
@@ -441,11 +541,9 @@ _hb_done:
   ld  d, a
   ld  a, ($cb01)
   ld  e, a
-  ld  bc, ($d472)
-  ld  hl, ($d477)
-  push hl
-  ld  hl, ($d475)
+  pop bc
   pop af
+  pop hl
   ret
 
 _irq_runtime_ready:
@@ -621,22 +719,25 @@ _irq_call_translated_nmi:
   ld  e, a
 
   ; Per-frame game logic runs through the translated NES NMI handler.
-  ; Per NES NMI semantics, hardware would push PC + P on the 6502 stack
-  ; and jump via $FFFA. We synthesize the P push here so the translated
-  ; RTI at the end pops a matching byte. PC isn't pushed because the
-  ; translated routine returns via Z80 ret to this irq_handler, not via
-  ; an emulated jump-via-popped-PC.
-  ; Stackless inline rt_push6502 for shadow P. Calling the generic helper here
-  ; adds both a return address and helper register saves at the deepest native
-  ; stack point; the IRQ/NMI bridge only needs DE (resident X/Y) preserved.
-  ld  a, ($cb03)            ; shadow P
-  ld  c, a
+  ; Per NES NMI semantics, hardware pushes PCH, PCL, P on the 6502 stack
+  ; and jumps via $FFFA. Synthesize the full 3-byte frame with the
+  ; sentinel PC $FFFF: rt_rti pops P + PC and, on the sentinel, returns
+  ; natively to this bridge — while a game that REWRITES the stacked PC
+  ; before RTI (BRK-recovery idiom) gets dispatched to the rewritten
+  ; address, matching hardware. Inline (stackless): the IRQ/NMI bridge
+  ; only needs DE (resident X/Y) preserved at the deepest native point.
   ld  a, ($cb02)            ; shadow S
   ld  l, a
   ld  h, $c1
-  ld  (hl), c               ; emulated 6502 stack write
-  dec a
-  ld  ($cb02), a            ; push decrements S
+  ld  (hl), $ff             ; sentinel PCH at S
+  dec l                     ; page-wrapping, like the 6502 stack
+  ld  (hl), $ff             ; sentinel PCL at S-1
+  dec l
+  ld  a, ($cb03)            ; shadow P
+  ld  (hl), a               ; P at S-2
+  ld  a, ($cb02)
+  sub 3
+  ld  ($cb02), a            ; push decrements S by the frame size
   ; The frame interrupt can arrive while translated code has bank-switched
   ; slot 1 for a far call/jump. `translated_nmi` lives in its own generated
   ; bank, so save the current slot-1 bank by NMI nesting depth, map the NMI
@@ -742,11 +843,9 @@ _pace_done:
   ld  e, a
   xor a
   ld  ($cb7e), a            ; leaving handler
-  ld  bc, ($d472)
-  ld  hl, ($d477)
-  push hl
-  ld  hl, ($d475)
+  pop bc
   pop af
+  pop hl
   ei
   ret
 
@@ -763,11 +862,9 @@ _irq_line_scroll_split:
   ld  e, a
   xor a
   ld  ($cb7e), a            ; leaving handler
-  ld  bc, ($d472)
-  ld  hl, ($d477)
-  push hl
-  ld  hl, ($d475)
+  pop bc
   pop af
+  pop hl
   ei
   ret
 

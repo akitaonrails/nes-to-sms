@@ -38,6 +38,7 @@ pub const REQUIRED_HELPERS: &[&str] = &[
     "rt_translated_tail_gate",
     "rt_unresolved_jsr",
     "rt_brk",
+    "rt_rti",
     "rt_asl_a",
     "rt_asl_mem",
     "rt_lsr_a",
@@ -98,6 +99,10 @@ pub fn emit_runtime_helpers(p: &mut Program) {
     emit_halt_stub(p, "rt_indirect_jmp");
     emit_halt_stub(p, "rt_unresolved_jsr");
     emit_halt_stub(p, "rt_brk");
+    // rt_rti pops a 3-byte interrupt frame and dispatches; no interrupt
+    // frame exists in the single-routine harness, so reaching it is a
+    // mis-execution — HALT like the other trap helpers.
+    emit_halt_stub(p, "rt_rti");
     p.comment("─── end runtime helpers ───");
 }
 

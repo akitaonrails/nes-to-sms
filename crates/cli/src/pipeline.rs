@@ -203,7 +203,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                         | ir::Op::Rti
                         | ir::Op::Jmp { .. }
                         | ir::Op::JmpIndirect { .. }
-                        | ir::Op::Brk
+                        | ir::Op::Brk { .. }
                         | ir::Op::Jam { .. }
                 )
             });
@@ -362,7 +362,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                                     | ir::Op::Rti
                                     | ir::Op::Jmp { .. }
                                     | ir::Op::JmpIndirect { .. }
-                                    | ir::Op::Brk
+                                    | ir::Op::Brk { .. }
                                     | ir::Op::Jam { .. }
                             )
                         });
@@ -429,7 +429,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                             | ir::Op::Rti
                             | ir::Op::Jmp { .. }
                             | ir::Op::JmpIndirect { .. }
-                            | ir::Op::Brk
+                            | ir::Op::Brk { .. }
                             | ir::Op::Jam { .. }
                     )
                 });
@@ -1459,6 +1459,7 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_unresolved_jsr",
     "rt_unresolved_jsr_flash",
     "rt_brk",
+    "rt_rti",
     "rt_asl_a",
     "rt_asl_mem",
     "rt_lsr_a",

@@ -115,7 +115,7 @@ pub fn classify_routine(routine: &Routine) -> Option<String> {
                 return Some(format!("unsupported op: {reason}"));
             }
             Op::Jam { .. } => return Some("jam opcode".into()),
-            Op::Brk => return Some("brk".into()),
+            Op::Brk { .. } => return Some("brk".into()),
             Op::Jsr { target } | Op::Jmp { target } | Op::BranchIf { target, .. } => {
                 // External Jsr/Jmp/BranchIf would land on stub `ret`s
                 // in the harness; the oracle follows the real callee.

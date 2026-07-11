@@ -89,6 +89,7 @@ pub mod runtime_symbols {
     pub const UNRESOLVED_JSR: &str = "rt_unresolved_jsr";
     pub const TRANSLATED_RTS: &str = "rt_translated_rts";
     pub const BRK: &str = "rt_brk";
+    pub const RTI: &str = "rt_rti";
     pub const FAR_CALL: &str = "rt_far_call";
     pub const FAR_JMP: &str = "rt_far_jmp";
 }
@@ -545,25 +546,37 @@ fn emit_ror_a_flags_inline(p: &mut z80_emit::Program) {
 /// H.4: inline 6502 push — A to $C100+S, S decremented. A preserved.
 /// Clobbers HL/D and native flags (same contract as rt_push6502).
 fn emit_push6502_inline(p: &mut z80_emit::Program) {
+    // RESERVE the slot (publish S-1) before writing the byte at old-S.
+    // The write-then-publish order raced with the IRQ/NMI bridge: an
+    // interrupt between the write and the S update pushes its 3-byte
+    // frame at the same S and clobbers the in-flight byte (surfaced as
+    // a garbage rt_rts_dispatch target mid-route).
     p.ld_c_a();
     p.ld_a_abs(sms_layout::SHADOW_S);
+    p.dec_a();
+    p.ld_abs_a(sms_layout::SHADOW_S);
+    p.inc_a();
     p.ld_l_a();
     p.ld_h_imm(0xC1);
     p.ld_hl_ptr_c();
-    p.dec_a();
-    p.ld_abs_a(sms_layout::SHADOW_S);
     p.ld_a_c();
 }
 
-/// H.4: inline 6502 pop — S incremented, A from $C100+S. Clobbers HL
-/// and native flags (same contract as rt_pop6502).
+/// H.4: inline 6502 pop — A from $C100+S+1, then S incremented. Read
+/// BEFORE publishing: once S+1 is published, the IRQ/NMI bridge may
+/// push its frame over the just-vacated slot; reading afterwards races.
+/// Clobbers HL/B/C and native flags.
 fn emit_pop6502_inline(p: &mut z80_emit::Program) {
     p.ld_a_abs(sms_layout::SHADOW_S);
     p.inc_a();
-    p.ld_abs_a(sms_layout::SHADOW_S);
     p.ld_l_a();
     p.ld_h_imm(0xC1);
+    p.ld_c_a();
     p.ld_a_hl_ptr();
+    p.ld_b_a();
+    p.ld_a_c();
+    p.ld_abs_a(sms_layout::SHADOW_S);
+    p.ld_a_b();
 }
 
 /// (sms_base + idx) := A; A preserved (6502 store contract). Clobbers
@@ -1629,7 +1642,7 @@ fn is_flag_boundary(op: &ir::Op) -> bool {
             | Op::JumpEngineCall { .. }
             | Op::Jmp { .. }
             | Op::JmpIndirect { .. }
-            | Op::Brk
+            | Op::Brk { .. }
             | Op::Php
             | Op::Unsupported { .. }
             | Op::Jam { .. }
@@ -2668,9 +2681,14 @@ pub fn lower_routine(
             }
 
             // ------------------------------------------------------------------
-            Op::Brk => {
+            Op::Brk { pc } => {
+                // NES BRK is a 2-byte software interrupt: the pushed return
+                // PC is the BRK site + 2. rt_brk builds the 3-byte frame on
+                // the emulated stack and vectors to translated_irq; control
+                // resumes wherever the handler's RTI frame says.
                 program.comment("BRK");
-                program.call(BRK);
+                program.ld_hl_imm(pc.wrapping_add(2));
+                program.jp(BRK);
             }
 
             // ------------------------------------------------------------------
@@ -3766,9 +3784,12 @@ pub fn lower_routine(
             }
 
             Op::Rti => {
-                program.call(POP_6502);
-                program.ld_abs_a(SHADOW_P);
-                program.ret();
+                // rt_rti pops P + PC from the emulated 6502 stack. The
+                // sentinel PC pushed by the runtime's NMI bridge returns
+                // natively; a game-written PC (BRK return, or a recovery
+                // that rewrote the frame) dispatches through the banked
+                // dispatcher. Tail transfer: control does not come back.
+                program.jp(RTI);
             }
 
             // ------------------------------------------------------------------
@@ -3944,6 +3965,7 @@ mod tests {
             "rt_translated_call_gate",
             "rt_translated_tail_gate",
             BRK,
+            RTI,
             FAR_CALL,
             FAR_JMP,
         ];
@@ -4626,10 +4648,12 @@ runtime_label = "rt_replacement"
     }
 
     #[test]
-    fn rti_still_native_ret() {
+    fn rti_tail_transfers_to_rt_rti() {
+        // RTI pops the 3-byte interrupt frame in rt_rti: sentinel PC =
+        // native ret (NMI bridge), game-written PC = banked dispatch
+        // (BRK return / recovery rewrite). Not an RTS, not inline.
         let build = lower_and_finish(vec![Op::Rti]);
-        assert!(build.asm.contains("call rt_pop6502"));
-        assert!(build.asm.contains("ret"));
+        assert!(build.asm.contains("jp rt_rti"));
         assert!(!build.asm.contains("jp rt_translated_rts"));
     }
 

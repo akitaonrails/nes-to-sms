@@ -73,6 +73,13 @@ rt_translated_call_gate:
   ld   a, (hl)              ; entry A from frame[0]
   ld   h, b
   ld   l, c
+  .ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a            ; breadcrumb: last computed transfer
+  ld   ($ca3d), hl
+  ld   a, $01
+  ld   ($ca3c), a
+  ld   a, ($ca3f)
+  .endif
   jp   (hl)
 
 rt_translated_tail_gate:
@@ -82,6 +89,13 @@ rt_translated_tail_gate:
   ld   a, h
   ld   h, b
   ld   l, c
+  .ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a            ; breadcrumb: last computed transfer
+  ld   ($ca3d), hl
+  ld   a, $02
+  ld   ($ca3c), a
+  ld   a, ($ca3f)
+  .endif
   jp   (hl)
 
 ; ─── rt_far_gate ──────────────────────────────────────────────────────────────
@@ -97,8 +111,24 @@ rt_translated_tail_gate:
 rt_far_gate:
   ; Phase R: target arrives in BC (DE holds resident 6502 X/Y and must
   ; flow through untouched). A = target bank; ($cb15) = caller A.
-  ld   ($cb2e), bc          ; park target (dedicated gate scratch word)
-  ld   c, a
+  ; The target is parked on the NATIVE STACK, not in fixed RAM: the old
+  ; $CB2E scratch word was shared across invocations, so a nested IRQ
+  ; whose handler ran its own far transfer inside this window clobbered
+  ; the in-flight target (caught on Mednafen as a far_gate jump to $0000).
+.ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a
+  ld   a, b
+  or   c
+  jr   nz, _fg_entry_ok
+  ld   a, $04                ; marker 4: far_gate ENTERED with target $0000
+  jp   rt_diag_zero_cont
+_fg_entry_ok:
+  ld   a, ($ca3f)
+.endif
+  ld   h, b
+  ld   l, c                  ; HL = target
+  ld   c, a                  ; C = target bank
+  push hl                    ; park target (re-entrancy safe)
 
   ; Save previous slot-1 bank in the RAM far-bank stack. Reserve first, then
   ; write, so a nested IRQ far-call cannot reuse the same slot.
@@ -112,12 +142,17 @@ rt_far_gate:
   ld   a, c
   ld   ($cb14), a
   ld   ($fffe), a
+  pop  hl                    ; target back
   ld   bc, _far_after
   push bc
-  ld   bc, ($cb2e)
-  ld   h, b
-  ld   l, c                  ; target; jump directly instead of push/ret
   ld   a, ($cb15)           ; caller A (JSR/JMP preserve the accumulator)
+  .ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a            ; breadcrumb: last computed transfer
+  ld   ($ca3d), hl
+  ld   a, $03
+  ld   ($ca3c), a
+  ld   a, ($ca3f)
+  .endif
   jp   (hl)                  ; target RET unwinds through _far_after
 
 ; ─── rt_far_gate_cont ─────────────────────────────────────────────────────────
@@ -129,35 +164,55 @@ rt_far_gate:
 ; Continuation and previous bank live in the FAR_BANK_STACK_PTR LIFO as:
 ;   [continuation_lo, continuation_hi, previous_bank]
 rt_far_gate_cont:
-  ld   ($cb2e), bc            ; park target (dedicated gate scratch word)
+.ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a
+  ld   a, b
+  or   c
+  jr   nz, _fgc_entry_ok
+  ld   a, $05                ; marker 5: far_gate_cont ENTERED with target $0000
+  jp   rt_diag_zero_cont
+_fgc_entry_ok:
+  ld   a, ($ca3f)
+.endif
+  push bc                     ; park target on the native stack (see rt_far_gate)
   ld   b, h                   ; B = continuation high
   ld   c, a                   ; C = target bank
   ld   a, l                   ; A = continuation low
 
-  ; Write continuation bytes, reserve the full 3-byte frame, then fill the
-  ; previous-bank byte. Once the pointer advances, a nested IRQ far-call cannot
-  ; reuse this frame even if it lands before the previous-bank write below.
+  ; RESERVE the full 3-byte frame FIRST, then fill it. The old order wrote
+  ; the continuation bytes before advancing the pointer: a nested IRQ
+  ; far-call landing between those writes reused the same slot and left a
+  ; mixed/stale continuation behind (popped later as a wild jump).
   ; 16-bit INC/LD keep native flags intact.
   ld   hl, (FAR_BANK_STACK_PTR)
-  ld   (hl), a                ; continuation low
   inc  hl
-  ld   (hl), b                ; continuation high
   inc  hl
   inc  hl
   ld   (FAR_BANK_STACK_PTR), hl
+  dec  hl                     ; HL = slot+2
   dec  hl
+  ld   (hl), b                ; slot+1 = continuation high
+  dec  hl
+  ld   (hl), a                ; slot+0 = continuation low
+  inc  hl
+  inc  hl
   ld   a, ($cb14)
-  ld   (hl), a                ; previous slot-1 bank
+  ld   (hl), a                ; slot+2 = previous slot-1 bank
 
   ld   a, c
   ld   ($cb14), a
   ld   ($fffe), a
+  pop  hl                     ; parked target
   ld   bc, _far_after_cont
   push bc
-  ld   bc, ($cb2e)
-  ld   h, b
-  ld   l, c                   ; target; jump directly instead of push/ret
   ld   a, ($cb15)             ; caller A (JSR preserves the accumulator)
+  .ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a            ; breadcrumb: last computed transfer
+  ld   ($ca3d), hl
+  ld   a, $04
+  ld   ($ca3c), a
+  ld   a, ($ca3f)
+  .endif
   jp   (hl)                   ; target RET unwinds through _far_after_cont
 
 rt_far_call:
@@ -218,9 +273,42 @@ _far_after_cont:
   dec  hl
   ld   c, (hl)              ; continuation low; HL now points to frame base
   ld   (FAR_BANK_STACK_PTR), hl
+.ifdef DIAG_WILDJUMP
+  ld   a, b
+  or   c
+  jr   nz, _fac_cont_ok
+  ld   a, $02                ; marker 2: far LIFO popped zero continuation
+  jp   rt_diag_zero_cont
+_fac_cont_ok:
+.endif
   pop  af                   ; restore target return A/F
   push bc
   ret                       ; resume call site continuation
+
+.ifdef DIAG_WILDJUMP
+; Zero-continuation freeze. A = marker naming the pop site; records the
+; native SP + a 16-byte stack window and halts with a red backdrop so a
+; Mednafen savestate captures the guilty pop in place (RAM keeps the TR
+; frames, far LIFO, and shadow state exactly as the pop saw them).
+;   $CA21  marker   $CA24  SP   $CA28  stack window SP-8..SP+7
+rt_diag_zero_cont:
+  di
+  ld   ($ca21), a
+  ld   hl, $0000
+  add  hl, sp
+  ld   ($ca24), hl
+  ld   bc, $fff8
+  add  hl, bc
+  ld   de, $ca28
+  ld   bc, $0010
+  ldir
+  ld   a, $03                ; RED backdrop
+  call rt_boot_beacon
+_dzc_halt:
+  di
+  halt
+  jr   _dzc_halt
+.endif
 
 ; ─── rt_translated_rts ────────────────────────────────────────────────────────
 ; Software RTS for translated 6502 code. Entry A = returned 6502 A, DE =
@@ -274,6 +362,14 @@ _tr_rts_pop_frame:
   ld   c, (hl)               ; continuation low
   inc  hl
   ld   b, (hl)               ; continuation high
+.ifdef DIAG_WILDJUMP
+  ld   a, b
+  or   c
+  jr   nz, _tr_rts_cont_ok
+  ld   a, $01                ; marker 1: rt_translated_rts popped zero cont
+  jp   rt_diag_zero_cont
+_tr_rts_cont_ok:
+.endif
   inc  hl
   ld   a, (hl)               ; return bank
   ld   ($cb14), a
@@ -285,6 +381,13 @@ _tr_rts_pop_frame:
   ld   (TR_RET_PTR), hl       ; publish pop after all frame reads
   ld   h, b
   ld   l, c
+  .ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a            ; breadcrumb: last computed transfer
+  ld   ($ca3d), hl
+  ld   a, $05
+  ld   ($ca3c), a
+  ld   a, ($ca3f)
+  .endif
   jp   (hl)
 _tr_rts_underflow:
   ld   a, $e3
@@ -386,9 +489,23 @@ _ij_jump:
   jr   nz, _ij_jump_di
   ld   a, (TR_RET_SCRATCH_A)
   ei
+  .ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a            ; breadcrumb: last computed transfer
+  ld   ($ca3d), hl
+  ld   a, $06
+  ld   ($ca3c), a
+  ld   a, ($ca3f)
+  .endif
   jp   (hl)
 _ij_jump_di:
   ld   a, (TR_RET_SCRATCH_A)
+  .ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a            ; breadcrumb: last computed transfer
+  ld   ($ca3d), hl
+  ld   a, $07
+  ld   ($ca3c), a
+  ld   a, ($ca3f)
+  .endif
   jp   (hl)
 
 ; ─── rt_banked_tail_dispatch ──────────────────────────────────────────────────
@@ -399,6 +516,15 @@ _ij_jump_di:
 rt_banked_tail_dispatch:
   di
   ld   (TR_RET_SCRATCH_A), a   ; preserve incoming A through scan/mapper write
+.ifdef DIAG_WILDJUMP
+  ld   a, b
+  or   c
+  jr   nz, _btd_target_ok
+  ld   a, $03                ; marker 3: dispatch requested for NES $0000
+  jp   rt_diag_zero_cont
+_btd_target_ok:
+  ld   a, (TR_RET_SCRATCH_A)
+.endif
   ld   a, c
   ld   ($cb1b), a              ; requested target diagnostics / scan key
   ld   a, b
@@ -466,9 +592,23 @@ _btd_hit:
   jr   nz, _btd_jump_di
   ld   a, (TR_RET_SCRATCH_A)
   ei
+  .ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a            ; breadcrumb: last computed transfer
+  ld   ($ca3d), hl
+  ld   a, $08
+  ld   ($ca3c), a
+  ld   a, ($ca3f)
+  .endif
   jp   (hl)
 _btd_jump_di:
   ld   a, (TR_RET_SCRATCH_A)
+  .ifdef DIAG_WILDJUMP
+  ld   ($ca3f), a            ; breadcrumb: last computed transfer
+  ld   ($ca3d), hl
+  ld   a, $09
+  ld   ($ca3c), a
+  ld   a, ($ca3f)
+  .endif
   jp   (hl)
 _btd_miss:
   ld   a, ($cb14)
@@ -676,6 +816,66 @@ rt_rts_dispatch:
   ld   a, (TR_RET_SCRATCH_A)
   jp   rt_banked_tail_dispatch
 
+; ─── rt_rti ───────────────────────────────────────────────────────────────────
+; 6502 RTI: pop P, then PCL, PCH from the emulated stack and resume at the
+; popped PC. Interrupt frames pushed by the runtime (the NMI bridge in
+; boot.s, rt_brk) carry PC values a game either leaves alone or rewrites:
+;   - sentinel $FFFF (NMI bridge): the frame belongs to the native bridge
+;     call — return natively. Fast path, taken by every normal NMI.
+;   - anything else (BRK return address, or a recovery that rewrote the
+;     stacked PC before RTI): transfer through the banked dispatcher.
+;     6502 semantics, not native call pairing.
+; Entry: A = 6502 A (preserved), DE = resident X/Y (preserved). Lowered
+; RTI tail-jumps here.
+rt_rti:
+  ld   (TR_RET_SCRATCH_A), a
+  ld   a, ($cb02)            ; 6502 S
+  ld   h, $c1
+  inc  a
+  ld   l, a
+  ld   a, (hl)               ; P (pushed last, popped first)
+  ld   ($cb03), a
+  inc  l                     ; page-wrapping, like the 6502 stack
+  ld   c, (hl)               ; PCL
+  inc  l
+  ld   b, (hl)               ; PCH
+  ld   a, ($cb02)
+  add  a, 3
+  ld   ($cb02), a            ; S += 3
+  ld   a, b
+  and  c
+  inc  a                     ; Z iff PC == $FFFF (both bytes $FF)
+  jr   nz, _rti_dispatch
+  ld   a, (TR_RET_SCRATCH_A)
+  ret
+_rti_dispatch:
+  ; A non-sentinel RTI is a 6502-level control transfer that ABANDONS the
+  ; interrupted native context: CV1's junk-dispatch recovery rewrites the
+  ; stacked PC (after TXS stack repair) and RTIs to its main flow, never
+  ; returning through anything between. The abandoned native stack words,
+  ; translated-call frames, far-LIFO frames, and NMI depth bookkeeping
+  ; would otherwise leak and later unwind through mismatched or virgin
+  ; (zero) frames — observed on Mednafen as a jp $0000 reboot loop, ~80
+  ; reboots/minute. Reset all of it, exactly as the game's own TXS reset
+  ; the 6502 stack. (The bridge's sentinel path above never comes here.)
+  ld   sp, $dffc              ; native stack base (see boot.s)
+  ld   hl, TR_RET_BASE
+  ld   (TR_RET_PTR), hl       ; translated-call frames: empty
+  ld   hl, FAR_BANK_STACK_BASE
+  ld   (FAR_BANK_STACK_PTR), hl
+  xor  a
+  ld   ($cb7e), a             ; not in handler context
+  ld   ($ca12), a             ; presentation guard clear
+  ld   a, ($ca11)
+  or   a
+  jr   z, _rti_depth_done     ; interrupted outside any translated NMI
+  ld   a, $01                 ; resident-NMI depth (main-in-NMI games);
+  ld   ($ca11), a             ; a nested handler that BRKed is abandoned
+_rti_depth_done:
+  ei                          ; frame IRQs must keep flowing to the game
+  ld   a, (TR_RET_SCRATCH_A)
+  jp   rt_banked_tail_dispatch
+
 ; ─── rt_unresolved_jsr ────────────────────────────────────────────────────────
 ; Trap: called when the Rust back end emitted a JSR to an address that could
 ; not be resolved to a translated label at compile time.
@@ -703,27 +903,43 @@ _ujsr_flash:
   jr   _ujsr_flash          ; loop forever
 
 ; ─── rt_brk ───────────────────────────────────────────────────────────────────
-; Trap: BRK is used in NES programs to trigger the IRQ/BRK vector.
-; For v1 we treat it as a fatal error (SMB never intentionally BRKs).
-; Same trap as rt_unresolved_jsr.
-; NES BRK is a software interrupt: push state, vector through the IRQ
-; handler, RTI back. Games tolerate junk-code excursions this way
-; (CV1's task engine lands in data banks and recovers via BRK->RTI).
-; Model: far-call the translated IRQ vector and return to the caller
-; (the byte after the BRK). The 6502 B-flag/P-push subtleties are not
-; modeled — handlers that inspect the pushed P for the B bit would
-; need them (none of the current targets do).
+; NES BRK is a software interrupt: push PCH, PCL (return = BRK+2), then
+; P with the B flag, set I, and vector through the IRQ handler. Games
+; tolerate junk-code excursions this way (CV1's task engine lands in
+; data banks and recovers via BRK->IRQ; the recovery may rewrite the
+; stacked PC or reset S entirely before its RTI). All of that only
+; works if the frame is real and the eventual RTI honors the stacked
+; PC — see rt_rti. Control never returns here: 6502 semantics transfer
+; to the IRQ vector, and the RTI dispatches wherever the (possibly
+; rewritten) frame says.
+; Entry: HL = NES return PC (BRK site + 2), A = 6502 A, DE = resident
+; X/Y (preserved). Lowered BRK tail-jumps here.
 rt_brk:
-  ld   a, ($cb14)
-  push af
+  ld   (TR_RET_SCRATCH_A), a
+  ld   b, h                  ; B = PCH, C = PCL
+  ld   c, l
+  ; RESERVE the 3-byte frame first (publish S-3), then fill: an IRQ/NMI
+  ; bridge push landing mid-fill would otherwise clobber the frame.
+  ld   a, ($cb02)            ; 6502 S
+  ld   l, a
+  ld   h, $c1
+  sub  3
+  ld   ($cb02), a            ; publish S-3
+  ld   (hl), b               ; PCH at old S
+  dec  l                     ; page-wrapping, like the 6502 stack
+  ld   (hl), c               ; PCL at S-1
+  dec  l
+  ld   a, ($cb03)
+  or   $30                   ; pushed P carries B + bit 5 (6502 BRK)
+  ld   (hl), a               ; P at S-2
+  ld   a, ($cb03)
+  or   $04                   ; live P: I set on interrupt entry
+  ld   ($cb03), a
   ld   a, :translated_irq
   ld   ($cb14), a
   ld   ($fffe), a
-  call translated_irq
-  pop  af
-  ld   ($cb14), a
-  ld   ($fffe), a
-  ret
+  ld   a, (TR_RET_SCRATCH_A)
+  jp   translated_irq
 
 ; ─── rt_read_indexed ──────────────────────────────────────────────────────────
 ; Read a byte at (HL + B).

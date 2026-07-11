@@ -3000,6 +3000,17 @@ fn main() {
                 bus.ram[0x0B75] as u16 | (bus.ram[0x0B76] as u16) << 8,
                 bus.ram[0x0B7D],
             );
+            if std::env::var("SMS_TRAP_RING").is_ok() {
+                eprintln!("  emulated S=${:02X} stack page $C1E0-$C1FF:", bus.ram[0x0B02]);
+                let hex: Vec<String> = (0x01E0..0x0200)
+                    .map(|i| format!("{:02X}", bus.ram[i]))
+                    .collect();
+                eprintln!("    {}", hex.join(" "));
+                eprintln!("  last 48 xfers:");
+                for (k, f, t) in xfer_ring.iter().rev().take(48).rev() {
+                    eprintln!("    {k} ${f:04X} -> ${t:04X}");
+                }
+            }
         }
         if let Some(mw_pc) = mapped_log_pc {
             if pc == mw_pc && mapped_logged < 60 {

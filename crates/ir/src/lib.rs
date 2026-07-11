@@ -353,7 +353,9 @@ pub enum Op {
 
     // Misc
     Nop,
-    Brk,
+    Brk {
+        pc: u16,
+    },
     Jam {
         pc: u16,
         opcode: u8,
@@ -555,7 +557,7 @@ fn lift_insn(
     match insn.mnemonic {
         // ---- Nop / Brk / Jam ----
         Mnemonic::NOP => return vec![Op::Nop],
-        Mnemonic::BRK => return vec![Op::Brk],
+        Mnemonic::BRK => return vec![Op::Brk { pc }],
         Mnemonic::JAM => {
             return vec![Op::Jam {
                 pc,
