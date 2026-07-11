@@ -447,6 +447,20 @@ _ppudata_pattern_write:
   ld   (hl), a
   call rt_raw_ciram_sram_disable
   ; --- 2. FC invalidation: base = ((D:E) >> 4) & $FF ---
+  ; Table-aware: only invalidate when this upload's table is the
+  ; PRESENTED table ($CA13). Uploads to the other table (sprite-anim
+  ; refreshes, next-screen preloads) must not kill live variants —
+  ; a table-blind invalidation made a later regeneration re-read the
+  ; other table's (empty) bytes and wipe rendered glyphs.
+  ld   a, ($ca13)
+  cp   $ff
+  jr   z, _ppw_inval_go      ; pre-first-flush: keep old behavior
+  ld   c, a
+  ld   a, d
+  and  $10
+  cp   c
+  jr   nz, _ppw_no_inval
+_ppw_inval_go:
   ld   a, e
   rrca
   rrca
@@ -475,6 +489,7 @@ _ppudata_pattern_write:
   ld   (hl), a
   inc  hl
   ld   (hl), a
+_ppw_no_inval:
   ; --- 3. sprite copy-through when this write's table is the sprite table ---
   ld   a, ($cb08)
   and  $08                   ; PPUCTRL bit 3

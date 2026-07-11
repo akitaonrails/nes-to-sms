@@ -97,7 +97,17 @@ _gv_p3_zero:
   ; bytes to staging ($CB63 p0 rows, $CB6B p1 rows), then emit rows
   ; interleaved with the S-plane fills.
   push bc
+  ; Source table = the PRESENTED table ($CA13, maintained by the FC
+  ; flush), not live PPUCTRL: games toggle bit 4 dozens of times per
+  ; frame during uploads, and a variant generated against a transient
+  ; table value would persist (the flush damper sees no presented
+  ; change and never re-projects). Before the first flush ($CA13=$FF)
+  ; fall back to live PPUCTRL.
+  ld   a, ($ca13)
+  cp   $ff
+  jr   nz, _gvr_have_table
   ld   a, ($cb08)
+_gvr_have_table:
   and  $10                   ; PPUCTRL bit 4 = BG table
   rrca
   rrca
