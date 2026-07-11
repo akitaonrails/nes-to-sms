@@ -99,11 +99,15 @@ _gv_p3_zero:
   push bc
   ld   a, ($cb08)
   and  $10                   ; PPUCTRL bit 4 = BG table
-  ld   h, a                  ; H:L = (table_bit<<8) | base
-  ld   l, c
-  add  hl, hl
-  add  hl, hl
-  add  hl, hl
+  rrca
+  rrca
+  rrca
+  rrca                       ; $10 -> $01: H must be table*0x100 BEFORE the
+  ld   h, a                  ; <<4 below. The old code loaded $10 directly:
+  ld   l, c                  ; (0x1000|base)*16 overflows 16 bits and wraps
+  add  hl, hl                ; to base*16 — every table-1 tile read its
+  add  hl, hl                ; TABLE-0 bytes (zeros for CV1's logo/title
+  add  hl, hl                ; font), rendering empty patterns.
   add  hl, hl                ; *16 -> table*4096 + base*16
   ld   de, CHR_RAM_SRAM_BASE
   add  hl, de

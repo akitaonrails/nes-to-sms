@@ -665,6 +665,8 @@ struct SmsBus {
     cram_writes: u32,
     /// Total number of VDP data-port writes.
     vdp_data_writes: u32,
+    watch_vram: Option<(usize, usize)>,
+    watch_vram_logged: u32,
     /// Total number of VDP control-port writes.
     vdp_control_writes: u32,
     /// Total number of controller port reads.
@@ -973,6 +975,8 @@ impl SmsBus {
             vram_writes: 0,
             cram_writes: 0,
             vdp_data_writes: 0,
+            watch_vram: None,
+            watch_vram_logged: 0,
             vdp_control_writes: 0,
             controller_reads: 0,
             nt_fold_cell_pages: [0; 1024],
@@ -1900,6 +1904,17 @@ impl Bus for SmsBus {
                         // VRAM write (code 0 is read-mode but real HW writes
                         // anyway in some cases; SMB doesn't rely on this).
                         let masked = (addr & 0x3FFF) as usize;
+                        if let Some((wa, wl)) = self.watch_vram
+                            && masked >= wa
+                            && masked < wa + wl
+                            && self.watch_vram_logged < 200
+                        {
+                            self.watch_vram_logged += 1;
+                            eprintln!(
+                                "VRAMW ${masked:04X} = {value:02X} pc=${:04X} bank1={}",
+                                self.watch_pc, self.slot_bank[1]
+                            );
+                        }
                         self.vram[masked] = value;
                         self.vram_writes += 1;
                         self.record_nt_fold_write(addr);
@@ -2833,6 +2848,15 @@ fn main() {
         RT_PPU_WRITE_FALLBACK_ADDR
     };
     let mut bus = SmsBus::new(rom, controller_port_dc);
+    if let Ok(spec) = std::env::var("SMS_WATCH_VRAM")
+        && let Some((a, l)) = spec.split_once(':')
+        && let (Ok(a), Ok(l)) = (
+            usize::from_str_radix(a.trim_start_matches("0x"), 16),
+            usize::from_str_radix(l.trim_start_matches("0x"), 16),
+        )
+    {
+        bus.watch_vram = Some((a, l));
+    }
     bus.d300_compact_store_range = d300_compact_store_range(&symbol_defs);
     bus.nt_folded_s_compact_available = bus.d300_compact_store_range.is_some();
     bus.cc_subpal_range = cc_subpal_range(&symbol_defs);
@@ -4169,6 +4193,21 @@ fn main() {
         format_runtime_materializer_hooks(&runtime_materializer_monitor)
     );
     println!("{}", format_nt_raw_write_stats(&bus));
+    if let Ok(spec) = std::env::var("SMS_DUMP_SRAM") {
+        // Dump cart SRAM (offset:len hex) — e.g. the CHR-RAM mirror at $0800+.
+        if let Some((a, l)) = spec.split_once(':') {
+            if let (Ok(a), Ok(l)) = (
+                usize::from_str_radix(a.trim_start_matches("0x"), 16),
+                usize::from_str_radix(l.trim_start_matches("0x"), 16),
+            ) {
+                let hex: Vec<String> = bus.cart_ram[a..(a + l).min(bus.cart_ram.len())]
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect();
+                println!("SRAM ${a:04X}: {}", hex.join(" "));
+            }
+        }
+    }
     if std::env::var("SMS_DUMP_CIRAM").is_ok() {
         for row in 0..12usize {
             let mut raw = String::new();

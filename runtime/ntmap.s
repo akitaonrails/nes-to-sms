@@ -496,6 +496,12 @@ _nps_teleport:
   ; from raw CIRAM, including the rows 0-3 band. ~896 mapped writes:
   ; fine with rendering off (page flips happen behind disabled video);
   ; a one-frame overrun otherwise.
+rt_nt_materialize_window:
+  ; Also called by the deferred FC flush (boot.s): after a BG-table
+  ; switch invalidates the variant cache, a STATIC screen never
+  ; rewrites its cells, so nothing would regenerate them — re-project
+  ; the whole window so every visible cell picks up variants from the
+  ; now-current pattern table.
   ld   a, ($cb2a)           ; new window start
   ld   d, 32
 _npt_loop:

@@ -180,6 +180,8 @@ boot_main:
   ld  ($ca10), a            ; beacon: first-NMI
   ld  ($ca11), a            ; translated-NMI nesting depth
   ld  ($ca12), a            ; presentation-in-progress guard
+  ld  a, $ff
+  ld  ($ca13), a            ; last-materialized BG table (force first flush)
   ld  hl, $d4c0
   ld  ($d47d), hl           ; far-bank stack next-free pointer
   ld  hl, $d300
@@ -641,12 +643,29 @@ _present_no_reg1:
   jr  z, _present_no_fcflush
   xor a
   ld  ($cb7f), a
+  ; Damping: games toggle PPUCTRL bit 4 dozens of times per frame
+  ; during upload bursts; only the value PRESENTED matters. If the
+  ; table now selected is the one the current variants were generated
+  ; against ($CA13 latch), the toggles cancelled out — skip the flush
+  ; entirely. Without this the full-window re-projection below ran
+  ; every frame (avg budget 0.45x -> 6.6x).
+  ld  a, ($cb08)
+  and $10
+  ld  hl, $ca13
+  cp  (hl)
+  jr  z, _present_no_fcflush
+  ld  (hl), a
   push de
   ld  hl, $d600
   ld  de, $d601
   ld  bc, $03ff
   ld  (hl), $ff
   ldir
+  ; The invalidation alone only helps cells that get REWRITTEN; a
+  ; static screen (CV1 logo/title) keeps stale patterns forever.
+  ; Re-project the visible window so variants regenerate against the
+  ; newly-selected pattern table.
+  call rt_nt_materialize_window
   pop de
 _present_no_fcflush:
   ; Dirty band (rows 0-3): re-materialize from the selected page's raw
