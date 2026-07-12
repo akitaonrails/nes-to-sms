@@ -79,6 +79,40 @@ classes, all fixed:
   the two; nametable diffs are a constant tile-index offset
   (on-demand variant pool allocation order — benign).
 
+## OPEN: the GPGX attract-transition freeze (commit 6f35a05 state)
+
+CV1 runs on Mednafen (Enter starts the game — verified end-to-end via
+scripted keypress + savestate task read). On GPGX it deterministically
+dies at the title/attract transition: a phantom "$C3F2 push + RTS"
+appears (dispatch target $C3F3 = the operand byte of LDA #$01), which
+neither the harness (300M-step attract cycles, zero traps) nor
+Mednafen ever produces. Event-tied, NOT overclock: reproduces at
+OVERCLOCK=100 (just later in wall time, right after the title shows).
+
+The recovery chain keeps the machine alive through several links
+(realign -> $F0xx audio interior -> emulated-stack RTS -> bank-5 $FF
+padding) but the game state has already drifted — the cascade is a
+symptom. The root divergence is upstream and GPGX-timing-specific.
+
+Debugging assets that work TODAY:
+- RetroArch UDP telemetry: `echo "READ_CORE_RAM <hexoff> <len>" | nc
+  -u -w1 127.0.0.1 55355` against a headless GPGX (`network_cmd_enable
+  = "true"`; use `video_driver = "sdl2"` under Xvfb or captures are
+  blank). WRITE_CORE_RAM pokes work too. Offsets are work-RAM relative
+  ($C000 = 0).
+- DIAG_WILDJUMP breadcrumbs: $CB1D trap marker, $CB1B/1C miss target,
+  $CA3C/3D last computed transfer, $CA34 handler phase, $CA20 reboot
+  counter, $CA36 pause-NMI PC capture (GPGX never fires it — works on
+  Mednafen).
+- Known-good: keyboard reaches the core (hold z -> $CB06 = 01).
+
+Next tools for the root cause: extract GPGX Z80 state (RetroArch
+savestate via configured hotkey + state-dir, then parse the GPGX
+serialization), or an instruction-level GPGX-vs-harness lockstep at
+the transition frame; or bisect which translated site pushes $C3F2
+(instrument the few rt_rts_dispatch call sites with a DIAG log of
+pushed pairs).
+
 ## Next phase (in order)
 
 1. **Title letter polish** (the one open rendering bug). State:
