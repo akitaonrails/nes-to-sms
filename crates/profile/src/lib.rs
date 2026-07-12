@@ -48,6 +48,28 @@ pub struct Profile {
     /// (CV1: title start + in-game pause).
     #[serde(default)]
     pub input: Input,
+    #[serde(default)]
+    pub render: Render,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Render {
+    /// Arm the sprite-0 line-IRQ scroll split (SMB status bar). Games
+    /// that don't need it should disable it: line-IRQ pending/counter
+    /// semantics vary across emulators (a GPGX line-IRQ storm starved
+    /// the frame handler on CV1).
+    #[serde(default = "default_true")]
+    pub scroll_split: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Render {
+    fn default() -> Self {
+        Render { scroll_split: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

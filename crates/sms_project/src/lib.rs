@@ -74,6 +74,8 @@ pub struct ProjectConfig<'a> {
     pub input_action: bool,
     /// SMS PAUSE button injects a NES Start press (see input.s/boot.s).
     pub input_pause_start: bool,
+    /// Arm the sprite-0 line-IRQ scroll split (see boot.s).
+    pub scroll_split: bool,
 }
 
 #[derive(Debug)]
@@ -254,6 +256,9 @@ fn sms_asm_content(
     }
     if cfg.input_pause_start {
         mapper_define.push_str("\n.define INPUT_PAUSE_START 1");
+    }
+    if !cfg.scroll_split {
+        mapper_define.push_str("\n.define NO_SCROLL_SPLIT 1");
     }
     if cfg.chr_ram {
         mapper_define.push_str("\n.define NES_CHR_RAM 1\n.define CHR_RAM_SRAM_BASE $8800");
@@ -571,6 +576,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            scroll_split: true,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -671,6 +677,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            scroll_split: true,
             rom_kib: 32,
             region: 0x4C,
             title: "TOOLONGTITLE", // 12 chars
@@ -694,6 +701,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            scroll_split: true,
             rom_kib: 17,
             region: 0x4C,
             title: "TEST",
@@ -717,6 +725,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            scroll_split: true,
             rom_kib: 64,
             region: 0x4C,
             title: "BANKS4",
@@ -782,6 +791,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            scroll_split: true,
             rom_kib: 8,
             region: 0x4C,
             title: "TEST",
@@ -828,6 +838,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            scroll_split: true,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -854,6 +865,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            scroll_split: true,
             rom_kib: 32,
             region: 0x4C,
             title: "TEST",
@@ -880,6 +892,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            scroll_split: true,
             rom_kib: 64,
             region: 0x4C,
             title: "TEST",

@@ -936,6 +936,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
         chr_ram: image.chr.is_empty(),
         input_action: prof.input.mode == profile::InputMode::Action,
         input_pause_start: prof.input.pause_start,
+        scroll_split: prof.render.scroll_split,
     };
     sms_project::emit_project(&args.out, &build, &project_assets, &cfg, runtime_dir)?;
 

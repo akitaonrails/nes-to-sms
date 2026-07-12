@@ -93,29 +93,49 @@ reset_entry:
 ; with $FF (ROM erased value).  WLA-DX will fill the gap automatically.
 
 .org $0008
-  ; RST 1 — unused for v1.  Trap immediately so bugs surface.
+.ifdef DIAG_WILDJUMP
+  jp rt_wildjump_diag        ; record the wild source, then freeze red
+.else
+  ; RST 1 — unused. Trap immediately so bugs surface.
   di
   halt
+.endif
 
 .org $0010
-  ; RST 2 — unused.
+.ifdef DIAG_WILDJUMP
+  jp rt_wildjump_diag        ; record the wild source, then freeze red
+.else
+  ; RST 2 — unused. Trap immediately so bugs surface.
   di
   halt
+.endif
 
 .org $0018
-  ; RST 3 — unused.
+.ifdef DIAG_WILDJUMP
+  jp rt_wildjump_diag        ; record the wild source, then freeze red
+.else
+  ; RST 3 — unused. Trap immediately so bugs surface.
   di
   halt
+.endif
 
 .org $0020
-  ; RST 4 — unused.
+.ifdef DIAG_WILDJUMP
+  jp rt_wildjump_diag        ; record the wild source, then freeze red
+.else
+  ; RST 4 — unused. Trap immediately so bugs surface.
   di
   halt
+.endif
 
 .org $0028
-  ; RST 5 — unused.
+.ifdef DIAG_WILDJUMP
+  jp rt_wildjump_diag        ; record the wild source, then freeze red
+.else
+  ; RST 5 — unused. Trap immediately so bugs surface.
   di
   halt
+.endif
 
 .org $0030
 .ifdef DIAG_WILDJUMP
@@ -138,7 +158,24 @@ reset_entry:
   ; countdown that rt_controller_latch translates into Start held for
   ; 4 frames then released (a clean press edge). $CB2E is free (the old
   ; far-gate park moved to the native stack).
+  ; DIAG: also capture the interrupted PC (the NMI pushed it) into
+  ; $CA36/37 and count NMIs at $CA35 — a non-maskable probe that works
+  ; even when the machine is interrupt-dead (press pause, read RAM).
   push af
+.ifdef DIAG_WILDJUMP
+  push hl
+  ld  hl, $0004
+  add hl, sp
+  ld  a, (hl)
+  ld  ($ca36), a             ; interrupted PC low
+  inc hl
+  ld  a, (hl)
+  ld  ($ca37), a             ; interrupted PC high
+  ld  a, ($ca35)
+  inc a
+  ld  ($ca35), a             ; pause-NMI count
+  pop hl
+.endif
   ld  a, $04
   ld  ($cb2e), a
   pop af
@@ -618,10 +655,25 @@ _irq_runtime_ready:
   jp  nz, _present_skip_all
   ld  a, $01
   ld  ($ca12), a
+.ifdef DIAG_WILDJUMP
+  ld  a, ($ca30)
+  inc a
+  ld  ($ca30), a             ; entered vblank wait
+.endif
 _present_wait_vblank:
+.ifdef DIAG_WILDJUMP
+  ld  hl, ($ca32)
+  inc hl
+  ld  ($ca32), hl            ; spin iterations (running)
+.endif
   in  a, ($7e)               ; V-counter
   cp  $e0
   jr  c, _present_wait_vblank
+.ifdef DIAG_WILDJUMP
+  ld  a, ($ca31)
+  inc a
+  ld  ($ca31), a             ; exited vblank wait
+.endif
   ; Apply a deferred PPUMASK-driven VDP reg-1 write (see ppu.s): display
   ; enable changes only ever land here, inside VBlank.
   ld  a, ($cb2d)
@@ -635,6 +687,10 @@ _present_wait_vblank:
 .endif
   xor a
   ld  ($cb2d), a
+.ifdef DIAG_WILDJUMP
+  ld  a, $01
+  ld  ($ca34), a
+.endif
 _present_no_reg1:
 .ifdef NES_CHR_RAM
   ; Deferred variant-cache flush (BG table switched; see ppu.s).
@@ -665,8 +721,14 @@ _present_no_reg1:
   ; static screen (CV1 logo/title) keeps stale patterns forever.
   ; Re-project the visible window so variants regenerate against the
   ; newly-selected pattern table.
+.ifndef DIAG_NO_PROJECTION
   call rt_nt_materialize_window
+.endif
   pop de
+.ifdef DIAG_WILDJUMP
+  ld  a, $02
+  ld  ($ca34), a
+.endif
 _present_no_fcflush:
   ; Dirty band (rows 0-3): re-materialize from the selected page's raw
   ; CIRAM (write-time page gating is unsound; see ntmap.s).
@@ -674,11 +736,19 @@ _present_no_fcflush:
   or  a
   jr  z, _present_band_clean
   call rt_nt_materialize_band
+.ifdef DIAG_WILDJUMP
+  ld  a, $03
+  ld  ($ca34), a
+.endif
 _present_band_clean:
 .endif
   ld  a, ($cb09)             ; PPUMASK
   bit 4, a                   ; sprites enabled?
   call nz, rt_sat_upload
+.ifdef DIAG_WILDJUMP
+  ld  a, $04
+  ld  ($ca34), a
+.endif
   ; Project columns entering the visible window (E.5c) with the same
   ; playfield scroll the apply below will present: post pair when the
   ; split captured one this frame, else the live latch.
@@ -807,9 +877,17 @@ _nb_done:
   ld  a, ($ca11)
   inc a
   ld  ($ca11), a
+.ifdef DIAG_WILDJUMP
+  ld  a, $05
+  ld  ($ca34), a
+.endif
   ei
   call translated_nmi       ; jumps to the profile/ROM NMI vector
   di
+.ifdef DIAG_WILDJUMP
+  ld  a, $06
+  ld  ($ca34), a
+.endif
   ld  a, ($ca11)
   dec a
   ld  ($ca11), a
@@ -833,6 +911,10 @@ _irq_skip_translated_nmi:
 
   ; APU frame sequencer + PSG write-back (envelopes, lengths, sweeps).
   call apu_frame_tick
+.ifdef DIAG_WILDJUMP
+  ld  a, $07
+  ld  ($ca34), a
+.endif
 
   ; Frame-overrun pacing. The VDP frame interrupt is level-held: if this
   ; handler ran longer than one video frame (heavy translated NMIs do), the
@@ -953,6 +1035,14 @@ _apd_live:
   jp  _apply_scroll_pair_then_disable
 
 _apply_frame_split_scroll:
+.ifdef NO_SCROLL_SPLIT
+  ; Profile disabled the split: present the pre/live scroll and keep
+  ; line IRQs off. Line-counter/pending semantics differ across
+  ; emulators (GPGX latched pending line IRQs into a storm that
+  ; starved the frame handler on CV1).
+  call _apply_pre_or_live_scroll
+  jp  _disable_line_irq
+.else
   call _apply_pre_or_live_scroll
 
   ; Use NES sprite 0's Y coordinate as the generic split marker. The interrupt
@@ -965,6 +1055,7 @@ _apply_frame_split_scroll:
   ld  b, 10
   call vdp_set_register
   jp  _enable_line_irq
+.endif
 
 _apply_pre_or_live_scroll:
   ld  a, ($cb20)
@@ -1035,10 +1126,17 @@ _enable_line_irq:
   ret
 
 _disable_line_irq:
-  ; Restore the base R0 mode with line interrupts disabled.
+  ; Restore the base R0 mode with line interrupts disabled, and park the
+  ; line counter at $FF: the VDP decrements it every scanline regardless
+  ; of IE1 and LATCHES pending on underflow — a small parked value made
+  ; some emulators (GPGX) re-fire immediately at the next enable.
   ld  a, VDP_R0_BASE
   out ($bf), a
   ld  a, $80                ; VDP reg 0
+  out ($bf), a
+  ld  a, $ff
+  out ($bf), a
+  ld  a, $8a                ; VDP reg 10 = line counter reload
   out ($bf), a
   ret
 

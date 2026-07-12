@@ -7,6 +7,9 @@ mapper  = 2
 prg_kib = 128
 chr_kib = 0
 
+[render]
+scroll_split = false     # no line IRQs: GPGX line-pending storm starved the game
+
 [input]
 mode = "action"          # button 1 = NES A (jump), button 2 = NES B (whip)
 pause_start = true       # SMS PAUSE button = NES Start (title start / pause)

@@ -390,9 +390,18 @@ _tr_rts_cont_ok:
   .endif
   jp   (hl)
 _tr_rts_underflow:
+  ; No live TR frame for this RTS: the native call context was abandoned
+  ; (junk-BRK cascade + defensive recovery, realigned dispatch resume).
+  ; NES semantics: the RTS pops whatever the GAME's 6502 stack holds —
+  ; and ours ($C100+S) carries the game-arranged bytes (BRK frames,
+  ; explicit pushes, the defensive vector's repairs). Fall back to the
+  ; emulated-stack dispatch; a garbage pop chains into the dispatcher's
+  ; realignment retries and only then the loud trap. Keep the $E3 mark
+  ; for telemetry (cleared on successful dispatch by the next hit).
   ld   a, $e3
   ld   ($cb1d), a
-  jp   rt_unresolved_jsr_flash
+  ld   a, c                  ; returned 6502 A (parked at entry)
+  jp   rt_rts_dispatch
 
 ; ─── rt_far_jmp ───────────────────────────────────────────────────────────────
 ; Bank-aware cross-bank JMP. Translated `JMP L_XXXX` becomes:
@@ -573,6 +582,8 @@ _btd_skip:
   inc  hl
   jr   _btd_loop
 _btd_hit:
+  xor  a
+  ld   ($cb1d), a            ; recovered: clear any transient trap mark
   ld   a, (hl)
   ld   ($cb7c), a
   inc  hl
@@ -611,6 +622,130 @@ _btd_jump_di:
   .endif
   jp   (hl)
 _btd_miss:
+  ; Misaligned-return realignment (NES semantics): an RTI/RTS-dispatch
+  ; target with no table entry is a return into the MIDDLE of a lifted
+  ; instruction (junk-BRK recovery returns to BRK+2; a real 6502
+  ; re-synchronizes with the instruction stream within a few bytes).
+  ; Approximate: dispatch to the NEXT lifted boundary — one table pass
+  ; for the smallest fixed-bank entry >= target. Falls back to the
+  ; data BRK-walk (below) when no entry follows; switchable-bank
+  ; targets keep the loud trap (fail closed).
+  ld   a, ($cb1c)
+  cp   $c0
+  jp   c, _btd_trap_flash
+  ld   a, $ff
+  ld   ($ca15), a            ; best addr = $FFFF (none)
+  ld   ($ca16), a
+  ld   a, :rt_dispatch_table
+  ld   ($fffe), a
+  ld   hl, rt_dispatch_table
+_btd_next_loop:
+  ld   a, (hl)
+  ld   c, a                  ; entry addr lo
+  inc  hl
+  ld   a, (hl)
+  ld   b, a                  ; entry addr hi
+  inc  hl
+  or   c
+  jr   z, _btd_next_done     ; terminator (addr $0000)
+  ld   a, (hl)               ; NES bank constraint
+  cp   $ff
+  jr   nz, _btd_next_skip    ; only fixed-bank entries realign
+  ; entry >= target?
+  ld   a, ($cb1c)
+  cp   b
+  jr   z, _btd_next_hicmp_eq
+  jr   nc, _btd_next_skip    ; target hi > entry hi -> entry below target
+  jr   _btd_next_ge
+_btd_next_hicmp_eq:
+  ld   a, ($cb1b)
+  cp   c
+  jr   z, _btd_next_ge
+  jr   nc, _btd_next_skip
+_btd_next_ge:
+  ; entry < best?
+  ld   a, ($ca16)
+  cp   b
+  jr   c, _btd_next_skip
+  jr   nz, _btd_next_better
+  ld   a, ($ca15)
+  cp   c
+  jr   c, _btd_next_skip
+  jr   z, _btd_next_skip
+_btd_next_better:
+  ld   a, c
+  ld   ($ca15), a
+  ld   a, b
+  ld   ($ca16), a
+  ld   ($ca17), hl           ; best entry ptr (at the bank byte)
+_btd_next_skip:
+  inc  hl
+  inc  hl
+  inc  hl
+  inc  hl
+  jr   _btd_next_loop
+_btd_next_done:
+  ld   a, ($ca16)
+  cp   $ff
+  jr   nz, _btd_next_take
+  ld   a, ($ca15)
+  cp   $ff
+  jr   z, _btd_trap          ; nothing after target: try the data walk
+_btd_next_take:
+  ld   hl, ($ca17)
+  jp   _btd_hit
+_btd_trap:
+  ; Realignment exhausted: the target sits in a DATA region (no lifted
+  ; instruction boundary within reach — music/tables). NES semantics
+  ; for a walk through data: the bytes execute until a $00 acts as BRK
+  ; and re-enters the IRQ vector. Emulate that: scan fixed PRG for the
+  ; next $00 and take the software interrupt from there. Each cycle
+  ; makes forward progress (BRK+2 resumes past the previous zero), so
+  ; the walk crosses the data desert until realignment lands back in
+  ; real code or the game's defensive vector rewrites control flow.
+  ld   a, ($cb1c)
+  cp   $c0
+  jr   c, _btd_trap_flash    ; switchable-bank target: keep fail-closed
+  ld   a, ($cb14)
+  ld   ($fffe), a            ; put the caller's bank back in slot 1
+  ; read fixed PRG through slot 2: map data_prg_high at $FFFF
+  ld   a, :data_prg_high
+  ld   ($ffff), a
+  ld   a, ($cb1c)
+  sub  $40                   ; NES $C000-$FFFF -> slot 2 $8000-$BFFF
+  ld   h, a
+  ld   a, ($cb1b)
+  ld   l, a
+  ld   a, 64
+  ld   ($ca14), a            ; walk budget
+_btd_walk:
+  ld   a, (hl)
+  or   a
+  jr   z, _btd_walk_found
+  inc  hl
+  ld   a, h
+  cp   $c0                   ; ran off the top of slot 2: give up
+  jr   nc, _btd_walk_none
+  ld   a, ($ca14)
+  dec  a
+  ld   ($ca14), a
+  jr   nz, _btd_walk
+_btd_walk_none:
+  call rt_restore_prg_window
+  jr   _btd_trap_flash
+_btd_walk_found:
+  ; NES BRK at HL(slot2) -> NES addr = HL + $4000; return PC = addr + 2
+  call rt_restore_prg_window
+  ld   a, h
+  add  a, $40
+  ld   h, a
+  inc  hl
+  inc  hl
+  xor  a
+  ld   ($cb1d), a            ; walking, not trapped
+  ld   a, (TR_RET_SCRATCH_A)
+  jp   rt_brk
+_btd_trap_flash:
   ld   a, ($cb14)
   ld   ($fffe), a
   ld   a, ($cb62)
