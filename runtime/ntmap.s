@@ -78,7 +78,8 @@ rt_nt_ppuaddr_to_raw_ciram_sram:
   ld   h, a
   ret
 
-; Enable standard Sega mapper SRAM bank 0 in slot 2 ($8000-$BFFF).
+; Enable standard Sega mapper SRAM bank 0 in slot 2 ($8000-$BFFF). Valid only
+; during boot reset DI, an outer PPU guard (depth 1/2), or asserted presentation.
 ; Preserves: BC, DE, HL. Clobbers: AF.
 rt_raw_ciram_sram_enable:
   ld   a, RAW_CIRAM_SRAM_CTRL
@@ -93,7 +94,7 @@ rt_raw_ciram_sram_disable:
   ld   ($fffc), a
   ret
 
-; Clear the 2 KiB raw-CIRAM SRAM area. Intended for boot-time initialization;
+; Clear the 2 KiB raw-CIRAM SRAM area. Boot reset DI only;
 ; must only run from code outside slot 2 because $8000-$BFFF is RAM while
 ; enabled.
 ; Preserves: DE. Clobbers: AF, BC, HL.
@@ -105,7 +106,7 @@ rt_raw_ciram_sram_clear:
   call mem_fill
   jp   rt_raw_ciram_sram_disable
 
-; Write one raw NES CIRAM byte into the SRAM backend.
+; Write one raw NES CIRAM byte into the SRAM backend (outer PPU guard only).
 ; Entry: DE = NES PPU nametable/attribute address, A = byte.
 ; Preserves: DE. Clobbers: AF, BC, HL.
 rt_raw_ciram_sram_write:
@@ -139,19 +140,39 @@ rt_raw_ciram_sram_write:
   ld   ($fffc), a
   ret
 
-; Read one raw NES CIRAM byte from the SRAM backend.
+; Locked materializer read: presentation DI/depth0 after boot.s's boundary
+; assertion only. Stackless; not a public guarded API.
 ; Entry: DE = NES PPU nametable/attribute address.
 ; Exit:  A = byte.
-; Preserves: BC, DE, HL. Clobbers: AF.
-rt_raw_ciram_sram_read:
-  push hl
-  call rt_nt_ppuaddr_to_raw_ciram_sram
-  call rt_raw_ciram_sram_enable
+; Preserves: DE. Clobbers: AF, BC, HL.
+rt_raw_ciram_sram_read_locked:
+  ; Inline mirroring-aware CIRAM -> slot-2 SRAM pointer math.
+.ifdef NES_MIRRORING_VERTICAL
+  ld   a, d
+  and  $07
+  add  a, (RAW_CIRAM_SRAM_BASE >> 8)
+  ld   h, a
+  ld   l, e
+.endif
+.ifdef NES_MIRRORING_HORIZONTAL
+  ld   a, d
+  and  $03
+  ld   h, a
+  ld   a, d
+  and  $08
+  srl  a
+  or   h
+  add  a, (RAW_CIRAM_SRAM_BASE >> 8)
+  ld   h, a
+  ld   l, e
+.endif
+  ld   a, RAW_CIRAM_SRAM_CTRL
+  ld   ($fffc), a
   ld   a, (hl)
-  push af
-  call rt_raw_ciram_sram_disable
-  pop  af
-  pop  hl
+  ld   c, a
+  xor  a
+  ld   ($fffc), a
+  ld   a, c
   ret
 
 .endif
@@ -398,24 +419,15 @@ rt_nt_route_tile_write:
   cp   4
   jr   nc, _nrt_col_check
 .ifdef NES_CHR_RAM
-  ; Rows 0-3 are the status-bar band. Two mechanisms:
-  ;  - writes to the CURRENTLY-SELECTED page render immediately
-  ;    (write-through, correct while the select is stable);
-  ;  - writes to the other page raw-store only; a PPUCTRL select
-  ;    CHANGE sets $CB78 and the presentation re-materializes the
-  ;    whole band once from the newly selected page's raw CIRAM.
-  ; (Materializing on every dirty write starved the frame loop —
-  ; CV1 touches the band every frame.)
-  ld   a, ($cb08)
-  and  $01
-  rlca
-  rlca                      ; select bit 0 -> bit 2 ($2400 bit)
-  ld   b, a
+  ; Rows 0-3 are the fixed status band. Keep tile routing consistent with the
+  ; attribute path and VDP top-row scroll lock: NT-A writes render, while NT-B
+  ; writes remain raw-only for the scrolling playfield. The live PPUCTRL page
+  ; during VBlank describes the next scroll latch, not necessarily the page
+  ; currently visible in this fixed band.
   ld   a, d
   and  $04
-  cp   b
   jr   z, _nrt_in
-  or   a                    ; carry clear: non-selected page -> raw only
+  or   a                    ; carry clear: NT-B -> raw only
   ret
 .else
   ; SMB-proven band rule: NT-A rows 0-3 render (fixed HUD); NT-B
@@ -514,20 +526,32 @@ _npt_loop:
   and  $3f
   dec  d
   jr   nz, _npt_loop
-  ret
+  ; The playfield window may start in NT-B, but the locked status band is
+  ; always sourced from NT-A. Restore it last so a full-window projection
+  ; cannot leave page-B rows 0-3 folded over the HUD.
+  jp   rt_nt_materialize_band
 
-; rt_nt_materialize_band — project rows 0-3, columns 0-31 of the
-; PPUCTRL-SELECTED page from raw CIRAM into the folded band (called
+; rt_nt_materialize_band — project rows 0-3, columns 0-31 of NT-A from raw
+; CIRAM into the folded band (called
 ; from the presentation when $CB78 is set; the band shows scroll 0).
 ; Clobbers: AF, BC, DE, HL.
 rt_nt_materialize_band:
   xor  a
   ld   ($cb78), a
-  ld   a, ($cb08)
-  and  $01
-  rrca
-  rrca
-  rrca                      ; select bit 0 -> bit 5 (= column 32)
+  ; Before a game establishes a split-scroll pair, the top rows belong to the
+  ; same presented page as the playfield (title/transition screens included).
+  ; Once a post-split pair exists, keep the fixed status band on NT-A. Use the
+  ; presented-window latch rather than live PPUCTRL, which games toggle during
+  ; VBlank uploads.
+  ld   a, ($cb20)
+  bit  2, a
+  jr   nz, _nmb_fixed_page
+  ld   a, ($cb2a)
+  and  $20
+  jr   _nmb_page_ready
+_nmb_fixed_page:
+  xor  a
+_nmb_page_ready:
   ld   d, 32
 _nmb_loop:
   push af
@@ -591,8 +615,38 @@ _npc_row:
   or   d
   or   $20
   ld   d, a
-  call rt_raw_ciram_sram_read   ; A = raw tile (preserves DE)
+  call rt_raw_ciram_sram_read_locked ; presentation-locked, stackless read
   ld   ($cb13), a               ; park raw tile without spending native stack
+.ifdef PROFILE_TOP_TILE_REMAP_ROWS
+  ; Profile-owned, display-only cleanup for transition-fill tiles in a fixed
+  ; top band. Never modify raw CIRAM: later projections must retain the game's
+  ; actual writes and can apply a different presentation policy.
+  ld   a, ($cb2c)
+  cp   PROFILE_TOP_TILE_REMAP_ROWS
+  jr   nc, _npc_top_remap_done
+  ld   a, ($cb13)
+.ifdef PROFILE_TOP_TILE_REMAP_FROM_0
+  cp   PROFILE_TOP_TILE_REMAP_FROM_0
+  jr   z, _npc_top_remap_replace
+.endif
+.ifdef PROFILE_TOP_TILE_REMAP_FROM_1
+  cp   PROFILE_TOP_TILE_REMAP_FROM_1
+  jr   z, _npc_top_remap_replace
+.endif
+.ifdef PROFILE_TOP_TILE_REMAP_FROM_2
+  cp   PROFILE_TOP_TILE_REMAP_FROM_2
+  jr   z, _npc_top_remap_replace
+.endif
+.ifdef PROFILE_TOP_TILE_REMAP_FROM_3
+  cp   PROFILE_TOP_TILE_REMAP_FROM_3
+  jr   z, _npc_top_remap_replace
+.endif
+  jr   _npc_top_remap_done
+_npc_top_remap_replace:
+  ld   a, PROFILE_TOP_TILE_REMAP_TO
+  ld   ($cb13), a
+_npc_top_remap_done:
+.endif
   ; fold to the SMS table: $3700 + ((DE - $2000) & $3FF) * 2
   ld   a, d
   and  $03

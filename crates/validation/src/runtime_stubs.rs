@@ -34,6 +34,7 @@ pub const REQUIRED_HELPERS: &[&str] = &[
     "rt_mapper_write",
     "rt_indirect_jmp",
     "rt_translated_rts",
+    "rt_translated_return_escape",
     "rt_translated_call_gate",
     "rt_translated_tail_gate",
     "rt_unresolved_jsr",
@@ -51,6 +52,8 @@ pub const REQUIRED_HELPERS: &[&str] = &[
     "rt_inc_mem",
     "rt_dec_mem",
     "rt_read_indexed",
+    "rt_read_prg_high",
+    "rt_read_prg_high_indexed",
     "rt_write_indexed",
     "rt_read_zp_ptr_y",
     "rt_write_zp_ptr_y",
@@ -80,10 +83,13 @@ pub fn emit_runtime_helpers(p: &mut Program) {
     emit_dec_mem(p);
     emit_bit_mem(p);
     emit_read_indexed(p);
+    emit_read_prg_high(p);
+    emit_read_prg_high_indexed(p);
     emit_write_indexed(p);
     emit_read_zp_ptr_y(p);
     emit_write_zp_ptr_y(p);
     emit_translated_rts(p);
+    emit_translated_return_escape(p);
     emit_halt_stub(p, "rt_translated_call_gate");
     emit_halt_stub(p, "rt_translated_tail_gate");
     // Hardware helpers — RET stubs. Routines that touch hardware are
@@ -157,6 +163,15 @@ fn emit_translated_rts(p: &mut Program) {
     p.ld_b_hl_ptr();
     p.inc_hl();
     p.ld_a_hl_ptr();
+    p.bit_a(6);
+    p.jr_z("_validation_tr_rts_bank_ready");
+    p.ld_a_abs(SHADOW_S);
+    p.inc_a();
+    p.inc_a();
+    p.ld_abs_a(SHADOW_S);
+    p.ld_a_hl_ptr();
+    p.and_imm(0x1F);
+    p.label("_validation_tr_rts_bank_ready");
     p.ld_abs_a(0xCB14);
     p.ld_abs_a(0xFFFE);
     p.dec_hl();
@@ -169,6 +184,84 @@ fn emit_translated_rts(p: &mut Program) {
     p.jp_hl();
     p.label("_validation_tr_rts_underflow");
     p.ld_a_imm(0xE3);
+    p.ld_abs_a(0xCB1D);
+    p.halt();
+}
+
+fn emit_translated_return_escape(p: &mut Program) {
+    p.label("rt_translated_return_escape");
+    p.push_af();
+    p.ld_a_i();
+    p.di();
+    p.jp_po("_validation_tr_escape_was_disabled");
+    p.ld_a_imm(1);
+    p.ld_abs_a(0xD471);
+    p.jr("_validation_tr_escape_find_frame");
+    p.label("_validation_tr_escape_was_disabled");
+    p.xor_a();
+    p.ld_abs_a(0xD471);
+    p.label("_validation_tr_escape_find_frame");
+    p.ld_hl_abs(0xCB76);
+    p.ld_abs_hl(0xCB73);
+    p.ld_a_h();
+    p.cp_imm(0xD3);
+    p.jr_z("_validation_tr_escape_check_seg0");
+    p.cp_imm(0xD5);
+    p.jr_z("_validation_tr_escape_check_seg1");
+    p.cp_imm(0xD6);
+    p.jr_nz("_validation_tr_escape_underflow");
+    p.ld_a_l();
+    p.or_a();
+    p.jr_nz("_validation_tr_escape_underflow");
+    p.ld_hl_imm(0xD5FC);
+    p.jr("_validation_tr_escape_pop_frame");
+    p.label("_validation_tr_escape_check_seg0");
+    p.ld_a_l();
+    p.cp_imm(0x01);
+    p.jr_c("_validation_tr_escape_underflow");
+    p.cp_imm(0xF9);
+    p.jr_nc("_validation_tr_escape_underflow");
+    p.and_imm(0x03);
+    p.jr_nz("_validation_tr_escape_underflow");
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.jr("_validation_tr_escape_pop_frame");
+    p.label("_validation_tr_escape_check_seg1");
+    p.ld_a_l();
+    p.or_a();
+    p.jr_z("_validation_tr_escape_bridge");
+    p.and_imm(0x03);
+    p.jr_nz("_validation_tr_escape_underflow");
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.jr("_validation_tr_escape_pop_frame");
+    p.label("_validation_tr_escape_bridge");
+    p.ld_hl_imm(0xD3F8);
+    p.label("_validation_tr_escape_pop_frame");
+    p.ld_abs_hl(0xCB76);
+    p.ld_a_abs(SHADOW_S);
+    p.ld_l_a();
+    p.ld_h_imm(0xC1);
+    p.ld_hl_ptr_b();
+    p.dec_l();
+    p.ld_hl_ptr_c();
+    p.sub_imm(2);
+    p.ld_abs_a(SHADOW_S);
+    p.ld_a_abs(0xD471);
+    p.or_a();
+    p.jr_z("_validation_tr_escape_return_disabled");
+    p.pop_af();
+    p.ei();
+    p.ret();
+    p.label("_validation_tr_escape_return_disabled");
+    p.pop_af();
+    p.ret();
+    p.label("_validation_tr_escape_underflow");
+    p.ld_a_imm(0xE5);
     p.ld_abs_a(0xCB1D);
     p.halt();
 }
@@ -400,7 +493,7 @@ fn emit_cpx_a(p: &mut Program) {
 fn emit_cpy_a(p: &mut Program) {
     p.label("rt_cpy_a");
     p.push_af();
-    p.ld_a_abs(SHADOW_Y);
+    p.ld_a_e();
     emit_compare_inner(p, "cpy_a");
     p.pop_af();
     p.ret();
@@ -956,6 +1049,7 @@ fn emit_read_zp_ptr_y(p: &mut Program) {
     p.push_hl();
     p.push_bc();
     p.push_de();
+    p.ld_c_e(); // preserve resident Y before DE becomes the decoded pointer
     // HL := $C000 + B
     p.ld_a_b();
     p.ld_l_a();
@@ -965,10 +1059,20 @@ fn emit_read_zp_ptr_y(p: &mut Program) {
     p.inc_l();
     p.ld_d_hl_ptr();
     // DE = pointer; add Y
-    p.ld_a_abs(SHADOW_Y);
+    p.ld_a_c();
     p.ld_l_a();
     p.ld_h_imm(0);
     p.add_hl_de();
+    // Fixed high PRG is split outside SMS RAM; use the common helper.
+    p.ld_a_h();
+    p.cp_imm(0xC0);
+    p.jr_c("_rzpy_not_high");
+    p.call("rt_read_prg_high");
+    p.pop_de();
+    p.pop_bc();
+    p.pop_hl();
+    p.ret();
+    p.label("_rzpy_not_high");
     // If HL < $0800, remap by adding $C000.
     p.ld_a_h();
     p.cp_imm(0x08);
@@ -982,6 +1086,37 @@ fn emit_read_zp_ptr_y(p: &mut Program) {
     p.pop_bc();
     p.pop_hl();
     p.ret();
+}
+
+fn emit_read_prg_high(p: &mut Program) {
+    p.label("rt_read_prg_high");
+    p.push_bc();
+    p.push_de();
+    p.ld_a_h();
+    p.cp_imm(0xC0);
+    p.jr_nc("_rph_valid");
+    p.halt();
+    p.label("_rph_valid");
+    p.cp_imm(0xE0);
+    p.jr_nc("_rph_upper");
+    p.sub_imm(0xC0);
+    p.ld_h_a();
+    p.label("_rph_upper");
+    p.ld_a_hl_ptr();
+    p.pop_de();
+    p.pop_bc();
+    p.ret();
+}
+
+fn emit_read_prg_high_indexed(p: &mut Program) {
+    p.label("rt_read_prg_high_indexed");
+    p.ld_a_l();
+    p.add_a_b();
+    p.ld_l_a();
+    p.ld_a_h();
+    p.adc_a_imm0();
+    p.ld_h_a();
+    p.jp("rt_read_prg_high");
 }
 
 fn emit_write_zp_ptr_y(p: &mut Program) {

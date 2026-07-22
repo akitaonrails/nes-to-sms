@@ -46,11 +46,23 @@ pub enum RawCiramBackend {
     SramSlot2,
 }
 
-// Compact layout: translated code 4-16, NES PRG data banks 17-24
-// (8 x 16 KiB = 128 KiB carts like CV1), assets 25-31 — all within
-// 512 KiB, which every emulator's Sega-mapper path handles (1 MiB
-// support is spotty: both GPGX and Mednafen rendered black).
-pub const NES_PRG_BANK_BASE: u32 = 17;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UxromBusConflicts {
+    None,
+    And,
+}
+
+// Compact mapper layout: translated code 4-20, NES PRG data banks 21-28
+// (8 x 16 KiB = 128 KiB carts like CV1), converted CHR in bank 29, and
+// small runtime assets packed into bank 30. Bank 31 remains spare. Keeping
+// the image at 512 KiB matters: 1 MiB Sega-mapper support is spotty in both
+// GPGX and Mednafen.
+pub const NES_PRG_BANK_BASE: u32 = 21;
+
+const PACKED_PALETTE_OFFSET: u32 = 0x0000;
+const PACKED_NAMETABLE_OFFSET: u32 = 0x0020;
+const PACKED_CHR_NES_OFFSET: u32 = 0x0720;
+const PACKED_CHR_MAPS_OFFSET: u32 = 0x2720;
 
 #[derive(Debug, Clone)]
 pub struct ProjectConfig<'a> {
@@ -66,6 +78,10 @@ pub struct ProjectConfig<'a> {
     pub raw_ciram_backend: RawCiramBackend,
     /// NES mapper number (drives runtime .ifdef paths).
     pub mapper: u16,
+    /// Mapper 2 bank count, validated against the emitted PRG bank assets.
+    pub uxrom_bank_count: Option<u8>,
+    /// Mapper 2 bus-conflict mode.
+    pub uxrom_bus_conflicts: Option<UxromBusConflicts>,
     /// CHR-RAM cart: patterns upload at runtime; variant regeneration
     /// reads back from VRAM instead of the (blank) data_chr asset.
     pub chr_ram: bool,
@@ -76,6 +92,11 @@ pub struct ProjectConfig<'a> {
     pub input_pause_start: bool,
     /// Arm the sprite-0 line-IRQ scroll split (see boot.s).
     pub scroll_split: bool,
+    /// Display-only remap applied while materializing the declared top rows.
+    pub top_tile_remap_rows: u8,
+    pub top_tile_remap_from: Vec<u8>,
+    pub top_tile_remap_to: u8,
+    pub chr_ram_bg_identity: bool,
 }
 
 #[derive(Debug)]
@@ -83,6 +104,9 @@ pub enum EmitError {
     Io(io::Error),
     InvalidTitle(String),
     InvalidRomSize(u32),
+    InvalidUxromConfig(String),
+    ReservedBankPlacement { bank: u32, reserved_bank: u32 },
+    LayoutExceedsRomCapacity { required_bank: u32, bank_count: u32 },
 }
 
 impl fmt::Display for EmitError {
@@ -95,6 +119,24 @@ impl fmt::Display for EmitError {
             EmitError::InvalidRomSize(n) => {
                 write!(f, "rom_kib must be a multiple of 16 and >= 16, got: {n}")
             }
+            EmitError::InvalidUxromConfig(reason) => {
+                write!(f, "invalid UxROM configuration: {reason}")
+            }
+            EmitError::ReservedBankPlacement {
+                bank,
+                reserved_bank,
+            } => write!(
+                f,
+                "build.asm places code in bank {bank}, which collides with reserved data banks starting at {reserved_bank}"
+            ),
+            EmitError::LayoutExceedsRomCapacity {
+                required_bank,
+                bank_count,
+            } => write!(
+                f,
+                "project layout requires ROM bank {required_bank}, but ROM capacity ends at bank {}",
+                bank_count.saturating_sub(1)
+            ),
         }
     }
 }
@@ -116,12 +158,114 @@ impl From<io::Error> for EmitError {
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
-fn validate_config(cfg: &ProjectConfig<'_>) -> Result<(), EmitError> {
+fn validate_config(
+    cfg: &ProjectConfig<'_>,
+    assets: &ProjectAssets,
+    build: &z80_emit::Build,
+) -> Result<(), EmitError> {
     if !cfg.title.is_ascii() || cfg.title.len() > 11 {
         return Err(EmitError::InvalidTitle(cfg.title.to_string()));
     }
     if cfg.rom_kib < 16 || cfg.rom_kib % 16 != 0 {
         return Err(EmitError::InvalidRomSize(cfg.rom_kib));
+    }
+    if assets.prg_banks.is_some() && cfg.mapper != 2 {
+        return Err(EmitError::InvalidUxromConfig(
+            "PRG bank assets require mapper 2".into(),
+        ));
+    }
+    if cfg.mapper == 2 {
+        let count = cfg
+            .uxrom_bank_count
+            .ok_or_else(|| EmitError::InvalidUxromConfig("missing UxROM bank count".into()))?;
+        if !matches!(count, 2 | 4 | 8 | 16) {
+            return Err(EmitError::InvalidUxromConfig(format!(
+                "bank count must be 2, 4, 8, or 16, got {count}"
+            )));
+        }
+        if cfg.uxrom_bus_conflicts.is_none() {
+            return Err(EmitError::InvalidUxromConfig(
+                "missing bus-conflict mode".into(),
+            ));
+        }
+        if assets.prg_banks.as_ref().map(Vec::len) != Some(count as usize) {
+            return Err(EmitError::InvalidUxromConfig(
+                "PRG bank assets do not match configured bank count".into(),
+            ));
+        }
+    } else if cfg.uxrom_bank_count.is_some() || cfg.uxrom_bus_conflicts.is_some() {
+        return Err(EmitError::InvalidUxromConfig(
+            "UxROM settings supplied for a non-UxROM mapper".into(),
+        ));
+    }
+    let explicit_banks: Vec<u32> = build
+        .asm
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix(".bank "))
+        .filter_map(|tail| tail.split_whitespace().next()?.parse::<u32>().ok())
+        .collect();
+    let reserved_bank = if assets.prg_banks.is_some() {
+        NES_PRG_BANK_BASE
+    } else {
+        24
+    };
+    if let Some(&bank) = explicit_banks.iter().find(|&&bank| bank >= reserved_bank) {
+        return Err(EmitError::ReservedBankPlacement {
+            bank,
+            reserved_bank,
+        });
+    }
+    let mut required_bank = explicit_banks.into_iter().max().unwrap_or(0);
+    let asset_base = if let Some(banks) = &assets.prg_banks {
+        required_bank = required_bank.max(NES_PRG_BANK_BASE + banks.len() as u32 - 1);
+        NES_PRG_BANK_BASE + banks.len() as u32
+    } else {
+        24
+    };
+    if let Some(banks) = &assets.prg_banks {
+        if assets.chr_4bpp.len() > 0x4000 {
+            return Err(EmitError::InvalidUxromConfig(
+                "converted CHR does not fit its packed asset bank".into(),
+            ));
+        }
+        if assets.nametable.as_ref().is_some_and(|v| v.len() > 0x700)
+            || assets.chr_nes.as_ref().is_some_and(|v| v.len() > 0x2000)
+            || assets
+                .chr_maps
+                .as_ref()
+                .is_some_and(|v| v.len() > (0x4000 - PACKED_CHR_MAPS_OFFSET as usize))
+        {
+            return Err(EmitError::InvalidUxromConfig(
+                "small runtime assets exceed the packed bank layout".into(),
+            ));
+        }
+        if assets.prg_high.as_deref() != banks.last().map(Vec::as_slice) {
+            return Err(EmitError::InvalidUxromConfig(
+                "fixed PRG asset must match the final UxROM bank".into(),
+            ));
+        }
+        required_bank = required_bank.max(asset_base + 1);
+    } else {
+        for (enabled, offset) in [
+            (true, 0),
+            (true, 1),
+            (assets.nametable.is_some(), 2),
+            (assets.prg_low.is_some(), 3),
+            (assets.chr_nes.is_some(), 4),
+            (assets.chr_maps.is_some(), 5),
+            (assets.prg_high.is_some(), 6),
+        ] {
+            if enabled {
+                required_bank = required_bank.max(asset_base + offset);
+            }
+        }
+    }
+    let bank_count = cfg.rom_kib / 16;
+    if required_bank >= bank_count {
+        return Err(EmitError::LayoutExceedsRomCapacity {
+            required_bank,
+            bank_count,
+        });
     }
     Ok(())
 }
@@ -260,14 +404,35 @@ fn sms_asm_content(
     if !cfg.scroll_split {
         mapper_define.push_str("\n.define NO_SCROLL_SPLIT 1");
     }
+    if cfg.top_tile_remap_rows > 0 {
+        mapper_define.push_str(&format!(
+            "\n.define PROFILE_TOP_TILE_REMAP_ROWS {}\n.define PROFILE_TOP_TILE_REMAP_TO ${:02X}",
+            cfg.top_tile_remap_rows, cfg.top_tile_remap_to
+        ));
+        for (index, tile) in cfg.top_tile_remap_from.iter().enumerate() {
+            mapper_define.push_str(&format!(
+                "\n.define PROFILE_TOP_TILE_REMAP_FROM_{index} ${tile:02X}"
+            ));
+        }
+    }
+    if cfg.chr_ram_bg_identity {
+        mapper_define.push_str("\n.define PROFILE_CHR_RAM_BG_IDENTITY 1");
+    }
     if cfg.chr_ram {
         mapper_define.push_str("\n.define NES_CHR_RAM 1\n.define CHR_RAM_SRAM_BASE $8800");
     }
-    if let Some(banks) = &assets.prg_banks {
+    if assets.prg_banks.is_some() {
         mapper_define.push_str(&format!(
-            "\n.define NES_PRG_BANK_BASE {NES_PRG_BANK_BASE}\n.define NES_PRG_BANK_MASK {}",
-            banks.len().next_power_of_two() - 1
+            "\n.define NES_PRG_BANK_BASE {NES_PRG_BANK_BASE}\n.define NES_PRG_BANK_COUNT {}\n.define NES_PRG_BANK_MASK {}",
+            cfg.uxrom_bank_count.expect("validated UxROM config"),
+            cfg.uxrom_bank_count.expect("validated UxROM config") - 1
         ));
+        let conflicts = if cfg.uxrom_bus_conflicts == Some(UxromBusConflicts::And) {
+            1
+        } else {
+            0
+        };
+        mapper_define.push_str(&format!("\n.define NES_PRG_BUS_CONFLICTS {conflicts}"));
     }
     let mirroring_define = match cfg.mirroring {
         NesMirroring::Vertical => ".define NES_MIRRORING_VERTICAL 1",
@@ -312,11 +477,10 @@ fn sms_asm_content(
          {runtime_includes}.include \"generated/translated.asm\"\n\
          \n\
          ; ── Data blobs ───────────────────────────────────────────────────\n\
-         ; Each asset lives in its own dedicated bank, pinned to slot 2 so\n\
-         ; the symbol value is a clean slot-2 logical address ($8000-$BFFF).\n\
-         ; boot.s switches the right bank into slot 2 before reading.\n\
+         ; Assets are pinned to slot 2. Mapper builds pack the small blobs\n\
+         ; together; symbols retain their exact slot-2 logical addresses.\n\
          .bank {asset_chr} slot 2\n\
-         .org $0000\n\
+         .org ${palette_org:04X}\n\
          .section \"data_chr\" force\n\
          data_chr:\n\
          .incbin \"data/chr.4bpp\"\n\
@@ -334,6 +498,7 @@ fn sms_asm_content(
         rom_banks = rom_banks,
         asset_chr = asset_base,
         asset_palette = asset_base + 1,
+        palette_org = PACKED_PALETTE_OFFSET,
         title = cfg.title,
         mapper_define = mapper_define,
         mirroring_define = mirroring_define,
@@ -342,15 +507,19 @@ fn sms_asm_content(
     );
 
     if has_nametable {
+        let (bank, org) = if assets.prg_banks.is_some() {
+            (asset_base + 1, PACKED_NAMETABLE_OFFSET)
+        } else {
+            (asset_base + 2, 0)
+        };
         out.push_str(&format!(
             "\n\
-             .bank {} slot 2\n\
-             .org $0000\n\
+             .bank {bank} slot 2\n\
+             .org ${org:04X}\n\
              .section \"data_nametable\" force\n\
              data_nametable:\n\
              .incbin \"data/nametable.bin\"\n\
-             .ends\n",
-            asset_base + 2
+             .ends\n"
         ));
     }
 
@@ -387,36 +556,52 @@ fn sms_asm_content(
     }
 
     if assets.prg_high.is_some() {
-        out.push_str(&format!(
-            "\n\
-             .bank {} slot 2\n\
-             .org $0000\n\
-             .section \"data_prg_high\" force\n\
-             data_prg_high:\n\
-             .incbin \"data/prg_high.bin\"\n\
-             .ends\n",
-            asset_base + 6
-        ));
+        if let Some(banks) = &assets.prg_banks {
+            out.push_str(&format!(
+                "\n.define data_prg_high data_prg_bank_{}\n",
+                banks.len() - 1
+            ));
+        } else {
+            out.push_str(&format!(
+                "\n\
+                 .bank {} slot 2\n\
+                 .org $0000\n\
+                 .section \"data_prg_high\" force\n\
+                 data_prg_high:\n\
+                 .incbin \"data/prg_high.bin\"\n\
+                 .ends\n",
+                asset_base + 6
+            ));
+        }
     }
 
     if assets.chr_nes.is_some() {
+        let (bank, org) = if assets.prg_banks.is_some() {
+            (asset_base + 1, PACKED_CHR_NES_OFFSET)
+        } else {
+            (asset_base + 4, 0)
+        };
         out.push_str(&format!(
             "\n\
-             .bank {} slot 2\n\
-             .org $0000\n\
+             .bank {bank} slot 2\n\
+             .org ${org:04X}\n\
              .section \"data_chr_nes\" force\n\
              data_chr_nes:\n\
              .incbin \"data/chr.nes\"\n\
-             .ends\n",
-            asset_base + 4
+             .ends\n"
         ));
     }
 
     if assets.chr_maps.is_some() {
+        let (bank, org) = if assets.prg_banks.is_some() {
+            (asset_base + 1, PACKED_CHR_MAPS_OFFSET)
+        } else {
+            (asset_base + 5, 0)
+        };
         out.push_str(&format!(
             "\n\
-             .bank {} slot 2\n\
-             .org $0000\n\
+             .bank {bank} slot 2\n\
+             .org ${org:04X}\n\
              .section \"data_chr_maps\" force\n\
              data_chr_maps:\n\
              data_chr_bg_map0:\n\
@@ -428,8 +613,7 @@ fn sms_asm_content(
              data_chr_sprite_map1:\n\
              .incbin \"data/chr_maps.bin\" SKIP $500 READ $100\n\
              data_chr_maps_end:\n\
-             .ends\n",
-            asset_base + 5
+             .ends\n"
         ));
     }
 
@@ -489,7 +673,7 @@ pub fn emit_project(
     cfg: &ProjectConfig<'_>,
     runtime_src_dir: Option<&Path>,
 ) -> Result<(), EmitError> {
-    validate_config(cfg)?;
+    validate_config(cfg, assets, build)?;
 
     fs::create_dir_all(out_dir)?;
 
@@ -573,16 +757,51 @@ mod tests {
     fn minimal_cfg() -> ProjectConfig<'static> {
         ProjectConfig {
             mapper: 0,
+            uxrom_bank_count: None,
+            uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
             scroll_split: true,
-            rom_kib: 32,
+            top_tile_remap_rows: 0,
+            top_tile_remap_from: Vec::new(),
+            top_tile_remap_to: 0,
+            chr_ram_bg_identity: false,
+            rom_kib: 512,
             region: 0x4C,
             title: "TEST",
             mirroring: NesMirroring::Vertical,
             raw_ciram_backend: RawCiramBackend::None,
         }
+    }
+
+    fn uxrom_bank_payloads() -> Vec<Vec<u8>> {
+        (0u8..8)
+            .map(|bank| {
+                (0..0x4000)
+                    .map(|offset| {
+                        bank.wrapping_mul(0x1d)
+                            .wrapping_add((offset as u8).wrapping_mul(0x49))
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn uxrom_assets() -> (ProjectAssets, Vec<Vec<u8>>) {
+        let banks = uxrom_bank_payloads();
+        let mut assets = minimal_assets();
+        assets.prg_high = Some(banks.last().unwrap().clone());
+        assets.prg_banks = Some(banks.clone());
+        (assets, banks)
+    }
+
+    fn uxrom_cfg(bus_conflicts: UxromBusConflicts) -> ProjectConfig<'static> {
+        let mut cfg = minimal_cfg();
+        cfg.mapper = 2;
+        cfg.uxrom_bank_count = Some(8);
+        cfg.uxrom_bus_conflicts = Some(bus_conflicts);
+        cfg
     }
 
     // ── 1. emit_project produces all expected files and directories ────────────
@@ -674,10 +893,16 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            uxrom_bank_count: None,
+            uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
             scroll_split: true,
+            top_tile_remap_rows: 0,
+            top_tile_remap_from: Vec::new(),
+            top_tile_remap_to: 0,
+            chr_ram_bg_identity: false,
             rom_kib: 32,
             region: 0x4C,
             title: "TOOLONGTITLE", // 12 chars
@@ -698,10 +923,16 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            uxrom_bank_count: None,
+            uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
             scroll_split: true,
+            top_tile_remap_rows: 0,
+            top_tile_remap_from: Vec::new(),
+            top_tile_remap_to: 0,
+            chr_ram_bg_identity: false,
             rom_kib: 17,
             region: 0x4C,
             title: "TEST",
@@ -722,11 +953,17 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            uxrom_bank_count: None,
+            uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
             scroll_split: true,
-            rom_kib: 64,
+            top_tile_remap_rows: 0,
+            top_tile_remap_from: Vec::new(),
+            top_tile_remap_to: 0,
+            chr_ram_bg_identity: false,
+            rom_kib: 512,
             region: 0x4C,
             title: "BANKS4",
             mirroring: NesMirroring::Vertical,
@@ -736,12 +973,15 @@ mod tests {
         emit_project(&out, &build, &assets, &cfg, None).unwrap();
 
         let sms_asm = fs::read_to_string(out.join("sms.asm")).unwrap();
-        // 64 KiB / 16 = 4 banks
+        // 512 KiB / 16 = 32 banks
         assert!(
-            sms_asm.contains("bankstotal 4"),
-            "expected 'bankstotal 4' in sms.asm"
+            sms_asm.contains("bankstotal 32"),
+            "expected 'bankstotal 32' in sms.asm"
         );
-        assert!(sms_asm.contains("banks 4"), "expected 'banks 4' in sms.asm");
+        assert!(
+            sms_asm.contains("banks 32"),
+            "expected 'banks 32' in sms.asm"
+        );
 
         fs::remove_dir_all(&out).unwrap();
     }
@@ -788,10 +1028,16 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            uxrom_bank_count: None,
+            uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
             scroll_split: true,
+            top_tile_remap_rows: 0,
+            top_tile_remap_from: Vec::new(),
+            top_tile_remap_to: 0,
+            chr_ram_bg_identity: false,
             rom_kib: 8,
             region: 0x4C,
             title: "TEST",
@@ -835,11 +1081,17 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            uxrom_bank_count: None,
+            uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
             scroll_split: true,
-            rom_kib: 32,
+            top_tile_remap_rows: 0,
+            top_tile_remap_from: Vec::new(),
+            top_tile_remap_to: 0,
+            chr_ram_bg_identity: false,
+            rom_kib: 512,
             region: 0x4C,
             title: "TEST",
             mirroring: NesMirroring::Vertical,
@@ -856,17 +1108,44 @@ mod tests {
     }
 
     #[test]
+    fn test_sms_asm_contains_top_tile_remap_defines() {
+        let out = unique_dir("sms_proj_top_tile_remap");
+        let build = minimal_build();
+        let assets = minimal_assets();
+        let mut cfg = minimal_cfg();
+        cfg.top_tile_remap_rows = 6;
+        cfg.top_tile_remap_from = vec![0x37, 0x38];
+        cfg.top_tile_remap_to = 0;
+
+        emit_project(&out, &build, &assets, &cfg, None).unwrap();
+
+        let sms_asm = fs::read_to_string(out.join("sms.asm")).unwrap();
+        assert!(sms_asm.contains(".define PROFILE_TOP_TILE_REMAP_ROWS 6"));
+        assert!(sms_asm.contains(".define PROFILE_TOP_TILE_REMAP_FROM_0 $37"));
+        assert!(sms_asm.contains(".define PROFILE_TOP_TILE_REMAP_FROM_1 $38"));
+        assert!(sms_asm.contains(".define PROFILE_TOP_TILE_REMAP_TO $00"));
+
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
     fn test_sms_asm_contains_horizontal_mirroring_define() {
         let out = unique_dir("sms_proj_horizontal_mirroring");
         let build = minimal_build();
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            uxrom_bank_count: None,
+            uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
             scroll_split: true,
-            rom_kib: 32,
+            top_tile_remap_rows: 0,
+            top_tile_remap_from: Vec::new(),
+            top_tile_remap_to: 0,
+            chr_ram_bg_identity: false,
+            rom_kib: 512,
             region: 0x4C,
             title: "TEST",
             mirroring: NesMirroring::Horizontal,
@@ -889,11 +1168,17 @@ mod tests {
         let assets = minimal_assets();
         let cfg = ProjectConfig {
             mapper: 0,
+            uxrom_bank_count: None,
+            uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
             scroll_split: true,
-            rom_kib: 64,
+            top_tile_remap_rows: 0,
+            top_tile_remap_from: Vec::new(),
+            top_tile_remap_to: 0,
+            chr_ram_bg_identity: false,
+            rom_kib: 512,
             region: 0x4C,
             title: "TEST",
             mirroring: NesMirroring::Vertical,
@@ -908,5 +1193,95 @@ mod tests {
         assert!(sms_asm.contains(".define RAW_CIRAM_SRAM_CTRL $08"));
 
         fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn uxrom_eight_banks_preserve_assets_fixed_bank_and_mapper_defines() {
+        let out = unique_dir("sms_proj_uxrom");
+        let build = minimal_build();
+        let (assets, banks) = uxrom_assets();
+        let cfg = uxrom_cfg(UxromBusConflicts::And);
+
+        emit_project(&out, &build, &assets, &cfg, None).unwrap();
+        let asm = fs::read_to_string(out.join("sms.asm")).unwrap();
+        assert_eq!(banks.len(), 8);
+        assert!(asm.contains(".define NES_PRG_BANK_COUNT 8"));
+        assert!(asm.contains(".define NES_PRG_BANK_MASK 7"));
+        assert!(asm.contains(".define NES_PRG_BUS_CONFLICTS 1"));
+        for (bank, expected) in banks.iter().enumerate() {
+            assert_eq!(
+                fs::read(out.join(format!("data/prg_bank_{bank}.bin"))).unwrap(),
+                *expected,
+                "PRG bank {bank} was reordered, aliased, or truncated"
+            );
+            assert!(asm.contains(&format!(".bank {} slot 2", NES_PRG_BANK_BASE + bank as u32)));
+            assert!(asm.contains(&format!(".incbin \"data/prg_bank_{bank}.bin\"")));
+        }
+        assert!(!out.join("data/prg_bank_8.bin").exists());
+        assert_eq!(
+            fs::read(out.join("data/prg_high.bin")).unwrap(),
+            *banks.last().unwrap(),
+            "fixed PRG asset must be the physical final PRG bank"
+        );
+        assert!(asm.contains(".define data_prg_high data_prg_bank_7"));
+        assert!(asm.contains(&format!(".bank {} slot 2", NES_PRG_BANK_BASE + 9)));
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn uxrom_without_conflicts_emits_zero_define() {
+        let out = unique_dir("sms_proj_uxrom_no_conflict");
+        let build = minimal_build();
+        let (assets, _) = uxrom_assets();
+        let cfg = uxrom_cfg(UxromBusConflicts::None);
+        emit_project(&out, &build, &assets, &cfg, None).unwrap();
+        let asm = fs::read_to_string(out.join("sms.asm")).unwrap();
+        assert!(asm.contains(".define NES_PRG_BUS_CONFLICTS 0"));
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn rejects_prg_bank_assets_for_non_uxrom_mapper() {
+        let out = unique_dir("sms_proj_non_uxrom_prg_banks");
+        let build = minimal_build();
+        let (assets, _) = uxrom_assets();
+        let cfg = minimal_cfg();
+
+        let err = emit_project(&out, &build, &assets, &cfg, None).unwrap_err();
+        assert!(matches!(err, EmitError::InvalidUxromConfig(_)));
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn rejects_explicit_build_bank_in_reserved_uxrom_data_range() {
+        let out = unique_dir("sms_proj_reserved_bank");
+        let mut build = minimal_build();
+        build
+            .asm
+            .push_str(&format!("\n.bank {NES_PRG_BANK_BASE} slot 1\n"));
+        let (assets, _) = uxrom_assets();
+        let cfg = uxrom_cfg(UxromBusConflicts::None);
+
+        assert!(matches!(
+            emit_project(&out, &build, &assets, &cfg, None),
+            Err(EmitError::ReservedBankPlacement {
+                bank: NES_PRG_BANK_BASE,
+                reserved_bank: NES_PRG_BANK_BASE,
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_uxrom_layout_that_exceeds_rom_capacity() {
+        let out = unique_dir("sms_proj_uxrom_overflow");
+        let build = minimal_build();
+        let (assets, _) = uxrom_assets();
+        let mut cfg = uxrom_cfg(UxromBusConflicts::None);
+        cfg.rom_kib = 480;
+
+        assert!(matches!(
+            emit_project(&out, &build, &assets, &cfg, None),
+            Err(EmitError::LayoutExceedsRomCapacity { .. })
+        ));
     }
 }

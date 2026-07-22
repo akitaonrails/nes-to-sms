@@ -565,12 +565,27 @@ SMS-native terms.
       title and some intros might. Implement: SAT writer handles
       8x16 by emitting two SMS sprites with consecutive tile indices.
 
+      **CHR-RAM outcome:** the SAT resolver now gives every OAM entry an even
+      SMS pair slot, selects NES pattern table 0/1 from the OAM tile low bit,
+      and regenerates both tiles with NES palette and H/V-flip semantics. The
+      trace framebuffer also renders SMS 8x16 mode. CV1 title and Stage 1 use
+      this path successfully; a standalone synthetic/Mednafen fixture is still
+      required to close the general item.
+
       **Acceptance:** test sprite renders as 8x16 in Mednafen.
 
 - [ ] **E.11 Background palette via attributes.** NES uses 16x16 pixel
       attribute regions selecting one of 4 background subpalettes.
       The runtime needs to translate attribute writes into SMS
       per-tile palette select bits.
+
+      **CHR-RAM outcome:** complete-window rebuilds now reset the background
+      variant allocator before rematerialization, so variants from old scenes
+      cannot force live-pattern recycling. CV1's oracle-measured peak is
+      234/256 live variants on the title and 54/256 in Stage 1. Normal
+      attribute-driven variants are enabled again; the Stage 1 trace now has
+      the reference blue sky, green canopy, dark lower backdrop, and gray
+      fence/ground rather than the shape-only single-palette rendering.
 
       **Acceptance:** 1-1 background colors approximate the NES (sky,
       bricks, pipes, ground).

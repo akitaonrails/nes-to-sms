@@ -371,7 +371,19 @@ _tr_rts_pop_frame:
 _tr_rts_cont_ok:
 .endif
   inc  hl
-  ld   a, (hl)               ; return bank
+  ld   a, (hl)               ; return bank + translated-frame flags
+  bit  6, a
+  jr   z, _tr_rts_bank_ready ; ordinary frames already contain a clean bank
+  ; A stack-aware JumpEngine frame represents an RTS address that the NES
+  ; caller explicitly placed on $0100+S. Its handler's RTS consumes those two
+  ; bytes before resuming the translated continuation.
+  ld   a, ($cb02)
+  inc  a
+  inc  a
+  ld   ($cb02), a
+  ld   a, (hl)
+  and  $1f                   ; SMS code bank (flags occupy the high bits)
+_tr_rts_bank_ready:
   ld   ($cb14), a
   ld   ($fffe), a
   dec  hl
@@ -402,6 +414,91 @@ _tr_rts_underflow:
   ld   ($cb1d), a
   ld   a, c                  ; returned 6502 A (parked at entry)
   jp   rt_rts_dispatch
+
+; ─── rt_translated_return_escape ─────────────────────────────────────────────
+; Bridge a profiled 6502 tail escape that discards one JSR return address as
+; stack data before returning through the caller below it. Translated JSRs keep
+; continuations in TR_RET rather than at $C100+S, so the escape edge calls here
+; with BC equal to the original 6502 JSR-pushed return PC. Pop one TR_RET frame,
+; push BCH then BCL using 6502 stack order, and return with A and DE preserved.
+; Invalid/empty translated stacks fail closed with marker $E5.
+rt_translated_return_escape:
+  push af
+  ld   a, i                  ; P/V = prior IFF2
+  di
+  jp   po, _tr_escape_was_disabled
+  ld   a, $01
+  ld   ($d471), a
+  jr   _tr_escape_find_frame
+_tr_escape_was_disabled:
+  xor  a
+  ld   ($d471), a
+_tr_escape_find_frame:
+  ld   hl, (TR_RET_PTR)
+  ld   (TR_RET_DIAG_PTR), hl
+  ld   a, h
+  cp   $d3
+  jr   z, _tr_escape_check_seg0
+  cp   $d5
+  jr   z, _tr_escape_check_seg1
+  cp   $d6
+  jp   nz, _tr_escape_underflow
+  ld   a, l
+  or   a
+  jp   nz, _tr_escape_underflow
+  ld   hl, $d5fc             ; ptr == D600 pops final segment-1 frame
+  jr   _tr_escape_pop_frame
+_tr_escape_check_seg0:
+  ld   a, l
+  cp   $01
+  jp   c, _tr_escape_underflow
+  cp   $f9
+  jp   nc, _tr_escape_underflow
+  and  $03
+  jp   nz, _tr_escape_underflow
+  dec  hl
+  dec  hl
+  dec  hl
+  dec  hl
+  jr   _tr_escape_pop_frame
+_tr_escape_check_seg1:
+  ld   a, l
+  or   a
+  jr   z, _tr_escape_bridge
+  and  $03
+  jp   nz, _tr_escape_underflow
+  dec  hl
+  dec  hl
+  dec  hl
+  dec  hl
+  jr   _tr_escape_pop_frame
+_tr_escape_bridge:
+  ld   hl, $d3f8
+_tr_escape_pop_frame:
+  ld   (TR_RET_PTR), hl       ; publish the discarded frame
+
+  ld   a, ($cb02)            ; old 6502 S
+  ld   l, a
+  ld   h, $c1
+  ld   (hl), b               ; JSR pushes return high first
+  dec  l                     ; page wraps naturally within $C100-$C1FF
+  ld   (hl), c               ; then return low
+  sub  $02
+  ld   ($cb02), a
+
+  ld   a, ($d471)
+  or   a
+  jr   z, _tr_escape_return_disabled
+  pop  af
+  ei
+  ret
+_tr_escape_return_disabled:
+  pop  af
+  ret
+_tr_escape_underflow:
+  ld   a, $e5
+  ld   ($cb1d), a
+  jp   rt_unresolved_jsr_flash
 
 ; ─── rt_far_jmp ───────────────────────────────────────────────────────────────
 ; Bank-aware cross-bank JMP. Translated `JMP L_XXXX` becomes:
@@ -519,7 +616,8 @@ _ij_jump_di:
 
 ; ─── rt_banked_tail_dispatch ──────────────────────────────────────────────────
 ; BC = NES ROM target address, A = incoming translated A, DE resident X/Y.
-; Slot-0 tail dispatch for computed JMP/RTS paths: scans the generated table,
+; Slot-0 tail dispatch for computed JMP/RTS paths: uses the generated page
+; directory, then scans only the target address's high-byte group,
 ; switches slot 1 from slot 0, restores A, and jumps directly to the target.
 ; No rt_far_gate and no native return/restore frame.
 rt_banked_tail_dispatch:
@@ -540,7 +638,19 @@ _btd_target_ok:
   ld   ($cb1c), a
   ld   a, :rt_dispatch_table
   ld   ($fffe), a
-  ld   hl, rt_dispatch_table
+  ld   a, ($cb1c)
+  cp   $80
+  jr   c, _btd_miss
+  sub  $80
+  add  a, a
+  ld   l, a
+  ld   h, $00
+  ld   bc, rt_dispatch_page_table
+  add  hl, bc
+  ld   a, (hl)
+  inc  hl
+  ld   h, (hl)
+  ld   l, a
   xor  a
   ld   ($cb7d), a
 _btd_loop:
@@ -564,10 +674,13 @@ _btd_addr_nonzero:
   inc  hl
   ld   a, ($cb1c)
   cp   b
-  jr   nz, _btd_skip
+  jr   nz, _btd_miss
   ld   a, ($cb1b)
   cp   c
-  jr   nz, _btd_skip
+  jr   z, _btd_check_bank
+  jr   c, _btd_miss         ; sorted page: next entry is above the target
+  jr   _btd_skip
+_btd_check_bank:
   ld   a, (hl)                 ; NES bank constraint
   cp   $ff
   jr   z, _btd_hit
@@ -705,10 +818,31 @@ _btd_trap:
   ; real code or the game's defensive vector rewrites control flow.
   ld   a, ($cb1c)
   cp   $c0
-  jr   c, _btd_trap_flash    ; switchable-bank target: keep fail-closed
+  jp   c, _btd_trap_flash    ; switchable-bank target: keep fail-closed
   ld   a, ($cb14)
   ld   ($fffe), a            ; put the caller's bank back in slot 1
-  ; read fixed PRG through slot 2: map data_prg_high at $FFFF
+  ; DI/depth0 locked transaction: assert canonical slot 2 before scanning.
+  ld   a, i
+  jp   pe, _btd_slot2_bad
+  ld   a, ($d47f)
+  or   a
+  jp   nz, _btd_slot2_bad
+  ld   a, ($fffc)
+  or   a
+  jp   nz, _btd_slot2_bad
+  ld   a, ($ffff)
+  ld   b, a
+.ifdef NES_PRG_BANK_BASE
+  ld   a, ($cb62)
+  and  NES_PRG_BANK_MASK
+  add  a, NES_PRG_BANK_BASE
+  cp   b
+.else
+  ld   a, :data_prg_low
+  cp   b
+.endif
+  jp   nz, _btd_slot2_bad
+  ; Locked map to fixed PRG; no calls/pushes in this transaction.
   ld   a, :data_prg_high
   ld   ($ffff), a
   ld   a, ($cb1c)
@@ -731,11 +865,29 @@ _btd_walk:
   ld   ($ca14), a
   jr   nz, _btd_walk
 _btd_walk_none:
-  call rt_restore_prg_window
+  xor  a
+  ld   ($fffc), a
+.ifdef NES_PRG_BANK_BASE
+  ld   a, ($cb62)
+  and  NES_PRG_BANK_MASK
+  add  a, NES_PRG_BANK_BASE
+.else
+  ld   a, :data_prg_low
+.endif
+  ld   ($ffff), a
   jr   _btd_trap_flash
 _btd_walk_found:
   ; NES BRK at HL(slot2) -> NES addr = HL + $4000; return PC = addr + 2
-  call rt_restore_prg_window
+  xor  a
+  ld   ($fffc), a
+.ifdef NES_PRG_BANK_BASE
+  ld   a, ($cb62)
+  and  NES_PRG_BANK_MASK
+  add  a, NES_PRG_BANK_BASE
+.else
+  ld   a, :data_prg_low
+.endif
+  ld   ($ffff), a
   ld   a, h
   add  a, $40
   ld   h, a
@@ -745,6 +897,13 @@ _btd_walk_found:
   ld   ($cb1d), a            ; walking, not trapped
   ld   a, (TR_RET_SCRATCH_A)
   jp   rt_brk
+_btd_slot2_bad:
+  di
+  ld   a, ($cb62)
+  ld   ($cb1a), a
+  ld   a, RT_BTD_SLOT2_BAD
+  ld   ($cb1d), a
+  jp   rt_unresolved_jsr_flash
 _btd_trap_flash:
   ld   a, ($cb14)
   ld   ($fffe), a
@@ -755,8 +914,9 @@ _btd_trap_flash:
   jp   rt_unresolved_jsr_flash
 
 ; ─── rt_banked_dispatch ───────────────────────────────────────────────────────
-; BC = NES ROM target address. Look it up in the generated dispatch
-; table: entries of .dw nes_addr / .db nes_bank / .db sms_bank / .dw label,
+; BC = NES ROM target address. Look it up through the generated high-byte page
+; directory, then the address-sorted dispatch records for that page. Entries
+; are .dw nes_addr / .db nes_bank / .db sms bank / .dw label,
 ; terminated by addr $0000. Fixed-bank entries carry nes_bank $FF and
 ; match any window state; window entries ($8000-$BFFF) also require the
 ; current UxROM bank shadow ($CB62) to match. Hit -> far-gate jump (bank
@@ -798,7 +958,19 @@ _bd_slow:
   push af                   ; caller's slot-1 bank (restored before far-gate)
   ld   a, :rt_dispatch_table
   ld   ($fffe), a
-  ld   hl, rt_dispatch_table
+  ld   a, b
+  cp   $80
+  jp   c, _bd_miss
+  sub  $80
+  add  a, a
+  ld   l, a
+  ld   h, $00
+  ld   de, rt_dispatch_page_table
+  add  hl, de
+  ld   e, (hl)
+  inc  hl
+  ld   d, (hl)
+  ex   de, hl
   xor  a
   ld   ($cb7d), a           ; scan counter (diagnostics)
 _bd_loop:
@@ -815,10 +987,13 @@ _bd_loop:
   ; address match?
   ld   a, d
   cp   b
-  jr   nz, _bd_skip
+  jr   nz, _bd_miss
   ld   a, e
   cp   c
-  jr   nz, _bd_skip
+  jr   z, _bd_check_bank
+  jr   c, _bd_skip
+  jr   _bd_miss             ; sorted page: next entry is above the target
+_bd_check_bank:
   ; bank constraint: entry nes_bank $FF matches anything; else compare
   ; with the mapper shadow (only meaningful for window targets).
   ld   a, (hl)
@@ -1089,29 +1264,204 @@ rt_read_indexed:
   ld   a, (hl)
   ret
 
-; ─── rt_read_prg_high_indexed ─────────────────────────────────────────────────
-; Read a byte from the original NES fixed PRG window ($C000-$FFFF).
-; Entry: HL = NES base address in $C000-$FFFF, B = unsigned offset.
-; Exit:  A = byte at (HL + B). HL and B preserved. Slot 2 restored to
-;        data_prg_low because most translated PRG table reads expect it there.
-rt_read_prg_high_indexed:
-  push hl
-  push bc
+; ─── rt_read_prg_high ─────────────────────────────────────────────────────────
+; Entry HL = effective NES $C000-$FFFF. Exit A = byte; preserves C/DE.
+; The fixed high image is mapped only for this outer transaction.
+rt_read_prg_high:
+  ld   a, h
+  cp   $c0
+  jp   c, _rph_bad
+.ifndef NES_PRG_BANK_BASE
+  ; NROM has no mutable NES bank shadow. Keep the temporary slot-2 mapping
+  ; atomic against IRQ presentation, but avoid the mapper-2 guard snapshot on
+  ; this very hot table-read path. Op boundaries always expose ROM with the
+  ; NROM low image selected, so the two paths restore that exact invariant.
+  ld   a, i
+  di
+  jp   po, _rph_nrom_di
+_rph_nrom_ei:
   ld   a, :data_prg_high
   ld   ($ffff), a
   ld   a, h
-  sub  $40                   ; $C000->$8000 within slot 2
+  sub  $40
   ld   h, a
-  ld   c, b
-  ld   b, 0
-  add  hl, bc
-  ld   a, (hl)
-  push af
-  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
-  pop  af
-  pop  bc
-  pop  hl
+  ld   b, (hl)
+  ld   a, :data_prg_low
+  ld   ($ffff), a
+  ld   a, b
+  ei
   ret
+_rph_nrom_di:
+  ld   a, :data_prg_high
+  ld   ($ffff), a
+  ld   a, h
+  sub  $40
+  ld   h, a
+  ld   b, (hl)
+  ld   a, :data_prg_low
+  ld   ($ffff), a
+  ld   a, b
+  ret
+.else
+  ld   a, ($d47f)
+  cp   2
+  jp   nc, _rph_overflow
+  ; Inline frame snapshot (depth 0/1).
+  or   a
+  jr   nz, _rph_f1
+  ; Most translated fixed-PRG reads begin at an operation boundary where
+  ; slot 2 is already the canonical mapper window and SRAM is disabled. In
+  ; that common depth-0 case, restoring from the mapper shadow is equivalent
+  ; to saving four bytes of mapper state for every table byte. Keep the full
+  ; snapshot below for nested/private callers with a temporary mapping.
+  ld   a, ($fffc)
+  or   a
+  jr   nz, _rph_f0
+  ld   a, ($cb62)
+  and  NES_PRG_BANK_MASK
+  add  a, NES_PRG_BANK_BASE
+  ld   b, a
+  ld   a, ($ffff)
+  cp   b
+  jr   nz, _rph_f0
+  ld   a, i
+  di
+  jp   po, _rph_fast_i0
+  ld   a, $01
+  jr   _rph_fast_map
+_rph_fast_i0:
+  xor  a
+_rph_fast_map:
+  ld   ($ca19), a
+  ld   a, :data_prg_high
+  ld   ($ffff), a
+  ld   a, h
+  sub  $40
+  ld   h, a
+  ld   b, (hl)
+  ld   a, ($cb62)
+  and  NES_PRG_BANK_MASK
+  add  a, NES_PRG_BANK_BASE
+  ld   ($ffff), a
+  ld   a, ($ca19)
+  bit  0, a
+  ld   a, b
+  ret  z
+  ei
+  ret
+_rph_f0:
+  ld   a, i
+  di
+  jp   po, _rph_i0
+  ld   a, $01
+  jr   _rph_s0
+_rph_i0:
+  xor  a
+_rph_s0:
+  ld   ($ca19), a
+  ld   a, ($fffc)
+  ld   ($ca1a), a
+  ld   a, ($ffff)
+  ld   ($ca1b), a
+  ld   a, ($cb62)
+  ld   ($ca1c), a
+  jr   _rph_map
+_rph_f1:
+  ld   a, i
+  di
+  jp   po, _rph_i1
+  ld   a, $01
+  jr   _rph_s1
+_rph_i1:
+  xor  a
+_rph_s1:
+  ld   ($ca1d), a
+  ld   a, ($fffc)
+  ld   ($ca1e), a
+  ld   a, ($ffff)
+  ld   ($ca1f), a
+  ld   a, ($cb62)
+  ld   ($d3ff), a
+_rph_map:
+  ld   a, ($d47f)
+  inc  a
+  ld   ($d47f), a
+  xor  a
+  ld   ($fffc), a
+  ld   a, :data_prg_high
+  ld   ($ffff), a
+  ld   a, h
+  sub  $40
+  ld   h, a
+  ld   b, (hl)
+  ; exact inline exit
+  ld   a, ($d47f)
+  or   a
+  jp   z, _rph_underflow
+  cp   3
+  jp   nc, _rph_corrupt
+  dec  a
+  ld   ($d47f), a
+  jr   nz, _rph_x1
+  xor  a
+  ld   ($fffc), a
+  ld   a, ($ca1c)
+  ld   ($cb62), a
+  ld   a, ($ca1b)
+  ld   ($ffff), a
+  ld   a, ($ca1a)
+  ld   ($fffc), a
+  ld   a, ($ca19)
+  jr   _rph_ret
+_rph_x1:
+  xor  a
+  ld   ($fffc), a
+  ld   a, ($d3ff)
+  ld   ($cb62), a
+  ld   a, ($ca1f)
+  ld   ($ffff), a
+  ld   a, ($ca1e)
+  ld   ($fffc), a
+  ld   a, ($ca1d)
+_rph_ret:
+  bit  0, a
+  ld   a, b
+  ret  z
+  ei
+  ret
+_rph_overflow:
+  ld   a, RT_GUARD_OVERFLOW
+  jr   _rph_trap
+_rph_underflow:
+  ld   a, RT_GUARD_UNDERFLOW
+  jr   _rph_trap
+_rph_corrupt:
+  ld   a, RT_GUARD_CORRUPT
+_rph_trap:
+  di
+  ld   ($cb1d), a
+.endif
+_rph_bad:
+  di
+  ld   a, RT_PRG_HIGH_BAD_ADDRESS
+  ld   ($cb1d), a
+_rph_halt:
+  halt
+  jr   _rph_halt
+
+; ─── rt_read_prg_high_indexed ─────────────────────────────────────────────────
+; Read a byte from the original NES fixed PRG window ($C000-$FFFF).
+; Entry: HL = NES base address in $C000-$FFFF, B = unsigned offset.
+; Exit:  A = byte at (HL + B). Preserves C/DE; clobbers B/HL/native flags.
+;        Slot-2 mapper state is restored exactly.
+rt_read_prg_high_indexed:
+  ld   a, l
+  add  a, b
+  ld   l, a
+  ld   a, h
+  adc  a, 0
+  ld   h, a
+  jp   rt_read_prg_high
 
 ; ─── rt_write_indexed ─────────────────────────────────────────────────────────
 ; Write C to (HL + B).
@@ -1217,16 +1567,7 @@ _rzpy_deref:
   ld   a, (hl)
   ret
 _rzpy_prg_high:
-  ld   a, :data_prg_high
-  ld   ($ffff), a
-  ld   a, h
-  sub  $40                  ; $C000-$FFFF -> $8000-$BFFF in slot 2
-  ld   h, a
-  ld   a, (hl)
-  ld   c, a                 ; park result while restoring slot-2 PRG window
-  call rt_restore_prg_window   ; current NES PRG window (banked-aware)
-  ld   a, c
-  ret
+  jp   rt_read_prg_high
 
 ; ─── rt_write_zp_ptr_y ────────────────────────────────────────────────────────
 ; 6502 (zp),Y addressing mode write.

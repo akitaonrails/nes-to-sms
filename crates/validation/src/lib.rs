@@ -93,7 +93,12 @@ pub fn classify_routine(routine: &Routine) -> Option<String> {
     if !routine.ops.iter().any(|op| {
         matches!(
             op,
-            Op::Rts | Op::Rti | Op::Jmp { .. } | Op::JmpIndirect { .. } | Op::JumpEngineCall { .. }
+            Op::Rts
+                | Op::Rti
+                | Op::Jmp { .. }
+                | Op::ReturnEscape { .. }
+                | Op::JmpIndirect { .. }
+                | Op::JumpEngineCall { .. }
         )
     }) {
         return Some("no terminal RTS/JMP (trimmed range or fall-through)".into());
@@ -130,6 +135,11 @@ pub fn classify_routine(routine: &Routine) -> Option<String> {
                 // game-mode handler). Skip; correctness of the dispatch
                 // is validated end-to-end in trace_sms, not per-routine.
                 return Some("jump engine dispatch".into());
+            }
+            Op::ReturnEscape { .. } => {
+                // The isolated harness has no caller continuation frame to
+                // discard. Exercise this profile edge end-to-end instead.
+                return Some("translated return escape".into());
             }
             // PrgRom indexed reads are now diff'd — both oracle and z80
             // bus have the full PRG embedded at NES addresses $8000+.
@@ -331,7 +341,16 @@ fn run_oracle_full_prg(
 ) -> FinalState {
     let mut bus = oracle_6502::FlatBus::new();
     // Load the full PRG at NROM base.
-    bus.load(0x8000, prg);
+    // Map NES PRG explicitly: the first 16 KiB is the lower window and the
+    // final 16 KiB is fixed at $C000. NROM-128 mirrors its sole bank.
+    let lower = &prg[..prg.len().min(0x4000)];
+    bus.load(0x8000, lower);
+    let fixed = if prg.len() == 0x4000 {
+        lower
+    } else {
+        &prg[prg.len() - 0x4000..]
+    };
+    bus.load(0xC000, fixed);
     // Seed zero page and RAM mirror with the same random bytes.
     let mut zp = [0u8; 0x100];
     let mut ram = [0u8; 0x600];
@@ -623,18 +642,19 @@ fn run_z80_with_prg(
         }
         bus.mem[0x3E00 + v] = p;
     }
-    // Embed the NES PRG bytes at their NES addresses ($8000-$BFFF) so
-    // the lowered code's PrgRom indexed reads find real bytes. We can
-    // ONLY embed the lower 16 KiB: SMS $C000-$FFFF is where the shadow
-    // 6502 state, zero page, ram mirror, and emulated 6502 stack live.
-    // Embedding NES PRG $C000-$FFFF would overwrite those. PrgRom reads
-    // into NES $C000+ stay unmapped in the harness; routines that depend
-    // on them will diff and surface as Phase D follow-ups.
+    // Lower PRG stays at $8000-$BFFF; final fixed PRG is split around SMS RAM.
     if let Some(prg) = prg {
-        let copy_len = prg.len().min(0xC000 - 0x8000);
-        for (i, b) in prg[..copy_len].iter().enumerate() {
+        let lower = &prg[..prg.len().min(0x4000)];
+        for (i, b) in lower.iter().enumerate() {
             bus.mem[0x8000 + i] = *b;
         }
+        let fixed = if prg.len() == 0x4000 {
+            lower
+        } else {
+            &prg[prg.len() - 0x4000..]
+        };
+        bus.mem[..0x2000].copy_from_slice(&fixed[..0x2000]);
+        bus.mem[0xE000..].copy_from_slice(&fixed[0x2000..]);
     }
     // Seed SMS RAM zp/ram (same bytes as the oracle saw at NES zp/ram).
     let mut zp = [0u8; 0x100];

@@ -42,7 +42,7 @@ pub mod sms_layout {
     pub const PENDING_VDP_REG1: u16 = 0xCB2D;
     pub const CHR_NT_REBUILD_DIRTY: u16 = 0xCB78;
     pub const CHR_VARIANT_FLUSH_PENDING: u16 = 0xCB7F;
-    pub const PPU_WRITE_CONTINUATION: u16 = 0xD3FC;
+    pub const CHR_SCREEN_REBUILD_PENDING: u16 = 0xCA18;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +69,7 @@ pub mod runtime_symbols {
     pub const SBC_A_VIA_SHADOW: &str = "rt_sbc_a";
     pub const CMP_A_VIA_SHADOW: &str = "rt_cmp_a";
     pub const ROUTE_INDEXED: &str = "rt_read_indexed";
+    pub const READ_PRG_HIGH: &str = "rt_read_prg_high";
     pub const READ_PRG_HIGH_INDEXED: &str = "rt_read_prg_high_indexed";
     pub const WRITE_INDEXED: &str = "rt_write_indexed";
     pub const READ_ZP_PTR_Y: &str = "rt_read_zp_ptr_y";
@@ -88,6 +89,8 @@ pub mod runtime_symbols {
     pub const CPY_A: &str = "rt_cpy_a";
     pub const UNRESOLVED_JSR: &str = "rt_unresolved_jsr";
     pub const TRANSLATED_RTS: &str = "rt_translated_rts";
+    pub const TRANSLATED_RETURN_ESCAPE: &str = "rt_translated_return_escape";
+    pub const BANKED_TAIL_DISPATCH: &str = "rt_banked_tail_dispatch";
     pub const BRK: &str = "rt_brk";
     pub const RTI: &str = "rt_rti";
     pub const FAR_CALL: &str = "rt_far_call";
@@ -128,6 +131,7 @@ impl<'p> Default for LowerOptions<'p> {
 #[derive(Debug)]
 pub enum LowerError {
     UnsupportedOp { pc: Option<u16>, reason: String },
+    UnsupportedMapperStore { pc: Option<u16>, reason: String },
     UnstableOpcode { pc: u16, opcode: u8 },
     IndirectAddrNotSupported { mode: String },
 }
@@ -143,6 +147,13 @@ impl std::fmt::Display for LowerError {
             }
             LowerError::UnsupportedOp { pc: None, reason } => {
                 write!(f, "unsupported op: {reason}")
+            }
+            LowerError::UnsupportedMapperStore {
+                pc: Some(pc),
+                reason,
+            } => write!(f, "unsupported mapper store at ${pc:04X}: {reason}"),
+            LowerError::UnsupportedMapperStore { pc: None, reason } => {
+                write!(f, "unsupported mapper store: {reason}")
             }
             LowerError::UnstableOpcode { pc, opcode } => {
                 write!(f, "unstable opcode {opcode:#04X} at ${pc:04X}")
@@ -239,34 +250,55 @@ fn indexed_direct_base(base: u16, region: ir::MemRegion) -> Option<u16> {
     indexed_plain_ram_base(base, region).or_else(|| indexed_plain_prg_low(base, region))
 }
 
-/// H2: direct high-PRG read (NES $C000+): map :data_prg_high into slot 2,
-/// read, restore :data_prg_low. Compile-time constant addressing — no
-/// dispatcher. A := (addr). Clobbers E and native flags.
-fn emit_prg_high_read_direct(p: &mut z80_emit::Program, nes_addr: u16) {
-    p.ld_a_bank_imm("data_prg_high");
-    p.ld_abs_a(0xFFFF);
-    p.ld_a_abs(nes_addr - 0x4000);
-    p.ld_c_a();
-    p.call("rt_restore_prg_window");
-    p.ld_a_c();
+/// Fixed-high PRG read. Mapper 2 must restore the exact selected window through
+/// the guarded helper. NROM has one immutable low window, so retain the proven
+/// inline map/read/restore sequence used by the accepted SMB routes.
+fn emit_prg_high_read_direct(
+    p: &mut z80_emit::Program,
+    nes_addr: u16,
+    guarded_mapper_window: bool,
+) {
+    if guarded_mapper_window {
+        p.ld_hl_imm(nes_addr);
+        p.call(runtime_symbols::READ_PRG_HIGH);
+    } else {
+        p.ld_a_bank_imm("data_prg_high");
+        p.ld_abs_a(0xFFFF);
+        p.ld_a_abs(nes_addr - 0x4000);
+        p.ld_c_a();
+        p.call("rt_restore_prg_window");
+        p.ld_a_c();
+    }
 }
 
-/// H2: direct high-PRG indexed read: A := (base + idx). Clobbers HL/B/C/E
-/// and native flags.
-fn emit_prg_high_indexed_direct(p: &mut z80_emit::Program, base: u16, idx: IdxReg) {
-    p.ld_a_bank_imm("data_prg_high");
-    p.ld_abs_a(0xFFFF);
-    p.ld_hl_imm(base - 0x4000);
-    idx.load_into_a(p);
-    p.add_a_l();
-    p.ld_l_a();
-    p.ld_a_h();
-    p.adc_a_imm0();
-    p.ld_h_a();
-    p.ld_a_hl_ptr();
-    p.ld_c_a();
-    p.call("rt_restore_prg_window");
-    p.ld_a_c();
+/// H2 fixed-high indexed read. See `emit_prg_high_read_direct` for why mapper 2
+/// uses the guarded helper while NROM keeps the accepted inline sequence.
+fn emit_prg_high_indexed_direct(
+    p: &mut z80_emit::Program,
+    base: u16,
+    idx: IdxReg,
+    guarded_mapper_window: bool,
+) {
+    if guarded_mapper_window {
+        p.ld_hl_imm(base);
+        idx.load_into_a(p);
+        p.ld_b_a();
+        p.call(runtime_symbols::READ_PRG_HIGH_INDEXED);
+    } else {
+        p.ld_a_bank_imm("data_prg_high");
+        p.ld_abs_a(0xFFFF);
+        p.ld_hl_imm(base - 0x4000);
+        idx.load_into_a(p);
+        p.add_a_l();
+        p.ld_l_a();
+        p.ld_a_h();
+        p.adc_a_imm0();
+        p.ld_h_a();
+        p.ld_a_hl_ptr();
+        p.ld_c_a();
+        p.call("rt_restore_prg_window");
+        p.ld_a_c();
+    }
 }
 
 /// A := (sms_base + idx). Clobbers HL/B/C and native flags.
@@ -608,6 +640,7 @@ fn emit_ldxy_mem(
     addr: &ir::AddrExpr,
     region: ir::MemRegion,
     target: IdxReg,
+    guarded_mapper_window: bool,
 ) {
     use ir::{AddrExpr, MemRegion};
     // Keep translated LDX/LDY memory loads off the native Z80 stack. The old
@@ -635,14 +668,14 @@ fn emit_ldxy_mem(
             program.ld_a_abs(*a);
         }
         (AddrExpr::Const(a), MemRegion::PrgRom) => {
-            emit_prg_high_read_direct(program, *a);
+            emit_prg_high_read_direct(program, *a, guarded_mapper_window);
         }
         (AddrExpr::AbsIndexedX(base), _) => {
             if let Some(sms) = indexed_direct_base(*base, region) {
                 emit_indexed_read_direct(program, sms, IdxReg::X);
             } else {
                 if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                    emit_prg_high_indexed_direct(program, *base, IdxReg::X);
+                    emit_prg_high_indexed_direct(program, *base, IdxReg::X, guarded_mapper_window);
                 } else {
                     program.ld_hl_imm(indexed_base_to_sms(*base, region));
                     program.ld_a_d();
@@ -656,7 +689,7 @@ fn emit_ldxy_mem(
                 emit_indexed_read_direct(program, sms, IdxReg::Y);
             } else {
                 if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                    emit_prg_high_indexed_direct(program, *base, IdxReg::Y);
+                    emit_prg_high_indexed_direct(program, *base, IdxReg::Y, guarded_mapper_window);
                 } else {
                     program.ld_hl_imm(indexed_base_to_sms(*base, region));
                     program.ld_a_e_reg();
@@ -891,7 +924,6 @@ fn emit_value_src_to_a(p: &mut z80_emit::Program, src: &ir::ValueSrc) {
 /// `runtime/ppu.s`'s `_ppu_w_scroll` body.
 fn emit_ppu_scroll_write_inline(p: &mut z80_emit::Program) {
     use sms_layout::*;
-
     let scroll_y = p.fresh_label("ppu_scroll_y");
     let capture_post = p.fresh_label("ppu_scroll_post");
     let clear_toggle = p.fresh_label("ppu_scroll_clear_toggle");
@@ -899,7 +931,10 @@ fn emit_ppu_scroll_write_inline(p: &mut z80_emit::Program) {
 
     p.comment("inline STA $2005 PPUSCROLL (stackless)");
     p.ld_abs_a(PPU_WRITE_VALUE);
-    p.ld_a_abs(PPU_SCROLL_TOGGLE);
+    // The NES has one shared first/second-write latch for $2005 and $2006.
+    // PPUADDR_TOGGLE is canonical; keep the older scroll shadow synchronized
+    // because runtime diagnostics still expose it.
+    p.ld_a_abs(PPUADDR_TOGGLE);
     p.or_a();
     p.jr_nz(&scroll_y);
 
@@ -908,6 +943,7 @@ fn emit_ppu_scroll_write_inline(p: &mut z80_emit::Program) {
     p.ld_abs_a(PPU_SCROLL_X);
     p.ld_a_imm(1);
     p.ld_abs_a(PPU_SCROLL_TOGGLE);
+    p.ld_abs_a(PPUADDR_TOGGLE);
     p.ld_a_abs(PPU_WRITE_VALUE);
     p.jr(&restore_a);
 
@@ -938,6 +974,7 @@ fn emit_ppu_scroll_write_inline(p: &mut z80_emit::Program) {
     p.label(&clear_toggle);
     p.xor_a();
     p.ld_abs_a(PPU_SCROLL_TOGGLE);
+    p.ld_abs_a(PPUADDR_TOGGLE);
 
     p.label(&restore_a);
     p.ld_a_abs(PPU_WRITE_VALUE);
@@ -956,6 +993,7 @@ fn emit_ppu_ctrl_write_inline(p: &mut z80_emit::Program, chr_ram: bool) {
     let body = p.fresh_label("ppu_ctrl_body");
     let no_nt_flip = p.fresh_label("ppu_ctrl_no_nt_flip");
     let no_tile_flip = p.fresh_label("ppu_ctrl_no_tile_flip");
+    let sprite_base_2000 = p.fresh_label("ppu_ctrl_sprite_base_2000");
     let sprite_base_0000 = p.fresh_label("ppu_ctrl_sprite_base_0000");
     let sprite_base_set = p.fresh_label("ppu_ctrl_sprite_base_set");
     let display_done = p.fresh_label("ppu_ctrl_reg1_display_done");
@@ -1002,9 +1040,14 @@ fn emit_ppu_ctrl_write_inline(p: &mut z80_emit::Program, chr_ram: bool) {
     p.ld_a_c();
     p.ld_abs_a(PPU_CTRL);
 
-    // Mirror NES PPUCTRL bit 3 into SMS VDP register 6.
+    // Mirror NES PPUCTRL bit 3 into SMS VDP register 6 for 8x8 sprites. In
+    // 8x16 mode the NES selects the pattern table per OAM tile bit, so the
+    // CHR-RAM SAT resolver uses its pair cache at the SMS $2000 base.
+    p.bit_a(5);
+    p.jr_nz(&sprite_base_2000);
     p.bit_a(3);
     p.jr_nz(&sprite_base_0000);
+    p.label(&sprite_base_2000);
     p.ld_a_imm(0xff);
     p.jr(&sprite_base_set);
     p.label(&sprite_base_0000);
@@ -1031,7 +1074,7 @@ fn emit_ppu_ctrl_write_inline(p: &mut z80_emit::Program, chr_ram: bool) {
 /// Stores the mask shadow and refreshes the deferred SMS VDP register-1 latch.
 /// The small DI/EI guard mirrors `rt_ppu_write`'s interrupt behavior without a
 /// call frame.
-fn emit_ppu_mask_write_inline(p: &mut z80_emit::Program) {
+fn emit_ppu_mask_write_inline(p: &mut z80_emit::Program, chr_ram: bool) {
     use sms_layout::*;
 
     let was_disabled = p.fresh_label("ppu_mask_was_disabled");
@@ -1040,6 +1083,8 @@ fn emit_ppu_mask_write_inline(p: &mut z80_emit::Program) {
     let sprite_done = p.fresh_label("ppu_mask_reg1_sprite_done");
     let done_no_ei = p.fresh_label("ppu_mask_done_no_ei");
     let restore_a = p.fresh_label("ppu_mask_restore_a");
+    let no_enable_edge = p.fresh_label("ppu_mask_no_enable_edge");
+    let old_render_off = p.fresh_label("ppu_mask_old_render_off");
 
     p.comment("inline STA $2001 PPUMASK (stackless)");
     p.ld_abs_a(PPU_WRITE_VALUE);
@@ -1054,6 +1099,27 @@ fn emit_ppu_mask_write_inline(p: &mut z80_emit::Program) {
     p.ld_abs_a(PPU_IFF_RESTORE);
 
     p.label(&body);
+    if chr_ram {
+        p.ld_a_abs(PPU_MASK);
+        p.and_imm(0x18);
+        p.jr_z(&old_render_off);
+        p.ld_a_abs(PPU_WRITE_VALUE);
+        p.and_imm(0x18);
+        p.jr_nz(&no_enable_edge);
+        p.xor_a();
+        p.ld_abs_a(CHR_SCREEN_REBUILD_PENDING);
+        p.jr(&no_enable_edge);
+        p.label(&old_render_off);
+        p.ld_a_abs(PPU_WRITE_VALUE);
+        p.and_imm(0x18);
+        p.jr_z(&no_enable_edge);
+        p.ld_a_abs(CHR_SCREEN_REBUILD_PENDING);
+        p.cp_imm(0x40);
+        p.jr_nc(&no_enable_edge);
+        p.xor_a();
+        p.ld_abs_a(CHR_SCREEN_REBUILD_PENDING);
+        p.label(&no_enable_edge);
+    }
     p.ld_a_abs(PPU_WRITE_VALUE);
     p.ld_abs_a(PPU_MASK);
     emit_ppu_reg1_latch_inline(p, &display_done, &sprite_done);
@@ -1095,12 +1161,10 @@ fn emit_ppu_reg1_latch_inline(p: &mut z80_emit::Program, display_done: &str, spr
 
 fn emit_ppu_write_callless(program: &mut z80_emit::Program, reg: u8) {
     use runtime_symbols::*;
-    use sms_layout::*;
 
     let cont = program.fresh_label("ppu_write_cont");
     program.ld_b_imm(reg);
     program.ld_hl_label(&cont);
-    program.ld_abs_hl(PPU_WRITE_CONTINUATION);
     program.jp(PPU_WRITE_CONT);
     program.label(&cont);
 }
@@ -1238,7 +1302,12 @@ fn const_addr_to_sms(addr: &ir::AddrExpr, region: ir::MemRegion) -> Option<u16> 
 
 /// Emit instructions that load a memory operand into Z80 B, ready for an
 /// ALU runtime call.  Falls back to a comment for unresolvable modes.
-fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::MemRegion) {
+fn emit_mem_to_b_with_mode(
+    p: &mut z80_emit::Program,
+    addr: &ir::AddrExpr,
+    region: ir::MemRegion,
+    guarded_mapper_window: bool,
+) {
     use ir::{AddrExpr, MemRegion};
     use runtime_symbols::*;
     use sms_layout::*;
@@ -1259,10 +1328,17 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
             p.ld_b_hl_ptr();
         }
         AddrExpr::Const(a) if region == MemRegion::PrgRom => {
-            p.ld_c_a();
-            emit_prg_high_read_direct(p, *a);
-            p.ld_b_a();
-            p.ld_a_c();
+            if guarded_mapper_window {
+                p.ld_c_a();
+                emit_prg_high_read_direct(p, *a, true);
+                p.ld_b_a();
+                p.ld_a_c();
+            } else {
+                p.push_af();
+                emit_prg_high_read_direct(p, *a, false);
+                p.ld_b_a();
+                p.pop_af();
+            }
         }
         AddrExpr::AbsIndexedX(base) => {
             // For indexed reads we must preserve A across the read (the
@@ -1279,12 +1355,17 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
                 p.ld_b_hl_ptr();
                 p.ld_a_c();
             } else if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                // A saved in E-free path: the direct emitter clobbers C/E,
-                // so park the accumulator on the stack around it.
-                p.push_af();
-                emit_prg_high_indexed_direct(p, *base, IdxReg::X);
-                p.ld_b_a();
-                p.pop_af();
+                if guarded_mapper_window {
+                    p.ld_c_a();
+                    emit_prg_high_indexed_direct(p, *base, IdxReg::X, true);
+                    p.ld_b_a();
+                    p.ld_a_c();
+                } else {
+                    p.push_af();
+                    emit_prg_high_indexed_direct(p, *base, IdxReg::X, false);
+                    p.ld_b_a();
+                    p.pop_af();
+                }
             } else {
                 // rt_read_indexed returns the operand in A and clobbers BC, so
                 // do not park the 6502 accumulator in C here. Flag-live ADC/SBC
@@ -1312,12 +1393,17 @@ fn emit_mem_to_b(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::Mem
                 p.ld_b_hl_ptr();
                 p.ld_a_c();
             } else if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                // A saved in E-free path: the direct emitter clobbers C/E,
-                // so park the accumulator on the stack around it.
-                p.push_af();
-                emit_prg_high_indexed_direct(p, *base, IdxReg::Y);
-                p.ld_b_a();
-                p.pop_af();
+                if guarded_mapper_window {
+                    p.ld_c_a();
+                    emit_prg_high_indexed_direct(p, *base, IdxReg::Y, true);
+                    p.ld_b_a();
+                    p.ld_a_c();
+                } else {
+                    p.push_af();
+                    emit_prg_high_indexed_direct(p, *base, IdxReg::Y, false);
+                    p.ld_b_a();
+                    p.pop_af();
+                }
             } else {
                 // rt_read_indexed clobbers BC; preserve the accumulator on the
                 // native stack instead of in C.
@@ -1641,6 +1727,7 @@ fn is_flag_boundary(op: &ir::Op) -> bool {
             | Op::JsrUnknown { .. }
             | Op::JumpEngineCall { .. }
             | Op::Jmp { .. }
+            | Op::ReturnEscape { .. }
             | Op::JmpIndirect { .. }
             | Op::Brk { .. }
             | Op::Php
@@ -1682,6 +1769,7 @@ pub fn routine_incoming_flag_reads(ops: &[ir::Op]) -> u8 {
             Op::Label(_)
                 | Op::BranchIf { .. }
                 | Op::Jmp { .. }
+                | Op::ReturnEscape { .. }
                 | Op::JmpIndirect { .. }
                 | Op::Jsr { .. }
                 | Op::JsrUnknown { .. }
@@ -1801,7 +1889,7 @@ fn flags_live_after(
             // the target routine's RTS returns them to OUR caller as a
             // potential flag return value. Same soundness rule as RTS:
             // treat pending flags as live.
-            Op::Jmp { .. } => return true,
+            Op::Jmp { .. } | Op::ReturnEscape { .. } => return true,
             _ if is_flag_boundary(op) => return true,
             _ => {}
         }
@@ -2458,6 +2546,15 @@ pub fn lower_routine(
     use runtime_symbols::*;
     use sms_layout::*;
 
+    // A profile-less lowering pass must remain conservative. Mapper 0 is the
+    // only layout whose low PRG window is immutable and can use the accepted
+    // inline fixed-high read sequence; mapper 2 restores an exact live bank.
+    let guarded_mapper_window = opts.profile.is_none_or(|profile| profile.rom.mapper != 0);
+    let emit_mem_to_b =
+        |program: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::MemRegion| {
+            emit_mem_to_b_with_mode(program, addr, region, guarded_mapper_window)
+        };
+
     // Pre-compute flag liveness: for each op whose result sets N/Z,
     // is the flag read by a later op before being overwritten?
     // Cuts ~60% of SET_NZ_A invocations on SMB by eliding the call
@@ -2712,6 +2809,18 @@ pub fn lower_routine(
                 });
             }
 
+            Op::UnsupportedMapperStore {
+                pc,
+                mnemonic,
+                reason,
+                ..
+            } => {
+                return Err(LowerError::UnsupportedMapperStore {
+                    pc: Some(*pc),
+                    reason: format!("{mnemonic}: {reason}"),
+                });
+            }
+
             // ------------------------------------------------------------------
             // Loads
             // ------------------------------------------------------------------
@@ -2748,7 +2857,7 @@ pub fn lower_routine(
                         program.ld_a_abs(*a);
                     }
                     (AddrExpr::Const(a), MemRegion::PrgRom) => {
-                        emit_prg_high_read_direct(program, *a);
+                        emit_prg_high_read_direct(program, *a, guarded_mapper_window);
                     }
                     (AddrExpr::AbsIndexedX(0x4016), MemRegion::ApuIo) => {
                         emit_controller_read_indexed_x_inline(program);
@@ -2757,7 +2866,12 @@ pub fn lower_routine(
                         if let Some(sms) = indexed_direct_base(*base, *region) {
                             emit_indexed_read_direct(program, sms, IdxReg::X);
                         } else if *region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                            emit_prg_high_indexed_direct(program, *base, IdxReg::X);
+                            emit_prg_high_indexed_direct(
+                                program,
+                                *base,
+                                IdxReg::X,
+                                guarded_mapper_window,
+                            );
                         } else {
                             program.ld_hl_imm(indexed_base_to_sms(*base, *region));
                             program.ld_a_d();
@@ -2769,7 +2883,12 @@ pub fn lower_routine(
                         if let Some(sms) = indexed_direct_base(*base, *region) {
                             emit_indexed_read_direct(program, sms, IdxReg::Y);
                         } else if *region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                            emit_prg_high_indexed_direct(program, *base, IdxReg::Y);
+                            emit_prg_high_indexed_direct(
+                                program,
+                                *base,
+                                IdxReg::Y,
+                                guarded_mapper_window,
+                            );
                         } else {
                             program.ld_hl_imm(indexed_base_to_sms(*base, *region));
                             program.ld_a_e_reg();
@@ -2841,7 +2960,7 @@ pub fn lower_routine(
             }
 
             Op::LdxMem { addr, region } => {
-                emit_ldxy_mem(program, addr, *region, IdxReg::X);
+                emit_ldxy_mem(program, addr, *region, IdxReg::X, guarded_mapper_window);
             }
 
             Op::LdyImm(v) => {
@@ -2857,38 +2976,41 @@ pub fn lower_routine(
             }
 
             Op::LdyMem { addr, region } => {
-                emit_ldxy_mem(program, addr, *region, IdxReg::Y);
+                emit_ldxy_mem(program, addr, *region, IdxReg::Y, guarded_mapper_window);
             }
 
             // ------------------------------------------------------------------
             // Stores
             // ------------------------------------------------------------------
             Op::StaMem { addr, region } => {
-                // Stores into ROM space are MAPPER register writes for any
-                // addressing mode (CV1's bus-conflict-safe `STA $C000,Y`
-                // bank switch). They must never remap to SMS RAM.
-                if matches!(region, MemRegion::PrgRom | MemRegion::Mapper) {
-                    let idx = match addr {
-                        AddrExpr::AbsIndexedX(_) => Some(IdxReg::X),
-                        AddrExpr::AbsIndexedY(_) => Some(IdxReg::Y),
-                        _ => None,
-                    };
-                    let base = match addr {
-                        AddrExpr::AbsIndexedX(b) | AddrExpr::AbsIndexedY(b) => *b,
-                        AddrExpr::Const(a) => *a,
-                        _ => 0x8000,
+                // PRG-ROM stores are mapper writes only when the indexed base
+                // cannot wrap out of the ROM window. The lifter preserves these
+                // forms so we can pass their exact effective address to runtime.
+                if *region == MemRegion::PrgRom {
+                    let (base, idx) = match addr {
+                        AddrExpr::AbsIndexedX(base) if (0x8000..=0xFF00).contains(base) => {
+                            (*base, IdxReg::X)
+                        }
+                        AddrExpr::AbsIndexedY(base) if (0x8000..=0xFF00).contains(base) => {
+                            (*base, IdxReg::Y)
+                        }
+                        _ => {
+                            return Err(LowerError::UnsupportedMapperStore {
+                                pc: None,
+                                reason: "PRG-ROM STA requires AbsIndexedX/AbsIndexedY with base $8000-$FF00"
+                                    .to_string(),
+                            });
+                        }
                     };
                     program.ld_hl_imm(base);
-                    if let Some(ix) = idx {
-                        program.ld_c_a();
-                        ix.load_into_a(program);
-                        program.add_a_l();
-                        program.ld_l_a();
-                        program.ld_a_h();
-                        program.adc_a_imm0();
-                        program.ld_h_a();
-                        program.ld_a_c();
-                    }
+                    program.ld_c_a();
+                    idx.load_into_a(program);
+                    program.add_a_l();
+                    program.ld_l_a();
+                    program.ld_a_h();
+                    program.adc_a_imm0();
+                    program.ld_h_a();
+                    program.ld_a_c();
                     program.call(MAPPER_WRITE);
                 } else {
                     match (addr, region) {
@@ -2950,12 +3072,32 @@ pub fn lower_routine(
             }
 
             Op::StxMem { addr, region } => {
+                if matches!(
+                    *region,
+                    MemRegion::Mapper | MemRegion::PrgRam | MemRegion::PrgRom
+                ) {
+                    return Err(LowerError::UnsupportedMapperStore {
+                        pc: None,
+                        reason: "STX to expansion space, PRG RAM, or PRG ROM is unsupported"
+                            .to_string(),
+                    });
+                }
                 // STX must NOT modify A. Bracket with push/pop AF, mirror
                 // StaMem's addressing-mode coverage.
                 emit_stxy_mem(program, addr, *region, IdxReg::X);
             }
 
             Op::StyMem { addr, region } => {
+                if matches!(
+                    *region,
+                    MemRegion::Mapper | MemRegion::PrgRam | MemRegion::PrgRom
+                ) {
+                    return Err(LowerError::UnsupportedMapperStore {
+                        pc: None,
+                        reason: "STY to expansion space, PRG RAM, or PRG ROM is unsupported"
+                            .to_string(),
+                    });
+                }
                 emit_stxy_mem(program, addr, *region, IdxReg::Y);
             }
 
@@ -3707,6 +3849,20 @@ pub fn lower_routine(
                 }
             }
 
+            Op::ReturnEscape {
+                target,
+                return_addr,
+            } => {
+                // Some 6502 tail escapes discard their own JSR return bytes
+                // with PLA/PLA, then let a later RTS return through the caller
+                // below. Pop the equivalent translated frame and materialize
+                // those two bytes on the emulated stack before following the
+                // original JMP edge.
+                program.ld_bc_imm(*return_addr);
+                program.call(TRANSLATED_RETURN_ESCAPE);
+                program.translated_tail_jmp(target);
+            }
+
             Op::JmpIndirect { addr } => {
                 program.ld_hl_imm(*addr);
                 program.jp(INDIRECT_JMP);
@@ -3750,7 +3906,14 @@ pub fn lower_routine(
             // On Z80 this must be a software tail bank jump: do not leave a
             // native far-call helper return frame behind. The target's own
             // `RTS` unwinds via the translated-call continuation stack.
-            Op::JumpEngineCall { targets } => {
+            Op::JumpEngineCall {
+                targets,
+                return_target,
+                tail_indices,
+                stack_return_bytes,
+                target_entry_a,
+            } => {
+                let banked_mapper = opts.profile.is_some_and(|p| p.rom.mapper == 2);
                 if targets.is_empty() {
                     program.comment("JumpEngineCall with empty targets — unreachable".to_string());
                     program.call(UNRESOLVED_JSR);
@@ -3767,12 +3930,30 @@ pub fn lower_routine(
                     let n = targets.len();
                     for (i, target) in targets.iter().enumerate() {
                         if i + 1 == n {
-                            program.translated_tail_jmp(target);
+                            emit_jump_engine_target(
+                                program,
+                                i,
+                                target,
+                                return_target.as_deref(),
+                                tail_indices,
+                                *stack_return_bytes,
+                                target_entry_a,
+                                banked_mapper,
+                            );
                         } else {
                             let skip = program.fresh_label("je_skip");
                             program.cp_imm(i as u8);
                             program.jp_nz(&skip);
-                            program.translated_tail_jmp(target);
+                            emit_jump_engine_target(
+                                program,
+                                i,
+                                target,
+                                return_target.as_deref(),
+                                tail_indices,
+                                *stack_return_bytes,
+                                target_entry_a,
+                                banked_mapper,
+                            );
                             program.label(&skip);
                         }
                     }
@@ -3802,7 +3983,10 @@ pub fn lower_routine(
                         let chr_ram = opts.profile.map(|p| p.rom.chr_kib == 0).unwrap_or(false);
                         emit_ppu_ctrl_write_inline(program, chr_ram);
                     }
-                    1 => emit_ppu_mask_write_inline(program),
+                    1 => {
+                        let chr_ram = opts.profile.map(|p| p.rom.chr_kib == 0).unwrap_or(false);
+                        emit_ppu_mask_write_inline(program, chr_ram);
+                    }
                     5 => emit_ppu_scroll_write_inline(program),
                     _ => emit_ppu_write_callless(program, *reg),
                 }
@@ -3870,6 +4054,36 @@ pub fn lower_routine(
     }
 
     Ok(())
+}
+
+fn emit_jump_engine_target(
+    program: &mut z80_emit::Program,
+    index: usize,
+    target: &str,
+    return_target: Option<&str>,
+    tail_indices: &[usize],
+    stack_return_bytes: u8,
+    target_entry_a: &[u8],
+    banked_mapper: bool,
+) {
+    if let Some(&entry_a) = target_entry_a.get(index) {
+        program.ld_a_imm(entry_a);
+    }
+    if let Some(continuation) = return_target
+        && !tail_indices.contains(&index)
+    {
+        program.translated_call_with_continuation(target, continuation, stack_return_bytes);
+    } else if banked_mapper
+        && let Some(addr) = target
+            .strip_prefix("L_")
+            .filter(|hex| !hex.contains('_'))
+            .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+            .filter(|addr| (0x8000..0xC000).contains(addr))
+    {
+        program.translated_banked_tail_dispatch(addr);
+    } else {
+        program.translated_tail_jmp(target);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3962,8 +4176,12 @@ mod tests {
             UNRESOLVED_JSR,
             "rt_unresolved_jsr_flash",
             TRANSLATED_RTS,
+            TRANSLATED_RETURN_ESCAPE,
+            BANKED_TAIL_DISPATCH,
             "rt_translated_call_gate",
             "rt_translated_tail_gate",
+            "rt_read_prg_high",
+            "rt_read_prg_high_indexed",
             BRK,
             RTI,
             FAR_CALL,
@@ -4021,6 +4239,88 @@ mod tests {
         assert!(build.asm.contains("or (hl)"), "inline NZ sequence missing");
     }
 
+    #[test]
+    fn fixed_high_reads_use_guarded_helpers_without_mapper_sequences() {
+        for (op, helper) in [
+            (
+                Op::LdaMem {
+                    addr: AddrExpr::Const(0xC000),
+                    region: MemRegion::PrgRom,
+                },
+                "call rt_read_prg_high",
+            ),
+            (
+                Op::LdaMem {
+                    addr: AddrExpr::AbsIndexedX(0xFF01),
+                    region: MemRegion::PrgRom,
+                },
+                "call rt_read_prg_high_indexed",
+            ),
+            (
+                Op::AdcMem {
+                    addr: AddrExpr::AbsIndexedY(0xC000),
+                    region: MemRegion::PrgRom,
+                },
+                "call rt_read_prg_high_indexed",
+            ),
+        ] {
+            let build = lower_and_finish(vec![op]);
+            let helper_pos = build.asm.find(helper).expect("guarded helper call");
+            assert!(
+                !build.asm[..helper_pos].contains("push af"),
+                "fixed-high operand fetch must not stack AF"
+            );
+            assert!(!build.asm.contains("ld ($FFFF),a"));
+            assert!(!build.asm.contains("data_prg_high"));
+            assert!(!build.asm.contains("rt_restore_prg_window"));
+        }
+    }
+
+    #[test]
+    fn nrom_profile_keeps_inline_fixed_high_reads() {
+        let prof = profile::load_from_str(
+            r#"
+[rom]
+name = "nrom-test"
+mapper = 0
+prg_kib = 32
+chr_kib = 8
+"#,
+        )
+        .unwrap();
+        let opts = LowerOptions {
+            profile: Some(&prof),
+            emit_source_comments: true,
+            routine_flag_reads: None,
+        };
+        let routine = make_routine(
+            "test_routine",
+            vec![
+                Op::LdaMem {
+                    addr: AddrExpr::Const(0xC123),
+                    region: MemRegion::PrgRom,
+                },
+                Op::LdaMem {
+                    addr: AddrExpr::AbsIndexedX(0xC200),
+                    region: MemRegion::PrgRom,
+                },
+            ],
+        );
+        let mut program = z80_emit::Program::new();
+        define_runtime_stubs(&mut program);
+        program.label("rt_restore_prg_window");
+        program.ret();
+        program.label("data_prg_high");
+        program.ret();
+        lower_routine(&mut program, &routine, &opts).unwrap();
+        let build = program.finish().unwrap();
+
+        assert_eq!(build.asm.matches("ld a,:data_prg_high").count(), 2);
+        assert_eq!(build.asm.matches("call rt_restore_prg_window").count(), 2);
+        assert!(!build.asm.contains("call rt_read_prg_high"));
+        assert!(!build.asm.contains("call rt_read_prg_high_indexed"));
+    }
+
     // -------------------------------------------------------------------
     // StaMem ZeroPage — no NZ update
     // -------------------------------------------------------------------
@@ -4036,6 +4336,105 @@ mod tests {
             !build.asm.contains("and $7D"),
             "unexpected inline NZ update"
         );
+    }
+
+    #[test]
+    fn indexed_prg_rom_sta_passes_exact_mapper_address() {
+        let build = lower_and_finish(vec![Op::StaMem {
+            addr: AddrExpr::AbsIndexedY(0xFF00),
+            region: MemRegion::PrgRom,
+        }]);
+        assert!(build.asm.contains("ld hl,$FF00"));
+        assert!(build.asm.contains("add a,l"));
+        assert!(build.asm.contains("adc a,$00"));
+        assert!(build.asm.contains("call rt_mapper_write"));
+    }
+
+    #[test]
+    fn constant_mapper_write_keeps_its_exact_address() {
+        let build = lower_and_finish(vec![Op::MapperWrite {
+            addr: 0x8000,
+            value: ValueSrc::A,
+        }]);
+        assert!(build.asm.contains("ld hl,$8000"));
+        assert!(build.asm.contains("call rt_mapper_write"));
+    }
+
+    #[test]
+    fn invalid_prg_rom_sta_forms_fail_closed_without_8000_fallback() {
+        for addr in [
+            AddrExpr::Const(0x8000),
+            AddrExpr::AbsIndexedX(0xFF01),
+            AddrExpr::IndirectY(0x10),
+        ] {
+            let routine = make_routine(
+                "test_routine",
+                vec![Op::StaMem {
+                    addr,
+                    region: MemRegion::PrgRom,
+                }],
+            );
+            let mut prog = z80_emit::Program::new();
+            let err = lower_routine(&mut prog, &routine, &LowerOptions::default())
+                .expect_err("invalid PRG-ROM STA must fail");
+            assert!(matches!(err, LowerError::UnsupportedMapperStore { .. }));
+        }
+    }
+
+    #[test]
+    fn stx_sty_mapper_related_regions_fail_closed() {
+        for (op, mnemonic) in [
+            (
+                Op::StxMem {
+                    addr: AddrExpr::Const(0x4020),
+                    region: MemRegion::Mapper,
+                },
+                "STX",
+            ),
+            (
+                Op::StyMem {
+                    addr: AddrExpr::Const(0x6000),
+                    region: MemRegion::PrgRam,
+                },
+                "STY",
+            ),
+            (
+                Op::StxMem {
+                    addr: AddrExpr::Const(0x8000),
+                    region: MemRegion::PrgRom,
+                },
+                "STX",
+            ),
+        ] {
+            let routine = make_routine("test_routine", vec![op]);
+            let mut prog = z80_emit::Program::new();
+            let err = lower_routine(&mut prog, &routine, &LowerOptions::default())
+                .expect_err("mapper-related STX/STY must fail");
+            assert!(
+                matches!(err, LowerError::UnsupportedMapperStore { reason, .. } if reason.starts_with(mnemonic))
+            );
+        }
+    }
+
+    #[test]
+    fn structured_mapper_store_op_returns_structured_error() {
+        let routine = make_routine(
+            "test_routine",
+            vec![Op::UnsupportedMapperStore {
+                pc: 0x8123,
+                opcode: 0x8D,
+                mnemonic: "STA".to_string(),
+                reason: "expansion space".to_string(),
+            }],
+        );
+        let mut prog = z80_emit::Program::new();
+        let err = lower_routine(&mut prog, &routine, &LowerOptions::default())
+            .expect_err("mapper-store violation must fail");
+        assert!(matches!(
+            err,
+            LowerError::UnsupportedMapperStore { pc: Some(0x8123), reason }
+                if reason.contains("STA") && reason.contains("expansion space")
+        ));
     }
 
     // -------------------------------------------------------------------
@@ -4092,6 +4491,55 @@ mod tests {
     }
 
     #[test]
+    fn ppu_scroll_uses_the_shared_2005_2006_latch() {
+        let build = lower_and_finish(vec![Op::PpuWrite {
+            reg: 5,
+            value: ValueSrc::A,
+        }]);
+        assert!(build.asm.contains("ld a,($CB0E)"));
+        assert!(build.asm.matches("ld ($CB0E),a").count() >= 2);
+        assert!(build.asm.contains("ld ($CB0B),a"));
+    }
+
+    #[test]
+    fn chr_ram_ppumask_inline_damps_full_screen_rebuilds() {
+        let prof = profile::load_from_str(
+            r#"
+[rom]
+name = "chr-ram-test"
+mapper = 0
+prg_kib = 32
+chr_kib = 0
+"#,
+        )
+        .unwrap();
+        let routine = make_routine(
+            "test_routine",
+            vec![Op::PpuWrite {
+                reg: 1,
+                value: ValueSrc::A,
+            }],
+        );
+        let mut program = z80_emit::Program::new();
+        define_runtime_stubs(&mut program);
+        program.org(0x0000);
+        lower_routine(
+            &mut program,
+            &routine,
+            &LowerOptions {
+                profile: Some(&prof),
+                ..LowerOptions::default()
+            },
+        )
+        .unwrap();
+        let build = program.finish().unwrap();
+
+        assert!(build.asm.contains("ld a,($CA18)"));
+        assert!(build.asm.contains("cp $40"));
+        assert!(build.asm.contains("ld ($CA18),a"));
+    }
+
+    #[test]
     fn ppu_write_reg6_a() {
         let build = lower_and_finish(vec![Op::PpuWrite {
             reg: 6,
@@ -4100,6 +4548,7 @@ mod tests {
         // ld b,$06 = 06 06
         assert!(build.bytes.windows(2).any(|w| w == [0x06, 0x06]));
         assert!(build.asm.contains("jp rt_ppu_write_cont"));
+        assert!(!build.asm.contains("ld ($D3FC),hl"));
         assert!(!build.asm.contains("call rt_ppu_write"));
     }
 
@@ -4144,8 +4593,16 @@ mod tests {
     // OamDmaWrite
     // -------------------------------------------------------------------
     #[test]
-    fn oam_dma_write_a() {
+    fn oam_dma_write_from_all_registers() {
         let build = lower_and_finish(vec![Op::OamDmaWrite { value: ValueSrc::A }]);
+        assert!(build.asm.contains("call rt_oam_dma"));
+
+        let build = lower_and_finish(vec![Op::OamDmaWrite { value: ValueSrc::X }]);
+        assert!(build.asm.contains("ld a,d"));
+        assert!(build.asm.contains("call rt_oam_dma"));
+
+        let build = lower_and_finish(vec![Op::OamDmaWrite { value: ValueSrc::Y }]);
+        assert!(build.asm.contains("ld a,e"));
         assert!(build.asm.contains("call rt_oam_dma"));
     }
 
@@ -4468,6 +4925,10 @@ mod tests {
             "test_routine",
             vec![Op::JumpEngineCall {
                 targets: vec!["L_a".to_string(), "L_b".to_string()],
+                return_target: None,
+                tail_indices: Vec::new(),
+                stack_return_bytes: 0,
+                target_entry_a: Vec::new(),
             }],
         );
         let mut prog = z80_emit::Program::new();
@@ -4485,6 +4946,75 @@ mod tests {
         assert!(!test_asm.contains("call rt_far_call"));
         assert!(!test_asm.contains("ret"));
         assert!(!test_asm.contains("call rt_far_jmp"));
+    }
+
+    #[test]
+    fn mapper_jump_engine_uses_live_bank_for_unqualified_window_target() {
+        let prof = profile::load_from_str(
+            r#"
+[rom]
+name = "uxrom-test"
+mapper = 2
+prg_kib = 128
+chr_kib = 0
+"#,
+        )
+        .unwrap();
+        let opts = LowerOptions {
+            profile: Some(&prof),
+            emit_source_comments: true,
+            routine_flag_reads: None,
+        };
+        let routine = make_routine(
+            "test_routine",
+            vec![Op::JumpEngineCall {
+                targets: vec!["L_8123".to_string()],
+                return_target: None,
+                tail_indices: Vec::new(),
+                stack_return_bytes: 0,
+                target_entry_a: vec![0x81],
+            }],
+        );
+        let mut prog = z80_emit::Program::new();
+        define_runtime_stubs(&mut prog);
+        prog.org(0x0000);
+        lower_routine(&mut prog, &routine, &opts).unwrap();
+        let build = prog.finish().unwrap();
+
+        assert!(build.asm.contains("ld a,$81"));
+        assert!(build.asm.contains("ld bc,$8123"));
+        assert!(build.asm.contains("jp rt_banked_tail_dispatch"));
+        assert!(!build.asm.contains("jp rt_translated_tail_gate"));
+    }
+
+    #[test]
+    fn stack_aware_jump_engine_emits_continuation_and_tail_exception() {
+        let routine = make_routine(
+            "test_routine",
+            vec![Op::JumpEngineCall {
+                targets: vec!["L_returning".to_string(), "L_tail".to_string()],
+                return_target: Some("L_cont".to_string()),
+                tail_indices: vec![1],
+                stack_return_bytes: 2,
+                target_entry_a: vec![0xAA, 0xBB],
+            }],
+        );
+        let mut prog = z80_emit::Program::new();
+        define_runtime_stubs(&mut prog);
+        prog.org(0x0000);
+        for label in ["L_returning", "L_tail", "L_cont"] {
+            prog.label(label);
+            prog.ret();
+        }
+        lower_routine(&mut prog, &routine, &LowerOptions::default()).unwrap();
+        let build = prog.finish().unwrap();
+
+        assert!(build.asm.contains("ld a,$AA"));
+        assert!(build.asm.contains("ld a,$BB"));
+        assert!(build.asm.contains("ld bc,L_cont"));
+        assert!(build.asm.contains("or $40"));
+        assert!(build.asm.contains("jp L_returning"));
+        assert!(build.asm.contains("jp L_tail"));
     }
 
     // -------------------------------------------------------------------
@@ -4655,6 +5185,21 @@ runtime_label = "rt_replacement"
         let build = lower_and_finish(vec![Op::Rti]);
         assert!(build.asm.contains("jp rt_rti"));
         assert!(!build.asm.contains("jp rt_translated_rts"));
+    }
+
+    #[test]
+    fn return_escape_pops_translated_frame_before_tail_jump() {
+        let build = lower_and_finish(vec![
+            Op::ReturnEscape {
+                target: "escape_target".to_string(),
+                return_addr: 0xEA79,
+            },
+            Op::Label("escape_target".to_string()),
+        ]);
+        assert!(build.asm.contains("ld bc,$EA79"));
+        assert!(build.asm.contains("call rt_translated_return_escape"));
+        assert!(build.asm.contains("ld bc,escape_target"));
+        assert!(build.asm.contains("jp rt_translated_tail_gate"));
     }
 
     // -------------------------------------------------------------------

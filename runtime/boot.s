@@ -15,6 +15,7 @@
 ;   $CA10        Beacon: first translated NMI
 ;   $CA11        Translated-NMI nesting depth
 ;   $CA12        Presentation-in-progress guard
+;   $CA18        CHR-RAM off-render nametable-write count / rebuild pending
 ;   $CC00-$D2FF  SMS visible nametable high-byte shadow ($3700-$3DFF + $9500)
 ;   $D300-$D3FB  Translated-call continuation frames (dispatch.s)
 ;   $D500-$D5FF  Translated-call continuation segment 1 (dispatch.s)
@@ -57,6 +58,10 @@
 ;   $D477-$D478  IRQ saved AF (keeps one word off native stack after save)
 ;   $D479-$D47C  rt_oam_dma AF/HL save (sat.s)
 ;   $D47D-$D47E  Far slot-1 bank stack next-free pointer (dispatch.s)
+;   $D47F        Slot-2 transaction guard depth (maximum 2)
+;   $CA19-$CA1C Slot-2 guard frame 0: IFF2, $FFFC, $FFFF, $CB62
+;   $CA1D-$CA1F/$D3FF Slot-2 guard frame 1: IFF2, $FFFC, $FFFF, $CB62
+;   $D3FC-$D3FE  PPU continuation pointer/mode; $D3FF is guard frame-1 CB62
 ;   $D4C0-$D4FF  Far slot-1 bank/continuation stack entries (dispatch.s)
 ;   $CB80-$CBFF  Raw mirrored NES attribute shadow (2 CIRAM pages × 64 bytes)
 ;   $CB13-$CB1F  13-byte scratch ("temp w")
@@ -67,8 +72,17 @@
 ;   stack writes must never reach those bytes or they reprogram banking under
 ;   the running code.
 
-.define VDP_R0_BASE            $66   ; Mode 4 + top-row hscroll lock + left blank
-.define VDP_R0_LINE_IRQ_ON     $76   ; VDP_R0_BASE + IE1 line IRQ enable
+.define VDP_R0_BASE            $46   ; Mode 4 + top-row hscroll lock
+.define VDP_R0_LINE_IRQ_ON     $56   ; VDP_R0_BASE + IE1 line IRQ enable
+.define RT_GUARD_OVERFLOW       $F1
+.define RT_GUARD_UNDERFLOW      $F2
+.define RT_GUARD_CORRUPT        $F3
+.define RT_MAPPER_BAD_ADDRESS   $F4
+.define RT_MAPPER_NESTED        $F5
+.define RT_MAPPER_COMMIT_BAD    $F6
+.define RT_PRG_HIGH_BAD_ADDRESS $F7
+.define RT_PRESENT_SLOT2_BAD    $F8
+.define RT_BTD_SLOT2_BAD        $F9
 
 .bank 0 slot 0
 .org $0000
@@ -217,6 +231,8 @@ boot_main:
   ld  ($ca10), a            ; beacon: first-NMI
   ld  ($ca11), a            ; translated-NMI nesting depth
   ld  ($ca12), a            ; presentation-in-progress guard
+  ld  ($ca18), a            ; no CHR-RAM full-screen rebuild pending
+  ld  ($d47f), a            ; slot-2 transaction guard depth
   ld  a, $ff
   ld  ($ca13), a            ; last-materialized BG table (force first flush)
   ld  hl, $d4c0
@@ -382,6 +398,20 @@ boot_main:
   xor a
   ld  ($ca00), a            ; bg variant pool next-free slot = 0
   ld  ($ca07), a            ; bg variant ring has not wrapped yet
+.ifdef NES_CHR_RAM
+  ; 8x16 sprite cache: tile key per OAM entry at $D400 and attribute key per
+  ; entry at $D480. $D400 is shared with the ordinary 8x8 resolved table, so
+  ; the resolver invalidates it again whenever 8x16 mode is re-entered.
+  ld  hl, $d400
+  ld  bc, $0040
+  ld  a, $ff
+  call mem_fill
+  ld  hl, $d480
+  ld  bc, $0040
+  call mem_fill
+  xor a
+  ld  ($d468), a            ; last SAT mode was 8x8
+.endif
 
   ; 12. Enable display and frame interrupts (VDP reg 1).
   ;     %11110000: display on, frame INT enabled, M1=1 (224-line mode),
@@ -552,6 +582,17 @@ irq_handler:
   push hl
   push af
   push bc
+.ifndef NES_PRG_BANK_BASE
+  ; NROM fixed-high reads temporarily map data_prg_high inline. An IRQ may land
+  ; between that map and its restore, so preserve the interrupted slot-2 bank
+  ; on the re-entrant native stack and present/NMI from the canonical low bank.
+  ; Mapper 2 cannot use this shortcut: its guarded transactions also own SRAM
+  ; control and the live NES-bank shadow.
+  ld  a, ($ffff)
+  push af
+  ld  a, :data_prg_low
+  ld  ($ffff), a
+.endif
   ld  a, $01
   ld  ($cb7e), a            ; in-handler flag (nesting-aware ei gating)
 .ifdef NES_CHR_RAM
@@ -592,6 +633,10 @@ _hb_done:
   ld  d, a
   ld  a, ($cb01)
   ld  e, a
+.ifndef NES_PRG_BANK_BASE
+  pop af
+  ld  ($ffff), a
+.endif
   pop bc
   pop af
   pop hl
@@ -674,6 +719,49 @@ _present_wait_vblank:
   inc a
   ld  ($ca31), a             ; exited vblank wait
 .endif
+  ; Single outer presentation invariant: all materializer/SAT slot-2 traffic
+  ; runs under DI with no slot-2 guard and the current PRG window visible.
+  ; Do not add per-byte checks below this boundary.
+  ld  a, i
+  jp  pe, _present_slot2_bad
+  ld  a, ($d47f)
+  or  a
+  jp  nz, _present_slot2_bad
+  ld  a, ($fffc)
+  or  a
+  jp  nz, _present_slot2_bad
+  ld  b, a
+  ld  a, ($ffff)
+.ifdef NES_PRG_BANK_BASE
+  ld  b, a
+  ld  a, ($cb62)
+  and NES_PRG_BANK_MASK
+  add a, NES_PRG_BANK_BASE
+  cp  b
+.else
+  cp  :data_prg_low
+.endif
+  jp  nz, _present_slot2_bad
+  ; A CHR-RAM game can replace an entire screen in raw CIRAM while rendering
+  ; is disabled. Rebuild the folded SMS nametable before applying the deferred
+  ; display-enable write, so no stale cells from the previous scene are shown.
+.ifdef NES_CHR_RAM
+  ld  a, ($ca18)
+  or  a
+  jr  z, _present_no_screen_rebuild
+  ld  a, ($cb09)
+  and $18
+  jr  z, _present_no_screen_rebuild
+  xor a
+  ld  ($ca18), a
+.ifndef DIAG_NO_PROJECTION
+  ; A complete screen build replaces every visible cell. Reclaim variant slots
+  ; owned by the previous scene before projecting the new working set.
+  call rt_bg_reset_variant_cache
+  call rt_nt_materialize_window
+.endif
+_present_no_screen_rebuild:
+.endif
   ; Apply a deferred PPUMASK-driven VDP reg-1 write (see ppu.s): display
   ; enable changes only ever land here, inside VBlank.
   ld  a, ($cb2d)
@@ -712,18 +800,12 @@ _present_no_reg1:
   jr  z, _present_no_fcflush
   ld  (hl), a
   push de
-  ld  hl, $d600
-  ld  de, $d601
-  ld  bc, $03ff
-  ld  (hl), $ff
-  ldir
-  ; The invalidation alone only helps cells that get REWRITTEN; a
-  ; static screen (CV1 logo/title) keeps stale patterns forever.
-  ; Re-project the visible window so variants regenerate against the
-  ; newly-selected pattern table.
-.ifndef DIAG_NO_PROJECTION
-  call rt_nt_materialize_window
-.endif
+  ; PPUCTRL selects the source table globally. Keep every existing variant's
+  ; slot number (and therefore every nametable reference) stable, and refresh
+  ; only its pixels from the newly presented table. A full reset/reprojection
+  ; here renumbered slots and took far beyond one real VBlank, exposing torn
+  ; columns even though the final trace framebuffer looked coherent.
+  call rt_bg_refresh_variant_cache
   pop de
 .ifdef DIAG_WILDJUMP
   ld  a, $02
@@ -767,6 +849,15 @@ _irq_proj_go:
   call vbuf_flush
   xor a
   ld  ($ca12), a            ; presentation complete (re-entrancy guard clear)
+  jp  _present_skip_all
+
+_present_slot2_bad:
+  di
+  ld  a, RT_PRESENT_SLOT2_BAD
+  ld  ($cb1d), a
+_present_slot2_halt:
+  halt
+  jr  _present_slot2_halt
 
 _present_skip_all:
   ; Start each translated NMI before the approximated sprite-0 hit point.
@@ -956,6 +1047,10 @@ _pace_done:
   ld  e, a
   xor a
   ld  ($cb7e), a            ; leaving handler
+.ifndef NES_PRG_BANK_BASE
+  pop af
+  ld  ($ffff), a            ; resume an interrupted inline fixed-high read
+.endif
   pop bc
   pop af
   pop hl
@@ -975,6 +1070,10 @@ _irq_line_scroll_split:
   ld  e, a
   xor a
   ld  ($cb7e), a            ; leaving handler
+.ifndef NES_PRG_BANK_BASE
+  pop af
+  ld  ($ffff), a
+.endif
   pop bc
   pop af
   pop hl
@@ -1140,6 +1239,109 @@ _disable_line_irq:
   out ($bf), a
   ret
 
+.ends
+
+; ─── Slot-2 transaction guard ────────────────────────────────────────────────
+; Cold outer-transaction guard for routines that temporarily map slot 2.  The
+; hot loops remain inline; callers enter once and exit once.  Frames save IFF2,
+; SRAM control ($FFFC), slot-2 bank ($FFFF), and the NES PRG-bank shadow
+; ($CB62).  Preserves BC/DE/HL, clobbers AF, and uses no native pushes.
+.section "slot2_guard" free
+rt_slot2_guard_enter:
+  ld  a, i
+  di
+  ld  a, ($d47f)
+  jp  po, _slot2_guard_enter_di
+  cp  2
+  jp  nc, _slot2_guard_overflow
+  or  a
+  jr  nz, _slot2_guard_enter_1_ei
+  ld  a, $01
+  ld  ($ca19), a
+  jr  _slot2_guard_enter_snapshot_0
+_slot2_guard_enter_1_ei:
+  ld  a, $01
+  ld  ($ca1d), a
+  jr  _slot2_guard_enter_snapshot_1
+_slot2_guard_enter_di:
+  cp  2
+  jp  nc, _slot2_guard_overflow
+  or  a
+  jr  nz, _slot2_guard_enter_1_di
+  xor a
+  ld  ($ca19), a
+  jr  _slot2_guard_enter_snapshot_0
+_slot2_guard_enter_1_di:
+  xor a
+  ld  ($ca1d), a
+  jr  _slot2_guard_enter_snapshot_1
+_slot2_guard_enter_snapshot_0:
+  ld  a, ($fffc)
+  ld  ($ca1a), a
+  ld  a, ($ffff)
+  ld  ($ca1b), a
+  ld  a, ($cb62)
+  ld  ($ca1c), a
+  jr  _slot2_guard_enter_done
+_slot2_guard_enter_snapshot_1:
+  ld  a, ($fffc)
+  ld  ($ca1e), a
+  ld  a, ($ffff)
+  ld  ($ca1f), a
+  ld  a, ($cb62)
+  ld  ($d3ff), a
+_slot2_guard_enter_done:
+  ld  a, ($d47f)
+  inc a
+  ld  ($d47f), a
+  ret
+
+; Exact exit: forces ROM visibility before restoring the saved slot-2 state;
+; returns saved IFF2 in A and deliberately leaves interrupts disabled.
+rt_slot2_guard_exit_exact_di:
+  ld  a, ($d47f)
+  or  a
+  jp  z, _slot2_guard_underflow
+  cp  3
+  jp  nc, _slot2_guard_corrupt
+  dec a
+  ld  ($d47f), a
+  jr  nz, _slot2_guard_exit_1
+  xor a
+  ld  ($fffc), a
+  ld  a, ($ca1c)
+  ld  ($cb62), a
+  ld  a, ($ca1b)
+  ld  ($ffff), a
+  ld  a, ($ca1a)
+  ld  ($fffc), a
+  ld  a, ($ca19)
+  ret
+_slot2_guard_exit_1:
+  xor a
+  ld  ($fffc), a
+  ld  a, ($d3ff)
+  ld  ($cb62), a
+  ld  a, ($ca1f)
+  ld  ($ffff), a
+  ld  a, ($ca1e)
+  ld  ($fffc), a
+  ld  a, ($ca1d)
+  ret
+_slot2_guard_overflow:
+  ld  a, RT_GUARD_OVERFLOW
+  jr  _slot2_guard_trap
+_slot2_guard_underflow:
+  ld  a, RT_GUARD_UNDERFLOW
+  jr  _slot2_guard_trap
+_slot2_guard_corrupt:
+  ld  a, RT_GUARD_CORRUPT
+_slot2_guard_trap:
+  di
+  ld  ($cb1d), a
+_slot2_guard_halt:
+  halt
+  jr  _slot2_guard_halt
 .ends
 
 ; ─── mem_fill ─────────────────────────────────────────────────────────────────

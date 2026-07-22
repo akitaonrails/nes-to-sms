@@ -292,6 +292,14 @@ pub enum Op {
     Jmp {
         target: String,
     },
+    /// Tail jump that first discards one translated-call continuation and
+    /// recreates the corresponding two 6502 JSR return bytes. The destination
+    /// is expected to consume those bytes as stack data before returning
+    /// through the next caller.
+    ReturnEscape {
+        target: String,
+        return_addr: u16,
+    },
     JmpIndirect {
         addr: u16,
     },
@@ -307,6 +315,10 @@ pub enum Op {
     /// stack having the return address (which JumpEngine pops as data).
     JumpEngineCall {
         targets: Vec<String>,
+        return_target: Option<String>,
+        tail_indices: Vec<usize>,
+        stack_return_bytes: u8,
+        target_entry_a: Vec<u8>,
     },
     Rts,
     Rti,
@@ -332,6 +344,15 @@ pub enum Op {
     MapperWrite {
         addr: u16,
         value: ValueSrc,
+    },
+    /// Store that targets mapper-adjacent space with unsupported semantics.
+    /// This is distinct from generic unsupported instructions so pipeline
+    /// generation can fail closed rather than emit a diagnostic stub.
+    UnsupportedMapperStore {
+        pc: u16,
+        opcode: u8,
+        mnemonic: String,
+        reason: String,
     },
     /// RTS used as a computed jump (the 6502 `PHA hi / PHA lo / RTS`
     /// dispatch idiom): pops two bytes from the emulated 6502 stack and
@@ -360,6 +381,24 @@ pub enum Op {
         pc: u16,
         opcode: u8,
     },
+}
+
+impl Op {
+    /// True when execution cannot fall through to the next translated op.
+    pub fn is_hard_terminator(&self) -> bool {
+        matches!(
+            self,
+            Op::Jmp { .. }
+                | Op::ReturnEscape { .. }
+                | Op::JmpIndirect { .. }
+                | Op::JumpEngineCall { .. }
+                | Op::Rts
+                | Op::Rti
+                | Op::RtsDispatch
+                | Op::Brk { .. }
+                | Op::Jam { .. }
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +435,8 @@ pub struct LiftOptions {
     /// `JSR` at one of these PCs, it substitutes a `JumpEngineCall`
     /// op carrying the listed targets instead of a plain `Jsr`.
     pub jump_engine_sites: Vec<JumpEngineSite>,
+    /// Profile-qualified tail edges that escape one translated call frame.
+    pub return_escape_sites: Vec<ReturnEscapeSite>,
     /// Banked-window lifting (mapper plan M1): when set (e.g. "b0_"),
     /// every label generated for an address inside $8000-$BFFF becomes
     /// `L_b0_XXXX` — the routine's identity is (bank, addr). Fixed-bank
@@ -414,6 +455,36 @@ pub struct LiftOptions {
 pub struct JumpEngineSite {
     pub caller: u16,
     pub targets: Vec<String>,
+    pub return_target: Option<String>,
+    pub tail_indices: Vec<usize>,
+    pub stack_return_bytes: u8,
+    pub target_entry_a: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReturnEscapeSite {
+    pub caller: u16,
+    pub target: u16,
+    pub return_addr: u16,
+}
+
+impl JumpEngineSite {
+    fn table_start(&self) -> usize {
+        usize::from(self.caller) + 3
+    }
+
+    fn table_end(&self) -> Option<usize> {
+        self.targets
+            .len()
+            .checked_mul(2)
+            .and_then(|len| self.table_start().checked_add(len))
+    }
+
+    fn contains_table_byte(&self, pc: u16) -> bool {
+        let pc = usize::from(pc);
+        self.table_end()
+            .is_some_and(|end| pc >= self.table_start() && pc < end)
+    }
 }
 
 impl Default for LiftOptions {
@@ -423,6 +494,7 @@ impl Default for LiftOptions {
             end: 0,
             entry_name: String::new(),
             jump_engine_sites: Vec::new(),
+            return_escape_sites: Vec::new(),
             window_label_prefix: None,
             extra_label_pcs: Vec::new(),
         }
@@ -472,7 +544,11 @@ pub fn mark_rts_dispatch(ops: &mut [Op]) -> usize {
             Op::Pha => unmatched += 1,
             Op::Pla => unmatched -= 1,
             // Block boundaries reset the local push balance.
-            Op::Label(_) | Op::BranchIf { .. } | Op::Jmp { .. } | Op::Jsr { .. } => unmatched = 0,
+            Op::Label(_)
+            | Op::BranchIf { .. }
+            | Op::Jmp { .. }
+            | Op::ReturnEscape { .. }
+            | Op::Jsr { .. } => unmatched = 0,
             Op::Rts => {
                 if unmatched >= 2 {
                     *op = Op::RtsDispatch;
@@ -537,6 +613,20 @@ fn lift_insn(
     _internal_targets: &HashSet<u16>,
 ) -> Vec<Op> {
     let pc = insn.pc;
+
+    if opts
+        .return_escape_sites
+        .iter()
+        .any(|site| site.caller == pc)
+        && !(insn.mnemonic == Mnemonic::JMP && insn.mode == AddrMode::Absolute)
+    {
+        return vec![Op::Unsupported {
+            pc,
+            opcode: insn.opcode,
+            mnemonic: format!("{:?}", insn.mnemonic),
+            reason: "return_escape caller is not an absolute JMP".to_string(),
+        }];
+    }
 
     // Helper: record a label (internal or external)
     let record_target =
@@ -734,6 +824,23 @@ fn lift_insn(
             AddrMode::Absolute => {
                 if let Operand::Addr(target) = insn.operand {
                     let lbl = record_target(target, branch_labels, external_calls);
+                    if let Some(site) = opts.return_escape_sites.iter().find(|s| s.caller == pc) {
+                        if site.target != target {
+                            return vec![Op::Unsupported {
+                                pc,
+                                opcode: insn.opcode,
+                                mnemonic: "JMP".to_string(),
+                                reason: format!(
+                                    "return_escape target mismatch: profile ${:04X}, ROM ${target:04X}",
+                                    site.target
+                                ),
+                            }];
+                        }
+                        return vec![Op::ReturnEscape {
+                            target: lbl,
+                            return_addr: site.return_addr,
+                        }];
+                    }
                     return vec![Op::Jmp { target: lbl }];
                 }
             }
@@ -758,8 +865,22 @@ fn lift_insn(
                 // bypassing the 6502-stack-trick the real JumpEngine
                 // routine would use.
                 if let Some(site) = opts.jump_engine_sites.iter().find(|s| s.caller == pc) {
+                    for target in &site.targets {
+                        if !external_calls.contains(target) {
+                            external_calls.push(target.clone());
+                        }
+                    }
+                    if let Some(return_target) = &site.return_target
+                        && !external_calls.contains(return_target)
+                    {
+                        external_calls.push(return_target.clone());
+                    }
                     return vec![Op::JumpEngineCall {
                         targets: site.targets.clone(),
+                        return_target: site.return_target.clone(),
+                        tail_indices: site.tail_indices.clone(),
+                        stack_return_bytes: site.stack_return_bytes,
+                        target_entry_a: site.target_entry_a.clone(),
                     }];
                 }
                 let lbl = record_target(target, branch_labels, external_calls);
@@ -906,16 +1027,33 @@ fn lift_insn(
                         // targets to the APU shim at runtime.
                         vec![Op::StaMem { addr, region }]
                     }
-                    MemRegion::Mapper | MemRegion::PrgRam => {
+                    MemRegion::PrgRom => {
                         if let Some(ca) = addr.const_addr() {
                             vec![Op::MapperWrite {
                                 addr: ca,
                                 value: ValueSrc::A,
                             }]
                         } else {
+                            // Keep indexed ROM stores intact: lowering computes
+                            // their exact effective mapper-register address.
                             vec![Op::StaMem { addr, region }]
                         }
                     }
+                    MemRegion::Mapper | MemRegion::PrgRam => vec![Op::UnsupportedMapperStore {
+                        pc,
+                        opcode: insn.opcode,
+                        mnemonic: "STA".to_string(),
+                        reason: match region {
+                            MemRegion::Mapper => {
+                                "STA to expansion space ($4020-$5FFF) is not a supported UxROM mapper register"
+                            }
+                            MemRegion::PrgRam => {
+                                "STA to PRG RAM ($6000-$7FFF) is not a supported UxROM mapper register"
+                            }
+                            _ => unreachable!(),
+                        }
+                        .to_string(),
+                    }],
                     _ => vec![Op::StaMem { addr, region }],
                 };
             }
@@ -934,6 +1072,16 @@ fn lift_insn(
                         reg: (base & 0x07) as u8,
                         value: ValueSrc::X,
                     }],
+                    MemRegion::OamDma => vec![Op::OamDmaWrite { value: ValueSrc::X }],
+                    MemRegion::Mapper | MemRegion::PrgRam | MemRegion::PrgRom => {
+                        vec![Op::UnsupportedMapperStore {
+                            pc,
+                            opcode: insn.opcode,
+                            mnemonic: "STX".to_string(),
+                            reason: "STX to expansion space, PRG RAM, or PRG ROM is unsupported"
+                                .to_string(),
+                        }]
+                    }
                     _ => vec![Op::StxMem { addr, region }],
                 };
             }
@@ -952,6 +1100,16 @@ fn lift_insn(
                         reg: (base & 0x07) as u8,
                         value: ValueSrc::Y,
                     }],
+                    MemRegion::OamDma => vec![Op::OamDmaWrite { value: ValueSrc::Y }],
+                    MemRegion::Mapper | MemRegion::PrgRam | MemRegion::PrgRom => {
+                        vec![Op::UnsupportedMapperStore {
+                            pc,
+                            opcode: insn.opcode,
+                            mnemonic: "STY".to_string(),
+                            reason: "STY to expansion space, PRG RAM, or PRG ROM is unsupported"
+                                .to_string(),
+                        }]
+                    }
                     _ => vec![Op::StyMem { addr, region }],
                 };
             }
@@ -1092,6 +1250,11 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
 
     // ---- Pass 1: collect internal branch targets ----
     let mut internal_targets: HashSet<u16> = HashSet::new();
+    let is_jump_engine_table_byte = |pc: u16| {
+        opts.jump_engine_sites
+            .iter()
+            .any(|site| site.contains_table_byte(pc))
+    };
     {
         let mut pc = opts.start;
         while pc < opts.end {
@@ -1100,7 +1263,10 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
 
             if insn.is_branch() {
                 if let Some(target) = insn.branch_target() {
-                    if target >= opts.start && target < opts.end {
+                    if target >= opts.start
+                        && target < opts.end
+                        && !is_jump_engine_table_byte(target)
+                    {
                         internal_targets.insert(target);
                     }
                 }
@@ -1108,10 +1274,30 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
             // Also mark JMP absolute targets inside range
             if insn.mnemonic == Mnemonic::JMP {
                 if let (AddrMode::Absolute, Operand::Addr(target)) = (insn.mode, insn.operand) {
-                    if target >= opts.start && target < opts.end {
+                    if target >= opts.start
+                        && target < opts.end
+                        && !is_jump_engine_table_byte(target)
+                    {
                         internal_targets.insert(target);
                     }
                 }
+            }
+
+            if insn.mnemonic == Mnemonic::JSR
+                && insn.mode == AddrMode::Absolute
+                && let Some(site) = opts.jump_engine_sites.iter().find(|site| site.caller == pc)
+            {
+                let Some(table_end) = site.table_end() else {
+                    break;
+                };
+                if table_end >= usize::from(opts.end) {
+                    break;
+                }
+                let Ok(table_end) = u16::try_from(table_end) else {
+                    break;
+                };
+                pc = table_end;
+                continue;
             }
 
             pc = pc.wrapping_add(insn.size as u16);
@@ -1131,7 +1317,7 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
     // cross-routine PCs the pipeline asked us to expose as labels.
     let mut all_targets = internal_targets.clone();
     for &pc in &opts.extra_label_pcs {
-        if pc >= opts.start && pc < opts.end {
+        if pc >= opts.start && pc < opts.end && !is_jump_engine_table_byte(pc) {
             all_targets.insert(pc);
         }
     }
@@ -1175,9 +1361,39 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
         let next_pc = pc.wrapping_add(insn.size as u16);
         lifted_end = next_pc;
 
-        // If this is a hard terminator and there's nothing reachable after,
-        // stop early (unless the next PC is a branch target we still need to emit).
-        if insn.is_terminator() && !internal_targets.contains(&next_pc) {
+        // JumpEngine consumes the JSR return address as its inline table
+        // pointer and tail-dispatches to the selected target. Continue only
+        // when an earlier branch has established a reachable code target
+        // beyond the table.
+        if insn.mnemonic == Mnemonic::JSR
+            && insn.mode == AddrMode::Absolute
+            && let Some(site) = opts.jump_engine_sites.iter().find(|site| site.caller == pc)
+        {
+            let table_end = site.table_end().unwrap_or(usize::from(next_pc));
+            if let Some(&target) = internal_targets
+                .iter()
+                .filter(|&&target| {
+                    usize::from(target) >= table_end && !is_jump_engine_table_byte(target)
+                })
+                .min()
+            {
+                pc = target;
+                continue;
+            }
+            break;
+        }
+
+        // If this is a hard terminator, continue at the lowest pending forward
+        // internal target; otherwise there is nothing reachable to emit.
+        if insn.is_terminator() {
+            if let Some(&target) = internal_targets
+                .iter()
+                .filter(|&&target| target >= next_pc)
+                .min()
+            {
+                pc = target;
+                continue;
+            }
             break;
         }
 
@@ -1224,6 +1440,7 @@ mod tests {
             entry_name: format!("L_{cpu_start:04X}"),
             extra_label_pcs: Vec::new(),
             jump_engine_sites: Vec::new(),
+            return_escape_sites: Vec::new(),
         };
         lift_range(&prg, &opts).expect("lift failed")
     }
@@ -1321,6 +1538,16 @@ mod tests {
     }
 
     #[test]
+    fn lift_stx_sty_oam_dma() {
+        // 8E/8C 14 40 — STX/STY $4014
+        let stx = lift(0x8000, &[0x8E, 0x14, 0x40]);
+        assert!(stx.ops.contains(&Op::OamDmaWrite { value: ValueSrc::X }));
+
+        let sty = lift(0x8000, &[0x8C, 0x14, 0x40]);
+        assert!(sty.ops.contains(&Op::OamDmaWrite { value: ValueSrc::Y }));
+    }
+
+    #[test]
     fn lift_lda_controller() {
         // AD 16 40 — LDA $4016
         let r = lift(0x8000, &[0xAD, 0x16, 0x40]);
@@ -1370,6 +1597,68 @@ mod tests {
     }
 
     #[test]
+    fn lift_forward_branch_past_external_jmp() {
+        // $8000: D0 04     BNE $8006
+        // $8002: 4C 00 90  JMP $9000
+        // $8006: 60        RTS
+        let r = lift(0x8000, &[0xD0, 0x04, 0x4C, 0x00, 0x90, 0xEA, 0x60]);
+
+        assert!(r.branch_labels.contains(&"L_8006".to_string()));
+        let jmp_pos = r
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::Jmp { target } if target == "L_9000"))
+            .unwrap();
+        let label_pos = r
+            .ops
+            .iter()
+            .position(|op| op == &Op::Label("L_8006".to_string()))
+            .unwrap();
+        let rts_pos = r.ops.iter().rposition(|op| op == &Op::Rts).unwrap();
+        assert!(jmp_pos < label_pos && label_pos < rts_pos);
+    }
+
+    #[test]
+    fn lift_profiled_return_escape() {
+        let prg = make_prg_at(0xE7D0, &[0x4C, 0x60, 0xEC]);
+        let opts = LiftOptions {
+            start: 0xE7D0,
+            end: 0xE7D3,
+            entry_name: "L_E7D0".to_string(),
+            jump_engine_sites: Vec::new(),
+            return_escape_sites: vec![ReturnEscapeSite {
+                caller: 0xE7D0,
+                target: 0xEC60,
+                return_addr: 0xEA79,
+            }],
+            window_label_prefix: None,
+            extra_label_pcs: Vec::new(),
+        };
+        let routine = lift_range(&prg, &opts).expect("lift return escape");
+        assert!(routine.ops.contains(&Op::ReturnEscape {
+            target: "L_EC60".to_string(),
+            return_addr: 0xEA79,
+        }));
+
+        let mut stale = opts;
+        stale.return_escape_sites[0].target = 0xEC61;
+        let routine = lift_range(&prg, &stale).expect("stale fact becomes unsupported IR");
+        assert!(routine.ops.iter().any(|op| matches!(
+            op,
+            Op::Unsupported { reason, .. } if reason.contains("return_escape target mismatch")
+        )));
+
+        let prg = make_prg_at(0xE7D0, &[0xEA]);
+        stale.end = 0xE7D1;
+        let routine = lift_range(&prg, &stale).expect("stale opcode becomes unsupported IR");
+        assert!(routine.ops.iter().any(|op| matches!(
+            op,
+            Op::Unsupported { reason, .. }
+                if reason.contains("return_escape caller is not an absolute JMP")
+        )));
+    }
+
+    #[test]
     fn lift_external_branch_target() {
         // C9 03 B0 01 60
         // $AEF9: CMP #$03
@@ -1385,6 +1674,7 @@ mod tests {
             end: 0xAEFE,
             entry_name: "L_AEF9".to_string(),
             jump_engine_sites: Vec::new(),
+            return_escape_sites: Vec::new(),
             extra_label_pcs: Vec::new(),
         };
         let r = lift_range(&prg, &opts).unwrap();
@@ -1399,6 +1689,82 @@ mod tests {
         assert!(r.ops.contains(&Op::Jsr {
             target: "L_1234".to_string()
         }));
+    }
+
+    #[test]
+    fn lift_jump_engine_skips_inline_table_and_tail_dispatches() {
+        // The branch makes $8009 reachable without executing the dispatch;
+        // the bytes in between are a two-entry pointer table, not code.
+        let prg = make_prg_at(
+            0x8000,
+            &[0xD0, 0x07, 0x20, 0x00, 0x90, 0x32, 0x12, 0x02, 0x80, 0x60],
+        );
+        let r = lift_range(
+            &prg,
+            &LiftOptions {
+                start: 0x8000,
+                end: 0x800A,
+                entry_name: "L_8000".into(),
+                jump_engine_sites: vec![JumpEngineSite {
+                    caller: 0x8002,
+                    targets: vec!["First".into(), "Second".into()],
+                    return_target: None,
+                    tail_indices: Vec::new(),
+                    stack_return_bytes: 0,
+                    target_entry_a: Vec::new(),
+                }],
+                return_escape_sites: Vec::new(),
+                window_label_prefix: None,
+                extra_label_pcs: Vec::new(),
+            },
+        )
+        .expect("lift");
+
+        assert_eq!(r.end, 0x800A);
+        assert!(r.ops.contains(&Op::JumpEngineCall {
+            targets: vec!["First".into(), "Second".into()],
+            return_target: None,
+            tail_indices: Vec::new(),
+            stack_return_bytes: 0,
+            target_entry_a: Vec::new(),
+        }));
+        assert!(r.ops.contains(&Op::Rts));
+        assert!(r.external_calls.contains(&"First".to_string()));
+        assert!(r.external_calls.contains(&"Second".to_string()));
+        assert!(!r.ops.iter().any(|op| matches!(op, Op::Jam { .. })));
+        assert!(
+            !r.ops
+                .iter()
+                .any(|op| matches!(op, Op::Source { pc, .. } if (0x8005..0x8009).contains(pc)))
+        );
+    }
+
+    #[test]
+    fn lift_jump_engine_without_bypass_ends_after_jsr() {
+        let prg = make_prg_at(0x8000, &[0x20, 0x00, 0x90, 0x32, 0x12, 0x02, 0x80, 0x60]);
+        let r = lift_range(
+            &prg,
+            &LiftOptions {
+                start: 0x8000,
+                end: 0x8008,
+                entry_name: "L_8000".into(),
+                jump_engine_sites: vec![JumpEngineSite {
+                    caller: 0x8000,
+                    targets: vec!["First".into(), "Second".into()],
+                    return_target: None,
+                    tail_indices: Vec::new(),
+                    stack_return_bytes: 0,
+                    target_entry_a: Vec::new(),
+                }],
+                return_escape_sites: Vec::new(),
+                window_label_prefix: None,
+                extra_label_pcs: Vec::new(),
+            },
+        )
+        .expect("lift");
+
+        assert_eq!(r.end, 0x8003);
+        assert!(r.ops.last().is_some_and(Op::is_hard_terminator));
     }
 
     #[test]
@@ -1436,6 +1802,7 @@ mod tests {
                 end: 0xE3EC,
                 entry_name: "L_E3E9".into(),
                 jump_engine_sites: Vec::new(),
+                return_escape_sites: Vec::new(),
                 extra_label_pcs: Vec::new(),
             },
         )
@@ -1526,6 +1893,51 @@ mod tests {
     }
 
     #[test]
+    fn lift_mapper_stores_are_fail_closed_except_prg_rom_sta() {
+        // STA $8000 remains a constant-address mapper write.
+        let r = lift(0x8000, &[0x8D, 0x00, 0x80]);
+        assert!(r.ops.contains(&Op::MapperWrite {
+            addr: 0x8000,
+            value: ValueSrc::A,
+        }));
+
+        // STA $9000,X / STA $C000,Y retain their indexed address expressions
+        // so lowering can pass the effective mapper register address.
+        let r = lift(0x8000, &[0x9D, 0x00, 0x90, 0x99, 0x00, 0xC0]);
+        assert!(r.ops.contains(&Op::StaMem {
+            addr: AddrExpr::AbsIndexedX(0x9000),
+            region: MemRegion::PrgRom,
+        }));
+        assert!(r.ops.contains(&Op::StaMem {
+            addr: AddrExpr::AbsIndexedY(0xC000),
+            region: MemRegion::PrgRom,
+        }));
+
+        for (bytes, mnemonic, range) in [
+            (&[0x8D, 0x20, 0x40][..], "STA", "expansion space"),
+            (&[0x8D, 0x00, 0x60][..], "STA", "PRG RAM"),
+            (&[0x8E, 0x00, 0x80][..], "STX", "PRG ROM"),
+            (&[0x8C, 0x00, 0x60][..], "STY", "PRG RAM"),
+        ] {
+            let r = lift(0x8000, bytes);
+            assert!(r.ops.iter().any(|op| matches!(op,
+                Op::UnsupportedMapperStore { mnemonic: actual, reason, .. }
+                if actual == mnemonic && reason.contains(range)
+            )));
+        }
+    }
+
+    #[test]
+    fn lift_sta_indirect_y_zero_page_remains_supported() {
+        // STA ($10),Y has a zero-page pointer base, not a mapper base.
+        let r = lift(0x8000, &[0x91, 0x10]);
+        assert!(r.ops.contains(&Op::StaMem {
+            addr: AddrExpr::IndirectY(0x10),
+            region: MemRegion::ZeroPage,
+        }));
+    }
+
+    #[test]
     fn lift_error_on_empty_range() {
         let prg = vec![0u8; 0x8000];
         let opts = LiftOptions {
@@ -1534,6 +1946,7 @@ mod tests {
             end: 0x8000,
             entry_name: "test".to_string(),
             jump_engine_sites: Vec::new(),
+            return_escape_sites: Vec::new(),
             extra_label_pcs: Vec::new(),
         };
         assert!(lift_range(&prg, &opts).is_err());
@@ -1548,6 +1961,7 @@ mod tests {
             end: 0x8000,
             entry_name: "test".to_string(),
             jump_engine_sites: Vec::new(),
+            return_escape_sites: Vec::new(),
             extra_label_pcs: Vec::new(),
         };
         assert!(lift_range(&prg, &opts).is_err());

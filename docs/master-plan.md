@@ -257,10 +257,15 @@ Estimated 4–6 weeks.
 `$C000-$C0FF`; NES RAM mirror at `$C000-$C7FF`. Emulated 6502 stack at
 `$C100-$C1FF`.
 
-**2.2 JSR/RTS → CALL/RET.** Native Z80 stack carries return addresses.
-Emulated 6502 stack only carries explicit `PHA`/`PLA`/`PHP`/`PLP` values.
-JMP indirect routes through the runtime `dispatch.s` table; profile
-provides target sets.
+**2.2 JSR/RTS → translated continuation stack.** Generated JSRs push a
+bank-qualified continuation into the runtime `TR_RET` software stack; RTS pops
+and dispatches that frame without leaving a long-lived native Z80 return word.
+The emulated 6502 stack normally carries explicit `PHA`/`PLA`/`PHP`/`PLP`
+values and interrupt frames. A profile `[[return_escape]]` annotation bridges
+the uncommon 6502 idiom where a tail-jumped callee deliberately consumes its
+caller's JSR return bytes as stack data: it discards one `TR_RET` frame and
+materializes the corresponding two bytes on `$C100-$C1FF`. JMP indirect routes
+through the runtime `dispatch.s` table; profile data provides target facts.
 
 **2.3 SMS runtime library finished.** All modules from the architecture
 table written and tested standalone.

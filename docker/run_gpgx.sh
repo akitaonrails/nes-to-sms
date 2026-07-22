@@ -5,7 +5,8 @@
 #
 # Usage:  docker/run_gpgx.sh [out/smb/sms.sms]
 #         OVERCLOCK=300 docker/run_gpgx.sh      # dial the Z80 overclock (% )
-# Controls (RetroArch default): arrows = D-pad, Z/X = buttons, Enter = Start.
+# Controls (RetroArch default): arrows = D-pad, Z/X = buttons,
+# Enter = SMS Pause/NES Start.
 # Speed is paced to 60 fps by the core's timer, so the overclock only adds CPU
 # headroom (keeps the heavy NMI from dropping frames); it does not change game
 # speed. If it ever runs fast/slow, that's the frame pacing, not the overclock.
@@ -13,6 +14,20 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ROM="${1:-out/smb/sms.sms}"
+
+# The receiver remains visible as hidraw even when the wireless controller is
+# powered off, while RetroArch needs the controller's event/joystick device.
+# Make that easy-to-miss state explicit before starting the container.
+if grep -Fq 'Name="8BitDo Ultimate 2 Wireless Controller"' /proc/bus/input/devices 2>/dev/null; then
+  echo "Gamepad detected: 8BitDo Ultimate 2 Wireless Controller"
+else
+  echo "WARNING: 8BitDo gamepad event device not detected." >&2
+  echo "Power/connect the controller, then confirm it appears in /proc/bus/input/devices." >&2
+  echo "Keyboard fallback: arrows = D-pad, Z/X = buttons, Enter = SMS Pause/Start." >&2
+  if [ "${GPGX_REQUIRE_GAMEPAD:-0}" = "1" ]; then
+    exit 2
+  fi
+fi
 
 # Allow the container's X client to reach the host display (reverted easily
 # with `xhost -local:`). Harmless local-only grant.

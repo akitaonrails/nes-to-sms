@@ -49,6 +49,139 @@ name = "Reset"
     std::fs::write(path, toml).unwrap();
 }
 
+fn set_payload_sha256(path: &std::path::Path, digest: &str) {
+    let profile = std::fs::read_to_string(path).unwrap().replacen(
+        "chr_kib = 8\n",
+        &format!("chr_kib = 8\npayload_sha256 = \"{digest}\"\n"),
+        1,
+    );
+    std::fs::write(path, profile).unwrap();
+}
+
+fn set_mapper(path: &std::path::Path, mapper: u16) {
+    let profile = std::fs::read_to_string(path).unwrap().replacen(
+        "mapper  = 0",
+        &format!("mapper  = {mapper}"),
+        1,
+    );
+    std::fs::write(path, profile).unwrap();
+}
+
+fn set_rom_size(path: &std::path::Path, field: &str, kib: u32) {
+    let profile = std::fs::read_to_string(path).unwrap();
+    let old = format!("{field} = {}", if field == "prg_kib" { 32 } else { 8 });
+    let new = format!("{field} = {kib}");
+    std::fs::write(path, profile.replacen(&old, &new, 1)).unwrap();
+}
+
+/// Build a NES 2.0 UxROM image with eight physical 16-KiB PRG banks and
+/// CHR-RAM. Every bank starts as a distinct sentinel-filled payload; callers
+/// can therefore prove that the emitted bank files retain physical order.
+fn build_uxrom8_rom(fixed_code: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    const BANK_SIZE: usize = 16 * 1024;
+    let mut banks: Vec<Vec<u8>> = (0u8..8).map(|bank| vec![0xF0 | bank; BANK_SIZE]).collect();
+
+    // Bank 3 provides the declared switchable entry; bank 0 provides a
+    // deliberately undeclared switchable target at $8010.
+    banks[3][0] = 0x60; // RTS at $8000
+    banks[0][0x10] = 0x60; // RTS at $8010
+    banks[7][..fixed_code.len()].copy_from_slice(fixed_code);
+    let vectors = BANK_SIZE;
+    banks[7][vectors - 6..vectors - 4].copy_from_slice(&0xC000u16.to_le_bytes());
+    banks[7][vectors - 4..vectors - 2].copy_from_slice(&0xC000u16.to_le_bytes());
+    banks[7][vectors - 2..vectors].copy_from_slice(&0xC000u16.to_le_bytes());
+
+    let mut rom = vec![0u8; 16 + 8 * BANK_SIZE];
+    rom[0..4].copy_from_slice(b"NES\x1a");
+    rom[4] = 8; // eight 16-KiB PRG banks
+    rom[5] = 0; // CHR-RAM
+    rom[6] = 0x21; // mapper 2, vertical mirroring
+    rom[7] = 0x08; // NES 2.0 marker
+    rom[8] = 0x20; // NES 2.0 submapper 2: AND bus conflicts
+    rom[11] = 0x07; // 8 KiB volatile CHR-RAM
+    for (bank, payload) in banks.iter().enumerate() {
+        let start = 16 + bank * BANK_SIZE;
+        rom[start..start + BANK_SIZE].copy_from_slice(payload);
+    }
+    (rom, banks)
+}
+
+/// Eight-bank executable contract. Reset runs from fixed `$C100`, selects
+/// every physical bank through a bus-conflict-safe `$BFF0` hotspot, and calls
+/// the same `$8000` address. Each bank-qualified routine stores its bank ID in
+/// zero page `$10+bank`; the generated unresolved label must therefore route
+/// through `rt_banked_dispatch` using the live mapper shadow.
+fn build_executable_uxrom8_rom() -> Vec<u8> {
+    const BANK_SIZE: usize = 16 * 1024;
+    let mut banks = vec![vec![0xEA; BANK_SIZE]; 8];
+    for (bank, payload) in banks.iter_mut().enumerate() {
+        payload[..5].copy_from_slice(&[0xA9, bank as u8, 0x85, 0x10 + bank as u8, 0x60]);
+        payload[0x3FF0] = 0xFF;
+    }
+
+    let mut reset = Vec::new();
+    for bank in 0u8..8 {
+        reset.extend_from_slice(&[
+            0xA9, bank, // LDA #bank
+            0x8D, 0xF0, 0xBF, // STA $BFF0 (ROM byte is $FF in every bank)
+            0x20, 0x00, 0x80, // JSR $8000 (live-bank dispatch)
+        ]);
+    }
+    let loop_addr = 0xC100u16 + reset.len() as u16;
+    reset.extend_from_slice(&[0x4C, loop_addr as u8, (loop_addr >> 8) as u8]);
+    banks[7][0x100..0x100 + reset.len()].copy_from_slice(&reset);
+    banks[7][BANK_SIZE - 6..BANK_SIZE - 4].copy_from_slice(&0xC100u16.to_le_bytes());
+    banks[7][BANK_SIZE - 4..BANK_SIZE - 2].copy_from_slice(&0xC100u16.to_le_bytes());
+    banks[7][BANK_SIZE - 2..BANK_SIZE].copy_from_slice(&0xC100u16.to_le_bytes());
+
+    let mut rom = vec![0u8; 16 + 8 * BANK_SIZE];
+    rom[0..4].copy_from_slice(b"NES\x1a");
+    rom[4] = 8;
+    rom[5] = 0;
+    rom[6] = 0x21;
+    rom[7] = 0x08;
+    rom[8] = 0x20;
+    rom[11] = 0x07;
+    for (bank, payload) in banks.iter().enumerate() {
+        let start = 16 + bank * BANK_SIZE;
+        rom[start..start + BANK_SIZE].copy_from_slice(payload);
+    }
+    rom
+}
+
+fn write_uxrom8_profile(path: &std::path::Path, rom: &[u8], bank_annotations: bool) {
+    let image = nes_rom::parse(rom).unwrap();
+    let annotations = if bank_annotations {
+        "\n[[bank_entry]]\nbank = 3\naddr = 0x8000\n\n[[bank_call]]\nbank = 3\ntarget = 0x8000\n"
+    } else {
+        ""
+    };
+    std::fs::write(
+        path,
+        format!(
+            "[rom]\nname = \"uxrom8\"\nmapper = 2\nprg_kib = 128\nchr_kib = 0\npayload_sha256 = \"{}\"\n\n[vectors]\nnmi = 0xc000\nreset = 0xc000\nirq = 0xc000\n\n[[function]]\naddr = 0xc000\nname = \"Reset\"\n{annotations}",
+            nes_rom::payload_sha256_hex(image.prg, image.chr)
+        ),
+    )
+    .unwrap();
+}
+
+fn write_executable_uxrom8_profile(path: &std::path::Path, rom: &[u8]) {
+    let image = nes_rom::parse(rom).unwrap();
+    let mut annotations = String::new();
+    for bank in 0u8..8 {
+        annotations.push_str(&format!("\n[[bank_entry]]\nbank = {bank}\naddr = 0x8000\n"));
+    }
+    std::fs::write(
+        path,
+        format!(
+            "[rom]\nname = \"uxrom8-executable\"\nmapper = 2\nprg_kib = 128\nchr_kib = 0\npayload_sha256 = \"{}\"\n\n[vectors]\nnmi = 0xc100\nreset = 0xc100\nirq = 0xc100\n\n[[function]]\naddr = 0xc100\nname = \"Reset\"\n{annotations}",
+            nes_rom::payload_sha256_hex(image.prg, image.chr)
+        ),
+    )
+    .unwrap();
+}
+
 fn tmp(suffix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -94,6 +227,377 @@ fn pipeline_runs_on_minimal_reset_only_rom() {
     // H.1c: the shadow-NZ update is inlined via the $3E00 table.
     assert!(asm.contains("and $7D"), "missing inline NZ update");
     assert!(asm.contains("jp rt_translated_rts"));
+}
+
+#[test]
+fn pipeline_rejects_mismatched_payload_before_generation() {
+    let rom = build_nrom_rom(&[0x60], 0x8000, 0x8000, 0x8000);
+    let work = tmp("payload-mismatch");
+    let rom_path = work.join("rom.nes");
+    let prof_path = work.join("profile.toml");
+    let out_path = work.join("out");
+    std::fs::write(&rom_path, &rom).unwrap();
+    write_minimal_profile(&prof_path, 0x8000, 0x8000, 0x8000);
+    set_payload_sha256(
+        &prof_path,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
+
+    let err = run_pipeline(nes_to_sms_args(&rom_path, &prof_path, &out_path, None)).unwrap_err();
+    assert!(err.contains("payload SHA-256 mismatch"), "error: {err}");
+    assert!(
+        err.contains("expected 0000000000000000000000000000000000000000000000000000000000000000")
+    );
+    assert!(!out_path.exists());
+}
+
+#[test]
+fn pipeline_rejects_unsupported_mapper_before_analysis() {
+    let mut rom = build_nrom_rom(&[0x60], 0x8000, 0x8000, 0x8000);
+    rom[6] = 0x30; // mapper 3
+    let work = tmp("unsupported-mapper");
+    let rom_path = work.join("rom.nes");
+    let prof_path = work.join("profile.toml");
+    let out_path = work.join("out");
+    std::fs::write(&rom_path, &rom).unwrap();
+    write_minimal_profile(&prof_path, 0x8000, 0x8000, 0x8000);
+    set_mapper(&prof_path, 3);
+
+    let err = run_pipeline(nes_to_sms_args(&rom_path, &prof_path, &out_path, None)).unwrap_err();
+    assert!(err.contains("unsupported mapper 3"), "error: {err}");
+    assert!(!out_path.exists());
+}
+
+#[test]
+fn pipeline_rejects_profile_prg_and_chr_size_mismatches_before_generation() {
+    let rom = build_nrom_rom(&[0x60], 0x8000, 0x8000, 0x8000);
+    for (field, declared, diagnostic) in [
+        ("prg_kib", 16, "profile PRG size mismatch"),
+        ("chr_kib", 0, "profile CHR size mismatch"),
+    ] {
+        let work = tmp(field);
+        let rom_path = work.join("rom.nes");
+        let prof_path = work.join("profile.toml");
+        let out_path = work.join("out");
+        std::fs::write(&rom_path, &rom).unwrap();
+        write_minimal_profile(&prof_path, 0x8000, 0x8000, 0x8000);
+        set_rom_size(&prof_path, field, declared);
+
+        let err =
+            run_pipeline(nes_to_sms_args(&rom_path, &prof_path, &out_path, None)).unwrap_err();
+        assert!(err.contains(diagnostic), "error: {err}");
+        assert!(!out_path.exists());
+    }
+}
+
+#[test]
+fn pipeline_rejects_out_of_range_bank_annotations_before_generation() {
+    let rom = build_nrom_rom(&[0x60], 0x8000, 0x8000, 0x8000);
+    let work = tmp("bad-bank-annotation");
+    let rom_path = work.join("rom.nes");
+    let prof_path = work.join("profile.toml");
+    let out_path = work.join("out");
+    std::fs::write(&rom_path, &rom).unwrap();
+    std::fs::write(
+        &prof_path,
+        "[rom]\nname = \"synth\"\nmapper = 2\nprg_kib = 32\nchr_kib = 8\n\n[[bank_entry]]\nbank = 0\naddr = 0xc000\n",
+    )
+    .unwrap();
+
+    let err = run_pipeline(nes_to_sms_args(&rom_path, &prof_path, &out_path, None)).unwrap_err();
+    assert!(
+        err.contains("bank_entry.addr must be in switchable $8000-$BFFF"),
+        "error: {err}"
+    );
+    assert!(!out_path.exists());
+}
+
+#[test]
+fn pipeline_emits_exact_eight_bank_uxrom_assets_and_dispatches() {
+    // Fixed bank: constant mapper STA $8000, safe indexed mapper STA
+    // $8000,X, a declared bank-3 call, then an undeclared window call.
+    let fixed_code = [
+        0xA9, 0x03, // LDA #$03
+        0x8D, 0x00, 0x80, // STA $8000
+        0xA2, 0x01, // LDX #$01
+        0xA9, 0x06, // LDA #$06
+        0x9D, 0x00, 0x80, // STA $8000,X
+        0x20, 0x00, 0x80, // JSR $8000 (declared bank 3)
+        0x20, 0x10, 0x80, // JSR $8010 (intentionally undeclared)
+        0x60, // RTS
+    ];
+    let (rom, expected_banks) = build_uxrom8_rom(&fixed_code);
+    let work = tmp("uxrom8");
+    let rom_path = work.join("rom.nes");
+    let prof_path = work.join("profile.toml");
+    let out_path = work.join("out");
+    std::fs::write(&rom_path, &rom).unwrap();
+    write_uxrom8_profile(&prof_path, &rom, true);
+
+    run_pipeline(nes_to_sms_args(&rom_path, &prof_path, &out_path, None))
+        .expect("UxROM pipeline runs");
+
+    for (bank, expected) in expected_banks.iter().enumerate() {
+        assert_eq!(
+            std::fs::read(out_path.join(format!("data/prg_bank_{bank}.bin"))).unwrap(),
+            *expected,
+            "bank {bank} was reordered or truncated"
+        );
+    }
+    assert_eq!(
+        std::fs::read(out_path.join("data/prg_high.bin")).unwrap(),
+        expected_banks[7],
+        "fixed PRG must be physical bank 7"
+    );
+
+    let sms_asm = std::fs::read_to_string(out_path.join("sms.asm")).unwrap();
+    for expected in [
+        ".define NES_PRG_BANK_COUNT 8",
+        ".define NES_PRG_BANK_MASK 7",
+        ".define NES_PRG_BUS_CONFLICTS 1",
+        ".incbin \"data/prg_bank_0.bin\"",
+        ".incbin \"data/prg_bank_7.bin\"",
+    ] {
+        assert!(sms_asm.contains(expected), "missing {expected} in sms.asm");
+    }
+
+    let translated = std::fs::read_to_string(out_path.join("generated/translated.asm")).unwrap();
+    let mut in_generated_code = false;
+    for line in translated.lines() {
+        let line = line.trim();
+        if line.starts_with(".section") {
+            in_generated_code = line.contains("generated_code_");
+        } else if line.starts_with(".ends") {
+            in_generated_code = false;
+        } else if in_generated_code {
+            if let Some(bank) = line
+                .strip_prefix(".bank ")
+                .and_then(|tail| tail.split_whitespace().next())
+                .and_then(|bank| bank.parse::<u32>().ok())
+            {
+                assert!(
+                    bank < sms_project::NES_PRG_BANK_BASE,
+                    "generated code was placed in reserved PRG data bank {bank}"
+                );
+            }
+        }
+    }
+    assert!(
+        translated.contains("L_b3_8000:"),
+        "declared bank entry missing"
+    );
+    assert!(
+        translated.contains("L_b3_8000"),
+        "declared bank call was not rewritten"
+    );
+    for expected in [
+        "rt_dispatch_table:",
+        "rt_dispatch_page_80:",
+        "rt_dispatch_page_FF:",
+        "rt_dispatch_page_table:",
+        ".dw rt_dispatch_page_80",
+        ".dw rt_dispatch_page_FF",
+    ] {
+        assert!(
+            translated.contains(expected),
+            "missing indexed dispatch artifact {expected}"
+        );
+    }
+    assert!(
+        translated.contains("L_8010:"),
+        "undeclared target lacks unresolved stub"
+    );
+    assert!(
+        translated.contains("jp rt_banked_dispatch"),
+        "undeclared window target is not fail-closed dispatch"
+    );
+    assert!(
+        translated.contains("ld hl,$8000"),
+        "constant mapper address missing"
+    );
+    assert!(
+        translated.contains("  ld hl,$8000\n  ld c,a\n  ld a,d"),
+        "indexed mapper base/value setup missing"
+    );
+    assert!(
+        translated.contains("add a,l"),
+        "indexed mapper low-byte addition missing"
+    );
+    assert!(
+        translated.contains("adc a,$00"),
+        "indexed mapper carry propagation missing"
+    );
+    assert!(
+        translated.matches("call rt_mapper_write").count() >= 2,
+        "both mapper STAs must lower"
+    );
+}
+
+#[test]
+fn executable_uxrom8_selects_and_dispatches_all_physical_banks() {
+    let rom = build_executable_uxrom8_rom();
+    let work = tmp("uxrom8-executable");
+    let rom_path = work.join("rom.nes");
+    let prof_path = work.join("profile.toml");
+    let out_path = work.join("out");
+    std::fs::write(&rom_path, &rom).unwrap();
+    write_executable_uxrom8_profile(&prof_path, &rom);
+
+    let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
+    run_pipeline(nes_to_sms_args(
+        &rom_path,
+        &prof_path,
+        &out_path,
+        Some(&runtime),
+    ))
+    .expect("executable UxROM pipeline runs");
+    let translated = std::fs::read_to_string(out_path.join("generated/translated.asm")).unwrap();
+    for bank in 0u8..8 {
+        assert!(
+            translated.contains(&format!("L_b{bank}_8000:")),
+            "missing translated entry for physical bank {bank}"
+        );
+    }
+    assert!(
+        translated.contains("L_8000:") && translated.contains("jp rt_banked_dispatch"),
+        "unqualified call must dispatch by the live mapper shadow"
+    );
+
+    // WLA-DX intentionally lives in the Docker toolchain. Normal host test
+    // runs still verify generation; inside that toolchain this additionally
+    // assembles and executes the contract in trace-sms.
+    if std::process::Command::new("wla-z80")
+        .arg("-h")
+        .output()
+        .is_err()
+        || std::process::Command::new("wlalink")
+            .arg("-h")
+            .output()
+            .is_err()
+    {
+        return;
+    }
+
+    let make = std::process::Command::new("make")
+        .arg("-C")
+        .arg(&out_path)
+        .output()
+        .expect("run WLA-DX make");
+    assert!(
+        make.status.success(),
+        "fixture assembly failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&make.stdout),
+        String::from_utf8_lossy(&make.stderr)
+    );
+
+    let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+    trace.arg(out_path.join("sms.sms")).args([
+        "--steps",
+        "2000000",
+        "--no-irq",
+        "--expect-no-trap",
+    ]);
+    for bank in 0u8..8 {
+        trace
+            .arg("--expect-ram")
+            .arg(format!("C0{:02X}={bank:02X}", 0x10 + bank));
+    }
+    let trace = trace.output().expect("execute trace-sms fixture");
+    assert!(
+        trace.status.success(),
+        "fixture execution failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&trace.stdout),
+        String::from_utf8_lossy(&trace.stderr)
+    );
+}
+
+#[test]
+fn uxrom_bus_conflicts_and_fatal_mapper_stores_are_fail_closed() {
+    let baseline = [0x60]; // RTS
+    let (rom, banks) = build_uxrom8_rom(&baseline);
+    let image = nes_rom::parse(&rom).unwrap();
+    let policy = nes_rom::resolve_mapper_policy(&image.header, image.prg.len()).unwrap();
+    for (bank, raw_write, rom_byte) in [
+        (0usize, 0xFF, banks[0][0x1000]),
+        (1, 0xFF, banks[1][0x1000]),
+    ] {
+        assert_eq!(raw_write, 0xFF, "raw write for bank {bank}");
+        assert_eq!(
+            rom_byte,
+            0xF0 | bank as u8,
+            "destination ROM byte for bank {bank}"
+        );
+        let effective = raw_write & rom_byte;
+        assert_eq!(effective, rom_byte, "raw AND ROM byte for bank {bank}");
+        assert_eq!(
+            policy
+                .selected_bank_from_write(raw_write, rom_byte)
+                .unwrap(),
+            bank as u8
+        );
+    }
+
+    // The lifter cannot infer PRG-ROM from an ordinary (zp),Y operand alone:
+    // it remains a valid indirect RAM store. These are the representable,
+    // statically classified fail-closed forms: expansion/PRG-RAM STA and
+    // PRG-ROM STX/STY.
+    for (name, code, diagnostic) in [
+        (
+            "expansion-sta",
+            vec![0xA9, 0x01, 0x8D, 0x20, 0x40, 0x60],
+            "STA to expansion space",
+        ),
+        (
+            "prgram-sta",
+            vec![0xA9, 0x01, 0x8D, 0x00, 0x60, 0x60],
+            "STA to PRG RAM",
+        ),
+        (
+            "prgrom-stx",
+            vec![0xA2, 0x01, 0x8E, 0x00, 0x80, 0x60],
+            "STX to expansion space, PRG RAM, or PRG ROM",
+        ),
+        (
+            "prgrom-sty",
+            vec![0xA0, 0x01, 0x8C, 0x00, 0x80, 0x60],
+            "STY to expansion space, PRG RAM, or PRG ROM",
+        ),
+    ] {
+        let (bad_rom, _) = build_uxrom8_rom(&code);
+        let work = tmp(name);
+        let rom_path = work.join("rom.nes");
+        let prof_path = work.join("profile.toml");
+        let out_path = work.join("out");
+        std::fs::write(&rom_path, &bad_rom).unwrap();
+        write_uxrom8_profile(&prof_path, &bad_rom, false);
+
+        let err =
+            run_pipeline(nes_to_sms_args(&rom_path, &prof_path, &out_path, None)).unwrap_err();
+        assert!(err.contains(diagnostic), "{name}: {err}");
+        assert!(
+            !out_path.exists(),
+            "{name} emitted a project despite fatal mapper store"
+        );
+    }
+}
+
+#[test]
+fn pipeline_accepts_matching_payload_digest() {
+    let rom = build_nrom_rom(&[0x60], 0x8000, 0x8000, 0x8000);
+    let work = tmp("payload-match");
+    let rom_path = work.join("rom.nes");
+    let prof_path = work.join("profile.toml");
+    let out_path = work.join("out");
+    std::fs::write(&rom_path, &rom).unwrap();
+    write_minimal_profile(&prof_path, 0x8000, 0x8000, 0x8000);
+    let image = nes_rom::parse(&rom).unwrap();
+    set_payload_sha256(
+        &prof_path,
+        &nes_rom::payload_sha256_hex(image.prg, image.chr),
+    );
+
+    let report = run_pipeline(nes_to_sms_args(&rom_path, &prof_path, &out_path, None)).unwrap();
+    assert!(report.contains("functions: 1"), "report:\n{report}");
 }
 
 #[test]
@@ -148,6 +652,77 @@ fn pipeline_handles_branch_and_jsr() {
     assert!(
         lower_asm.contains("bit 1,(hl)"),
         "BranchIf NotZero should test bit 1 of shadow P"
+    );
+}
+
+#[test]
+fn pipeline_emits_forward_branch_target_past_external_jmp() {
+    // $8000: BNE $8006; $8002: JMP $9000; $8006: LDA #$42; RTS.
+    let prg = [0xD0, 0x04, 0x4C, 0x00, 0x90, 0xEA, 0xA9, 0x42, 0x60];
+    let rom = build_nrom_rom(&prg, 0x8000, 0x8000, 0x8000);
+    let work = tmp("forward-branch-external-jmp");
+    let rom_path = work.join("rom.nes");
+    let prof_path = work.join("profile.toml");
+    let out_path = work.join("out");
+    std::fs::write(&rom_path, &rom).unwrap();
+    write_minimal_profile(&prof_path, 0x8000, 0x8000, 0x8000);
+
+    run_pipeline(nes_to_sms_args(&rom_path, &prof_path, &out_path, None)).expect("pipeline runs");
+
+    let asm = std::fs::read_to_string(out_path.join("generated/translated.asm")).unwrap();
+    let target_pos = asm.find("L_8006:").expect("internal target label missing");
+    let body_pos = asm[target_pos..]
+        .to_ascii_lowercase()
+        .find("ld a,$42")
+        .expect("internal target body missing");
+    assert!(body_pos > 0);
+    let unresolved_path = out_path.join("reports/unresolved_labels.txt");
+    assert!(
+        !unresolved_path.exists()
+            || !std::fs::read_to_string(unresolved_path)
+                .unwrap()
+                .contains("L_8006"),
+        "internal target was left unresolved"
+    );
+}
+
+#[test]
+fn pipeline_roots_branch_continuation_after_embedded_routine() {
+    // The reset walk branches around a separately rooted routine occupying
+    // $8004-$8007. Non-overlap normalization must create an owner for the
+    // continuation at $8008 instead of leaving the branch unresolved.
+    // $8000: BNE $8008; NOP; NOP
+    // $8004: NOP; NOP; NOP; RTS
+    // $8008: LDA #$42; RTS
+    let prg = [
+        0xD0, 0x06, 0xEA, 0xEA, 0xEA, 0xEA, 0xEA, 0x60, 0xA9, 0x42, 0x60,
+    ];
+    let rom = build_nrom_rom(&prg, 0x8000, 0x8000, 0x8000);
+    let work = tmp("embedded-routine-continuation");
+    let rom_path = work.join("rom.nes");
+    let prof_path = work.join("profile.toml");
+    let out_path = work.join("out");
+    std::fs::write(&rom_path, &rom).unwrap();
+    write_minimal_profile(&prof_path, 0x8000, 0x8000, 0x8000);
+    let profile = std::fs::read_to_string(&prof_path).unwrap();
+    std::fs::write(
+        &prof_path,
+        format!("{profile}\n[[function]]\naddr = 0x8004\nname = \"embedded\"\n"),
+    )
+    .unwrap();
+
+    run_pipeline(nes_to_sms_args(&rom_path, &prof_path, &out_path, None)).expect("pipeline runs");
+
+    let asm = std::fs::read_to_string(out_path.join("generated/translated.asm")).unwrap();
+    let target_pos = asm.find("L_8008:").expect("continuation owner missing");
+    assert!(asm[target_pos..].to_ascii_lowercase().contains("ld a,$42"));
+    let unresolved_path = out_path.join("reports/unresolved_labels.txt");
+    assert!(
+        !unresolved_path.exists()
+            || !std::fs::read_to_string(unresolved_path)
+                .unwrap()
+                .contains("L_8008"),
+        "embedded-routine continuation was left unresolved"
     );
 }
 
@@ -267,12 +842,12 @@ mod nes_to_sms_args {
 fn run_pipeline(args: nes_to_sms_args::Args) -> Result<String, String> {
     // Find the built binary.
     let bin = env!("CARGO_BIN_EXE_nes-to-sms");
-    let output = std::process::Command::new(bin)
-        .arg(&args.rom)
-        .arg(&args.profile)
-        .arg(&args.out)
-        .output()
-        .map_err(|e| format!("spawn: {e}"))?;
+    let mut command = std::process::Command::new(bin);
+    command.arg(&args.rom).arg(&args.profile).arg(&args.out);
+    if let Some(runtime) = &args.runtime {
+        command.arg("--runtime").arg(runtime);
+    }
+    let output = command.output().map_err(|e| format!("spawn: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "exit={:?}\nstdout:\n{}\nstderr:\n{}",

@@ -31,7 +31,7 @@
 ;                noise ctrl byte, frame-loop temp
 ;   $CB5E-$CB61  PSG attenuation cache ch0..ch3
 ;
-; rt_mapper_write discards all writes (NROM has no mapper registers).
+; rt_mapper_write owns mapper-2 writes; see its transaction notes below.
 
 .define APU_SHADOW   $CB30
 .define ENV_P1       $CB48
@@ -1024,29 +1024,121 @@ rt_sound_stub:
 
 ; ─── rt_mapper_write ──────────────────────────────────────────────────────────
 ; Entry: A = value written, HL = NES address ($8000-$FFFF).
-; NROM: no mapper registers; writes are discarded.
+; Preserves AF, DE, and shadow P ($CB03); clobbers BC/HL. Mapper writes are
+; outer slot-2 transactions only: nested guards trap rather than silently
+; restoring a stale mapper snapshot. The one AF push is intentionally bounded.
+; NROM: valid writes are discarded.
 ; UxROM (mapper 2): any write selects the 16 KiB PRG bank at the
 ; $8000-$BFFF window. The shim stores the NES bank shadow ($CB62) and
 ; maps the matching SMS data bank into slot 2 immediately — every
 ; existing PRG-window read path then sees the right bytes with zero
 ; per-read cost.
 rt_mapper_write:
-.ifdef NES_PRG_BANK_BASE
-  push af                   ; STA leaves the 6502 accumulator intact — the
-                            ; double-write idiom (sta/sta) reuses A
+.ifndef NES_PRG_BANK_BASE
+  ret
+.else
+  push af
+  ld   b, a                  ; raw write; caller AF remains on the native stack
+  ld   a, h
+  cp   $80
+  jp   c, _mw_bad_address
+  ld   a, ($d47f)
+  or   a
+  jp   nz, _mw_nested
+  ; Inline frame-0 entry; mapper writes require depth zero above.
+  ld   a, i
+  di
+  jp   po, _mw_enter_di
+  ld   a, $01
+  jr   _mw_enter_iff
+_mw_enter_di:
+  xor  a
+_mw_enter_iff:
+  ld   ($ca19), a
+  ld   a, ($fffc)
+  ld   ($ca1a), a
+  ld   a, ($ffff)
+  ld   ($ca1b), a
+  ld   a, ($cb62)
+  ld   ($ca1c), a
+  ld   a, $01
+  ld   ($d47f), a
+  xor  a
+  ld   ($fffc), a
+  ; Fetch the ROM bus byte before changing the selected-bank shadow.
+.if NES_PRG_BUS_CONFLICTS == 1
+  ld   a, h
+  cp   $c0
+  jr   nc, _mw_conflict_upper
+  ld   a, ($cb62)
   and  NES_PRG_BANK_MASK
+  add  a, NES_PRG_BANK_BASE
+  ld   ($ffff), a
+  ld   a, (hl)
+  jr   _mw_conflict_have_byte
+_mw_conflict_upper:
+  ld   a, :data_prg_high
+  ld   ($ffff), a
+  ld   a, h
+  sub  $40                   ; $C000-$FFFF -> slot-2 $8000-$BFFF
+  ld   h, a
+  ld   a, (hl)
+_mw_conflict_have_byte:
+  and  b
+  and  NES_PRG_BANK_MASK
+  jr   _mw_selected
+.else
+  ld   a, b
+  and  NES_PRG_BANK_MASK
+.endif
+_mw_selected:
   ld   ($cb62), a           ; NES PRG bank shadow
+  xor  a
+  ld   ($fffc), a           ; force ROM visibility before the final mapping
+  ld   a, ($cb62)
   add  a, NES_PRG_BANK_BASE
   ld   ($ffff), a           ; slot 2 = selected NES bank's data image
+  ; Commit: the new mapping is intentional, so discard (do not restore) the
+  ; guard frame. Its entry IFF2 controls the final EI only.
+  ld   a, ($d47f)
+  cp   $01
+  jp   nz, _mw_depth_corrupt
+  ld   a, ($ca19)
+  ld   c, a
+  xor  a
+  ld   ($d47f), a
+  ld   a, c
+  or   a
+  jr   z, _mw_return_di
   pop  af
-.endif
+  ei
   ret
+_mw_return_di:
+  pop  af
+  ret
+_mw_bad_address:
+  ld   a, RT_MAPPER_BAD_ADDRESS
+  jr   _mw_trap
+_mw_nested:
+  ld   a, RT_MAPPER_NESTED
+  jr   _mw_trap
+_mw_depth_corrupt:
+  ld   a, RT_MAPPER_COMMIT_BAD
+_mw_trap:
+  di
+  ld   ($cb1d), a
+_mw_halt:
+  halt
+  jr   _mw_halt
+.endif
 
 ; ─── rt_restore_prg_window ────────────────────────────────────────────────────
 ; Restore slot 2 to the CURRENT NES PRG window after a temporary remap
 ; (CHR maps, chr data, prg_high). NROM: the single data_prg_low bank.
 ; Banked: the bank selected by the mapper shadow. Clobbers A.
 rt_restore_prg_window:
+  xor  a
+  ld   ($fffc), a
 .ifdef NES_PRG_BANK_BASE
   ld   a, ($cb62)
   add  a, NES_PRG_BANK_BASE

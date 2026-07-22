@@ -55,8 +55,11 @@ reference after the translation reached byte-for-byte parity; the old
 script encoded pre-parity buggy behavior and dies on a real NES.
 
 The checkpoint directory should contain inspectable route artifacts such as
-`00060_title-before-start.ppm` / `.txt` through `04700_post-transition-1-2.ppm` /
-`.txt`.
+`00060_title-before-start.ppm` / `.txt` through
+`04450_post-transition-1-2.ppm` / `.txt`. The final checkpoint is inside the
+301-million-step budget under the delivered-game-frame clock; the former frame
+4700 target was unreachable even for the accepted pre-mapper ROM despite its
+post-transition RAM state already being green.
 
 ## Shared route semantic diff
 

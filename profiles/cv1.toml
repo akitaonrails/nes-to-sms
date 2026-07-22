@@ -6,9 +6,20 @@ name    = "Castlevania"
 mapper  = 2
 prg_kib = 128
 chr_kib = 0
+payload_sha256 = "7eba1637cd2fdbc4f0732eb5249e32d827dbdadbd7e165f961440af4310880dc"
 
 [render]
 scroll_split = false     # no line IRQs: GPGX line-pending storm starved the game
+# The translated coarse PPU schedule leaves CV1's title-transition fill tiles
+# $37/$38 in the top status band. Remap them only while projecting those rows;
+# raw CIRAM and playfield rows remain authoritative.
+top_tile_remap_rows = 8
+top_tile_remap_from = [0x37, 0x38]
+top_tile_remap_to = 0x00
+# Full-screen rebuilds reclaim the 256-slot variant cache, so CV1's largest
+# observed visible working set (234 tile/subpalette pairs) fits without the
+# shape-only identity fallback. Keep normal attribute-driven palette variants.
+chr_ram_bg_identity = false
 
 [input]
 mode = "action"          # button 1 = NES A (jump), button 2 = NES B (whip)
@@ -29,10 +40,66 @@ name = "func_EDF3"
 addr = 0xc368
 name = "func_C368"
 
+# Fixed-bank shared object-timer tail. The object handler at $DE32 branches
+# backward to the real BEQ instruction at $DE04; without this root the valid
+# path reached a strict unresolved stub when a broken candle spawned an item.
+[[function]]
+addr = 0xde04
+name = "func_DE04"
+
 # CV1 master task jump engine (JSR $CA6D at $C1F1; table at $C1F4).
 [[jump_engine]]
 caller = 0xc1f1
 targets = ["L_B7DC", "L_B823", "L_B859", "L_B8D2", "L_B911", "L_C232", "L_C2DE", "L_C32C", "L_C382", "L_C4E7", "L_C4E7", "L_8693", "L_C5F5", "L_C847", "L_86EE", "L_8B4B", "L_FB22"]
+target_entry_a = [0xB7, 0xB8, 0xB8, 0xB8, 0xB9, 0xC2, 0xC2, 0xC3, 0xC3, 0xC4, 0xC4, 0x86, 0xC5, 0xC8, 0x86, 0x8B, 0xFB]
+
+# Fixed-bank object dispatch tables using the same $CA6D pointer-table helper.
+# These annotations keep the inline words out of code discovery and preserve
+# the helper's target-high-byte accumulator value.
+[[jump_engine]]
+caller = 0xda5f
+targets = ["L_DA72", "L_DAAC", "L_DA7B", "L_DAA3", "L_DAB5", "L_DAB5", "L_DAE9", "L_DAE9"]
+target_entry_a = [0xDA, 0xDA, 0xDA, 0xDA, 0xDA, 0xDA, 0xDA, 0xDA]
+
+[[jump_engine]]
+caller = 0xe576
+targets = [
+    "L_E097", "L_E097", "L_E097", "L_E097", "L_E33F", "L_E097",
+    "L_E097", "L_E097", "L_E1AB", "L_E097", "L_E208", "L_E097",
+    "L_E097", "L_E1A7", "L_E18D", "L_E097", "L_E097", "L_E097",
+    "L_E097", "L_E1F3", "L_E16A", "L_E332", "L_E332", "L_E097",
+    "L_E276", "L_E279", "L_E2CC", "L_E276", "L_E314", "L_E31B",
+    "L_E1A3", "L_E395", "L_E097", "L_E097", "L_E097", "L_E097",
+    "L_E097", "L_E097", "L_E097", "L_E097", "L_E3D7", "L_E3D7",
+    "L_E3D7", "L_E3D7", "L_E3D7", "L_E3D7", "L_E3D7", "L_E3D6",
+]
+target_entry_a = [
+    0xE0, 0xE0, 0xE0, 0xE0, 0xE3, 0xE0, 0xE0, 0xE0,
+    0xE1, 0xE0, 0xE2, 0xE0, 0xE0, 0xE1, 0xE1, 0xE0,
+    0xE0, 0xE0, 0xE0, 0xE1, 0xE1, 0xE3, 0xE3, 0xE0,
+    0xE2, 0xE2, 0xE2, 0xE2, 0xE3, 0xE3, 0xE1, 0xE3,
+    0xE0, 0xE0, 0xE0, 0xE0, 0xE0, 0xE0, 0xE0, 0xE0,
+    0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3, 0xE3,
+]
+
+# This fixed-bank table deliberately contains switchable-window addresses.
+# Unqualified L_8xxx labels mean "the currently selected UxROM bank" and are
+# lowered through the runtime's bank-aware tail dispatcher.
+[[jump_engine]]
+caller = 0xf3da
+targets = [
+    "L_F41D", "L_805D", "L_F54C", "L_F533", "L_F53F", "L_F558",
+    "L_F56E", "L_849A", "L_84B9", "L_F41D", "L_89F5", "L_F41D",
+    "L_F581", "L_F5A7", "L_F5B3", "L_85CF", "L_F5D7", "L_8161",
+    "L_F4D2", "L_8A16", "L_8867", "L_F41D", "L_F41D", "L_F41D",
+    "L_8AA9", "L_81BE", "L_8664", "L_8425", "L_88C5", "L_8B3B",
+    "L_8AED", "L_8B3B", "L_F37C",
+]
+target_entry_a = [
+    0xF4, 0x80, 0xF5, 0xF5, 0xF5, 0xF5, 0xF5, 0x84, 0x84, 0xF4, 0x89,
+    0xF4, 0xF5, 0xF5, 0xF5, 0x85, 0xF5, 0x81, 0xF4, 0x8A, 0x88, 0xF4,
+    0xF4, 0xF4, 0x8A, 0x81, 0x86, 0x84, 0x88, 0x8B, 0x8A, 0x8B, 0xF3,
+]
 
 [[bank_call]]
 target = 0x8693
@@ -60,14 +127,6 @@ bank = 0
 
 [[bank_call]]
 target = 0xb911
-bank = 0
-
-[[bank_call]]
-target = 0xc0c0
-bank = 0
-
-[[bank_call]]
-target = 0xc0c0
 bank = 0
 
 [[function]]
@@ -226,6 +285,14 @@ addr = 0x85c2
 
 [[bank_entry]]
 bank = 0
+addr = 0x862e
+
+[[bank_entry]]
+bank = 0
+addr = 0x8656
+
+[[bank_entry]]
+bank = 0
 addr = 0x86d7
 
 [[bank_entry]]
@@ -367,6 +434,10 @@ addr = 0x9359
 [[bank_entry]]
 bank = 6
 addr = 0x9380
+
+[[bank_entry]]
+bank = 6
+addr = 0x9458
 
 [[bank_entry]]
 bank = 6
@@ -702,11 +773,59 @@ addr = 0xaae2
 
 [[bank_entry]]
 bank = 6
+addr = 0xabd6
+
+[[bank_entry]]
+bank = 6
+addr = 0xabdb
+
+[[bank_entry]]
+bank = 6
+addr = 0xac10
+
+[[bank_entry]]
+bank = 6
+addr = 0xac15
+
+[[bank_entry]]
+bank = 6
+addr = 0xac4f
+
+[[bank_entry]]
+bank = 6
+addr = 0xac54
+
+[[bank_entry]]
+bank = 6
 addr = 0xac70
 
 [[bank_entry]]
 bank = 6
 addr = 0xad4f
+
+[[bank_entry]]
+bank = 6
+addr = 0xad74
+
+[[bank_entry]]
+bank = 6
+addr = 0xad79
+
+[[bank_entry]]
+bank = 6
+addr = 0xad8d
+
+[[bank_entry]]
+bank = 6
+addr = 0xae2b
+
+[[bank_entry]]
+bank = 6
+addr = 0xae73
+
+[[bank_entry]]
+bank = 6
+addr = 0xae87
 
 [[bank_entry]]
 bank = 6
@@ -723,6 +842,14 @@ addr = 0xb823
 [[bank_entry]]
 bank = 6
 addr = 0xb859
+
+[[bank_entry]]
+bank = 6
+addr = 0xb8d2
+
+[[bank_entry]]
+bank = 6
+addr = 0xb911
 
 [[bank_entry]]
 bank = 6
@@ -757,7 +884,22 @@ addr = 0x9363
 
 [[jump_engine]]
 caller = 0x9369
+bank = 6
 targets = ["L_b6_9380", "L_b6_9482", "L_b6_9511", "L_b6_9539", "L_b6_9586", "L_b6_965B", "L_b6_9720", "L_b6_9757", "L_b6_97AA", "L_b6_97F2"]
+target_entry_a = [0x93, 0x94, 0x95, 0x95, 0x95, 0x96, 0x97, 0x97, 0x97, 0x97]
+
+# Bank-6 object/state engines reached by the canonical Stage 1 route.
+[[jump_engine]]
+caller = 0xa4c2
+bank = 6
+targets = ["L_b6_A4E0", "L_b6_A4F8", "L_b6_A505", "L_b6_A55B", "L_b6_A56A", "L_b6_A56D"]
+target_entry_a = [0xA4, 0xA4, 0xA5, 0xA5, 0xA5, 0xA5]
+
+[[jump_engine]]
+caller = 0xa679
+bank = 6
+targets = ["L_b6_A713", "L_b6_A727", "L_b6_A735", "L_b6_A75E"]
+target_entry_a = [0xA7, 0xA7, 0xA7, 0xA7]
 
 [[bank_entry]]
 bank = 6
@@ -778,6 +920,48 @@ addr = 0xaae1
 [[function]]
 addr = 0xe931
 name = "func_E931"
+
+# Object-type dispatch in the fixed bank. The reference oracle reaches this
+# site with physical PRG bank 5 selected; switchable-window targets therefore
+# use the bank-5 namespace. The 55-word inline table occupies $E95C-$E9C9.
+[[jump_engine]]
+caller = 0xe959
+return_target = "L_E9E6"
+tail_indices = [50]
+stack_return_bytes = 2
+targets = [
+    "L_EAB1", "L_b5_8008", "L_F07B", "L_F081", "L_EAB1", "L_EAB1",
+    "L_EF92", "L_b5_83F3", "L_b5_8456", "L_b5_8389", "L_b5_90AA",
+    "L_b5_8FD0", "L_EFB8", "L_EDBB", "L_F16C", "L_b5_8787", "L_ED6F",
+    "L_b5_824D", "L_ECF2", "L_b5_917C", "L_b5_8ADA", "L_b5_8BF9",
+    "L_b5_8C51", "L_DBA1", "L_b5_8EB8", "L_b5_80C7", "L_b5_8644",
+    "L_b5_82C5", "L_b5_89E2", "L_b5_94E6", "L_b5_935E", "L_b5_893F",
+    "L_EC7A", "L_EC7A", "L_b5_863E", "L_EB57", "L_EB54", "L_EB54",
+    "L_EB57", "L_b5_8DC6", "L_DD3D", "L_DD3D", "L_DD3D", "L_DD3D",
+    "L_DD3D", "L_DD3D", "L_DD3D", "L_DE12", "L_EB5A", "L_EB65",
+    "L_EC60", "L_EB5A", "L_EB36", "L_EB54", "L_E9E5",
+]
+target_entry_a = [
+    0xEA, 0x80, 0xF0, 0xF0, 0xEA, 0xEA, 0xEF, 0x83, 0x84, 0x83, 0x90,
+    0x8F, 0xEF, 0xED, 0xF1, 0x87, 0xED, 0x82, 0xEC, 0x91, 0x8A, 0x8B,
+    0x8C, 0xDB, 0x8E, 0x80, 0x86, 0x82, 0x89, 0x94, 0x93, 0x89, 0xEC,
+    0xEC, 0x86, 0xEB, 0xEB, 0xEB, 0xEB, 0x8D, 0xDD, 0xDD, 0xDD, 0xDD,
+    0xDD, 0xDD, 0xDD, 0xDE, 0xEB, 0xEB, 0xEC, 0xEB, 0xEB, 0xEB, 0xE9,
+]
+
+# $EA77 JSR $E4D9 can tail-escape through $E7D0 -> $EC60. The callee at
+# $EC60 discards that JSR's two return bytes with PLA/PLA before returning
+# through the next caller. Recreate that one return frame on the emulated
+# 6502 stack; the separate JumpEngine path into $EC60 already supplies its
+# own stack bytes and therefore does not use this edge annotation.
+[[return_escape]]
+caller = 0xe7d0
+target = 0xec60
+return_addr = 0xea79
+
+[[function]]
+addr = 0xe9e5
+name = "func_E9E5"
 
 [[function]]
 addr = 0xe503
@@ -838,3 +1022,166 @@ name = "func_E8E4"
 [[bank_entry]]
 bank = 0
 addr = 0x820d
+
+# Remaining $CA6D inline dispatch sites. The bank-5 entries are physical
+# tables in the canonical PRG bank selected by the Stage 1 object engine.
+[[jump_engine]]
+caller = 0x80cf
+bank = 5
+targets = ["L_b5_80E0", "L_b5_80F7", "L_b5_8156", "L_b5_817A", "L_b5_818C", "L_b5_8194", "L_b5_81CB"]
+target_entry_a = [0x80, 0x80, 0x81, 0x81, 0x81, 0x81, 0x81]
+
+[[jump_engine]]
+caller = 0x82cd
+bank = 5
+targets = ["L_b5_82DA", "L_b5_82E6", "L_b5_8304", "L_b5_8356", "L_b5_8369"]
+target_entry_a = [0x82, 0x82, 0x83, 0x83, 0x83]
+
+[[jump_engine]]
+caller = 0x838c
+bank = 5
+targets = ["L_b5_8397", "L_b5_83A3", "L_b5_83C9", "L_b5_83ED"]
+target_entry_a = [0x83, 0x83, 0x83, 0x83]
+
+[[jump_engine]]
+caller = 0x83f6
+bank = 5
+targets = ["L_b5_83FF", "L_b5_8437", "L_b5_8453"]
+target_entry_a = [0x83, 0x84, 0x84]
+
+[[jump_engine]]
+caller = 0x8505
+bank = 5
+targets = ["L_b5_8538", "L_b5_8555", "L_b5_8571", "L_b5_85B7", "L_b5_85D0", "L_b5_85DC", "L_b5_85D6"]
+target_entry_a = [0x85, 0x85, 0x85, 0x85, 0x85, 0x85, 0x85]
+
+[[jump_engine]]
+caller = 0x864c
+bank = 5
+targets = ["L_b5_868A", "L_b5_86A8", "L_b5_86D2", "L_b5_8701", "L_b5_8723", "L_b5_867A"]
+target_entry_a = [0x86, 0x86, 0x86, 0x87, 0x87, 0x86]
+
+[[jump_engine]]
+caller = 0x878d
+bank = 5
+targets = ["L_b5_87AA", "L_b5_87F6", "L_b5_881F", "L_b5_8853", "L_b5_8899"]
+target_entry_a = [0x87, 0x87, 0x88, 0x88, 0x88]
+
+[[jump_engine]]
+caller = 0x8961
+bank = 5
+targets = ["L_b5_896C", "L_b5_8979", "L_b5_8992", "L_b5_89BF"]
+target_entry_a = [0x89, 0x89, 0x89, 0x89]
+
+[[jump_engine]]
+caller = 0x89ed
+bank = 5
+targets = ["L_b5_89F8", "L_b5_8A04", "L_b5_8A1E", "L_b5_8A56"]
+target_entry_a = [0x89, 0x8A, 0x8A, 0x8A]
+
+[[jump_engine]]
+caller = 0x8ae8
+bank = 5
+targets = ["L_b5_8B08", "L_b5_8B22", "L_b5_8B41", "L_b5_8B5F", "L_b5_8BB7", "L_b5_8BE4"]
+target_entry_a = [0x8B, 0x8B, 0x8B, 0x8B, 0x8B, 0x8B]
+
+[[jump_engine]]
+caller = 0x8c09
+bank = 5
+targets = ["L_b5_8B08", "L_b5_8C12", "L_b5_8C2F", "L_F720", "L_b5_BD8A"]
+target_entry_a = [0x8B, 0x8C, 0x8C, 0xF7, 0xBD]
+
+[[jump_engine]]
+caller = 0x8ca0
+bank = 5
+targets = ["L_b5_8CD3", "L_b5_8CF0", "L_b5_8D0C", "L_b5_8D4A", "L_b5_8D5F", "L_b5_8D6B", "L_b5_8D65"]
+target_entry_a = [0x8C, 0x8C, 0x8D, 0x8D, 0x8D, 0x8D, 0x8D]
+
+[[jump_engine]]
+caller = 0x8ec1
+bank = 5
+targets = ["L_b5_8ECE", "L_b5_8EDA", "L_b5_8EF1", "L_b5_8F23", "L_b5_8F80"]
+target_entry_a = [0x8E, 0x8E, 0x8E, 0x8F, 0x8F]
+
+[[jump_engine]]
+caller = 0x8fd3
+bank = 5
+targets = ["L_b5_8FDE", "L_b5_8FFD", "L_b5_9036", "L_b5_9053"]
+target_entry_a = [0x8F, 0x8F, 0x90, 0x90]
+
+[[jump_engine]]
+caller = 0x90b3
+bank = 5
+targets = ["L_b5_90BE", "L_b5_90F8", "L_b5_9142", "L_b5_914A"]
+target_entry_a = [0x90, 0x90, 0x91, 0x91]
+
+[[jump_engine]]
+caller = 0x918e
+bank = 5
+targets = ["L_b5_919D", "L_b5_91B2", "L_b5_91E9", "L_b5_9225", "L_b5_9158", "L_b5_916A"]
+target_entry_a = [0x91, 0x91, 0x91, 0x92, 0x91, 0x91]
+
+[[jump_engine]]
+caller = 0x9234
+bank = 5
+targets = ["L_b5_9267", "L_b5_9284", "L_b5_92A0", "L_b5_92E6", "L_b5_92FF", "L_b5_930B", "L_b5_9305"]
+target_entry_a = [0x92, 0x92, 0x92, 0x92, 0x92, 0x93, 0x93]
+
+[[jump_engine]]
+caller = 0x9364
+bank = 5
+targets = ["L_b5_9371", "L_b5_93D6", "L_b5_9473", "L_b5_94B2", "L_b5_94BD"]
+target_entry_a = [0x93, 0x93, 0x94, 0x94, 0x94]
+
+[[jump_engine]]
+caller = 0x94fc
+bank = 5
+targets = [
+    "L_b5_9541", "L_b5_954D", "L_b5_957B", "L_b5_95C9", "L_b5_95E2",
+    "L_b5_95F9", "L_b5_9628", "L_b5_963F", "L_b5_9656", "L_b5_966D",
+    "L_b5_969D", "L_b5_96D1", "L_b5_96EA", "L_b5_96EA", "L_b5_9723",
+]
+target_entry_a = [0x95, 0x95, 0x95, 0x95, 0x95, 0x95, 0x96, 0x96, 0x96, 0x96, 0x96, 0x96, 0x96, 0x96, 0x97]
+
+[[jump_engine]]
+caller = 0x9528
+bank = 5
+targets = [
+    "L_b5_973F", "L_b5_976D", "L_b5_97BF", "L_b5_97DB", "L_b5_9806",
+    "L_b5_9845", "L_b5_9893", "L_b5_98B3", "L_b5_98DC", "L_b5_98F3",
+    "L_b5_9911",
+]
+target_entry_a = [0x97, 0x97, 0x97, 0x97, 0x98, 0x98, 0x98, 0x98, 0x98, 0x98, 0x99]
+
+[[jump_engine]]
+caller = 0x81e4
+bank = 6
+targets = ["L_b6_81EF", "L_b6_81F6", "L_b6_81EF", "L_b6_8303", "L_b6_824C"]
+target_entry_a = [0x81, 0x81, 0x81, 0x83, 0x82]
+
+# Fixed-bank tables below contain either fixed targets or live-bank window
+# targets. The unqualified window labels deliberately remain runtime-banked.
+[[jump_engine]]
+caller = 0xdd60
+targets = ["L_DD6D", "L_DD7C", "L_DD93", "L_DDBA", "L_DE03", "L_80A9", "L_8C9D", "L_9D03"]
+target_entry_a = [0xDD, 0xDD, 0xDD, 0xDD, 0xDE, 0x80, 0x8C, 0x9D]
+
+[[jump_engine]]
+caller = 0xde09
+targets = ["L_DDB2", "L_DDBA", "L_DDD8"]
+target_entry_a = [0xDD, 0xDD, 0xDD]
+
+[[jump_engine]]
+caller = 0xde3c
+targets = ["L_DE45", "L_DE65", "L_DE9E", "L_8CBD", "L_9D03"]
+target_entry_a = [0xDE, 0xDE, 0xDE, 0x8C, 0x9D]
+
+[[jump_engine]]
+caller = 0xefbb
+targets = ["L_EFF0", "L_F002", "L_F029", "L_F06D", "L_F073", "L_EFCA"]
+target_entry_a = [0xEF, 0xF0, 0xF0, 0xF0, 0xF0, 0xEF]
+
+[[jump_engine]]
+caller = 0xf084
+targets = ["L_F095", "L_F0B7", "L_F0FC", "L_F11D", "L_F13E", "L_F14E", "L_F15A"]
+target_entry_a = [0xF0, 0xF0, 0xF0, 0xF1, 0xF1, 0xF1, 0xF1]

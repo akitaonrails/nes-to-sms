@@ -164,6 +164,34 @@ pub struct Analyzed {
     pub report: DiscoveryReport,
 }
 
+/// CPU-address domain in which discovery may create and walk roots. References
+/// outside the domain remain external, allowing mapper-aware callers to
+/// analyze fixed and switchable PRG windows independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalysisWindow {
+    pub start: u16,
+    pub end_inclusive: u16,
+}
+
+impl AnalysisWindow {
+    pub const FULL_PRG: Self = Self {
+        start: 0x8000,
+        end_inclusive: 0xFFFF,
+    };
+    pub const SWITCHABLE_16K: Self = Self {
+        start: 0x8000,
+        end_inclusive: 0xBFFF,
+    };
+    pub const FIXED_16K: Self = Self {
+        start: 0xC000,
+        end_inclusive: 0xFFFF,
+    };
+
+    pub fn contains(self, addr: u16) -> bool {
+        addr >= self.start && addr <= self.end_inclusive
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal: per-walk result
 // ---------------------------------------------------------------------------
@@ -172,6 +200,10 @@ const MAX_FUNCTION_BYTES: u16 = 4096;
 
 struct WalkResult {
     end: u16,
+    /// Exact decoded instruction byte ranges. A function can have a forward
+    /// branch around an inline JumpEngine table, so its code is not
+    /// necessarily one contiguous range.
+    code_ranges: Vec<(usize, usize)>,
     internal_labels: Vec<u16>,
     external_refs: Vec<u16>,
     unresolved_indirect: Vec<u16>,
@@ -197,7 +229,10 @@ fn walk_function(
     entry: u16,
     profile: &profile::Profile,
     known_roots: &BTreeSet<u16>,
+    window: AnalysisWindow,
+    bank: Option<u8>,
 ) -> WalkResult {
+    let mut code_ranges: Vec<(usize, usize)> = Vec::new();
     let mut internal_labels: Vec<u16> = Vec::new();
     let mut external_refs: Vec<u16> = Vec::new();
     let mut unresolved_indirect: Vec<u16> = Vec::new();
@@ -214,6 +249,10 @@ fn walk_function(
     let mut hit_data = false;
 
     loop {
+        if !window.contains(pc) {
+            end = pc;
+            break;
+        }
         // Stop if we've wandered past upper bound.
         if pc >= upper_bound {
             truncated = true;
@@ -222,7 +261,7 @@ fn walk_function(
         }
 
         // Stop if we've hit a data region.
-        if profile.is_data_byte(pc) {
+        if profile.is_data_byte_in_bank(pc, bank) {
             hit_data = true;
             end = pc;
             break;
@@ -249,7 +288,12 @@ fn walk_function(
             }
         };
 
+        code_ranges.push((offset, usize::from(insn.size)));
+
         let next_pc = pc.wrapping_add(insn.size as u16);
+        let is_jump_engine_call = insn.mnemonic == Mnemonic::JSR
+            && insn.mode == AddrMode::Absolute
+            && profile.jump_engine_at(pc, bank).is_some();
 
         // Process targets of this instruction.
         match (insn.mnemonic, insn.mode, insn.operand) {
@@ -267,7 +311,15 @@ fn walk_function(
                 _,
             ) => {
                 if let Some(target) = insn.branch_target() {
-                    if is_internal_target(target, entry, upper_bound, known_roots) {
+                    if is_internal_target(
+                        target,
+                        entry,
+                        upper_bound,
+                        known_roots,
+                        profile,
+                        window,
+                        bank,
+                    ) {
                         targets_inside.insert(target);
                         if target != entry && !internal_labels.contains(&target) {
                             internal_labels.push(target);
@@ -280,11 +332,15 @@ fn walk_function(
 
             // JSR absolute
             (Mnemonic::JSR, AddrMode::Absolute, Operand::Addr(target)) => {
-                // JSR is always an external call.
-                push_unique(&mut external_refs, target);
-                // Also schedule as a callee root if in PRG range.
-                if target >= 0x8000 {
-                    push_unique_root(&mut new_roots, target, RootKind::JsrCallee);
+                // An annotated JumpEngine consumes the return address and
+                // dispatches through the inline table. The implementation is
+                // not a conventional callee from this site, and execution
+                // cannot fall through into the table.
+                if !is_jump_engine_call {
+                    push_unique(&mut external_refs, target);
+                    if window.contains(target) {
+                        push_unique_root(&mut new_roots, target, RootKind::JsrCallee);
+                    }
                 }
             }
 
@@ -292,8 +348,10 @@ fn walk_function(
             // is already within the walked body (target < next_pc) and not a known
             // root. Any forward JMP or JMP to a known root is an external tail call.
             (Mnemonic::JMP, AddrMode::Absolute, Operand::Addr(target)) => {
-                let is_backward_loop =
-                    target >= entry && target < next_pc && !known_roots.contains(&target);
+                let is_backward_loop = target >= entry
+                    && target < next_pc
+                    && !known_roots.contains(&target)
+                    && window.contains(target);
                 if is_backward_loop {
                     // Backward self-loop or loop within already-walked body.
                     targets_inside.insert(target);
@@ -302,7 +360,7 @@ fn walk_function(
                     }
                 } else {
                     push_unique(&mut external_refs, target);
-                    if target >= 0x8000 {
+                    if window.contains(target) {
                         push_unique_root(&mut new_roots, target, RootKind::JmpTarget);
                     }
                 }
@@ -316,17 +374,22 @@ fn walk_function(
             _ => {}
         }
 
-        // On a terminator, check if we must continue.
-        if insn.is_terminator() {
+        // On a terminator, continue at the next pending forward internal target.
+        if insn.is_terminator() || is_jump_engine_call {
             // JMP absolute pointing inside was handled above; for absolute JMP
             // where target is internal, we already inserted into targets_inside
-            // and next_pc might be elsewhere. The function continues only if
-            // next_pc is still needed.
-            if !targets_inside.contains(&next_pc) {
+            // and next_pc might be elsewhere.
+            if let Some(target) = targets_inside
+                .range(next_pc..)
+                .copied()
+                .find(|&target| !profile.is_data_byte_in_bank(target, bank))
+            {
+                pc = target;
+                continue;
+            } else {
                 end = next_pc;
                 break;
             }
-            // next_pc is a pending internal target — keep walking.
         }
 
         pc = next_pc;
@@ -342,6 +405,7 @@ fn walk_function(
 
     WalkResult {
         end,
+        code_ranges,
         internal_labels,
         external_refs,
         unresolved_indirect,
@@ -356,6 +420,9 @@ fn is_internal_target(
     entry: u16,
     upper_bound: u16,
     known_roots: &BTreeSet<u16>,
+    profile: &profile::Profile,
+    window: AnalysisWindow,
+    bank: Option<u8>,
 ) -> bool {
     // Target must be within function's plausible range.
     if target < entry || target >= upper_bound {
@@ -364,6 +431,12 @@ fn is_internal_target(
     // If the target is another known root (profile function, jump-table target,
     // or vector), it is an external reference.
     if known_roots.contains(&target) && target != entry {
+        return false;
+    }
+    if profile.is_data_byte_in_bank(target, bank) {
+        return false;
+    }
+    if !window.contains(target) {
         return false;
     }
     true
@@ -400,6 +473,16 @@ fn name_for(addr: u16, kinds: &[RootKind], profile: &profile::Profile) -> String
 // ---------------------------------------------------------------------------
 
 pub fn analyze(prg: &[u8], vectors: nes_rom_like::Vectors, profile: &profile::Profile) -> Analyzed {
+    analyze_in_window(prg, vectors, profile, AnalysisWindow::FULL_PRG, None)
+}
+
+pub fn analyze_in_window(
+    prg: &[u8],
+    vectors: nes_rom_like::Vectors,
+    profile: &profile::Profile,
+    window: AnalysisWindow,
+    bank: Option<u8>,
+) -> Analyzed {
     let prg_len = prg.len();
     let mut class_map = ClassMap::new(prg_len);
     let mut warnings: Vec<String> = Vec::new();
@@ -416,13 +499,24 @@ pub fn analyze(prg: &[u8], vectors: nes_rom_like::Vectors, profile: &profile::Pr
             class_map.mark_data(start_off, len);
         }
     }
+    for site in profile
+        .jump_engines
+        .iter()
+        .filter(|site| site.applies_to_bank(bank))
+    {
+        let start = site.table_start();
+        let len = site.table_len().unwrap_or(0);
+        if start >= 0x8000 {
+            class_map.mark_data(start - 0x8000, len);
+        }
+    }
 
     // ---- Build initial root set ----
     // Map: addr -> set of RootKind
     let mut root_kinds: BTreeMap<u16, Vec<RootKind>> = BTreeMap::new();
 
     let add_root = |root_kinds: &mut BTreeMap<u16, Vec<RootKind>>, addr: u16, kind: RootKind| {
-        if addr == 0x0000 || addr < 0x8000 {
+        if addr == 0x0000 || !window.contains(addr) {
             return;
         }
         let entry = root_kinds.entry(addr).or_default();
@@ -492,7 +586,7 @@ pub fn analyze(prg: &[u8], vectors: nes_rom_like::Vectors, profile: &profile::Pr
         // Snapshot the current known_roots for walk decisions.
         let known_roots: BTreeSet<u16> = root_kinds.keys().copied().collect();
 
-        let result = walk_function(prg, addr, profile, &known_roots);
+        let result = walk_function(prg, addr, profile, &known_roots, window, bank);
 
         if result.truncated {
             warnings.push(format!(
@@ -507,16 +601,11 @@ pub fn analyze(prg: &[u8], vectors: nes_rom_like::Vectors, profile: &profile::Pr
             ));
         }
 
-        // Mark code bytes.
-        if let Some(start_off) = cpu_to_prg(addr) {
-            if let Some(end_off) = cpu_to_prg(result.end) {
-                let len = end_off.saturating_sub(start_off);
-                class_map.mark_code(start_off, len);
-            } else if result.end == 0x0000 {
-                // end wrapped past 0xFFFF
-                let len = (0x10000usize).saturating_sub(addr as usize);
-                class_map.mark_code(start_off, len);
-            }
+        // Mark only bytes belonging to decoded instructions. A routine may
+        // branch around an inline JumpEngine table, leaving a data hole inside
+        // its overall address range.
+        for &(start_off, len) in &result.code_ranges {
+            class_map.mark_code(start_off, len);
         }
 
         // Collect unresolved indirects.
@@ -776,6 +865,107 @@ chr_kib = 8
         assert!(f1.root_kinds.contains(&RootKind::JsrCallee));
     }
 
+    #[test]
+    fn analysis_window_keeps_cross_window_call_external() {
+        // A switchable-window entry calls fixed-bank code. The reference is
+        // reported, but the fixed target must be analyzed by the fixed pass.
+        let mut prg = make_prg(0x8000, &[0x20, 0x00, 0xC0, 0x60]);
+        prg[0x4000] = 0xA9;
+        prg[0x4001] = 0x42;
+        prg[0x4002] = 0x60;
+        let result = analyze_in_window(
+            &prg,
+            vectors_reset(0x8000),
+            &minimal_profile(),
+            AnalysisWindow::SWITCHABLE_16K,
+            Some(0),
+        );
+
+        let f = result.functions.by_addr(0x8000).expect("window root");
+        assert!(f.external_refs.contains(&0xC000));
+        assert!(result.functions.by_addr(0xC000).is_none());
+        assert_eq!(result.class_map.class_at(0x4000), ByteClass::Unknown);
+    }
+
+    #[test]
+    fn jump_engine_table_is_data_and_not_a_conventional_fallthrough() {
+        // $8000: BNE $8009      ; reachable path around the dispatch/table
+        // $8002: JSR $9000      ; annotated JumpEngine call
+        // $8005: .word ...      ; includes JAM-looking $32/$02 bytes
+        // $8009: RTS
+        let prg = make_prg(
+            0x8000,
+            &[0xD0, 0x07, 0x20, 0x00, 0x90, 0x32, 0x12, 0x02, 0x80, 0x60],
+        );
+        let profile = profile::load_from_str(
+            r#"
+[rom]
+name = "JumpEngine test"
+mapper = 0
+prg_kib = 32
+chr_kib = 8
+
+[[jump_engine]]
+caller = 0x8002
+targets = ["First", "Second"]
+"#,
+        )
+        .unwrap();
+
+        let result = analyze(&prg, vectors_reset(0x8000), &profile);
+        let f = result.functions.by_addr(0x8000).expect("root function");
+        assert_eq!(f.end, 0x800A);
+        assert!(f.internal_labels.contains(&0x8009));
+        assert!(!f.external_refs.contains(&0x9000));
+        assert!(result.functions.by_addr(0x9000).is_none());
+
+        for addr in 0x8005u16..0x8009 {
+            assert_eq!(
+                result.class_map.class_at(usize::from(addr - 0x8000)),
+                ByteClass::Data,
+                "${addr:04X} should remain inline-table data"
+            );
+        }
+        assert_eq!(result.class_map.class_at(0x0009), ByteClass::Code);
+    }
+
+    #[test]
+    fn jump_engine_target_may_overlap_the_table_suffix_as_code() {
+        // $8000: JSR JumpEngine
+        // $8003: .word $8005, $804C
+        // $8005: the second pointer's bytes also begin `JMP $8080`
+        let mut prg = make_prg(0x8000, &[0x20, 0x00, 0x90, 0x05, 0x80, 0x4C, 0x80, 0x80]);
+        prg[0x0080] = 0x60;
+        let profile = profile::load_from_str(
+            r#"
+[rom]
+name = "overlapping JumpEngine table"
+mapper = 0
+prg_kib = 32
+chr_kib = 8
+
+[[function]]
+addr = 0x8005
+name = "overlap_target"
+
+[[jump_engine]]
+caller = 0x8000
+targets = ["L_8005", "L_804C"]
+"#,
+        )
+        .unwrap();
+
+        let result = analyze(&prg, vectors_reset(0x8000), &profile);
+        let target = result.functions.by_addr(0x8005).expect("overlap target");
+        assert_eq!(target.end, 0x8008);
+        assert!(target.external_refs.contains(&0x8080));
+        assert_eq!(result.class_map.class_at(0x0003), ByteClass::Data);
+        assert_eq!(result.class_map.class_at(0x0004), ByteClass::Data);
+        for offset in 0x0005..=0x0007 {
+            assert_eq!(result.class_map.class_at(offset), ByteClass::Code);
+        }
+    }
+
     // Test 4: three functions chained by JMP.
     #[test]
     fn three_functions_jmp_chain() {
@@ -818,6 +1008,20 @@ chr_kib = 8
         assert_eq!(f.addr, 0x8000);
         assert_eq!(f.end, 0x8006);
         assert!(f.internal_labels.contains(&0x8002));
+    }
+
+    #[test]
+    fn forward_branch_past_external_jmp_stays_internal() {
+        // $8000: D0 04     BNE $8006
+        // $8002: 4C 00 90  JMP $9000
+        // $8006: 60        RTS
+        let prg = make_prg(0x8000, &[0xD0, 0x04, 0x4C, 0x00, 0x90, 0x00, 0x60]);
+        let profile = minimal_profile();
+        let result = analyze(&prg, vectors_reset(0x8000), &profile);
+
+        let f = result.functions.by_addr(0x8000).unwrap();
+        assert_eq!(f.end, 0x8007);
+        assert!(f.internal_labels.contains(&0x8006));
     }
 
     // Test 6: JMP indirect recorded in unresolved_indirect.

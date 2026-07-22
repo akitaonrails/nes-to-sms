@@ -226,8 +226,13 @@ struct NesBus {
     watch_log: Vec<(u16, u8, u16)>,
     watch_bank_log: Vec<u8>,
     last_pc: u16,
+    current_frame: Option<usize>,
+    ppu_log_values: Vec<u8>,
+    ppu_log_limit: usize,
+    ppu_log_count: usize,
     /// UxROM: selected 16 KiB bank at $8000-$BFFF.
     prg_bank: u8,
+    mapper_policy: nes_rom::MapperPolicy,
     /// CHR-RAM store for pattern-space $2007 writes (ground truth).
     chr_ram: Vec<u8>,
 }
@@ -251,7 +256,7 @@ impl NesBus {
         }
     }
 
-    fn new(prg: Vec<u8>, chr: Vec<u8>) -> Self {
+    fn new(prg: Vec<u8>, chr: Vec<u8>, mapper_policy: nes_rom::MapperPolicy) -> Self {
         Self {
             ram: [0; 0x800],
             prg,
@@ -276,26 +281,39 @@ impl NesBus {
             watch_log: Vec::new(),
             watch_bank_log: Vec::new(),
             last_pc: 0,
+            current_frame: None,
+            ppu_log_values: std::env::var("FD_LOG_PPU_VALUES")
+                .ok()
+                .map(|spec| {
+                    spec.split(',')
+                        .filter_map(|raw| {
+                            u8::from_str_radix(
+                                raw.trim().trim_start_matches("0x").trim_start_matches('$'),
+                                16,
+                            )
+                            .ok()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            ppu_log_limit: std::env::var("FD_LOG_PPU_LIMIT")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(200),
+            ppu_log_count: 0,
             prg_bank: 0,
+            mapper_policy,
             chr_ram: vec![0u8; 0x3000],
         }
     }
 
     fn prg_read(&self, addr: u16) -> u8 {
-        if self.prg.len() > 32 * 1024 {
-            // Banked (UxROM model): $8000-$BFFF = selected 16 KiB bank,
-            // $C000-$FFFF = fixed last bank.
-            let off = if addr >= 0xC000 {
-                self.prg.len() - 0x4000 + (addr as usize - 0xC000)
-            } else {
-                (self.prg_bank as usize * 0x4000 + (addr as usize - 0x8000)) % self.prg.len()
-            };
-            self.prg[off]
-        } else {
-            // 32 KiB PRG at $8000-$FFFF; if 16 KiB, mirror.
-            let off = (addr as usize - 0x8000) % self.prg.len();
-            self.prg[off]
-        }
+        let off = self
+            .mapper_policy
+            .cpu_to_prg_offset(addr, self.prg_bank)
+            .expect("valid reference mapper bank")
+            .expect("PRG read address");
+        self.prg[off]
     }
 }
 
@@ -424,6 +442,20 @@ impl oracle_6502::Bus for NesBus {
                     // subject's uploaded tiles can be compared against
                     // ground truth (FD_DUMP_CHRRAM).
                     let a = self.ppu_addr & 0x3FFF;
+                    if (0x2000..0x3000).contains(&a)
+                        && self.ppu_log_values.contains(&value)
+                        && self.ppu_log_count < self.ppu_log_limit
+                    {
+                        eprintln!(
+                            "REF_PPU_WRITE frame={} bank={} pc=${:04X} addr=${a:04X} value=${value:02X} ctrl=${:02X}",
+                            self.current_frame
+                                .map_or_else(|| "pre".to_string(), |frame| frame.to_string()),
+                            self.prg_bank,
+                            self.last_pc,
+                            self.ppu_ctrl,
+                        );
+                        self.ppu_log_count += 1;
+                    }
                     if (a as usize) < self.chr_ram.len() {
                         self.chr_ram[a as usize] = value;
                     }
@@ -474,14 +506,53 @@ impl oracle_6502::Bus for NesBus {
                 self.strobe = new_strobe;
             }
             0x8000..=0xFFFF => {
-                // UxROM mapper register: any write selects the window bank.
-                if self.prg.len() > 32 * 1024 {
-                    let nbanks = (self.prg.len() / 0x4000) as u8;
-                    self.prg_bank = value % nbanks;
+                if self.mapper_policy.is_banked() {
+                    let bus_byte = self.prg_read(addr);
+                    self.prg_bank = self
+                        .mapper_policy
+                        .selected_bank_from_write(value, bus_byte)
+                        .expect("valid mapper write bank");
                 }
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod mapper_tests {
+    use super::*;
+
+    fn uxrom(conflicts: nes_rom::UxromBusConflicts) -> nes_rom::MapperPolicy {
+        nes_rom::MapperPolicy::Uxrom {
+            bank_count: 2,
+            bus_conflicts: conflicts,
+        }
+    }
+
+    #[test]
+    fn mapper_conflict_uses_current_lower_or_fixed_upper_rom_byte() {
+        let mut prg = vec![0u8; 2 * nes_rom::PRG_BANK_SIZE];
+        prg[0] = 1;
+        prg[nes_rom::PRG_BANK_SIZE] = 1;
+        let mut bus = NesBus::new(prg, vec![], uxrom(nes_rom::UxromBusConflicts::And));
+
+        oracle_6502::Bus::write(&mut bus, 0x8000, 3);
+        assert_eq!(bus.prg_bank, 1);
+        bus.prg_bank = 0;
+        oracle_6502::Bus::write(&mut bus, 0xc000, 3);
+        assert_eq!(bus.prg_bank, 1);
+    }
+
+    #[test]
+    fn mapper_without_conflicts_uses_raw_write() {
+        let mut bus = NesBus::new(
+            vec![0; 2 * nes_rom::PRG_BANK_SIZE],
+            vec![],
+            uxrom(nes_rom::UxromBusConflicts::None),
+        );
+        oracle_6502::Bus::write(&mut bus, 0x8000, 1);
+        assert_eq!(bus.prg_bank, 1);
     }
 }
 
@@ -499,12 +570,13 @@ const REF_PREROLL_CAP: usize = 2_000_000;
 fn run_reference(
     prg: Vec<u8>,
     chr: Vec<u8>,
+    mapper_policy: nes_rom::MapperPolicy,
     frames: usize,
     timeline: &ButtonTimeline,
 ) -> ([u8; 0x800], Vec<[u8; 0x800]>) {
     use oracle_6502::Cpu;
     let mut cpu = Cpu::new();
-    let mut bus = NesBus::new(prg, chr);
+    let mut bus = NesBus::new(prg, chr, mapper_policy);
     cpu.reset(&mut bus);
 
     // Pre-roll: run reset-init until NMI is enabled. SMB polls $2002 for
@@ -512,6 +584,7 @@ fn run_reference(
     bus.vblank = true;
     let mut pre = 0usize;
     while !bus.nmi_enabled && pre < REF_PREROLL_CAP {
+        bus.last_pc = cpu.pc;
         if cpu.step(&mut bus).is_err() {
             break;
         }
@@ -541,6 +614,7 @@ fn run_reference(
                 cpu.nmi(&mut bus);
             }
             for _ in 0..REF_INSN_PER_FRAME {
+                bus.last_pc = cpu.pc;
                 if cpu.step(&mut bus).is_err() {
                     break;
                 }
@@ -562,6 +636,7 @@ fn run_reference(
                 cpu.nmi(&mut bus);
             }
             for _ in 0..REF_INSN_PER_FRAME {
+                bus.last_pc = cpu.pc;
                 if cpu.step(&mut bus).is_err() {
                     break;
                 }
@@ -622,13 +697,45 @@ fn run_reference(
     let call_log_frame: Option<usize> = std::env::var("FD_LOG_CALLS")
         .ok()
         .and_then(|v| v.parse().ok());
+    // FD_TRACE_PC=E959,CA6D: log register and mapper state whenever the
+    // reference executes one of the listed CPU addresses. This is useful for
+    // proving indirect-dispatch selectors and bank identities from the NES,
+    // without deriving profile facts from an already-diverged SMS subject.
+    let trace_pc_list: Vec<u16> = std::env::var("FD_TRACE_PC")
+        .ok()
+        .map(|spec| {
+            spec.split(',')
+                .filter_map(|raw| {
+                    u16::from_str_radix(
+                        raw.trim().trim_start_matches("0x").trim_start_matches('$'),
+                        16,
+                    )
+                    .ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let trace_pc_limit = std::env::var("FD_TRACE_PC_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100);
+    let mut trace_pc_hits = 0usize;
     let mut call_log: Vec<(usize, u8, u16, u16)> = Vec::new();
     let mut bank_entry_set: std::collections::BTreeSet<(u8, u16)> = Default::default();
     let mut nmi_latched = bus.nmi_enabled;
     let mut nmi_fires = 0usize;
+    // Action games that put NES Start on the SMS Pause NMI cannot use SMB's
+    // RAM-driven title/gameplay face-button remap. This reference-only knob
+    // keeps scripted `start` events as NES Start for those profiles.
+    let pause_is_start = std::env::var("FD_PAUSE_START").is_ok();
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for frame in 0..frames {
-        bus.buttons = effective_nes_buttons(frame, timeline, bus.ram[0x0770]);
+        bus.current_frame = Some(frame);
+        bus.buttons = effective_nes_buttons(
+            frame,
+            timeline,
+            if pause_is_start { 0 } else { bus.ram[0x0770] },
+        );
         bus.vblank = true;
         bus.sprite0_phase = 0; // new frame: re-arm the sprite-0 hit handshake
         if bus.nmi_enabled {
@@ -646,8 +753,16 @@ fn run_reference(
             bus.watch_bank_log.clear();
         }
         for _ in 0..REF_INSN_PER_FRAME {
-            if debug_writes {
-                bus.last_pc = cpu.pc;
+            bus.last_pc = cpu.pc;
+            if trace_pc_hits < trace_pc_limit && trace_pc_list.contains(&cpu.pc) {
+                let stack_p = bus.ram[0x0100 | cpu.sp.wrapping_add(1) as usize];
+                let stack_lo = bus.ram[0x0100 | cpu.sp.wrapping_add(2) as usize];
+                let stack_hi = bus.ram[0x0100 | cpu.sp.wrapping_add(3) as usize];
+                eprintln!(
+                    "TRACE_PC frame={frame} bank={} pc=${:04X} A=${:02X} X=${:02X} Y=${:02X} P=${:02X} SP=${:02X} stack_p=${stack_p:02X} stack_pc=${stack_hi:02X}{stack_lo:02X}",
+                    bus.prg_bank, cpu.pc, cpu.a, cpu.x, cpu.y, cpu.p, cpu.sp
+                );
+                trace_pc_hits += 1;
             }
             if tracing {
                 let pc = cpu.pc;
@@ -736,13 +851,34 @@ fn run_reference(
         }
     }
     if std::env::var("FD_DUMP_NT").is_ok() {
-        for row in 6..14 {
-            let base = 0x2000 + row * 32;
+        let page = std::env::var("FD_DUMP_NT_PAGE")
+            .ok()
+            .and_then(|value| {
+                usize::from_str_radix(
+                    value
+                        .trim()
+                        .trim_start_matches("0x")
+                        .trim_start_matches('$'),
+                    16,
+                )
+                .ok()
+            })
+            .unwrap_or(0)
+            .min(3);
+        eprintln!(
+            "REF PPU ctrl=${:02X} mask=${:02X} addr=${:04X} nt_page={page}",
+            bus.ppu_ctrl, bus.ppu_mask, bus.ppu_addr
+        );
+        // Include the two 32-byte attribute-table rows after the 30 tile
+        // rows.  Keeping them in the same dump makes it possible to
+        // reconstruct the exact visible (tile, sub-palette) working set.
+        for row in 0..32 {
+            let base = 0x2000 + page * 0x400 + row * 32;
             let hex: Vec<String> = bus.chr_ram[base..base + 32]
                 .iter()
                 .map(|b| format!("{b:02X}"))
                 .collect();
-            eprintln!("REF NT row {row:02}: {}", hex.join(" "));
+            eprintln!("REF NT p{page} row {row:02}: {}", hex.join(" "));
         }
     }
     if let Ok(t) = std::env::var("FD_DUMP_CHRRAM") {
@@ -1279,6 +1415,8 @@ fn main() {
 
     let nes = std::fs::read(&nes_path).expect("read nes");
     let image = nes_rom::parse(&nes).expect("parse nes");
+    let mapper_policy = nes_rom::resolve_mapper_policy(&image.header, image.prg.len())
+        .expect("supported mapper policy");
     let prg = image.prg.to_vec();
 
     let (timeline, script_desc) = if let Some(path) = buttons_script {
@@ -1296,7 +1434,8 @@ fn main() {
         "Reference: running SMB PRG ({} bytes) for {frames} frames, script={script_desc}",
         prg.len()
     );
-    let (ref_init, ref_snaps) = run_reference(prg, image.chr.to_vec(), frames, &timeline);
+    let (ref_init, ref_snaps) =
+        run_reference(prg, image.chr.to_vec(), mapper_policy, frames, &timeline);
 
     // FD_REF_ONLY=1: print a compact per-frame reference trajectory for
     // authoring/recalibrating input scripts against real-NES dynamics

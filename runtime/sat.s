@@ -64,7 +64,16 @@
 ;   167      blank/transparent tile
 ;   168..183 16 variant scratch slots  (absolute VRAM $3500..$36E0)
 ;
-; TODO(Phase 3): Handle 8x16 sprites (NES PPU ctrl bit 5 = 1).
+; LOCKED MAPPING CONTRACT: The private variant path is proven as
+; boot presentation -> rt_sat_upload -> rt_sat_resolve ->
+; variant_get_scratch -> do_sprite_variant. Its temporary slot-2 map is
+; locked-only: it may execute beneath an outer PPU guard at depth 1 or 2, or
+; during presentation at depth 0 with IFF disabled after the boot boundary
+; assertion. rt_restore_prg_window is the locked restore primitive.
+; do_sprite_variant must not acquire its own guard or wrapper: that would deepen
+; this stack-sensitive private path.
+;
+; CHR-RAM 8x16 sprites are resolved per OAM entry into SMS slots 0..127.
 
 .define SAT_BLANK_REL    167
 .define SAT_SCRATCH_BASE  168
@@ -82,6 +91,10 @@
 .define SAT_VARIANT_MASK  $d467
 .define SAT_VISIBLE_FLAG  $d468
 .define SAT_RR_VICTIM     $d469
+.define SAT_PAIR_MODE     $d468
+.define SAT_PAIR_ROW      $d469
+.define SAT_PAIR_TILE_KEYS $d400
+.define SAT_PAIR_ATTR_KEYS $d480
 .define SAT_OAM_DMA_DE_SAVE $d46a
 .define SAT_OAM_DMA_AF_SAVE $d479
 .define SAT_OAM_DMA_HL_SAVE $d47b
@@ -104,9 +117,26 @@ rt_oam_dma:
   ld   a, h
   add  a, $c0                ; remap to SMS RAM base $C000
   ld   h, a
+  ld   a, ($cb0a)            ; NES DMA begins at OAMADDR and wraps at 256
+  or   a
+  jr   z, _oam_dma_aligned
+  ld   e, a
+  ld   d, $c9                ; first destination = $C900 + OAMADDR
+  neg
+  ld   c, a                  ; first span = 256 - OAMADDR
+  ld   b, $00
+  ldir
+  ld   de, $c900
+  ld   a, ($cb0a)
+  ld   c, a                  ; wrapped span = OAMADDR
+  ld   b, $00
+  ldir
+  jr   _oam_dma_done
+_oam_dma_aligned:
   ld   de, $c900             ; OAM staging
   ld   bc, $0100             ; 256 bytes
   ldir
+_oam_dma_done:
   ld   de, (SAT_OAM_DMA_DE_SAVE)
   ld   hl, (SAT_OAM_DMA_AF_SAVE)
   push hl
@@ -119,13 +149,43 @@ rt_oam_dma:
 ;   Entry: A = scratch index (0..15), B = attr key ($03 pal, $40 H, $80 V),
 ;          C = source sprite tile (relative, 0..166).
 ;   Writes 32 bytes to VRAM at $3500 + index*32.
-;   Clobbers AF, BC, DE, HL. Leaves data_prg_low mapped in slot 2.
+;   Clobbers AF, BC, DE, HL. Restores the current PRG window in slot 2.
+;   Locked-only private leaf; see the proven presentation chain above. Do not
+;   add a guard/wrapper here, because it would deepen the stack-sensitive path.
 do_sprite_variant:
   push af                    ; save scratch index
   ld   a, b
   and  $c3
   ld   (SAT_VARIANT_ATTR), a ; palette + flip key
+  ld   a, c
+  ld   (SAT_VARIANT_TILE), a
 
+.ifdef NES_CHR_RAM
+  ; Dynamic CHR source: copy the selected NES sprite-table tile from the SRAM
+  ; mirror into planar staging. The build-time data_chr asset is blank for
+  ; CHR-RAM cartridges and cannot supply sprite palette/flip variants.
+  ld   a, ($cb08)
+  and  $08
+  rrca
+  rrca
+  rrca                       ; table bit -> 0/1 in H before the *16 below
+  ld   h, a
+  ld   a, (SAT_VARIANT_TILE)
+  ld   l, a
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl                ; table*4096 + tile*16
+  ld   de, CHR_RAM_SRAM_BASE
+  add  hl, de
+  call rt_raw_ciram_sram_enable
+  ld   de, $cb63
+  ld   bc, 16
+  ldir
+  call rt_raw_ciram_sram_disable
+  ld   hl, $cb63
+  ld   (SAT_VARIANT_SRC), hl
+.else
   ; source base in ROM = data_chr ($8000) + (256 + C)*32 = $A000 + C*32
   ld   l, c
   ld   h, $00
@@ -137,6 +197,7 @@ do_sprite_variant:
   ld   de, $a000
   add  hl, de
   ld   (SAT_VARIANT_SRC), hl
+.endif
 
   ; dest VRAM = $3500 + index*32
   pop  af                    ; scratch index
@@ -155,9 +216,12 @@ do_sprite_variant:
   or   $40                   ; VRAM write flag
   out  ($bf), a
 
-  ; map data_chr bank into slot 2 for the source reads
+  ; Map the static CHR asset for CHR-ROM builds. CHR-RAM variants read the
+  ; staged planar bytes above and leave the current PRG window visible.
+.ifndef NES_CHR_RAM
   ld   a, :data_chr
   ld   ($ffff), a
+.endif
 
   ld   b, 8                  ; rows remaining
   ld   c, $00                ; output row index r
@@ -169,18 +233,37 @@ _dof_row:
   neg
   add  a, 7                  ; src row = 7 - r
 _dof_no_v:
+.ifdef NES_CHR_RAM
+  ld   e, a
+  ld   d, $00
+  ld   hl, (SAT_VARIANT_SRC)
+  add  hl, de                ; planar plane-0 row
+  ld   a, (hl)
+  ld   (SAT_VARIANT_P0), a
+  ld   de, 8
+  add  hl, de                ; matching plane-1 row
+  ld   a, (hl)
+  ld   (SAT_VARIANT_P1), a
+.else
   add  a, a
   add  a, a                  ; src_row * 4 (bytes per 4bpp row)
   ld   e, a
   ld   d, $00
   ld   hl, (SAT_VARIANT_SRC)
   add  hl, de                ; HL = source row pointer
+  ld   a, (hl)
+  ld   (SAT_VARIANT_P0), a
+  inc  hl
+  ld   a, (hl)
+  ld   (SAT_VARIANT_P1), a
+.endif
   ld   a, (SAT_VARIANT_ATTR)
   and  $40                   ; H-flip?
-  jr   z, _dof_plain
+  jr   z, _dof_row_done
   ; Inline bit-reversal for H-flip. Stackless and preserves B (row counter)
   ; and C (output row index): E is shifted right, A accumulates reversed bits.
-  ld   e, (hl)
+  ld   a, (SAT_VARIANT_P0)
+  ld   e, a
   xor  a
   srl  e
   rla
@@ -199,8 +282,8 @@ _dof_no_v:
   srl  e
   rla
   ld   (SAT_VARIANT_P0), a
-  inc  hl
-  ld   e, (hl)
+  ld   a, (SAT_VARIANT_P1)
+  ld   e, a
   xor  a
   srl  e
   rla
@@ -218,13 +301,6 @@ _dof_no_v:
   rla
   srl  e
   rla
-  ld   (SAT_VARIANT_P1), a
-  jr   _dof_row_done
-_dof_plain:
-  ld   a, (hl)
-  ld   (SAT_VARIANT_P0), a
-  inc  hl
-  ld   a, (hl)
   ld   (SAT_VARIANT_P1), a
 _dof_row_done:
   ld   a, (SAT_VARIANT_P0)
@@ -264,6 +340,8 @@ _dof_p3_out:
 ; it on miss, and return the SMS tile number to use. Entry: C = source rel tile,
 ; B = attr key. Exit: A = SMS sprite tile (relative). Falls back to the base tile
 ; if the per-frame scratch pool is exhausted.
+; Clobbers AF, BC, DE, HL. Locked-only transitively through do_sprite_variant;
+; valid only in the documented outer-guard or IFF-disabled presentation contexts.
 variant_get_scratch:
   ld   a, c
   ld   (SAT_VARIANT_TILE), a
@@ -344,11 +422,238 @@ _vgs_hit:
   add  a, SAT_SCRATCH_BASE
   ret
 
+.ifdef NES_CHR_RAM
+; Build one NES 8x16 sprite pair in the SMS $2000 sprite-pattern region.
+; Entry: A = NES OAM tile byte, B = attr ($03 palette, $40 H, $80 V),
+;        C = even destination SMS tile (2 * OAM entry index).
+_sat_build_pair_8x16:
+  ld   (SAT_VARIANT_TILE), a
+  ld   a, b
+  and  $c3
+  ld   (SAT_VARIANT_ATTR), a
+  ld   a, (SAT_VARIANT_TILE)
+  and  $01
+  ld   h, a
+  ld   a, (SAT_VARIANT_TILE)
+  and  $fe
+  ld   l, a
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  ld   de, CHR_RAM_SRAM_BASE
+  add  hl, de
+  ld   (SAT_VARIANT_SRC), hl
+
+  ld   l, c
+  ld   h, $00
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  ld   de, $2000
+  add  hl, de
+  ld   a, l
+  out  ($bf), a
+  ld   a, h
+  and  $3f
+  or   $40
+  out  ($bf), a
+
+  call rt_raw_ciram_sram_enable
+  xor  a
+  ld   (SAT_PAIR_ROW), a
+_sat_pair_row_loop:
+  ld   a, (SAT_PAIR_ROW)
+  ld   c, a
+  ld   a, (SAT_VARIANT_ATTR)
+  bit  7, a
+  ld   a, c
+  jr   z, _sat_pair_row_ready
+  ld   a, 15
+  sub  c
+_sat_pair_row_ready:
+  ld   c, a
+  and  $07
+  ld   e, a
+  ld   d, $00
+  ld   a, c
+  and  $08
+  jr   z, _sat_pair_have_offset
+  ld   a, e
+  add  a, 16
+  ld   e, a
+_sat_pair_have_offset:
+  ld   hl, (SAT_VARIANT_SRC)
+  add  hl, de
+  ld   a, (hl)
+  ld   (SAT_VARIANT_P0), a
+  ld   de, 8
+  add  hl, de
+  ld   a, (hl)
+  ld   (SAT_VARIANT_P1), a
+
+  ld   a, (SAT_VARIANT_ATTR)
+  bit  6, a
+  jr   z, _sat_pair_emit
+  ld   a, (SAT_VARIANT_P0)
+  call _sat_reverse_a
+  ld   (SAT_VARIANT_P0), a
+  ld   a, (SAT_VARIANT_P1)
+  call _sat_reverse_a
+  ld   (SAT_VARIANT_P1), a
+_sat_pair_emit:
+  ld   a, (SAT_VARIANT_P0)
+  out  ($be), a
+  ld   c, a
+  ld   a, (SAT_VARIANT_P1)
+  out  ($be), a
+  or   c
+  ld   (SAT_VARIANT_MASK), a
+  ld   c, a
+  ld   a, (SAT_VARIANT_ATTR)
+  bit  0, a
+  ld   a, $00
+  jr   z, _sat_pair_p2_ready
+  ld   a, c
+_sat_pair_p2_ready:
+  out  ($be), a
+  ld   a, (SAT_VARIANT_ATTR)
+  bit  1, a
+  ld   a, $00
+  jr   z, _sat_pair_p3_ready
+  ld   a, (SAT_VARIANT_MASK)
+_sat_pair_p3_ready:
+  out  ($be), a
+  ld   a, (SAT_PAIR_ROW)
+  inc  a
+  ld   (SAT_PAIR_ROW), a
+  cp   16
+  jr   c, _sat_pair_row_loop
+  call rt_raw_ciram_sram_disable
+  ret
+
+_sat_reverse_a:
+  ; Reverse all eight bits with three constant-time permutation stages. The
+  ; former shift loop cost eight iterations for every plane row of every
+  ; horizontally flipped 8x16 sprite, making ordinary animation a dominant
+  ; frame expense. B is dead inside _sat_build_pair_8x16 after the attribute
+  ; key has been parked in RAM.
+  ld   b, a
+  rrca
+  rrca
+  xor  b
+  and  $aa
+  xor  b                    ; swap adjacent 2-bit groups
+  ld   b, a
+  rrca
+  rrca
+  rrca
+  rrca
+  xor  b
+  and  $66
+  xor  b                    ; reverse around the nibble boundary
+  rrca                      ; align the reversed bit order
+  ret
+
+; Each OAM entry owns one even SMS pair slot. Rebuild its pair only when the
+; source tile or palette/flip key changes.
+_sat_resolve_8x16:
+  ld   a, (SAT_PAIR_MODE)
+  cp   1
+  jr   z, _res16_cache_ready
+  ld   a, 1
+  ld   (SAT_PAIR_MODE), a
+  ld   hl, SAT_PAIR_TILE_KEYS
+  ld   bc, $0040
+  ld   a, $ff
+  call mem_fill
+  ld   hl, SAT_PAIR_ATTR_KEYS
+  ld   bc, $0040
+  call mem_fill
+_res16_cache_ready:
+  ld   hl, $c900
+  ld   de, SAT_PAIR_TILE_KEYS
+  ld   b, 64
+_res16_loop:
+  push bc
+  ld   a, (hl)
+  cp   $cf
+  jr   nc, _res16_hidden
+  inc  hl
+  ld   a, (hl)
+  ld   (SAT_VARIANT_TILE), a
+  inc  hl
+  ld   a, (hl)
+  and  $c3
+  ld   (SAT_VARIANT_ATTR), a
+  inc  hl
+  inc  hl
+  ld   a, (SAT_VARIANT_TILE)
+  ld   c, a
+  ld   a, (de)
+  cp   c
+  jr   nz, _res16_regen
+  push hl
+  ld   a, e
+  add  a, $80
+  ld   l, a
+  ld   h, $d4
+  ld   a, (SAT_VARIANT_ATTR)
+  cp   (hl)
+  pop  hl
+  jr   z, _res16_next
+_res16_regen:
+  ld   a, (SAT_VARIANT_TILE)
+  ld   (de), a
+  push hl
+  ld   a, e
+  add  a, $80
+  ld   l, a
+  ld   h, $d4
+  ld   a, (SAT_VARIANT_ATTR)
+  ld   (hl), a
+  pop  hl
+  push hl
+  push de
+  ld   a, e
+  add  a, a
+  ld   c, a
+  ld   a, (SAT_VARIANT_ATTR)
+  ld   b, a
+  ld   a, (SAT_VARIANT_TILE)
+  call _sat_build_pair_8x16
+  pop  de
+  pop  hl
+  jr   _res16_next
+_res16_hidden:
+  inc  hl
+  inc  hl
+  inc  hl
+  inc  hl
+_res16_next:
+  inc  de
+  pop  bc
+  dec  b
+  jp   nz, _res16_loop
+  ret
+.endif
+
 ; ─── rt_sat_resolve ───────────────────────────────────────────────────────────
 ; First SAT pass: resolve each sprite's SMS tile number into $D400, performing
 ; software palette/flip variants into VRAM scratch as needed. Clobbers AF, BC,
-; DE, HL.
+; DE, HL. Locked-only transitively through rt_map_sprite_tile and
+; variant_get_scratch; valid only in the documented outer-guard or IFF-disabled
+; presentation contexts.
 rt_sat_resolve:
+.ifdef NES_CHR_RAM
+  ld   a, ($cb08)
+  bit  5, a
+  jp   nz, _sat_resolve_8x16
+  xor  a
+  ld   (SAT_PAIR_MODE), a
+.endif
   ; H.3: the variant pool persists across frames (see _vgs_miss).
   ; H2: hidden sprites (raw Y >= $CF — most of the 64 slots in typical
   ; frames) take a fast path: their resolved value is never uploaded
@@ -370,8 +675,10 @@ _res_loop:
   inc  hl                    ; -> next entry Y
   call rt_map_sprite_tile    ; A = mapped rel tile (preserves BC, DE, HL)
   ld   c, a                  ; C = rel tile (default resolved value)
+.ifndef NES_CHR_RAM
   cp   SAT_BLANK_REL         ; blank tile? leave transparent, no variant
   jr   z, _res_store
+.endif
   ld   a, b
   and  $c3                   ; palette bits + H/V flip; ignore priority bit 5
   jr   z, _res_store         ; base palette, no flip -> use mapped tile
@@ -409,7 +716,11 @@ _res_hidden:
 
 ; ─── rt_sat_upload ────────────────────────────────────────────────────────────
 ; Copies sprite data from NES OAM staging at $C900 into SMS VRAM SAT at $3F00,
-; resolving software sprite variants first. Called from irq_handler during VBlank.
+; resolving software sprite variants first. This is the presentation entry of
+; the proven private variant chain; it runs with IFF disabled at depth 0 after
+; the boot boundary assertion (or under an outer PPU guard at depth 1/2).
+; Preserves AF, BC, DE, HL. Its mapping descendants restore via the locked
+; rt_restore_prg_window primitive.
 rt_sat_upload:
   push af
   push hl
@@ -431,7 +742,7 @@ rt_sat_upload:
   out  ($bf), a
 
   ld   hl, $c900             ; Y is first byte of each 4-byte entry
-  ld   de, SAT_ATTRS         ; compacted attrs mirror visible SAT order
+  ld   c, 0                  ; compacted visible-sprite count
   ld   b, 64
 _sat_y_loop:
   ld   a, (hl)               ; NES Y
@@ -440,13 +751,7 @@ _sat_y_loop:
   inc  a                     ; visible SMS Y = NES Y + 1
 _sat_y_visible:
   out  ($be), a
-  push hl
-  inc  hl                    ; -> tile
-  inc  hl                    ; -> attr
-  ld   a, (hl)
-  ld   (de), a               ; attr for this compacted SAT entry
-  inc  de
-  pop  hl
+  inc  c
 _sat_y_skip:
   inc  hl
   inc  hl
@@ -459,12 +764,8 @@ _sat_y_skip:
   ; line (208) and entries past the compacted list kept rendering stale
   ; sprites (field report: squashed-goomba remains following the player).
   ; Write Y=$E0 (line 224+, offscreen in 224-line mode) to all 64-N slots.
-  ; N visible = (DE - SAT_ATTRS); remaining = 64 - N, always >= 0.
-  ld   a, e
-  sub  <SAT_ATTRS            ; A = visible count (attrs table is 64-aligned)
-  ld   b, a
   ld   a, 64
-  sub  b                     ; A = remaining slots
+  sub  c                     ; A = remaining slots
   jr   z, _sat_y_done
   ld   b, a
   ld   a, $e0
@@ -480,6 +781,11 @@ _sat_y_done:
   or   $40
   out  ($bf), a
 
+.ifdef NES_CHR_RAM
+  ld   a, ($cb08)
+  bit  5, a
+  jr   nz, _sat_xt_8x16
+.endif
   ld   hl, $c900             ; OAM (for X)
   ld   de, SAT_RESOLVED      ; resolved tile numbers
   ld   b, 64
@@ -505,7 +811,40 @@ _sat_xt_skip:
   inc  de                    ; skip resolved tile for this hidden sprite
 _sat_xt_next:
   djnz _sat_xt_loop
+  jr   _sat_upload_done
 
+.ifdef NES_CHR_RAM
+_sat_xt_8x16:
+  ; The pair resolver assigns even SMS tiles by original OAM index. Hidden
+  ; entries are skipped in SAT order but retain their index-owned cache slot.
+  ld   hl, $c900
+  ld   b, 64
+  ld   c, 0
+_sat_xt_16_loop:
+  ld   a, (hl)
+  cp   $cf
+  jr   nc, _sat_xt_16_skip
+  inc  hl
+  inc  hl
+  inc  hl
+  ld   a, (hl)
+  inc  hl
+  out  ($be), a              ; X
+  ld   a, c
+  add  a, a
+  out  ($be), a              ; even pair tile
+  jr   _sat_xt_16_next
+_sat_xt_16_skip:
+  inc  hl
+  inc  hl
+  inc  hl
+  inc  hl
+_sat_xt_16_next:
+  inc  c
+  djnz _sat_xt_16_loop
+.endif
+
+_sat_upload_done:
   pop  de
   pop  bc
   pop  hl

@@ -34,6 +34,13 @@ audio_driver = "pulse"
 audio_enable = "true"
 CFG
 
+# Xvfb/CI captures need the SDL2 video backend; the default GL path can create
+# a window while leaving its drawable black. Normal interactive launches keep
+# RetroArch's default unless the caller opts in.
+if [ -n "${GPGX_VIDEO_DRIVER:-}" ]; then
+  printf 'video_driver = "%s"\n' "$GPGX_VIDEO_DRIVER" >> "$OVR"
+fi
+
 # Gamepad autoconfig: the container ships no joypad profiles, so RetroArch
 # detects pads but reports "not configured". Provide one for the 8BitDo
 # Ultimate 2 Wireless (XInput layout: south/east/west/north = 0/1/2/3,

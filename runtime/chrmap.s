@@ -18,6 +18,13 @@
 ; nametable shadow ($CC00, 2 low bits; the high byte is otherwise 0 now). The
 ; tile write reads S there and resolves the variant.
 ;
+; MAPPING/LOCK CONTRACT: Every helper below that temporarily maps slot 2
+; ($FFFF) or enables the CIRAM/CHR-RAM SRAM window is locked-only. It may run
+; only beneath an outer PPU guard at depth 1 or 2, or on the presentation path
+; at depth 0 with IFF disabled after the boot boundary assertion. The mapping
+; helpers restore through rt_restore_prg_window, the locked restore primitive;
+; no caller may substitute an unlocked bank restore.
+;
 ; RAM:
 ;   $CA00        bg variant pool next-free slot (0-255)
 ;   $CA01-$CA06  do_variant scratch (p2, p3, slot, src ptr lo/hi, attr S)
@@ -48,7 +55,10 @@
 ; tile's low bitplanes from ROM (data_chr) and fill the high bitplanes with the
 ; sub-palette S (so every pixel gains S*4).
 ;   Entry: A = pool slot (0-255), B = S (0-3), C = base slot (0-255).
-;   Clobbers AF, BC, DE, HL. Leaves data_prg_low mapped in slot 2.
+;   Clobbers AF, BC, DE, HL. Restores the current PRG window in slot 2.
+;   Locked-only: temporarily maps slot 2 (or the CHR-RAM SRAM window). Valid
+;   contexts are outer PPU guard depth 1/2, or presentation depth 0 with IFF
+;   disabled after the boot boundary assertion; rt_restore_prg_window restores.
 rt_bg_gen_variant:
   ld   (BGV_SLOT), a
   ; high-plane fill bytes from S: plane2 = (S&1)?$FF:0, plane3 = (S&2)?$FF:0
@@ -145,15 +155,22 @@ _gvr_have_table:
   ld   b, 8
 _gvr_emit_row:
   ld   a, (hl)               ; plane 0 row
+  ld   (BGV_SRC), a
   out  ($be), a
   push bc
   ld   bc, 8
   add  hl, bc                ; -> plane 1 row
   ld   a, (hl)
   out  ($be), a
+  ld   c, a
+  ld   a, (BGV_SRC)
+  or   c                     ; NES pixel 0 keeps universal background colour
+  ld   c, a
   ld   a, (BGV_P2)
+  and  c
   out  ($be), a
   ld   a, (BGV_P3)
+  and  c
   out  ($be), a
   ld   bc, -7                ; back to next plane-0 row
   add  hl, bc
@@ -169,14 +186,21 @@ _gvr_emit_row:
   ld   b, 8
 _gv_row:
   ld   a, (hl)               ; plane 0 (low NES bitplane)
+  ld   (BGV_SRC), a
   out  ($be), a
   inc  hl
   ld   a, (hl)               ; plane 1
   out  ($be), a
+  ld   c, a
+  ld   a, (BGV_SRC)
+  or   c                     ; only non-zero NES pixels select sub-palette S
+  ld   c, a
   inc  hl                    ; skip source planes 2,3 (zero in data_chr)
   ld   a, (BGV_P2)
+  and  c
   out  ($be), a              ; plane 2 = S bit 0
   ld   a, (BGV_P3)
+  and  c
   out  ($be), a              ; plane 3 = S bit 1
   inc  hl
   inc  hl
@@ -190,6 +214,43 @@ _gv_row:
 ;   Entry: C = base slot, B = S (0-3).  Exit: A = pool slot.
 ;   Clobbers AF, DE, HL (B, C consumed).
 rt_bg_get_variant:
+.ifdef PROFILE_CHR_RAM_BG_IDENTITY
+  ; A dense CHR-RAM screen can require more than 256 (tile,sub-palette)
+  ; combinations, causing the variant ring to recycle slots that are still
+  ; visible. Identity mode pins each NES tile to the same SMS slot and uses
+  ; the first background palette. $D600[base] caches the presented CHR table
+  ; for which that slot was generated.
+  ld   a, c
+  ld   (BGV_SLOT), a
+  ld   l, a
+  ld   h, $00
+  ld   de, BGV_CACHE
+  add  hl, de
+  ld   a, ($ca13)
+  cp   $ff
+  jr   nz, _gbv_identity_have_table
+  ld   a, ($cb08)
+_gbv_identity_have_table:
+  and  $10
+  or   $80
+  ld   (BGV_ATTR_S), a
+  cp   (hl)
+  jr   z, _gbv_identity_done
+  ld   a, (BGV_SLOT)
+  ld   c, a
+  ld   b, $00
+  call rt_bg_gen_variant
+  ld   a, (BGV_SLOT)
+  ld   l, a
+  ld   h, $00
+  ld   de, BGV_CACHE
+  add  hl, de
+  ld   a, (BGV_ATTR_S)
+  ld   (hl), a
+_gbv_identity_done:
+  ld   a, (BGV_SLOT)
+  ret
+.endif
   ld   l, c
   ld   h, $00
   add  hl, hl
@@ -287,13 +348,68 @@ _gbv_inv_next:
   jr   nz, _gbv_inv_loop
   ret
 
+; Discard every cached (tile, sub-palette) assignment before a complete
+; visible-window rebuild.  Full rebuild callers immediately rewrite all 896
+; visible cells, so no live nametable entry can retain an invalidated slot.
+; Resetting the allocator here prevents variants from earlier scenes from
+; consuming the finite 256-slot background pattern table; a dense but valid
+; current screen can then use all slots without recycling visible patterns.
+; Clobbers: AF, BC, DE, HL.
+rt_bg_reset_variant_cache:
+  ld   hl, BGV_CACHE
+  ld   de, BGV_CACHE + 1
+  ld   bc, $03ff
+  ld   (hl), $ff
+  ldir
+  xor  a
+  ld   (BGV_POOL_NEXT), a
+  ld   (BGV_RING_WRAPPED), a
+  ret
+
+; Regenerate every assigned variant in its existing VRAM slot after the NES
+; background pattern-table select changes.  The cache key is (tile,S), while
+; PPUCTRL selects one source table globally, so slot ownership does not need to
+; change: only the 4bpp pixels do.  Preserving the slots is important because
+; all visible nametable cells contain those slot numbers.  The former
+; reset-and-rematerialize path renumbered the cache and rewrote 896 cells; on a
+; real VDP that work ran far beyond VBlank and exposed a half-old/half-new
+; screen.  Entry: $CA13 already contains the newly presented table bit.
+; Clobbers: AF, BC, DE, HL.
+rt_bg_refresh_variant_cache:
+  ld   hl, BGV_CACHE
+  ld   de, $0000             ; D = base tile, E = sub-palette S
+_bgv_refresh_loop:
+  ld   a, (hl)
+  cp   $ff
+  jr   z, _bgv_refresh_next
+  push hl
+  push de
+  ld   c, d                  ; base tile
+  ld   b, e                  ; sub-palette S
+  call rt_bg_gen_variant     ; A = existing slot
+  pop  de
+  pop  hl
+_bgv_refresh_next:
+  inc  hl
+  inc  e
+  ld   a, e
+  cp   4
+  jr   c, _bgv_refresh_loop
+  ld   e, 0
+  inc  d
+  jr   nz, _bgv_refresh_loop
+  ret
+
 ; ─── rt_bg_map_base_slot ─────────────────────────────────────────────────────
 ; Map a NES background tile byte through the active BG CHR map.
 ;   Entry: A = NES bg tile byte.
 ;   Exit:  A = mapped SMS base slot.
-;   Preserves BC, DE, HL. Clobbers AF. Leaves data_prg_low mapped in slot 2.
+;   Preserves BC, DE, HL. Clobbers AF. Restores the current PRG window in slot 2.
 ; Helper-only scaffold for a later CIRAM materializer; current rendering paths
 ; still use their inlined lookups and BGV_BSHADOW.
+; Locked-only: temporarily maps slot 2; valid only under the outer PPU guard
+; at depth 1/2, or in presentation at depth 0 with IFF disabled after the boot
+; boundary assertion. rt_restore_prg_window is the locked restore primitive.
 rt_bg_map_base_slot:
   push hl
   push de
@@ -356,10 +472,22 @@ _bgv_base_addr:
 ; Write a background nametable entry. Entry: A = NES tile byte; the caller has
 ; set the VDP write address to the cell. Resolves the (base, S) variant and
 ; writes its slot as the tile, palette 0 (sub-palette baked into the pixels).
-; Clobbers AF, BC, DE, HL. Leaves data_prg_low mapped in slot 2.
+; Clobbers AF, BC, DE, HL. Restores the current PRG window in slot 2.
+; Locked-only: its temporary slot-2 map is valid only under an outer PPU guard
+; at depth 1/2, or in presentation at depth 0 with IFF disabled after the boot
+; boundary assertion. Its inline restore is equivalent to the locked
+; rt_restore_prg_window primitive.
 rt_write_mapped_bg_tile:
   ld   c, a
-  ld   ($cb17), de           ; SMS nametable low-byte address
+  ; $CB18 is rt_ppu_write's saved 6502 accumulator.  Do not use the old
+  ; overlapping `$CB17` word scratch here: storing DE there replaced the
+  ; accumulator with the nametable high byte and corrupted repeated STA $2007
+  ; loops.  C already owns the tile byte, so $CB13 can safely park the address
+  ; high byte for this helper.
+  ld   a, e
+  ld   ($cb17), a
+  ld   a, d
+  ld   ($cb13), a
 
 .ifdef NES_CHR_RAM
   ; CHR-RAM: the base IS the NES tile index within the active BG table
@@ -397,7 +525,10 @@ _bgw_map_ready:
 
   ; In nametable range: record the base slot for this cell (so a later
   ; attribute write can re-resolve the variant), then read the sub-palette S.
-  ld   hl, ($cb17)
+  ld   a, ($cb17)
+  ld   l, a
+  ld   a, ($cb13)
+  ld   h, a
   ld   a, h
   cp   $37
   jr   c, _bgw_s0
@@ -405,7 +536,10 @@ _bgw_map_ready:
   jr   nc, _bgw_s0
   call _bgv_base_addr        ; HL(low addr) -> base-shadow addr (preserves BC)
   ld   (hl), c               ; base-shadow[cell] = base slot
-  ld   hl, ($cb17)
+  ld   a, ($cb17)
+  ld   l, a
+  ld   a, ($cb13)
+  ld   h, a
   call _bgv_sub_palette      ; A = S
   jr   _bgw_have_s
 _bgw_s0:
@@ -416,7 +550,10 @@ _bgw_have_s:
   ld   c, a                  ; C = variant slot
 
   ; write the nametable entry (re-set the address: gen may have moved it)
-  ld   hl, ($cb17)
+  ld   a, ($cb17)
+  ld   l, a
+  ld   a, ($cb13)
+  ld   h, a
   ld   a, l
   out  ($bf), a
   ld   a, h
@@ -436,19 +573,23 @@ _bgw_have_s:
 ; palette state. Still records the base slot in BGV_BSHADOW for folded SMS
 ; cells in the nametable range $3700-$3EFF so later explicit-S redraw helpers
 ; can re-resolve the cell.
-; Preserves BC, DE, HL. Clobbers AF. Leaves data_prg_low mapped in slot 2.
+; Preserves BC, DE, HL. Clobbers AF. Restores the current PRG window in slot 2.
 ; Scaffold only: current hot paths still call rt_write_mapped_bg_tile.
+; Locked-only: temporarily maps slot 2; valid only under the outer PPU guard
+; at depth 1/2, or in presentation at depth 0 with IFF disabled after the boot
+; boundary assertion. rt_restore_prg_window is the locked restore primitive.
 rt_write_mapped_bg_tile_s:
   push hl
   push de
   push bc
-  ld   ($cb13), a            ; temporary save NES tile byte
+  ld   c, a                  ; save NES tile byte before loading explicit S
   ld   a, b
   and  $03
   ld   ($cb16), a            ; explicit S
-  ld   a, ($cb13)
-  ld   c, a
-  ld   ($cb17), de           ; SMS nametable low-byte address
+  ld   a, e
+  ld   ($cb17), a
+  ld   a, d
+  ld   ($cb13), a            ; address high; never overlap saved A at $CB18
 
   ; base slot from the BG map
   ld   a, :data_chr_maps
@@ -470,7 +611,10 @@ _bgw_s_map_ready:
   call rt_restore_prg_window   ; current NES PRG window (banked-aware)
 
   ; In nametable range: record the base slot for this folded SMS cell.
-  ld   hl, ($cb17)
+  ld   a, ($cb17)
+  ld   l, a
+  ld   a, ($cb13)
+  ld   h, a
   ld   a, h
   cp   $37
   jr   c, _bgw_s_no_base_shadow
@@ -485,7 +629,10 @@ _bgw_s_no_base_shadow:
   ld   c, a                  ; C = variant slot
 
   ; write the nametable entry (re-set the address: gen may have moved it)
-  ld   hl, ($cb17)
+  ld   a, ($cb17)
+  ld   l, a
+  ld   a, ($cb13)
+  ld   h, a
   ld   a, l
   out  ($bf), a
   ld   a, h
@@ -506,9 +653,13 @@ _bgw_s_no_base_shadow:
 ; Write a background nametable entry from an explicit subpalette without
 ; touching the per-cell base-slot shadow.
 ;   Entry: A = NES tile byte, B = S (0..3), DE = SMS nametable low-byte address.
-;   Preserves BC, DE, HL. Clobbers AF. Leaves data_prg_low mapped in slot 2.
+;   Preserves BC, DE, HL. Clobbers AF. Restores the current PRG window in slot 2.
 ; Helper-only scaffold for a later CIRAM materializer; current paths still use
 ; BGV_BSHADOW so attribute redraw remains route-equivalent.
+; Locked-only transitively through rt_bg_map_base_slot: valid only under an
+; outer PPU guard at depth 1/2, or in presentation at depth 0 with IFF disabled
+; after the boot boundary assertion. rt_restore_prg_window is the locked
+; restore primitive.
 rt_write_mapped_bg_tile_s_noshadow:
   push hl
   push de
@@ -542,7 +693,10 @@ rt_write_mapped_bg_tile_s_noshadow:
 ; continuation/diagnostic slots. Intentionally uncalled by current runtime paths.
 ;   Entry: A = NES tile byte, B = S (0..3), DE = SMS nametable high-byte address.
 ;          The corresponding tile low-byte address is DE-1.
-;   Preserves BC, DE, HL. Clobbers AF. Leaves data_prg_low mapped in slot 2.
+;   Preserves BC, DE, HL. Clobbers AF. Restores the current PRG window in slot 2.
+;   Locked-only transitively through rt_write_mapped_bg_tile_s_noshadow; use
+;   only beneath outer PPU guard depth 1/2, or in presentation with IFF disabled
+;   at depth 0 after the boot boundary assertion.
 rt_redraw_bg_cell_tile_s_noshadow:
   push de
   dec  de                    ; high-byte addr -> low-byte tile addr
@@ -554,8 +708,17 @@ rt_redraw_bg_cell_tile_s_noshadow:
 ; Entry: A = NES OAM tile byte. Uses PPUCTRL bit 3 ($CB08) to choose NES sprite
 ; pattern table 0/1. Table 0 maps to tile bytes for SMS sprite base $2000;
 ; table 1 maps to tile bytes for SMS sprite base $0000.
-; Exit: A = SMS sprite tile byte. Preserves BC, DE, HL.
+; Exit: A = SMS sprite tile byte. Preserves BC, DE, HL; clobbers AF.
+; Locked-only: temporarily maps slot 2; valid only under the outer PPU guard
+; at depth 1/2, or in presentation at depth 0 with IFF disabled after the boot
+; boundary assertion. rt_restore_prg_window is the locked restore primitive.
 rt_map_sprite_tile:
+.ifdef NES_CHR_RAM
+  ; Pattern writes are copied to the SMS sprite region under the same NES tile
+  ; number, so dynamic CHR uses an identity map. Static packing maps are built
+  ; from the ROM's CHR asset, which is intentionally blank on CHR-RAM carts.
+  ret
+.else
   push hl
   push de
   push bc
@@ -584,6 +747,7 @@ _chrmap_sprite_base_ready:
   pop  hl
   ld   a, ($cb13)
   ret
+.endif
 
 ; Build DE = SMS nametable high-byte address for the top-left tile covered by
 ; attribute offset $CB19. Formula:

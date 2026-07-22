@@ -798,9 +798,6 @@ impl SmsDiffBus {
             }
             0xC000..=0xDFFF => {
                 self.ram[(addr - 0xC000) as usize] = value;
-                if addr >= 0xDFFC {
-                    self.apply_mapper_write(addr | 0x2000, value);
-                }
             }
             0xE000..=0xFFFB => self.ram[(addr - 0xE000) as usize] = value,
             0xFFFC..=0xFFFF => {
@@ -1398,5 +1395,16 @@ mod tests {
         assert_eq!(bus.slot_bank[2], 1);
         bus.mapper_control = 0;
         assert_eq!(bus.peek_u8(0x8000), 0xFF);
+    }
+
+    #[test]
+    fn dffc_ram_write_does_not_alias_mapper_control() {
+        let imported = ImportedState::default();
+        let mut bus = SmsDiffBus::new(Vec::new(), &imported);
+        bus.write_mem(0xFFFC, 0x08);
+        bus.write_mem(0xDFFC, 0x55);
+
+        assert_eq!(bus.peek_u8(0xDFFC), 0x55);
+        assert_eq!(bus.mapper_control, 0x08);
     }
 }

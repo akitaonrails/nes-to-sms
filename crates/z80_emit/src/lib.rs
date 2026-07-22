@@ -5,7 +5,7 @@ use std::collections::HashMap;
 // ── Patch kinds ──────────────────────────────────────────────────────────────
 
 /// A pending fixup to apply once labels are resolved.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PatchKind {
     /// 16-bit absolute address, little-endian (jp / call).
     Abs16 { offset: usize },
@@ -13,7 +13,7 @@ enum PatchKind {
     Rel8 { offset: usize },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Patch {
     /// Label being referenced.
     label: String,
@@ -25,6 +25,7 @@ struct Patch {
 
 // ── Section ──────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct Section {
     name: String,
     org: u16,
@@ -78,6 +79,7 @@ impl Section {
 
 // ── Program ──────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct Program {
     sections: Vec<Section>,
     current: usize,
@@ -213,6 +215,18 @@ impl Program {
         }
     }
 
+    /// Emit a relocatable 16-bit pointer to `label` as WLA-DX `.dw` data.
+    ///
+    /// The in-memory byte stream keeps zero placeholders because validation
+    /// never executes linker-owned data sections; the assembled project gets
+    /// the resolved address from WLA-DX. Track the reference so unresolved
+    /// targets retain the same fail-closed handling as instruction operands.
+    pub fn word_label(&mut self, label: &str) {
+        self.sec().push_u16_le(0x0000);
+        self.sec().push_asm(format!("  .dw {label}"));
+        self.referenced_labels.insert(label.to_string());
+    }
+
     pub fn align(&mut self, alignment: usize) {
         let cur_len = self.sections[self.current].len();
         let rem = cur_len % alignment;
@@ -227,6 +241,12 @@ impl Program {
 
     pub fn current_addr(&self) -> u16 {
         self.sections[self.current].current_addr()
+    }
+
+    /// Number of encoded bytes in the active section. Unlike `current_addr`,
+    /// this never wraps at 16 bits and is suitable for physical bank packing.
+    pub fn current_section_len(&self) -> usize {
+        self.sections[self.current].len()
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -1081,7 +1101,7 @@ impl Program {
         let cont = self.fresh_label("tr_cont");
         let overflow = self.fresh_label("tr_call_overflow");
 
-        self.emit_translated_call_frame(&cont, &overflow);
+        self.emit_translated_call_frame(&cont, &overflow, None, 0);
         if self.label_section.get(label) == Some(&self.current) {
             self.ld_a_hl_ptr();
             self.jp(label);
@@ -1099,6 +1119,35 @@ impl Program {
         self.referenced_labels.insert(label.to_string());
     }
 
+    /// Dispatch to `label` with an explicit translated RTS continuation.
+    /// This supports stack-aware pointer-table engines that arrange their own
+    /// 6502 return bytes before tail-dispatching. `stack_return_bytes` is
+    /// encoded in the software frame so `rt_translated_rts` can consume the
+    /// corresponding emulated-stack bytes before resuming `continuation`.
+    pub fn translated_call_with_continuation(
+        &mut self,
+        label: &str,
+        continuation: &str,
+        stack_return_bytes: u8,
+    ) {
+        let overflow = self.fresh_label("tr_call_overflow");
+        let frame_flags = match stack_return_bytes {
+            0 => 0,
+            2 => 0x40,
+            other => panic!("unsupported translated stack return size: {other}"),
+        };
+
+        self.emit_translated_call_frame(continuation, &overflow, Some(continuation), frame_flags);
+        self.ld_a_hl_ptr();
+        self.translated_tail_jmp(label);
+        self.label(&overflow);
+        self.ld_a_imm(0xE4);
+        self.ld_abs_a(0xCB1D);
+        self.jp("rt_unresolved_jsr_flash");
+        self.referenced_labels.insert(label.to_string());
+        self.referenced_labels.insert(continuation.to_string());
+    }
+
     /// Tail jump to a translated label, switching slot 1 for cross-section
     /// targets without leaving a native helper return frame behind.
     pub fn translated_tail_jmp(&mut self, label: &str) {
@@ -1113,7 +1162,23 @@ impl Program {
         }
     }
 
-    fn emit_translated_call_frame(&mut self, cont: &str, overflow: &str) {
+    /// Tail-dispatch a NES switchable-window address using the live mapper
+    /// bank. This is used by fixed-bank pointer tables whose entries name an
+    /// address in `$8000-$BFFF` but intentionally do not encode a physical
+    /// UxROM bank. BC carries the NES address and A remains the target-entry
+    /// accumulator value.
+    pub fn translated_banked_tail_dispatch(&mut self, addr: u16) {
+        self.ld_bc_imm(addr);
+        self.jp("rt_banked_tail_dispatch");
+    }
+
+    fn emit_translated_call_frame(
+        &mut self,
+        cont: &str,
+        overflow: &str,
+        return_bank_label: Option<&str>,
+        frame_flags: u8,
+    ) {
         // Keep entry A in C until frame[0] is filled; do not use global scratch.
         self.ld_c_a();
         let bridge = self.fresh_label("tr_push_bridge");
@@ -1197,7 +1262,14 @@ impl Program {
         self.inc_hl();
         self.ld_hl_ptr_b();
         self.inc_hl();
-        self.ld_a_abs(0xCB14);
+        if let Some(label) = return_bank_label {
+            self.emit_bytes_asm(&[0x3E, 0x00], &format!("  ld a,:{label}"));
+        } else {
+            self.ld_a_abs(0xCB14);
+        }
+        if frame_flags != 0 {
+            self.or_imm(frame_flags);
+        }
         self.ld_hl_ptr_a();
         self.dec_hl();
         self.dec_hl();
@@ -2009,6 +2081,17 @@ mod tests {
     }
 
     #[test]
+    fn test_word_label_data() {
+        let mut p = Program::new();
+        p.section("data");
+        p.label("target");
+        p.word_label("target");
+        let b = p.finish().unwrap();
+        assert_eq!(&b.bytes, &[0x00, 0x00]);
+        assert!(b.asm.contains(".dw target"));
+    }
+
+    #[test]
     fn test_fresh_label_unique() {
         let mut p = Program::new();
         let l1 = p.fresh_label("loop");
@@ -2026,6 +2109,20 @@ mod tests {
         assert_eq!(p.current_addr(), 0x0101);
         p.ld_hl_imm(0x0000);
         assert_eq!(p.current_addr(), 0x0104);
+    }
+
+    #[test]
+    fn cloned_program_mutations_are_independent() {
+        let mut original = Program::new();
+        original.section("code");
+        original.nop();
+        let mut candidate = original.clone();
+        candidate.label("candidate_only");
+        candidate.ld_a_imm(0x42);
+
+        assert_eq!(original.current_section_len(), 1);
+        assert_eq!(candidate.current_section_len(), 3);
+        assert!(original.finish().unwrap().asm.contains("candidate_only:") == false);
     }
 
     #[test]

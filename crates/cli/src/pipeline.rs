@@ -13,6 +13,7 @@ use crate::Args;
 pub enum Error {
     Io(std::io::Error),
     Rom(nes_rom::ParseError),
+    MapperPolicy(nes_rom::MapperPolicyError),
     Profile(profile::LoadError),
     Lift(ir::LiftError),
     Lower(lower::LowerError),
@@ -26,6 +27,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "i/o: {e}"),
             Error::Rom(e) => write!(f, "rom: {e}"),
+            Error::MapperPolicy(e) => write!(f, "mapper policy: {e}"),
             Error::Profile(e) => write!(f, "profile: {e}"),
             Error::Lift(e) => write!(f, "lift: {e:?}"),
             Error::Lower(e) => write!(f, "lower: {e}"),
@@ -46,6 +48,11 @@ impl From<std::io::Error> for Error {
 impl From<nes_rom::ParseError> for Error {
     fn from(e: nes_rom::ParseError) -> Self {
         Error::Rom(e)
+    }
+}
+impl From<nes_rom::MapperPolicyError> for Error {
+    fn from(e: nes_rom::MapperPolicyError) -> Self {
+        Error::MapperPolicy(e)
     }
 }
 impl From<profile::LoadError> for Error {
@@ -74,23 +81,353 @@ impl From<sms_project::EmitError> for Error {
     }
 }
 
+/// Mapper-store violations cannot safely degrade to generated stubs: doing so
+/// could turn an unsupported store into a wrong bank switch. Other lowering
+/// errors remain diagnostics while the converter's broader coverage grows.
+fn lower_error_is_fatal(error: &lower::LowerError) -> bool {
+    matches!(error, lower::LowerError::UnsupportedMapperStore { .. })
+}
+
+/// One WLA-DX slot is a physical 16 KiB ROM bank.
+const TRANSLATED_SECTION_CAPACITY: usize = 0x4000;
+const TRANSLATED_BANK_BASE: u32 = 4;
+const TRANSLATED_SLOT: u8 = 1;
+
+fn translated_section_bank(section_idx: u32, banked: bool) -> Result<u8, Error> {
+    let bank = TRANSLATED_BANK_BASE
+        .checked_add(section_idx)
+        .ok_or_else(|| {
+            Error::Diagnostic("translated section index overflows WLA bank numbering".to_string())
+        })?;
+    if banked && bank >= sms_project::NES_PRG_BANK_BASE {
+        let max_section = sms_project::NES_PRG_BANK_BASE - TRANSLATED_BANK_BASE - 1;
+        return Err(Error::Diagnostic(format!(
+            "translated code overflows the banked 512K layout \
+             (section {section_idx} > {max_section}; banks \
+             {}+ hold PRG data)",
+            sms_project::NES_PRG_BANK_BASE
+        )));
+    }
+    u8::try_from(bank).map_err(|_| {
+        Error::Diagnostic(format!(
+            "translated code bank {bank} exceeds WLA's bank range"
+        ))
+    })
+}
+
+fn begin_translated_section(
+    program: &mut z80_emit::Program,
+    section_idx: u32,
+    banked: bool,
+) -> Result<u16, Error> {
+    let bank = translated_section_bank(section_idx, banked)?;
+    program.section(&format!("generated_code_{section_idx}"));
+    let expected_program_idx = usize::try_from(section_idx)
+        .ok()
+        .and_then(|idx| idx.checked_add(1))
+        .ok_or_else(|| {
+            Error::Diagnostic(format!(
+                "translated logical section {section_idx} exceeds Program section indexing"
+            ))
+        })?;
+    let actual_program_idx = program.current_section_idx();
+    if actual_program_idx != expected_program_idx {
+        return Err(Error::Diagnostic(format!(
+            "translated logical section {section_idx} mapped to Program section {actual_program_idx}, expected {expected_program_idx}; helper sections must not precede generated code"
+        )));
+    }
+    program.set_section_placement(bank, TRANSLATED_SLOT);
+    program.org(0x4000);
+    Ok(program.current_addr())
+}
+
+fn advance_translated_section(
+    program: &mut z80_emit::Program,
+    section_idx: &mut u32,
+    banked: bool,
+) -> Result<u16, Error> {
+    *section_idx = section_idx.checked_add(1).ok_or_else(|| {
+        Error::Diagnostic("translated section index overflows WLA bank numbering".to_string())
+    })?;
+    begin_translated_section(program, *section_idx, banked)
+}
+
+fn translated_section_usage(program: &z80_emit::Program) -> usize {
+    program.current_section_len()
+}
+
+/// Transactionally pack one complete routine during the sizing pass. The
+/// closure owns all routine-local label/diagnostic mutation through `state`.
+fn pack_sizing_candidate<S: Clone>(
+    program: &mut z80_emit::Program,
+    state: &mut S,
+    section_idx: &mut u32,
+    banked: bool,
+    routine_name: &str,
+    emit: impl Fn(&mut z80_emit::Program, &mut S) -> Result<(), Error>,
+) -> Result<u32, Error> {
+    let mut candidate = program.clone();
+    let mut candidate_state = state.clone();
+    emit(&mut candidate, &mut candidate_state)?;
+    if translated_section_usage(&candidate) > TRANSLATED_SECTION_CAPACITY {
+        advance_translated_section(program, section_idx, banked)?;
+        candidate = program.clone();
+        candidate_state = state.clone();
+        emit(&mut candidate, &mut candidate_state)?;
+        let used = translated_section_usage(&candidate);
+        if used > TRANSLATED_SECTION_CAPACITY {
+            return Err(Error::Diagnostic(format!(
+                "translated routine {routine_name} exceeds physical 16 KiB slot: {used} bytes"
+            )));
+        }
+    }
+    *program = candidate;
+    *state = candidate_state;
+    Ok(*section_idx)
+}
+
+fn routine_auto_label(r: &ir::Routine) -> String {
+    if r.name.starts_with("L_b") {
+        r.name.clone()
+    } else {
+        format_label(r.entry)
+    }
+}
+
+/// Parse profile jump-engine target labels into their physical identity.
+/// `L_F000` is a fixed-window address; `L_b6_A123` is switchable bank 6.
+/// Unqualified switchable labels intentionally return `(None, addr)` because
+/// they mean "the mapper bank selected at runtime" and must not root every
+/// physical bank during static analysis.
+fn profile_target_identity(label: &str) -> Option<(Option<u8>, u16)> {
+    if let Some(rest) = label.strip_prefix("L_b") {
+        let (bank, addr) = rest.split_once('_')?;
+        return Some((
+            Some(bank.parse().ok()?),
+            u16::from_str_radix(addr, 16).ok()?,
+        ));
+    }
+    label
+        .strip_prefix("L_")
+        .filter(|rest| !rest.contains('_'))
+        .and_then(|addr| u16::from_str_radix(addr, 16).ok())
+        .map(|addr| (None, addr))
+}
+
+/// Re-run discovery until every decoded internal branch label is owned by a
+/// non-overlapping routine range. This matters when a separately discovered
+/// entry is embedded inside a larger routine: range normalization trims the
+/// outer routine at that entry, and a branch around the embedded routine can
+/// otherwise leave its continuation with no translated owner.
+fn analyze_with_continuation_roots(
+    prg: &[u8],
+    vectors: nes_rom_like::Vectors,
+    prof: &mut profile::Profile,
+    window: analysis::AnalysisWindow,
+    bank: Option<u8>,
+) -> analysis::Analyzed {
+    loop {
+        let analyzed = analysis::analyze_in_window(prg, vectors, prof, window, bank);
+        let mut normalized = analyzed.functions.functions.clone();
+        normalized.sort_by_key(|function| function.addr);
+        normalized.dedup_by_key(|function| function.addr);
+        for index in 0..normalized.len().saturating_sub(1) {
+            let next = normalized[index + 1].addr;
+            if normalized[index].end > next {
+                normalized[index].end = next;
+            }
+        }
+        normalized.retain(|function| function.end > function.addr);
+
+        let mut continuations = std::collections::BTreeSet::new();
+        for function in &analyzed.functions.functions {
+            for &label in &function.internal_labels {
+                let is_owned = normalized
+                    .iter()
+                    .any(|owner| label >= owner.addr && label < owner.end);
+                if window.contains(label) && !is_owned {
+                    continuations.insert(label);
+                }
+            }
+        }
+        continuations.retain(|address| {
+            prof.functions
+                .iter()
+                .all(|function| function.addr != *address)
+        });
+        if continuations.is_empty() {
+            return analyzed;
+        }
+
+        for address in continuations {
+            prof.functions.push(profile::Function {
+                addr: address,
+                name: prof
+                    .label_for(address)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("func_{address:04X}")),
+                note: Some("branch continuation after embedded routine".to_string()),
+            });
+        }
+    }
+}
+
+/// Labels whose definitions belong at this routine's entry address if it is
+/// stubbed. A BTreeSet makes aliases stable and eliminates overlap between
+/// the routine name, lifted labels, and branch targets.
+fn routine_owned_labels(r: &ir::Routine) -> Vec<String> {
+    let mut labels = std::collections::BTreeSet::new();
+    labels.insert(routine_auto_label(r));
+    labels.insert(r.name.clone());
+    for op in &r.ops {
+        if let ir::Op::Label(label) = op {
+            labels.insert(label.clone());
+        }
+    }
+    labels.extend(r.branch_labels.iter().cloned());
+    labels.into_iter().collect()
+}
+
+/// Define every alias a stubbed routine owns, then emit its single strict
+/// unresolved-call trap body. Callers must begin from a routine-local
+/// snapshot so this remains an atomic fallback.
+fn emit_routine_trap_stub(
+    program: &mut z80_emit::Program,
+    defined_labels: &mut std::collections::BTreeSet<String>,
+    r: &ir::Routine,
+) {
+    for label in routine_owned_labels(r) {
+        if !defined_labels.contains(&label) {
+            program.label(&label);
+            defined_labels.insert(label);
+        }
+    }
+    program.ld_a_imm(0xEE);
+    program.ld_abs_a(0xCB1B);
+    program.jp("rt_unresolved_jsr");
+}
+
+fn emit_translated_routine(
+    program: &mut z80_emit::Program,
+    defined_labels: &mut std::collections::BTreeSet<String>,
+    lower_failures: &mut Vec<String>,
+    r: &ir::Routine,
+    opts: &LowerOptions<'_>,
+) -> Result<(), Error> {
+    let pre_routine_program = program.clone();
+    let pre_routine_labels = defined_labels.clone();
+    let auto = routine_auto_label(r);
+    let lifter_emits_auto = r.branch_labels.contains(&auto) || r.name == auto;
+    if r.ops.len() > 600 {
+        *program = pre_routine_program;
+        *defined_labels = pre_routine_labels;
+        emit_routine_trap_stub(program, defined_labels, r);
+        lower_failures.push(format!(
+            "${:04X} {}: oversize ({} ops) — stubbed as data-walk",
+            r.entry,
+            r.name,
+            r.ops.len()
+        ));
+        return Ok(());
+    }
+    if !lifter_emits_auto && !defined_labels.contains(&auto) {
+        program.label(&auto);
+        defined_labels.insert(auto.clone());
+    }
+    if lifter_emits_auto {
+        defined_labels.insert(auto.clone());
+    }
+    defined_labels.insert(r.name.clone());
+    for bl in &r.branch_labels {
+        defined_labels.insert(bl.clone());
+    }
+    if let Err(e) = lower::lower_routine(program, r, opts) {
+        if lower_error_is_fatal(&e) {
+            *program = pre_routine_program;
+            *defined_labels = pre_routine_labels;
+            return Err(Error::Lower(e));
+        }
+        *program = pre_routine_program;
+        *defined_labels = pre_routine_labels;
+        emit_routine_trap_stub(program, defined_labels, r);
+        lower_failures.push(format!("${:04X} {}: {}", r.entry, r.name, e));
+    }
+    Ok(())
+}
+
+fn emit_translated_vector_aliases(program: &mut z80_emit::Program, reset: u16, nmi: u16, irq: u16) {
+    program.label("translated_reset");
+    program.translated_tail_jmp(&format_label(reset));
+    program.label("translated_nmi");
+    program.translated_tail_jmp(&format_label(nmi));
+    program.label("translated_irq");
+    program.translated_tail_jmp(&format_label(irq));
+}
+
 pub fn run(args: &Args) -> Result<String, Error> {
     // 1. Read and parse the ROM.
     let rom_bytes = std::fs::read(&args.rom)?;
     let image = nes_rom::parse(&rom_bytes)?;
-    let vectors = nes_rom::read_vectors(image.prg)
-        .ok_or_else(|| Error::Diagnostic("could not read NMI/RESET/IRQ vectors from PRG".into()))?;
-
     // 2. Load the profile.
     let prof = profile::load_from_path(&args.profile)?;
 
     // Sanity-check the profile against the parsed ROM.
+    let actual_prg_kib = image.prg.len() / 1024;
+    if prof.rom.prg_kib as usize != actual_prg_kib {
+        return Err(Error::Diagnostic(format!(
+            "profile PRG size mismatch: profile prg_kib={} KiB, ROM PRG payload={} KiB ({} bytes)",
+            prof.rom.prg_kib,
+            actual_prg_kib,
+            image.prg.len()
+        )));
+    }
+    let actual_chr_kib = image.chr.len() / 1024;
+    if prof.rom.chr_kib as usize != actual_chr_kib {
+        return Err(Error::Diagnostic(format!(
+            "profile CHR size mismatch: profile chr_kib={} KiB, ROM CHR-ROM payload={} KiB ({} bytes)",
+            prof.rom.chr_kib,
+            actual_chr_kib,
+            image.chr.len()
+        )));
+    }
+    if let Some(expected) = &prof.rom.payload_sha256 {
+        let actual = nes_rom::payload_sha256_hex(image.prg, image.chr);
+        if expected != &actual {
+            return Err(Error::Diagnostic(format!(
+                "profile payload SHA-256 mismatch: expected {expected}, actual {actual}"
+            )));
+        }
+    }
     if prof.rom.mapper != image.header.mapper {
         return Err(Error::Diagnostic(format!(
             "profile mapper={} but ROM mapper={}",
             prof.rom.mapper, image.header.mapper
         )));
     }
+    let policy = nes_rom::resolve_mapper_policy(&image.header, image.prg.len())?;
+    // Profile validation checks declared mapper-2 bank bounds. Recheck
+    // against the parsed ROM policy before any banked analysis slicing.
+    if policy.is_banked() {
+        let actual_bank_count = policy.bank_count();
+        for entry in &prof.bank_entries {
+            if entry.bank >= actual_bank_count {
+                return Err(Error::Diagnostic(format!(
+                    "bank_entry bank {} is out of range for parsed ROM's {actual_bank_count} mapper 2 banks",
+                    entry.bank
+                )));
+            }
+        }
+        for call in &prof.bank_calls {
+            if call.bank >= actual_bank_count {
+                return Err(Error::Diagnostic(format!(
+                    "bank_call bank {} is out of range for parsed ROM's {actual_bank_count} mapper 2 banks",
+                    call.bank
+                )));
+            }
+        }
+    }
+    let vectors = nes_rom::read_vectors_with_policy(policy, image.prg)?
+        .ok_or_else(|| Error::Diagnostic("could not read NMI/RESET/IRQ vectors from PRG".into()))?;
     if let Some(v) = prof.vectors {
         if v.reset != vectors.reset {
             return Err(Error::Diagnostic(format!(
@@ -106,35 +443,136 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
     }
 
-    // 3. Analyze. Discover functions; classify code/data.
-    //
-    // Mapper M0 (docs/mapper-plan.md): banked ROMs (PRG > 32 KiB) are
-    // analyzed through per-bank 32 KiB VIEWS — each view = one switchable
-    // bank at $8000-$BFFF + the fixed last bank at $C000-$FFFF, exactly
-    // NROM-shaped, so analysis and lifting run unchanged per view. View 0
-    // provides the shared fixed-bank code; banked-region discoveries are
-    // future M1 work (bank-entry annotations); for now the fixed bank
-    // alone boots UxROM titles to the trap-reporting stage.
-    let banked = image.prg.len() > 32 * 1024;
-    let analysis_view: Vec<u8> = if banked {
-        let fixed = &image.prg[image.prg.len() - 0x4000..];
-        let bank0 = &image.prg[..0x4000];
-        let mut v = Vec::with_capacity(0x8000);
-        v.extend_from_slice(bank0);
-        v.extend_from_slice(fixed);
-        v
-    } else {
-        image.prg.to_vec()
+    // 3. Analyze. UxROM fixed code is discovered exactly once. Each physical
+    // switchable bank is analyzed separately below and is rooted only by its
+    // verified [[bank_entry]] facts; vectors are never replayed in those views.
+    let banked = policy.is_banked();
+    let mut bank_entries_by_bank: std::collections::BTreeMap<u8, Vec<u16>> =
+        std::collections::BTreeMap::new();
+    for entry in &prof.bank_entries {
+        bank_entries_by_bank
+            .entry(entry.bank)
+            .or_default()
+            .push(entry.addr);
+    }
+    // A profiled inline table is a real reachability edge. Root its fixed
+    // targets and its explicitly bank-qualified window targets; leave
+    // unqualified window targets dynamic so analysis never invents physical
+    // bank facts that the reference/profile did not establish.
+    for site in &prof.jump_engines {
+        for target in site.targets.iter().chain(site.return_target.iter()) {
+            if let Some((Some(bank), addr)) = profile_target_identity(target)
+                && addr < 0xC000
+            {
+                bank_entries_by_bank.entry(bank).or_default().push(addr);
+            }
+        }
+    }
+    for entries in bank_entries_by_bank.values_mut() {
+        entries.sort_unstable();
+        entries.dedup();
+    }
+
+    // A window routine can call shared fixed code that is not otherwise a
+    // vector/profile root. Pre-discover those cross-window references and feed
+    // them into the one fixed-bank pass. The window pass itself cannot walk or
+    // classify fixed bytes.
+    let mut fixed_prof = prof.clone();
+    for site in &prof.jump_engines {
+        for target in site.targets.iter().chain(site.return_target.iter()) {
+            if let Some((_, addr)) = profile_target_identity(target)
+                && ((!banked && addr >= 0x8000) || (banked && addr >= 0xC000))
+                && fixed_prof
+                    .functions
+                    .iter()
+                    .all(|function| function.addr != addr)
+            {
+                fixed_prof.functions.push(profile::Function {
+                    addr,
+                    name: prof
+                        .label_for(addr)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("func_{addr:04X}")),
+                    note: Some("profiled JumpEngine target".to_string()),
+                });
+            }
+        }
+    }
+    if banked {
+        for (&bank, entries) in &bank_entries_by_bank {
+            let view = policy.analysis_view(image.prg, bank)?;
+            let mut window_prof = prof.clone();
+            window_prof.functions = entries
+                .iter()
+                .map(|&addr| profile::Function {
+                    addr,
+                    name: format!("L_b{bank}_{addr:04X}"),
+                    note: None,
+                })
+                .collect();
+            window_prof.jump_tables.clear();
+            window_prof
+                .jump_engines
+                .retain(|site| site.bank == Some(bank));
+            let window_analysis = analyze_with_continuation_roots(
+                &view,
+                nes_rom_like::Vectors {
+                    nmi: 0,
+                    reset: 0,
+                    irq: 0,
+                },
+                &mut window_prof,
+                analysis::AnalysisWindow::SWITCHABLE_16K,
+                Some(bank),
+            );
+            for target in window_analysis
+                .functions
+                .functions
+                .iter()
+                .flat_map(|function| function.external_refs.iter().copied())
+                .filter(|&target| target >= 0xC000)
+            {
+                if fixed_prof
+                    .functions
+                    .iter()
+                    .all(|function| function.addr != target)
+                {
+                    fixed_prof.functions.push(profile::Function {
+                        addr: target,
+                        name: prof
+                            .label_for(target)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("func_{target:04X}")),
+                        note: Some(format!("called from mapper bank {bank}")),
+                    });
+                }
+            }
+        }
+        fixed_prof.jump_engines.retain(|site| site.bank.is_none());
+    }
+    let analysis_view = policy.analysis_view(image.prg, 0)?;
+    let analysis_vectors = nes_rom_like::Vectors {
+        nmi: vectors.nmi,
+        reset: vectors.reset,
+        irq: vectors.irq,
     };
-    let analyzed = analysis::analyze(
-        &analysis_view,
-        nes_rom_like::Vectors {
-            nmi: vectors.nmi,
-            reset: vectors.reset,
-            irq: vectors.irq,
-        },
-        &prof,
-    );
+    let analyzed = if banked {
+        analyze_with_continuation_roots(
+            &analysis_view,
+            analysis_vectors,
+            &mut fixed_prof,
+            analysis::AnalysisWindow::FIXED_16K,
+            None,
+        )
+    } else {
+        analyze_with_continuation_roots(
+            &analysis_view,
+            analysis_vectors,
+            &mut fixed_prof,
+            analysis::AnalysisWindow::FULL_PRG,
+            None,
+        )
+    };
 
     // 4. Lift each discovered function into IR.
     //
@@ -145,15 +583,6 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // the lowered output; internal branches that target the trimmed-off
     // tail become external references and resolve via the alias label.
     let mut funcs: Vec<analysis::DiscoveredFunction> = analyzed.functions.functions.clone();
-    // Banked ROMs (M1): functions discovered inside the switchable window
-    // ($8000-$BFFF) came from walking the VIEW's bank-0 bytes — the real
-    // target bank is only known at run time. Drop them: their callers'
-    // targets become unresolved strict-trap stubs whose diagnostics
-    // (together with the $CB62 bank shadow) name the (bank, addr) pairs
-    // to annotate as [[bank_entry]] profile roots.
-    if banked {
-        funcs.retain(|f| f.addr >= 0xC000);
-    }
     funcs.sort_by_key(|f| f.addr);
     for i in 0..funcs.len() {
         if i + 1 < funcs.len() && funcs[i].end > funcs[i + 1].addr {
@@ -166,9 +595,24 @@ pub fn run(args: &Args) -> Result<String, Error> {
     let jump_engine_sites: Vec<ir::JumpEngineSite> = prof
         .jump_engines
         .iter()
+        .filter(|site| !banked || site.bank.is_none())
         .map(|s| ir::JumpEngineSite {
             caller: s.caller,
             targets: s.targets.clone(),
+            return_target: s.return_target.clone(),
+            tail_indices: s.tail_indices.clone(),
+            stack_return_bytes: s.stack_return_bytes,
+            target_entry_a: s.target_entry_a.clone(),
+        })
+        .collect();
+    let return_escape_sites: Vec<ir::ReturnEscapeSite> = prof
+        .return_escapes
+        .iter()
+        .filter(|site| !banked || site.bank.is_none())
+        .map(|site| ir::ReturnEscapeSite {
+            caller: site.caller,
+            target: site.target,
+            return_addr: site.return_addr,
         })
         .collect();
 
@@ -185,6 +629,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             end: f.end,
             entry_name: f.name.clone(),
             jump_engine_sites: jump_engine_sites.clone(),
+            return_escape_sites: return_escape_sites.clone(),
             window_label_prefix: None,
             extra_label_pcs: Vec::new(),
         };
@@ -196,17 +641,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     all_referenced_pcs.insert(addr);
                 }
             }
-            let has_terminator = r.ops.last().is_some_and(|op| {
-                matches!(
-                    op,
-                    ir::Op::Rts
-                        | ir::Op::Rti
-                        | ir::Op::Jmp { .. }
-                        | ir::Op::JmpIndirect { .. }
-                        | ir::Op::Brk { .. }
-                        | ir::Op::Jam { .. }
-                )
-            });
+            let has_terminator = r.ops.last().is_some_and(ir::Op::is_hard_terminator);
             if !has_terminator {
                 // If the final decoded instruction overlapped the next known
                 // root (SMB uses BIT-operand alternate entries), the real
@@ -220,27 +655,12 @@ pub fn run(args: &Args) -> Result<String, Error> {
 
     let mut lift_failures: Vec<String> = Vec::new();
     let mut banked_routines: Vec<ir::Routine> = Vec::new();
-    // 4b. Banked-window translation units (mapper plan M1). For each
-    // bank named by a [[bank_entry]], analyze an NROM-shaped view (that
-    // bank + the fixed bank) rooted at its entries and lift the window
-    // routines with bank-prefixed labels (L_bK_XXXX). Fixed-bank
-    // re-discoveries are dropped (the shared fixed translation wins);
-    // NEW fixed-bank functions reached only via banked code are lifted
-    // unprefixed from the same view (identical bytes).
+    // 4b. Banked-window translation units. Each physical bank is rooted only
+    // at its verified entries and constrained to $8000-$BFFF. Calls into the
+    // fixed window were folded into the one fixed pass above.
     if banked && !prof.bank_entries.is_empty() {
-        use std::collections::BTreeMap;
-        let mut by_bank: BTreeMap<u8, Vec<u16>> = BTreeMap::new();
-        for be in &prof.bank_entries {
-            by_bank.entry(be.bank).or_default().push(be.addr);
-        }
-        let mut known_fixed: std::collections::HashSet<u16> =
-            funcs.iter().map(|f| f.addr).collect();
-        for (bank, entries) in by_bank {
-            let mut view = Vec::with_capacity(0x8000);
-            view.extend_from_slice(
-                &image.prg[bank as usize * 0x4000..(bank as usize + 1) * 0x4000],
-            );
-            view.extend_from_slice(&image.prg[image.prg.len() - 0x4000..]);
+        for (bank, entries) in bank_entries_by_bank {
+            let view = policy.analysis_view(image.prg, bank)?;
             let prefix = format!("b{bank}_");
             let mut bprof = prof.clone();
             bprof.functions = entries
@@ -251,45 +671,23 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     note: None,
                 })
                 .collect();
-            let banalyzed = analysis::analyze(
+            bprof.jump_tables.clear();
+            bprof.jump_engines.retain(|site| site.bank == Some(bank));
+            let banalyzed = analyze_with_continuation_roots(
                 &view,
                 nes_rom_like::Vectors {
-                    nmi: vectors.nmi,
-                    reset: vectors.reset,
-                    irq: vectors.irq,
+                    nmi: 0,
+                    reset: 0,
+                    irq: 0,
                 },
-                &bprof,
+                &mut bprof,
+                analysis::AnalysisWindow::SWITCHABLE_16K,
+                Some(bank),
             );
             let mut bfuncs: Vec<analysis::DiscoveredFunction> =
                 banalyzed.functions.functions.clone();
-            let main_ranges: Vec<(u16, u16)> = funcs.iter().map(|f| (f.addr, f.end)).collect();
-            bfuncs.retain(|f| {
-                if (0x8000..0xC000).contains(&f.addr) {
-                    return true;
-                }
-                if f.addr < 0xC000 || known_fixed.contains(&f.addr) {
-                    return false;
-                }
-                // A fixed-region discovery whose entry lies INSIDE a main
-                // routine is a mid-routine alias target, not a new
-                // function — the interior-label mechanism resolves it.
-                !main_ranges.iter().any(|&(a, e)| f.addr > a && f.addr < e)
-            });
             bfuncs.sort_by_key(|f| f.addr);
             bfuncs.dedup_by_key(|f| f.addr);
-            // Fixed-region discoveries from this view must not overlap the
-            // MAIN fixed routines: clamp each one's end to the next main
-            // function start (otherwise their interior labels collide with
-            // main entries/aliases — duplicate-label link failures).
-            let mut main_starts: Vec<u16> = funcs.iter().map(|f| f.addr).collect();
-            main_starts.sort_unstable();
-            for f in bfuncs.iter_mut().filter(|f| f.addr >= 0xC000) {
-                if let Some(&next) = main_starts.iter().find(|&&a| a > f.addr) {
-                    if f.end > next {
-                        f.end = next;
-                    }
-                }
-            }
             if std::env::var("N2S_DEBUG_BANKFUNCS").is_ok() {
                 for f in &bfuncs {
                     eprintln!("bank{bank} func ${:04X}-${:04X} {}", f.addr, f.end, f.name);
@@ -301,12 +699,29 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     bfuncs[w].end = next;
                 }
             }
-            for f in &bfuncs {
-                if f.addr >= 0xC000 {
-                    // Later views must not re-lift this fixed routine.
-                    known_fixed.insert(f.addr);
-                }
-            }
+            let bank_jump_engine_sites: Vec<ir::JumpEngineSite> = prof
+                .jump_engines
+                .iter()
+                .filter(|site| site.bank == Some(bank))
+                .map(|site| ir::JumpEngineSite {
+                    caller: site.caller,
+                    targets: site.targets.clone(),
+                    return_target: site.return_target.clone(),
+                    tail_indices: site.tail_indices.clone(),
+                    stack_return_bytes: site.stack_return_bytes,
+                    target_entry_a: site.target_entry_a.clone(),
+                })
+                .collect();
+            let bank_return_escape_sites: Vec<ir::ReturnEscapeSite> = prof
+                .return_escapes
+                .iter()
+                .filter(|site| site.bank == Some(bank))
+                .map(|site| ir::ReturnEscapeSite {
+                    caller: site.caller,
+                    target: site.target,
+                    return_addr: site.return_addr,
+                })
+                .collect();
             // Interior-alias pass (mirrors the main funcs' two-pass):
             // collect every referenced window pc, then re-lift with
             // extra labels so cross-routine branch targets resolve.
@@ -316,7 +731,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     start: f.addr,
                     end: f.end,
                     entry_name: String::new(),
-                    jump_engine_sites: jump_engine_sites.clone(),
+                    jump_engine_sites: bank_jump_engine_sites.clone(),
+                    return_escape_sites: bank_return_escape_sites.clone(),
                     window_label_prefix: (f.addr < 0xC000).then(|| prefix.clone()),
                     extra_label_pcs: Vec::new(),
                 };
@@ -348,24 +764,15 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     } else {
                         format_label(f.addr)
                     },
-                    jump_engine_sites: jump_engine_sites.clone(),
+                    jump_engine_sites: bank_jump_engine_sites.clone(),
+                    return_escape_sites: bank_return_escape_sites.clone(),
                     window_label_prefix: in_window.then(|| prefix.clone()),
                     extra_label_pcs: extras,
                 };
                 match ir::lift_range(&view, &opts) {
                     Ok(mut r) => {
                         ir::mark_rts_dispatch(&mut r.ops);
-                        let has_terminator = r.ops.last().is_some_and(|op| {
-                            matches!(
-                                op,
-                                ir::Op::Rts
-                                    | ir::Op::Rti
-                                    | ir::Op::Jmp { .. }
-                                    | ir::Op::JmpIndirect { .. }
-                                    | ir::Op::Brk { .. }
-                                    | ir::Op::Jam { .. }
-                            )
-                        });
+                        let has_terminator = r.ops.last().is_some_and(ir::Op::is_hard_terminator);
                         if !has_terminator {
                             // Trimmed fallthrough: continue into the next
                             // routine via an explicit jump (bank-prefixed
@@ -410,6 +817,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             end: f.end,
             entry_name: f.name.clone(),
             jump_engine_sites: jump_engine_sites.clone(),
+            return_escape_sites: return_escape_sites.clone(),
             window_label_prefix: None,
             extra_label_pcs: extras,
         };
@@ -422,17 +830,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 // emitted SMS code. Without this, the lowered Z80 just
                 // continues executing past the routine's body into
                 // whatever bytes follow.
-                let has_terminator = r.ops.last().is_some_and(|op| {
-                    matches!(
-                        op,
-                        ir::Op::Rts
-                            | ir::Op::Rti
-                            | ir::Op::Jmp { .. }
-                            | ir::Op::JmpIndirect { .. }
-                            | ir::Op::Brk { .. }
-                            | ir::Op::Jam { .. }
-                    )
-                });
+                let has_terminator = r.ops.last().is_some_and(ir::Op::is_hard_terminator);
                 if !has_terminator {
                     let tail_addr = r.end;
                     let tail_has_owner = funcs
@@ -515,7 +913,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             }
             for op in r.ops.iter_mut() {
                 match op {
-                    Op::Jsr { target } | Op::Jmp { target } => {
+                    Op::Jsr { target } | Op::Jmp { target } | Op::ReturnEscape { target, .. } => {
                         if let Some(new) = map.get(target) {
                             *target = new.clone();
                         }
@@ -540,21 +938,9 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // boot/translated code lands on real translated bytes, not on the
     // in-bank offset which would alias slot 0). Banks start at 4 to
     // leave 0-3 for the runtime/boot + asset data the project emits.
-    const SECTION_MAX_BYTES: u16 = 10 * 1024;
-    const TRANSLATED_BANK_BASE: u8 = 4;
-    const TRANSLATED_SLOT: u8 = 1;
-
-    // ---- Fixed-point section assignment. Lowering shrinks whenever the
-    // label→section map lets far_call/far_jmp downgrade to plain call/jp,
-    // and shrinking moves the SECTION_MAX_BYTES rotation boundaries, which
-    // changes which section each label lands in. A single dry pass is
-    // therefore not sound: a downgrade decided against the dry layout can
-    // straddle a boundary that moved in the real layout (observed as a
-    // near `call` from bank $0A into bank 4 — wild execution — when the
-    // promoted sound-engine routines shifted the layout). Iterate until
-    // the map the emission consumed equals the map it produced; that
-    // self-consistency makes every downgrade provably same-bank.
-    // Iteration 0 with an empty map is the pessimistic all-far dry pass.
+    // Transactional next-fit sizing records an explicit logical section for
+    // every routine. Final emission follows that frozen plan; near-call
+    // downgrades only shrink bodies and never repack or relocate routines.
     let flag_reads: std::collections::HashMap<String, u8> = {
         let mut m = std::collections::HashMap::new();
         for r in &routines {
@@ -565,39 +951,30 @@ pub fn run(args: &Args) -> Result<String, Error> {
         m
     };
 
-    let emit_translated = |section_map: &std::collections::HashMap<String, usize>|
-     -> Result<(z80_emit::Program, Vec<String>, Vec<String>), Error> {
+    let emit_translated = |section_map: &std::collections::HashMap<String, usize>,
+                           routine_sections: Option<&[u32]>|
+     -> Result<
+        (z80_emit::Program, Vec<String>, Vec<String>, Vec<u32>),
+        Error,
+    > {
         let mut program = z80_emit::Program::new();
         let mut section_idx: u32 = 0;
-        program.section(&format!("generated_code_{section_idx}"));
-        program.set_section_placement(TRANSLATED_BANK_BASE + section_idx as u8, TRANSLATED_SLOT);
-        program.org(0x4000);
+        begin_translated_section(&mut program, section_idx, banked)?;
         program.prepopulate_label_section(section_map);
-        let mut section_base: u16 = program.current_addr();
         let opts = LowerOptions {
             profile: Some(&prof),
             emit_source_comments: true,
             routine_flag_reads: Some(&flag_reads),
         };
 
-        // Translated reset alias so boot.s can `jp translated_reset`.
-        program.label("translated_reset");
-        program.jp(&format_label(vectors.reset));
-        // Translated NMI alias so runtime/boot.s stays game-agnostic.
-        program.label("translated_nmi");
-        program.jp(&format_label(vectors.nmi));
-        // Translated IRQ/BRK alias: NES BRK vectors through the IRQ
-        // handler and RTIs — a well-defined interrupt, not a crash.
-        // (CV1's engine tolerates junk task dispatches this way.)
-        program.label("translated_irq");
-        program.jp(&format_label(vectors.irq));
+        emit_translated_vector_aliases(&mut program, vectors.reset, vectors.nmi, vectors.irq);
 
-        let mut prev_mapped_section: Option<usize> = None;
         let mut lower_failures: Vec<String> = Vec::new();
         let mut defined_labels: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
         defined_labels.insert("translated_reset".to_string());
         defined_labels.insert("translated_nmi".to_string());
+        defined_labels.insert("translated_irq".to_string());
 
         if std::env::var("N2S_DEBUG_RNAMES").is_ok() {
             let mut names: std::collections::HashMap<&str, usize> = Default::default();
@@ -608,137 +985,63 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 eprintln!("ROUTINE NAME x{c}: {n}");
             }
         }
-        for r in &routines {
-            // Rotate sections. With a frozen map (pass 2) the routine's
-            // section comes from the map — near-call downgrades shrink code,
-            // and re-rotating by size would move routines across the banks
-            // their callers were downgraded against (observed as wild
-            // near-calls into the wrong bank). Without a map (sizing pass)
-            // rotate when the section fills.
-            // Compare map TRANSITIONS, not absolute indices: the snapshot's
-            // section numbering includes program-internal sections, so its
-            // index space is offset from our counter.
-            let snapshot_key = if r.name.starts_with("L_b") {
-                r.name.clone() // banked units are registered under their prefixed label
-            } else {
-                format_label(r.entry)
-            };
-            let mapped_section = section_map.get(&snapshot_key).copied();
-            let should_rotate = match (mapped_section, prev_mapped_section) {
-                (Some(sec), Some(prev)) => sec != prev,
-                (Some(_), None) => false,
-                _ => {
-                    let cur = program.current_addr();
-                    // Wrapped past the 16 KiB slot = definitely rotate.
-                    cur < section_base || cur.saturating_sub(section_base) >= SECTION_MAX_BYTES
-                }
-            };
-            if mapped_section.is_some() {
-                prev_mapped_section = mapped_section;
-            }
-            if std::env::var("N2S_DEBUG_ROT").is_ok() {
-                eprintln!(
-                    "ROT?p{} {} cur=${:04X} base=${:04X} mapped={:?} prev={:?} rotate={}",
-                    if section_map.is_empty() { 1 } else { 2 },
-                    r.name,
-                    program.current_addr(),
-                    section_base,
-                    mapped_section,
-                    prev_mapped_section,
-                    should_rotate
-                );
-            }
-            if should_rotate {
-                section_idx += 1;
-                let max_section =
-                    sms_project::NES_PRG_BANK_BASE - TRANSLATED_BANK_BASE as u32 - 1;
-                if banked && section_idx > max_section {
+        let emit_routine = |program: &mut z80_emit::Program,
+                            defined_labels: &mut std::collections::BTreeSet<String>,
+                            lower_failures: &mut Vec<String>,
+                            r: &ir::Routine|
+         -> Result<(), Error> {
+            emit_translated_routine(program, defined_labels, lower_failures, r, &opts)
+        };
+
+        let mut assigned_sections = Vec::with_capacity(routines.len());
+        for (routine_index, r) in routines.iter().enumerate() {
+            if let Some(plan) = routine_sections {
+                let planned = *plan.get(routine_index).ok_or_else(|| {
+                    Error::Diagnostic("frozen layout is missing a routine assignment".to_string())
+                })?;
+                if planned < section_idx || planned > section_idx + 1 {
                     return Err(Error::Diagnostic(format!(
-                        "translated code overflows the banked 512K layout \
-                         (section {section_idx} > {max_section}; banks \
-                         {}+ hold PRG data)",
-                        sms_project::NES_PRG_BANK_BASE
+                        "frozen layout has impossible section {planned} for {} (current {section_idx})",
+                        r.name
                     )));
                 }
-                program.section(&format!("generated_code_{section_idx}"));
-                program.set_section_placement(
-                    TRANSLATED_BANK_BASE + section_idx as u8,
-                    TRANSLATED_SLOT,
-                );
-                program.org(0x4000);
-                section_base = program.current_addr();
-            }
-
-            // Internal call sites use the auto-generated `L_XXXX` label.
-            // Profile-supplied names and the auto label both need to point
-            // at the routine entry — UNLESS the lifter emits the auto label
-            // itself (entry PC is also an internal branch target).
-            let auto = if r.name.starts_with("L_b") {
-                r.name.clone() // banked unit: entry label carries the bank prefix
+                if planned > section_idx {
+                    begin_translated_section(&mut program, planned, banked)?;
+                    section_idx = planned;
+                }
+                let mut candidate = program.clone();
+                let mut candidate_labels = defined_labels.clone();
+                let mut candidate_failures = lower_failures.clone();
+                emit_routine(
+                    &mut candidate,
+                    &mut candidate_labels,
+                    &mut candidate_failures,
+                    r,
+                )?;
+                let used = translated_section_usage(&candidate);
+                if used > TRANSLATED_SECTION_CAPACITY {
+                    return Err(Error::Diagnostic(format!(
+                        "frozen layout overflow for {} in section {planned}: {used} bytes",
+                        r.name
+                    )));
+                }
+                program = candidate;
+                defined_labels = candidate_labels;
+                lower_failures = candidate_failures;
+                assigned_sections.push(planned);
             } else {
-                format_label(r.entry)
-            };
-            // The lifter always emits Op::Label(entry_name) as the first
-            // op — when the routine's NAME is the auto label (banked units,
-            // L_bK_XXXX), that op IS the definition.
-            let lifter_emits_auto = r.branch_labels.contains(&auto) || r.name == auto;
-            if !lifter_emits_auto && !defined_labels.contains(&auto) {
-                program.label(&auto);
-                defined_labels.insert(auto.clone());
-            }
-            if lifter_emits_auto {
-                defined_labels.insert(auto.clone());
-            }
-            defined_labels.insert(r.name.clone());
-            for bl in &r.branch_labels {
-                defined_labels.insert(bl.clone());
-            }
-
-            // Oversize guard: a mis-rooted walk through data decodes into
-            // a colossal garbage 'routine' (10-90 KiB) that cannot fit a
-            // 16 KiB bank. Emit a loud trap stub instead — if it is ever
-            // really executed, the trap reports it like any other miss.
-            if std::env::var("N2S_DEBUG_ROT").is_ok() && r.ops.len() > 500 {
-                eprintln!("BIG ROUTINE {} ops={}", r.name, r.ops.len());
-            }
-            if r.ops.len() > 600 {
-                if lifter_emits_auto {
-                    // The ops (which carried the entry label) are not
-                    // lowered — define the label on the stub instead.
-                    program.label(&auto);
-                }
-                program.ld_a_imm(0xEE);
-                program.ld_abs_a(0xCB1B);
-                program.jp("rt_unresolved_jsr");
-                lower_failures.push(format!(
-                    "${:04X} {}: oversize ({} ops) — stubbed as data-walk",
-                    r.entry,
-                    r.name,
-                    r.ops.len()
-                ));
-            } else {
-                match lower::lower_routine(&mut program, r, &opts) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        lower_failures.push(format!("${:04X} {}: {}", r.entry, r.name, e))
-                    }
-                }
-            }
-            // Post-emit rotation: giants legitimately exceeding the
-            // boundary start a fresh section for the next routine.
-            {
-                let cur = program.current_addr();
-                if cur < section_base || cur.saturating_sub(section_base) >= SECTION_MAX_BYTES {
-                    section_idx += 1;
-                    program.section(&format!("generated_code_{section_idx}"));
-                    program.set_section_placement(
-                        TRANSLATED_BANK_BASE + section_idx as u8,
-                        TRANSLATED_SLOT,
-                    );
-                    program.org(0x4000);
-                    section_base = program.current_addr();
-                    prev_mapped_section = None;
-                }
+                let mut state = (defined_labels, lower_failures);
+                let assigned = pack_sizing_candidate(
+                    &mut program,
+                    &mut state,
+                    &mut section_idx,
+                    banked,
+                    &r.name,
+                    |candidate, state| emit_routine(candidate, &mut state.0, &mut state.1, r),
+                )?;
+                defined_labels = state.0;
+                lower_failures = state.1;
+                assigned_sections.push(assigned);
             }
         }
 
@@ -784,11 +1087,15 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
         // Banked-dispatch table (mapper plan M1): every translated routine
         // keyed by (NES bank, NES addr) for runtime indirect dispatch.
-        // Fixed-bank routines use bank $FF (matches any window bank).
+        // Fixed-bank routines use bank $FF (matches any window bank). Keep the
+        // records address-sorted and emit a high-byte directory so the runtime
+        // starts at the requested 256-byte NES page instead of linearly
+        // walking every routine discovered before it.
         program.section("rt_dispatch_table_sec");
         program.label("rt_dispatch_table");
-        for r in &routines {
-            let (bank, addr, label) = match r.name.strip_prefix("L_b") {
+        let mut dispatch_records = routines
+            .iter()
+            .map(|r| match r.name.strip_prefix("L_b") {
                 Some(rest) => {
                     let mut it = rest.splitn(2, '_');
                     let b: u8 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0xFF);
@@ -801,29 +1108,53 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 // Fixed-bank routines are DEFINED under their auto L_XXXX
                 // label (profile display names are aliases only).
                 None => (0xFF, r.entry, format_label(r.entry)),
-            };
-            program.dispatch_entry(addr, bank, &label);
+            })
+            .collect::<Vec<_>>();
+        // Preserve the dispatch table's precedence at duplicate addresses:
+        // fixed-bank entries historically appeared before mapper-window
+        // entries and therefore win the runtime's first-match search.
+        dispatch_records.sort_by_key(|(bank, addr, _)| {
+            (
+                *addr,
+                if *bank == 0xFF {
+                    0u16
+                } else {
+                    *bank as u16 + 1
+                },
+            )
+        });
+        let mut next_record = 0usize;
+        for page in 0x80u16..=0xFF {
+            program.label(format!("rt_dispatch_page_{page:02X}"));
+            while next_record < dispatch_records.len()
+                && (dispatch_records[next_record].1 >> 8) == page
+            {
+                let (bank, addr, label) = &dispatch_records[next_record];
+                program.dispatch_entry(*addr, *bank, label);
+                next_record += 1;
+            }
         }
         program.data(None, &[0x00, 0x00]); // terminator: addr $0000
+        program.label("rt_dispatch_page_table");
+        for page in 0x80u16..=0xFF {
+            program.word_label(&format!("rt_dispatch_page_{page:02X}"));
+        }
 
-        Ok((program, lower_failures, unresolved))
+        Ok((program, lower_failures, unresolved, assigned_sections))
     };
 
-    // Two-pass freeze (H2): pass 1 sizes every cross-section call at the
-    // full inline-far length and yields the section map; pass 2 emits with
-    // near-call downgrades against that FROZEN map. Downgrades only shrink
-    // sections, so every same-section pair from pass 1 stays same-section —
-    // sound without iterating to a fixed point (the old equality iteration
-    // oscillated once the far/near size delta grew to 24 bytes).
+    // Sizing uses pessimistic far forms and records logical section IDs;
+    // final emission consumes those IDs exactly while near forms only shrink.
     let empty_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let (sizing_prog, _f, _u) = emit_translated(&empty_map)?;
+    let (sizing_prog, _f, _u, routine_sections) = emit_translated(&empty_map, None)?;
     let section_map = sizing_prog.label_section_snapshot();
     if std::env::var("N2S_DEBUG_SECTIONS").is_ok() {
         for l in ["translated_reset", "L_8000", "L_800F", "L_8220", "L_9000"] {
             eprintln!("map[{l}] = {:?}", section_map.get(l));
         }
     }
-    let (program, lower_failures, unresolved) = emit_translated(&section_map)?;
+    let (program, lower_failures, unresolved, _) =
+        emit_translated(&section_map, Some(&routine_sections))?;
 
     let mut build = program.finish()?;
     // Post-process the asm listing for WLA-DX:
@@ -867,24 +1198,17 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // own SMS data bank; the fixed LAST bank is prg_high. NROM keeps the
     // flat low/high split.
     let (prg_low, prg_banks) = if banked {
-        let banks: Vec<Vec<u8>> = image.prg.chunks(0x4000).map(|c| c.to_vec()).collect();
+        let banks: Vec<Vec<u8>> = (0..policy.bank_count())
+            .map(|bank| policy.prg_bank(image.prg, bank).map(|bytes| bytes.to_vec()))
+            .collect::<Result<_, _>>()?;
         (None, Some(banks))
     } else {
-        (
-            Some(image.prg[..image.prg.len().min(0x4000)].to_vec()),
-            None,
-        )
+        (Some(policy.lower_prg(image.prg).to_vec()), None)
     };
     // Mirror the fixed upper PRG window as well. The translated code can run
     // from generated banks in slot 1, so original fixed-bank data tables such
     // as SMB's Bitmasks at $C68A are read via a slot-2 runtime helper.
-    let prg_high = if banked {
-        Some(image.prg[image.prg.len() - 0x4000..].to_vec())
-    } else if image.prg.len() > 0x4000 {
-        Some(image.prg[0x4000..image.prg.len().min(0x8000)].to_vec())
-    } else {
-        Some(image.prg[..image.prg.len().min(0x4000)].to_vec())
-    };
+    let prg_high = Some(policy.fixed_prg(image.prg).to_vec());
     // Preserve raw NES CHR bytes for emulated PPUDATA reads. SMB's
     // DrawTitleScreen copies a command stream from PPU pattern-table space
     // ($1EC0+) through $2007; the converted SMS 4bpp tiles are not suitable
@@ -925,18 +1249,27 @@ pub fn run(args: &Args) -> Result<String, Error> {
     };
     let cfg = ProjectConfig {
         // 512 KiB for everything: NROM translated uses banks 4-23;
-        // banked carts use translated 4-15 + PRG data 16-23 + assets
-        // 24-30 (1 MiB ROMs rendered black on real emulators).
+        // banked carts use translated 4-16 + PRG data 17-24 + assets
+        // 25-31 (1 MiB ROMs rendered black on real emulators).
         rom_kib: 512,
         region: 0x4C,
         title: truncate_title(&prof.rom.name),
         mirroring,
         raw_ciram_backend: RawCiramBackend::SramSlot2,
         mapper: prof.rom.mapper,
+        uxrom_bank_count: policy.is_banked().then_some(policy.bank_count()),
+        uxrom_bus_conflicts: policy.uxrom_bus_conflicts().map(|mode| match mode {
+            nes_rom::UxromBusConflicts::None => sms_project::UxromBusConflicts::None,
+            nes_rom::UxromBusConflicts::And => sms_project::UxromBusConflicts::And,
+        }),
         chr_ram: image.chr.is_empty(),
         input_action: prof.input.mode == profile::InputMode::Action,
         input_pause_start: prof.input.pause_start,
         scroll_split: prof.render.scroll_split,
+        top_tile_remap_rows: prof.render.top_tile_remap_rows,
+        top_tile_remap_from: prof.render.top_tile_remap_from.clone(),
+        top_tile_remap_to: prof.render.top_tile_remap_to,
+        chr_ram_bg_identity: prof.render.chr_ram_bg_identity,
     };
     sms_project::emit_project(&args.out, &build, &project_assets, &cfg, runtime_dir)?;
 
@@ -1454,8 +1787,10 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_mapper_write",
     "rt_restore_prg_window",
     "rt_banked_dispatch",
+    "rt_banked_tail_dispatch",
     "rt_rts_dispatch",
     "rt_translated_rts",
+    "rt_translated_return_escape",
     "rt_translated_call_gate",
     "rt_translated_tail_gate",
     "rt_indirect_jmp",
@@ -1475,6 +1810,7 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_inc_mem",
     "rt_dec_mem",
     "rt_read_indexed",
+    "rt_read_prg_high",
     "rt_read_prg_high_indexed",
     "rt_write_indexed",
     "rt_read_zp_ptr_y",
@@ -1486,6 +1822,16 @@ const RUNTIME_SYMBOLS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_profile_jump_target_physical_identity() {
+        assert_eq!(profile_target_identity("L_E3D7"), Some((None, 0xE3D7)));
+        assert_eq!(
+            profile_target_identity("L_b6_A75E"),
+            Some((Some(6), 0xA75E))
+        );
+        assert_eq!(profile_target_identity("runtime_helper"), None);
+    }
 
     fn physical_maps() -> [[Option<u16>; 256]; 2] {
         [[None; 256]; 2]
@@ -1541,5 +1887,321 @@ mod tests {
         let err = build_chr_maps(&physical, &chr_4bpp).unwrap_err();
 
         assert!(err.contains("SMS base $0000"));
+    }
+
+    #[test]
+    fn only_structured_mapper_store_lower_errors_are_fatal() {
+        assert!(lower_error_is_fatal(
+            &lower::LowerError::UnsupportedMapperStore {
+                pc: Some(0x8000),
+                reason: "invalid mapper store".to_string(),
+            }
+        ));
+        assert!(!lower_error_is_fatal(&lower::LowerError::UnsupportedOp {
+            pc: Some(0x8000),
+            reason: "unrelated lowering gap".to_string(),
+        }));
+    }
+
+    #[test]
+    fn banked_translated_sections_stop_before_prg_data_bank() {
+        let last_section = sms_project::NES_PRG_BANK_BASE - TRANSLATED_BANK_BASE - 1;
+        assert_eq!(
+            u32::from(translated_section_bank(last_section, true).unwrap()),
+            sms_project::NES_PRG_BANK_BASE - 1
+        );
+        let err = translated_section_bank(last_section + 1, true).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("section {} > {last_section}", last_section + 1))
+        );
+    }
+
+    #[test]
+    fn translated_section_identity_rejects_interposed_program_section() {
+        let mut program = z80_emit::Program::new();
+        program.section("unexpected_helper");
+
+        let err = begin_translated_section(&mut program, 0, false).unwrap_err();
+        assert!(err.to_string().contains("logical section 0"));
+        assert!(err.to_string().contains("expected 1"));
+    }
+
+    #[test]
+    fn vector_aliases_use_tail_gates_for_cross_section_targets() {
+        let (mut program, mut section) = packing_program();
+        let target_program_section = program.current_section_idx() + 1;
+        program.prepopulate_label_section(&std::collections::HashMap::from([
+            ("L_C000".to_string(), target_program_section),
+            ("L_C100".to_string(), target_program_section),
+            ("L_C200".to_string(), target_program_section),
+        ]));
+
+        emit_translated_vector_aliases(&mut program, 0xC000, 0xC100, 0xC200);
+        advance_translated_section(&mut program, &mut section, false).unwrap();
+        for label in ["L_C000", "L_C100", "L_C200"] {
+            program.label(label);
+            program.ret();
+        }
+        program.section("test_runtime_stubs");
+        program.label("rt_translated_tail_gate");
+        program.ret();
+
+        let build = program.finish().unwrap();
+        assert_eq!(build.asm.matches("jp rt_translated_tail_gate").count(), 3);
+        for label in ["L_C000", "L_C100", "L_C200"] {
+            assert!(!build.asm.contains(&format!("jp {label}")));
+        }
+    }
+
+    fn packing_program() -> (z80_emit::Program, u32) {
+        let mut program = z80_emit::Program::new();
+        let section = 0;
+        begin_translated_section(&mut program, section, false).unwrap();
+        (program, section)
+    }
+
+    #[test]
+    fn packing_replays_crossing_candidate_in_next_section() {
+        let (mut program, mut section) = packing_program();
+        program.data(None, &vec![0xAA; 0x3FFF]);
+        let mut state = Vec::<String>::new();
+        let assigned = pack_sizing_candidate(
+            &mut program,
+            &mut state,
+            &mut section,
+            false,
+            "crossing_marker",
+            |candidate, state| {
+                candidate.label("crossing_marker");
+                candidate.data(None, &[0xC1, 0xC2]);
+                state.push("committed".to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(assigned, 1);
+        let build = program.finish().unwrap();
+        let first = build
+            .sections
+            .iter()
+            .find(|s| s.name == "generated_code_0")
+            .unwrap();
+        let second = build
+            .sections
+            .iter()
+            .find(|s| s.name == "generated_code_1")
+            .unwrap();
+        assert_eq!(first.bytes.len(), 0x3FFF);
+        assert_eq!(second.bytes, [0xC1, 0xC2]);
+        assert_eq!(state, ["committed"]);
+    }
+
+    #[test]
+    fn retry_relowers_section_sensitive_jsr_as_far() {
+        let (mut program, mut section) = packing_program();
+        let section_zero = program.current_section_idx();
+        program.label("L_target");
+        program.data(None, &vec![0xAA; 0x3FFF]);
+        let attempts = std::cell::Cell::new(0);
+
+        let routine = ir::Routine {
+            entry: 0x8000,
+            end: 0x8003,
+            name: "L_8000".to_string(),
+            ops: vec![
+                ir::Op::Label("L_8000".to_string()),
+                ir::Op::Jsr {
+                    target: "L_target".to_string(),
+                },
+                ir::Op::Rts,
+            ],
+            branch_labels: vec!["L_8000".to_string()],
+            external_calls: vec!["L_target".to_string()],
+            unresolved: Vec::new(),
+        };
+        let mut state = ();
+        let assigned = pack_sizing_candidate(
+            &mut program,
+            &mut state,
+            &mut section,
+            false,
+            "L_8000",
+            |candidate, _| {
+                attempts.set(attempts.get() + 1);
+                lower::lower_routine(candidate, &routine, &LowerOptions::default())
+                    .map_err(Error::from)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(assigned, 1);
+        assert_eq!(section, 1);
+        assert_eq!(attempts.get(), 2);
+        assert_ne!(program.current_section_idx(), section_zero);
+        assert_eq!(
+            program.label_section_idx("L_8000"),
+            Some(program.current_section_idx())
+        );
+
+        let unresolved = program.unresolved_labels();
+        program.section("test_runtime_stubs");
+        for label in unresolved {
+            program.label(&label);
+            program.ret();
+        }
+        let build = program.finish().unwrap();
+        let first = build
+            .sections
+            .iter()
+            .find(|s| s.name == "generated_code_0")
+            .unwrap();
+        let second = build
+            .sections
+            .iter()
+            .find(|s| s.name == "generated_code_1")
+            .unwrap();
+
+        assert_eq!(first.bytes.len(), 0x3FFF);
+        assert!(!second.bytes.is_empty());
+        assert_eq!(build.asm.matches("L_8000:").count(), 1);
+        assert!(build.asm.contains("jp rt_translated_call_gate"));
+        assert!(!build.asm.contains("ld a,(hl)"));
+    }
+
+    #[test]
+    fn packing_exact_full_final_section_does_not_advance() {
+        let (mut program, mut section) = packing_program();
+        let mut state = ();
+        let assigned = pack_sizing_candidate(
+            &mut program,
+            &mut state,
+            &mut section,
+            false,
+            "exact_full",
+            |candidate, _| {
+                candidate.data(None, &vec![0; 0x4000]);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(assigned, 0);
+        assert_eq!(section, 0);
+        assert_eq!(program.current_section_len(), 0x4000);
+    }
+
+    #[test]
+    fn packing_empty_section_oversize_reports_exact_size() {
+        let (mut program, mut section) = packing_program();
+        let mut state = ();
+        let err = pack_sizing_candidate(
+            &mut program,
+            &mut state,
+            &mut section,
+            false,
+            "too_large",
+            |candidate, _| {
+                candidate.data(None, &vec![0; 0x4001]);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("too_large"));
+        assert!(err.to_string().contains("16385 bytes"));
+    }
+
+    #[test]
+    fn packing_uses_all_banks_before_reserved_uxrom_data() {
+        let (mut program, mut section) = packing_program();
+        let mut state = ();
+        let section_count = sms_project::NES_PRG_BANK_BASE - TRANSLATED_BANK_BASE;
+        for index in 0..section_count {
+            let assigned = pack_sizing_candidate(
+                &mut program,
+                &mut state,
+                &mut section,
+                true,
+                "full_section",
+                |candidate, _| {
+                    candidate.data(None, &vec![0; 0x4000]);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(assigned, index);
+        }
+        let err = pack_sizing_candidate(
+            &mut program,
+            &mut state,
+            &mut section,
+            true,
+            "first_reserved_bank",
+            |candidate, _| {
+                candidate.data(None, &[0]);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(&format!(
+            "banks {}+ hold PRG data",
+            sms_project::NES_PRG_BANK_BASE
+        )));
+    }
+
+    #[test]
+    fn nonfatal_lowering_rolls_back_to_only_trap_stub() {
+        let (mut program, _) = packing_program();
+        let routine = ir::Routine {
+            entry: 0x8000,
+            end: 0x8003,
+            name: "profile_bad".to_string(),
+            ops: vec![
+                ir::Op::Label("profile_bad".to_string()),
+                ir::Op::Label("L_inner".to_string()),
+                ir::Op::Nop,
+                ir::Op::Unsupported {
+                    pc: 0x8002,
+                    opcode: 0x8B,
+                    mnemonic: "XAA".to_string(),
+                    reason: "unstable opcode".to_string(),
+                },
+            ],
+            branch_labels: vec!["profile_bad".to_string(), "L_inner".to_string()],
+            external_calls: Vec::new(),
+            unresolved: Vec::new(),
+        };
+        let mut labels = std::collections::BTreeSet::new();
+        let mut failures = Vec::new();
+        emit_translated_routine(
+            &mut program,
+            &mut labels,
+            &mut failures,
+            &routine,
+            &LowerOptions::default(),
+        )
+        .unwrap();
+        assert!(labels.contains("L_8000"));
+        assert!(labels.contains("profile_bad"));
+        assert!(labels.contains("L_inner"));
+        program.label("rt_unresolved_jsr");
+        program.ret();
+        let build = program.finish().unwrap();
+        assert!(failures.iter().any(|failure| failure.contains("XAA")));
+        assert_eq!(build.asm.matches("L_8000:").count(), 1);
+        assert_eq!(build.asm.matches("profile_bad:").count(), 1);
+        assert_eq!(build.asm.matches("L_inner:").count(), 1);
+        assert_eq!(build.asm.matches("ld a,$EE").count(), 1);
+        assert!(build.asm.contains("ld ($CB1B),a"));
+        assert!(!build.asm.contains("  nop"));
+        assert_eq!(
+            build
+                .bytes
+                .windows(5)
+                .filter(|bytes| *bytes == [0x3E, 0xEE, 0x32, 0x1B, 0xCB])
+                .count(),
+            1
+        );
+        assert_eq!(&build.bytes[..5], [0x3E, 0xEE, 0x32, 0x1B, 0xCB]);
     }
 }

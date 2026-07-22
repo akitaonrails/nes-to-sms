@@ -1,0 +1,7 @@
+# Reference-NES route. For frame-diff, set FD_PAUSE_START=1.
+600:start
+605:
+# The translated build does not finish Stage 1 setup until roughly frame 1800.
+# Start input after that boundary so the same route proves real gameplay input
+# instead of pressing buttons during the loading substates.
+1850:right

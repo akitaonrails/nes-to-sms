@@ -1,0 +1,18 @@
+# Reference-NES route. For frame-diff, set FD_PAUSE_START=1.
+600:start
+605:
+# Walk into Stage 1 and whip repeatedly across the first candle group. On the
+# translated build, inject NES Start separately with --pause-at-frame 600.
+1450:right
+1500:right,b
+1510:right
+1580:right,b
+1590:right
+1660:right,b
+1670:right
+1740:right,b
+1750:right
+1820:right,b
+1830:right
+1900:right,b
+1910:right

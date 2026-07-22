@@ -36,8 +36,8 @@
 ; SAT staging area at $C900 (see sat.s).
 ;
 ; rt_ppu_write: entry A = value, B = register index (0..7).
-; rt_ppu_write_cont: same, but returns by jumping to the continuation address
-; stored at $D3FC/$D3FD instead of consuming a native return frame.
+; rt_ppu_write_cont: same, with HL = continuation address; it publishes that
+; target under DI and returns by JP instead of consuming a native call frame.
 ; rt_ppu_read:  entry B = register index (0..7). Returns A.
 
 .section "ppu" free
@@ -48,39 +48,160 @@
 ; handler from interleaving with the control-port pairs / data bursts the
 ; register paths below may emit (see runtime/vdp.s).
 rt_ppu_write:
-  ex   af, af'              ; save value argument + caller flags without stack
+.ifndef NES_PRG_BANK_BASE
+  ; NROM has no mutable PRG-bank shadow. Exclude IRQs across the PPU/slot-2
+  ; operation and remember only IFF2; the IRQ bridge separately preserves a
+  ; transient inline fixed-high mapping. Mapper 2 uses the full guard below.
+  ld   c, a
+  ld   a, i
+  di
+  jp   po, _pw_nrom_di
+  ld   a, $01
+  jr   _pw_nrom_saved
+_pw_nrom_di:
+  xor  a
+_pw_nrom_saved:
+  ld   ($ca19), a
+  xor  a
+  ld   ($d3fe), a
+  ld   a, c
+  jp   _rt_ppu_write_body
+.else
+  ld   c, a                 ; A is the only native register value preserved
+  ld   a, i
+  di
+  jp   po, _pw_enter_di
+_pw_enter_ei:
+  ld   a, ($d47f)
+  cp   2
+  jp   nc, rt_ppu_guard_overflow
+  or   a
+  jr   nz, _pw_enter_ei_1
+  ld   a, $01
+  ld   ($ca19), a
+  jr   _pw_enter_snapshot0
+_pw_enter_ei_1:
+  ld   a, $01
+  ld   ($ca1d), a
+  jr   _pw_enter_snapshot1
+_pw_enter_di:
+  ld   a, ($d47f)
+  cp   2
+  jp   nc, rt_ppu_guard_overflow
+  or   a
+  jr   nz, _pw_enter_di_1
+  xor  a
+  ld   ($ca19), a
+  jr   _pw_enter_snapshot0
+_pw_enter_di_1:
+  xor  a
+  ld   ($ca1d), a
+_pw_enter_snapshot1:
+  ld   a, ($fffc)
+  ld   ($ca1e), a
+  ld   a, ($ffff)
+  ld   ($ca1f), a
+  ld   a, ($cb62)
+  ld   ($d3ff), a
+  jr   _pw_enter_done
+_pw_enter_snapshot0:
+  ld   a, ($fffc)
+  ld   ($ca1a), a
+  ld   a, ($ffff)
+  ld   ($ca1b), a
+  ld   a, ($cb62)
+  ld   ($ca1c), a
+_pw_enter_done:
+  ld   a, ($d47f)
+  inc  a
+  ld   ($d47f), a
   xor  a
   ld   ($d3fe), a            ; ordinary call path returns with `ret`
-  jp   _rt_ppu_write_entry
+  ld   a, c
+  jp   _rt_ppu_write_body
+.endif
 
 rt_ppu_write_cont:
-  ex   af, af'              ; save value argument + caller flags without stack
+.ifndef NES_PRG_BANK_BASE
+  ld   c, a
+  ld   a, i
+  di
+  jp   po, _pwc_nrom_di
   ld   a, $01
-  ld   ($d3fe), a            ; continuation path returns with `jp (hl)`
-_rt_ppu_write_entry:
-  ld   a, i                 ; P/V := IFF2 (1 = interrupts enabled)
-  di                        ; atomic vs the frame IRQ handler from here
-  jp   po, _pw_was_disabled
-  ld   a, $01
-  ld   ($cb19), a            ; _ppu_w_done must restore EI
-  ex   af, af'              ; restore value/flags for _rt_ppu_write_body
-  jp   _rt_ppu_write_body    ; tail-call: avoid one native stack frame
-_pw_was_disabled:
+  jr   _pwc_nrom_saved
+_pwc_nrom_di:
   xor  a
-  ld   ($cb19), a            ; leave interrupts off (handler/nested context)
-  ex   af, af'              ; restore value/flags for _rt_ppu_write_body
-  jp   _rt_ppu_write_body    ; tail-call: avoid one native stack frame
+_pwc_nrom_saved:
+  ld   ($ca19), a
+  ld   ($d3fc), hl
+  ld   a, $01
+  ld   ($d3fe), a
+  ld   a, c
+  jp   _rt_ppu_write_body
+.else
+  ld   c, a                 ; HL is the callless continuation target
+  ld   a, i
+  di
+  jp   po, _pwc_enter_di
+_pwc_enter_ei:
+  ld   a, ($d47f)
+  cp   2
+  jp   nc, rt_ppu_guard_overflow
+  or   a
+  jr   nz, _pwc_enter_ei_1
+  ld   a, $01
+  ld   ($ca19), a
+  jr   _pwc_snapshot0
+_pwc_enter_ei_1:
+  ld   a, $01
+  ld   ($ca1d), a
+  jr   _pwc_snapshot1
+_pwc_enter_di:
+  ld   a, ($d47f)
+  cp   2
+  jp   nc, rt_ppu_guard_overflow
+  or   a
+  jr   nz, _pwc_enter_di_1
+  xor  a
+  ld   ($ca19), a
+  jr   _pwc_snapshot0
+_pwc_enter_di_1:
+  xor  a
+  ld   ($ca1d), a
+_pwc_snapshot1:
+  ld   a, ($fffc)
+  ld   ($ca1e), a
+  ld   a, ($ffff)
+  ld   ($ca1f), a
+  ld   a, ($cb62)
+  ld   ($d3ff), a
+  jr   _pwc_enter_done
+_pwc_snapshot0:
+  ld   a, ($fffc)
+  ld   ($ca1a), a
+  ld   a, ($ffff)
+  ld   ($ca1b), a
+  ld   a, ($cb62)
+  ld   ($ca1c), a
+_pwc_enter_done:
+  ld   a, ($d47f)
+  inc a
+  ld   ($d47f), a
+  ld   ($d3fc), hl          ; publish only after DI + guard entry
+  ld   a, $01
+  ld   ($d3fe), a
+  ld   a, c
+  jp   _rt_ppu_write_body
+.endif
 
 _rt_ppu_write_body:
   ; Hot PPU writes run under the frame IRQ/NMI bridge, where the native stack is
   ; at its tightest. Keep this body stackless: $CB18 holds the write value,
-  ; $CB19 records whether rt_ppu_write must restore EI, $CB1E/$CB1F preserve
-  ; resident translated X/Y (DE), and alternate AF owns the caller's A+F until
-  ; _ppu_w_done. Runtime code must not use alternate AF elsewhere while inside
-  ; this body.
+  ; $CB1E/$CB1F preserve
+  ; resident translated X/Y (DE). Write ABI preserves A, DE, and shadow P;
+  ; BC/HL/native flags are scratch. No alternate AF or native stack is used.
   ld   ($cb18), a
   ld   ($cb1e), de
-  ex   af, af'
   ; Dispatch on register index in B.
   ld   a, b
   cp   0
@@ -141,8 +262,11 @@ _pwc_no_tflip:
   ; Mirror NES PPUCTRL bit 3 into SMS VDP register 6. The current CHR pack
   ; places NES sprite table 1 in SMS slots $000-$0FF and sprite table 0 in
   ; slots $100-$1FF, so table switches must also switch the SMS sprite base.
+  bit  5, a                 ; NES 8x16 selects the table per OAM tile bit
+  jr   nz, _ppu_sprite_base_2000
   bit  3, a
   jr   nz, _ppu_sprite_base_0000
+_ppu_sprite_base_2000:
   ld   a, $ff                ; bit 2 = 1: sprite pattern base $2000
   jr   _ppu_sprite_base_set
 _ppu_sprite_base_0000:
@@ -161,6 +285,32 @@ _ppu_w_mask:
   ; has a single display-enable bit, so display is on when either NES plane is
   ; enabled and off when both are disabled. This keeps blanking generic instead
   ; of relying on boot's initial always-on display state.
+  ; CHR-RAM games commonly draw a complete new screen while rendering is
+  ; disabled. $CA18 counts raw nametable writes during that off interval (see
+  ; the PPUDATA path below). Rebuild only after a substantial upload; games
+  ; also toggle PPUMASK around small per-frame updates, where rebuilding all
+  ; 896 cells would make the translated game unusably slow.
+.ifdef NES_CHR_RAM
+  ld   a, ($cb09)
+  and  $18
+  jr   z, _pwm_old_render_off
+  ld   a, ($cb18)
+  and  $18
+  jr   nz, _pwm_no_enable_edge
+  xor  a                    ; rendering on -> off: start a fresh write count
+  ld   ($ca18), a
+  jr   _pwm_no_enable_edge
+_pwm_old_render_off:
+  ld   a, ($cb18)
+  and  $18
+  jr   z, _pwm_no_enable_edge
+  ld   a, ($ca18)           ; rendering off -> on
+  cp   $40                  ; full-screen work threshold (64 tile writes)
+  jr   nc, _pwm_no_enable_edge
+  xor  a                    ; discard a small ordinary NMI update
+  ld   ($ca18), a
+_pwm_no_enable_edge:
+.endif
   ld   a, ($cb18)
   ld   ($cb09), a
   jp   _ppu_sync_vdp_reg1
@@ -226,10 +376,13 @@ _ppu_w_scroll:
   ; $2005 PPUSCROLL: double-write.
   ;   First write  (toggle=0): X scroll → $CB0C; toggle becomes 1.
   ;   Second write (toggle=1): Y scroll → $CB0D; toggle becomes 0.
+  ; $2005 and $2006 share one first/second-write latch on the NES. Keep the
+  ; legacy scroll-toggle shadow synchronized for diagnostics, but use the
+  ; address-toggle byte as the canonical shared latch.
   ; A complete pair is also captured into the split-scroll scheduler. Pairs
   ; before PPUSTATUS returns sprite-0 hit are pre-split; pairs after are
   ; post-split. The last complete pair in each phase wins.
-  ld   a, ($cb0b)           ; scroll toggle
+  ld   a, ($cb0e)           ; shared $2005/$2006 write toggle
   or   a
   jr   nz, _ppu_w_scroll_y
   ; First write = X scroll.
@@ -237,6 +390,7 @@ _ppu_w_scroll:
   ld   ($cb0c), a
   ld   a, 1
   ld   ($cb0b), a
+  ld   ($cb0e), a
   jp   _ppu_w_done
 _ppu_w_scroll_y:
   ; Second write = Y scroll.
@@ -262,6 +416,7 @@ _ppu_w_scroll_capture_post:
 _ppu_w_scroll_capture_done:
   xor  a
   ld   ($cb0b), a
+  ld   ($cb0e), a
   jp   _ppu_w_done
 
 _ppu_w_ppuaddr:
@@ -274,12 +429,14 @@ _ppu_w_ppuaddr:
   ld   a, ($cb18)
   ld   ($cb0f), a           ; high byte
   ld   a, 1
+  ld   ($cb0b), a
   ld   ($cb0e), a
   jp   _ppu_w_done
 _ppu_w_ppuaddr_lo:
   ld   a, ($cb18)
   ld   ($cb10), a           ; low byte
   xor  a
+  ld   ($cb0b), a
   ld   ($cb0e), a
   jp   _ppu_w_done
 
@@ -346,6 +503,20 @@ _ppudata_direct_nametable_tile:
   ld   (hl), c
   xor  a
   ld   ($fffc), a
+.ifdef NES_CHR_RAM
+  ; Count nametable writes made with both NES render planes disabled. The
+  ; PPUMASK enable edge uses this saturating count to distinguish a screen
+  ; build from a small per-frame update before requesting full projection.
+  ld   a, ($cb09)
+  and  $18
+  jr   nz, _ppudata_no_off_count
+  ld   a, ($ca18)
+  cp   $ff
+  jr   z, _ppudata_no_off_count
+  inc  a
+  ld   ($ca18), a
+_ppudata_no_off_count:
+.endif
   ; row = ((D & 3) << 3) | (E >> 5); rows 0-3 (status region) always render.
   ld   a, e
   rlca
@@ -362,18 +533,13 @@ _ppudata_direct_nametable_tile:
   cp   4
   jr   nc, _ppudata_tile_col_check
 .ifdef NES_CHR_RAM
-  ; Rows 0-3 are the status-bar band. Writes to the currently-selected page
-  ; render immediately; writes to the other page are raw-only.
-  ld   a, ($cb08)
-  and  $01
-  rlca
-  rlca                      ; select bit 0 -> bit 2 ($2400 bit)
-  ld   b, a
+  ; Rows 0-3 are the fixed NT-A status band. The live PPUCTRL page during a
+  ; VBlank upload may describe the next scroll latch rather than the page still
+  ; visible in the locked band, so NT-B writes remain raw-only here.
   ld   a, d
   and  $04
-  cp   b
-  jr   z, _ppudata_tile_in
-  jp   _ppudata_discard_direct
+  jp   nz, _ppudata_discard_direct
+  jr   _ppudata_tile_in
 .else
   ; SMB-proven band rule: NT-A rows 0-3 render (fixed HUD); NT-B column tops
   ; raw-store only.
@@ -430,8 +596,11 @@ _ppudata_pattern_write:
   ;  1. Raw 2bpp byte -> cartridge-SRAM CHR mirror (CHR_RAM_SRAM_BASE
   ;     + addr): the SOURCE for BG variant generation. No VRAM budget,
   ;     no VDP port cost.
-  ;  2. Invalidate the tile's cached variants (FC[tile & $FF]) so the
-  ;     next NT reference regenerates from the new bytes.
+  ;  2. Refresh the tile's already-cached background variants in place.
+  ;     Visible SMS nametable cells retain their assigned pool slot, just as
+  ;     NES nametable cells retain their tile index when CHR-RAM changes.
+  ;     Invalidating the cache here left those cells pointing at stale,
+  ;     partially-uploaded patterns until the whole screen was materialized.
   ;  3. If the tile is in the SPRITE pattern table (PPUCTRL bit 3),
   ;     copy-through to the fixed VRAM sprite region ($2000 + fold).
   ld   a, ($cb18)            ; the data byte
@@ -446,12 +615,16 @@ _ppudata_pattern_write:
   ld   a, ($cb13)
   ld   (hl), a
   call rt_raw_ciram_sram_disable
-  ; --- 2. FC invalidation: base = ((D:E) >> 4) & $FF ---
-  ; Table-aware: only invalidate when this upload's table is the
-  ; PRESENTED table ($CA13). Uploads to the other table (sprite-anim
-  ; refreshes, next-screen preloads) must not kill live variants —
-  ; a table-blind invalidation made a later regeneration re-read the
-  ; other table's (empty) bytes and wipe rendered glyphs.
+  ; --- 2. BG variant coherence: base = ((D:E) >> 4) & $FF ---
+  ; Table-aware: only refresh when this upload's table is the PRESENTED
+  ; table ($CA13). Uploads to the other table (sprite-animation refreshes,
+  ; next-screen preloads) must not alter live variants.
+  ;
+  ; Before the first presentation there are no visible cells to preserve, so
+  ; retain the old invalidation behavior. Once a table is presented, however,
+  ; regenerate every assigned (base,S) slot in place. Assigning a new slot on
+  ; the next nametable reference is not NES-equivalent: cells that are not
+  ; rewritten would keep the old slot and stale pattern indefinitely.
   ld   a, ($ca13)
   cp   $ff
   jr   z, _ppw_inval_go      ; pre-first-flush: keep old behavior
@@ -460,6 +633,74 @@ _ppudata_pattern_write:
   and  $10
   cp   c
   jr   nz, _ppw_no_inval
+  ; NES CHR uploads conventionally write one complete 16-byte tile. Refresh
+  ; after its final plane-1 row instead of rebaking the same variants sixteen
+  ; times; this keeps dynamic CHR coherent without multiplying load time.
+  ld   a, e
+  and  $0f
+  cp   $0f
+  jr   nz, _ppw_no_inval
+
+  ; C = base tile, HL = &FC[base*4].
+  ld   a, e
+  rrca
+  rrca
+  rrca
+  rrca
+  and  $0f
+  ld   c, a
+  ld   a, d
+  rlca
+  rlca
+  rlca
+  rlca
+  and  $f0
+  or   c
+  ld   c, a
+.ifdef PROFILE_CHR_RAM_BG_IDENTITY
+  ld   ($ca03), a            ; BGV_SLOT
+  ld   b, $00
+  call rt_bg_gen_variant     ; refresh identity slot in place
+  ld   a, ($ca03)
+  ld   l, a
+  ld   h, $00
+  ld   de, $d600
+  add  hl, de
+  ld   a, ($ca13)
+  and  $10
+  or   $80
+  ld   (hl), a
+  jr   _ppw_no_inval
+.else
+  ld   l, a
+  ld   h, $00
+  add  hl, hl
+  add  hl, hl                ; *4 (S variants per base)
+  ld   de, $d600             ; BGV_CACHE (chrmap.s)
+  add  hl, de
+  ld   b, $00                ; S = 0..3
+_ppw_refresh_loop:
+  ld   a, (hl)
+  cp   $ff
+  jr   z, _ppw_refresh_next
+  ; rt_bg_gen_variant clobbers all working registers. Preserve the cache
+  ; cursor and (S,base) pair; the outer PPU guard keeps this path atomic.
+  push hl
+  push de
+  push bc
+  call rt_bg_gen_variant     ; A=assigned slot, B=S, C=base
+  pop  bc
+  pop  de
+  pop  hl
+_ppw_refresh_next:
+  inc  hl
+  inc  b
+  ld   a, b
+  cp   $04
+  jr   c, _ppw_refresh_loop
+  jr   _ppw_no_inval
+.endif
+
 _ppw_inval_go:
   ld   a, e
   rrca
@@ -475,11 +716,19 @@ _ppw_inval_go:
   rlca
   and  $f0
   or   c
+.ifdef PROFILE_CHR_RAM_BG_IDENTITY
+  ld   l, a
+  ld   h, $00
+  ld   bc, $d600
+  add  hl, bc
+  ld   (hl), $ff
+  jr   _ppw_no_inval
+.else
   ld   l, a
   ld   h, $00
   add  hl, hl
   add  hl, hl                ; *4 (S variants per base)
-  ld   bc, $d600            ; BGV_CACHE (chrmap.s)
+  ld   bc, $d600             ; BGV_CACHE (chrmap.s)
   add  hl, bc
   ld   a, $ff
   ld   (hl), a
@@ -489,8 +738,14 @@ _ppw_inval_go:
   ld   (hl), a
   inc  hl
   ld   (hl), a
+.endif
 _ppw_no_inval:
   ; --- 3. sprite copy-through when this write's table is the sprite table ---
+  ; In 8x16 mode each OAM tile's low bit selects the NES pattern table. The
+  ; SAT resolver builds active pairs from the raw CHR mirror instead.
+  ld   a, ($cb08)
+  bit  5, a
+  jr   nz, _ppw_done
   ld   a, ($cb08)
   and  $08                   ; PPUCTRL bit 3
   rlca                       ; -> $10 (the table bit of the address)
@@ -768,52 +1023,149 @@ _ppudata_inc_done:
   jp   _ppu_w_done
 
 _ppu_w_done:
+.ifndef NES_PRG_BANK_BASE
   ld   de, ($cb1e)
-  ld   a, ($cb19)
-  or   a
-  jr   z, _ppu_w_maybe_return_disabled
+  ld   a, ($ca19)
+  ld   b, a
   ld   a, ($d3fe)
   or   a
-  jr   nz, _ppu_w_return_cont_ei
-  ex   af, af'              ; restore caller A+flags
+  jr   nz, _ppu_w_nrom_cont
+  ld   a, ($cb18)
+  bit  0, b
+  ret  z
   ei
   ret
-_ppu_w_return_cont_ei:
+_ppu_w_nrom_cont:
   ld   hl, ($d3fc)
-  ex   af, af'              ; restore caller A+flags
+  ld   a, ($cb18)
+  bit  0, b
+  jr   z, _ppu_w_nrom_cont_di
   ei
+_ppu_w_nrom_cont_di:
   jp   (hl)
-_ppu_w_maybe_return_disabled:
+.else
+  ld   a, ($d47f)
+  or   a
+  jp   z, rt_ppu_guard_underflow
+  cp   3
+  jp   nc, rt_ppu_guard_corrupt
+  dec  a
+  ld   ($d47f), a
+  jr   nz, _ppu_w_exit1
+  xor  a
+  ld   ($fffc), a
+  ld   a, ($ca1c)
+  ld   ($cb62), a
+  ld   a, ($ca1b)
+  ld   ($ffff), a
+  ld   a, ($ca1a)
+  ld   ($fffc), a
+  ld   a, ($ca19)
+  jr   _ppu_w_exit_done
+_ppu_w_exit1:
+  xor  a
+  ld   ($fffc), a
+  ld   a, ($d3ff)
+  ld   ($cb62), a
+  ld   a, ($ca1f)
+  ld   ($ffff), a
+  ld   a, ($ca1e)
+  ld   ($fffc), a
+  ld   a, ($ca1d)
+_ppu_w_exit_done:
+  ld   b, a
+  ld   de, ($cb1e)
   ld   a, ($d3fe)
   or   a
-  jr   nz, _ppu_w_return_cont_disabled
-  ex   af, af'              ; restore caller A+flags
+  jr   nz, _ppu_w_return_cont
+  ld   a, ($cb18)
+  bit  0, b
+  jr   z, _ppu_w_return_disabled
+  ei
+  ret
+_ppu_w_return_cont:
+  ld   hl, ($d3fc)
+  ld   a, ($cb18)
+  bit  0, b
+  jr   z, _ppu_w_return_cont_disabled
+  ei
+  jp   (hl)
+_ppu_w_return_disabled:
+  ld   a, ($cb18)
   ret
 _ppu_w_return_cont_disabled:
-  ld   hl, ($d3fc)
-  ex   af, af'              ; restore caller A+flags
+  ld   a, ($cb18)
   jp   (hl)
+.endif
 
 ; ─── rt_ppu_read ──────────────────────────────────────────────────────────────
 ; Entry: B = register index (0..7).
 ; Exit:  A = value.
 rt_ppu_read:
-  ; Reads overwrite A/NZ; no need to preserve caller AF while probing IFF2.
-  ld   a, i                 ; P/V := IFF2
+.ifndef NES_PRG_BANK_BASE
+  ld   a, i
   di
-  jp   po, _pr_was_disabled
+  jp   po, _pr_nrom_di
   ld   a, $01
-  ld   ($cb19), a            ; _ppu_r_done must restore EI
-  jp   _rt_ppu_read_body     ; tail-call: avoid one native stack frame
-_pr_was_disabled:
+  jr   _pr_nrom_saved
+_pr_nrom_di:
   xor  a
-  ld   ($cb19), a            ; leave interrupts off (handler/nested context)
+_pr_nrom_saved:
+  ld   ($ca19), a
+  jp   _rt_ppu_read_body
+.else
+  ld   a, i
+  di
+  jp   po, _pr_enter_di
+_pr_enter_ei:
+  ld   a, ($d47f)
+  cp   2
+  jp   nc, rt_ppu_guard_overflow
+  or   a
+  jr   nz, _pr_enter_ei_1
+  ld   a, $01
+  ld   ($ca19), a
+  jr   _pr_snap0
+_pr_enter_ei_1:
+  ld   a, $01
+  ld   ($ca1d), a
+  jr   _pr_snap1
+_pr_enter_di:
+  ld   a, ($d47f)
+  cp   2
+  jp   nc, rt_ppu_guard_overflow
+  or   a
+  jr   nz, _pr_enter_di_1
+  xor  a
+  ld   ($ca19), a
+  jr   _pr_snap0
+_pr_enter_di_1:
+  xor  a
+  ld   ($ca1d), a
+_pr_snap1:
+  ld   a, ($fffc)
+  ld   ($ca1e), a
+  ld   a, ($ffff)
+  ld   ($ca1f), a
+  ld   a, ($cb62)
+  ld   ($d3ff), a
+  jr   _pr_enter_done
+_pr_snap0:
+  ld   a, ($fffc)
+  ld   ($ca1a), a
+  ld   a, ($ffff)
+  ld   ($ca1b), a
+  ld   a, ($cb62)
+  ld   ($ca1c), a
+_pr_enter_done:
+  ld   a, ($d47f)
+  inc a
+  ld   ($d47f), a
   jp   _rt_ppu_read_body     ; tail-call: avoid one native stack frame
+.endif
 _rt_ppu_read_body:
   ; Read helpers return A and may clobber BC/HL/native flags, but DE holds
   ; resident translated X/Y and must survive. Keep the hot read body stackless.
-  ; $CB19 records whether the wrapper observed interrupts enabled and should
-  ; re-enable them on return.
   ld   ($cb1e), de
   ld   a, b
   cp   2
@@ -957,13 +1309,67 @@ _ppu_r_inc1:
 _ppu_r_done:
   ld   de, ($cb1e)
   ld   c, a
-  ld   a, ($cb19)
-  or   a
+.ifndef NES_PRG_BANK_BASE
+  ld   a, ($ca19)
+  ld   b, a
   ld   a, c
+  bit  0, b
+  ret  z
+  ei
+  ret
+.else
+  ld   a, ($d47f)
+  or   a
+  jp   z, rt_ppu_guard_underflow
+  cp   3
+  jp   nc, rt_ppu_guard_corrupt
+  dec  a
+  ld   ($d47f), a
+  jr   nz, _ppu_r_exit1
+  xor  a
+  ld   ($fffc), a
+  ld   a, ($ca1c)
+  ld   ($cb62), a
+  ld   a, ($ca1b)
+  ld   ($ffff), a
+  ld   a, ($ca1a)
+  ld   ($fffc), a
+  ld   a, ($ca19)
+  jr   _ppu_r_exit_done
+_ppu_r_exit1:
+  xor  a
+  ld   ($fffc), a
+  ld   a, ($d3ff)
+  ld   ($cb62), a
+  ld   a, ($ca1f)
+  ld   ($ffff), a
+  ld   a, ($ca1e)
+  ld   ($fffc), a
+  ld   a, ($ca1d)
+_ppu_r_exit_done:
+  ld   b, a
+  ld   a, c
+  bit  0, b
   jr   z, _ppu_r_done_no_ei
   ei
 _ppu_r_done_no_ei:
   ret
+
+rt_ppu_guard_overflow:
+  ld   a, RT_GUARD_OVERFLOW
+  jr   rt_ppu_guard_trap
+rt_ppu_guard_underflow:
+  ld   a, RT_GUARD_UNDERFLOW
+  jr   rt_ppu_guard_trap
+rt_ppu_guard_corrupt:
+  ld   a, RT_GUARD_CORRUPT
+rt_ppu_guard_trap:
+  di
+  ld   ($cb1d), a
+rt_ppu_guard_halt:
+  halt
+  jr   rt_ppu_guard_halt
+.endif
 
 _nes_to_sms_palette:
   ; Same coarse NES-master-palette -> SMS --BBGGRR mapping used by the Rust

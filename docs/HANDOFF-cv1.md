@@ -1,5 +1,12 @@
 # Handoff: Castlevania 1 (CV1) — real-emulator blocker RESOLVED
 
+> **Superseded (2026-07-21):** the mapper-2 recovery and current acceptance
+> result are recorded in `docs/cv1-recovery-plan.md`. In particular, the GPGX
+> attract-transition freeze described below no longer reproduces: the canonical
+> build accepts Start, renders a clean title/entrance background, and reaches
+> movable first-stage gameplay at 500% Z80 overclock. The remainder of this
+> file is retained as forensic history.
+
 Last updated: 2026-07-11 (commit 8ffb7f8). SMB fully green on
 `.roms/smb.nes` (three parity routes byte-for-byte, acceptance 4/4,
 395 tests, 0 unresolved labels).

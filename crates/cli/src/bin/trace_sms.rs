@@ -634,6 +634,7 @@ struct SmsBus {
     ram: [u8; RAM_SIZE],
     /// Log of (frame, op, port, value).
     io_log: Vec<String>,
+    io_entries: u64,
     /// VDP status reads. Real frame/line IRQ kind is supplied through
     /// `vdp_status_override` when the tracer injects an interrupt; fallback
     /// toggling keeps non-IRQ polling loops from stalling.
@@ -770,6 +771,7 @@ struct SmsBus {
     /// Log of every mapper write (port, value). Lets the trace report
     /// when a translated routine surprises us by re-banking a slot.
     bank_writes: Vec<(u16, u8)>,
+    bank_writes_total: u64,
     /// Per-address write tap. If `watch_addr` is set, every write to it
     /// pushes (step, value) into `watch_log`. Use to confirm whether a
     /// specific RAM byte ever gets touched.
@@ -888,11 +890,15 @@ struct NtExplicitSExample {
 struct WatchExecHit {
     step: usize,
     pc: u16,
+    from_pc: u16,
+    from_op: u8,
     bank1: u8,
     sp: u16,
     ret: u16,
     op: u8,
     a: u8,
+    b: u8,
+    c: u8,
     f: u8,
     p_shadow: u8,
     x_shadow: u8,
@@ -913,6 +919,8 @@ struct WatchExecHit {
     eb: u8,
     vertical_force: u8,
     area_obj_dispatch: u8,
+    translated_return_ptr: u16,
+    stack_6502: u8,
 }
 
 #[derive(Clone)]
@@ -935,6 +943,7 @@ impl SmsBus {
             cart_ram_writes: 0,
             ram: [0; RAM_SIZE],
             io_log: Vec::new(),
+            io_entries: 0,
             vdp_status_reads: 0,
             vdp_status_override: None,
             display_enabled_edge: false,
@@ -951,6 +960,7 @@ impl SmsBus {
             vdp_addr_high: 0,
             vdp_addr_low: 0,
             bank_writes: Vec::new(),
+            bank_writes_total: 0,
             watch_addr: std::env::var("SMS_WATCH_ADDR")
                 .ok()
                 .and_then(|s| u16::from_str_radix(s.trim_start_matches("0x"), 16).ok()),
@@ -1066,23 +1076,35 @@ impl SmsBus {
     /// Apply a Sega mapper register write. `addr` is the canonical register
     /// address ($FFFC-$FFFF); callers translate mirror addresses first.
     fn apply_mapper_write(&mut self, addr: u16, value: u8) {
+        self.bank_writes_total += 1;
         match addr {
             0xFFFC => {
                 self.mapper_control = value;
-                self.io_log.push(format!("mapper ctrl=${value:02X}"));
-                self.bank_writes.push((0xFFFC, value));
+                self.io_entries += 1;
+                if self.io_log.len() < 4096 {
+                    self.io_log.push(format!("mapper ctrl=${value:02X}"));
+                }
+                if self.bank_writes.len() < 4096 {
+                    self.bank_writes.push((0xFFFC, value));
+                }
             }
             0xFFFD => {
                 self.slot_bank[0] = value;
-                self.bank_writes.push((0xFFFD, value));
+                if self.bank_writes.len() < 4096 {
+                    self.bank_writes.push((0xFFFD, value));
+                }
             }
             0xFFFE => {
                 self.slot_bank[1] = value;
-                self.bank_writes.push((0xFFFE, value));
+                if self.bank_writes.len() < 4096 {
+                    self.bank_writes.push((0xFFFE, value));
+                }
             }
             0xFFFF => {
                 self.slot_bank[2] = value;
-                self.bank_writes.push((0xFFFF, value));
+                if self.bank_writes.len() < 4096 {
+                    self.bank_writes.push((0xFFFF, value));
+                }
             }
             _ => {}
         }
@@ -1809,6 +1831,9 @@ impl Bus for SmsBus {
                 if let Some(offset) = self.slot2_cart_ram_offset(addr) {
                     self.cart_ram[offset] = value;
                     self.cart_ram_writes += 1;
+                    if self.watches_write(addr) {
+                        self.watch_log.push(self.watch_entry(addr, value));
+                    }
                 }
                 // Other writes to ROM area are ignored (real SMS hardware).
             }
@@ -1818,15 +1843,9 @@ impl Bus for SmsBus {
                 if self.watches_write(addr) {
                     self.watch_log.push(self.watch_entry(addr, value));
                 }
-                // Sega mapper registers are RAM-mirrored: Mednafen (and the
-                // usual SMS Plus lineage) applies mapper writes on the
-                // $DFFC-$DFFF mirror as well as $FFFC-$FFFF. Model that here
-                // so stack/data traffic near the top of RAM can't silently
-                // pass in the trace harness while reprogramming banks on a
-                // real emulator (2026-07-03 Mednafen black-screen root cause).
-                if addr >= 0xDFFC {
-                    self.apply_mapper_write(addr | 0x2000, value);
-                }
+                // The Sega mapper decodes only the canonical $FFFC-$FFFF
+                // addresses. $DFFC-$DFFF are ordinary work RAM, despite RAM
+                // otherwise being mirrored through $FFFF.
             }
             0xE000..=0xFFFB => {
                 self.ram[(addr - 0xE000) as usize] = value;
@@ -1947,7 +1966,10 @@ impl Bus for SmsBus {
                             self.display_enabled_edge = true;
                         }
                         self.vdp_regs[reg as usize] = val;
-                        self.io_log.push(format!("vdp r{reg} = ${val:02X}"));
+                        self.io_entries += 1;
+                        if self.io_log.len() < 4096 {
+                            self.io_log.push(format!("vdp r{reg} = ${val:02X}"));
+                        }
                     }
                     self.vdp_addr_latched = false;
                 }
@@ -2019,6 +2041,12 @@ fn ram_index(addr: u16) -> Option<usize> {
         _ => return None,
     };
     Some(usize::from(idx))
+}
+
+/// `$E3` is recoverable telemetry from the translated-RTS emulated-stack
+/// fallback. All other non-zero `$Ex` markers represent loud runtime traps.
+fn is_hard_runtime_trap(marker: u8) -> bool {
+    (marker & 0xF0) == 0xE0 && marker != 0xE3
 }
 
 fn load_button_script(path: &str) -> Result<Vec<(usize, u8)>, String> {
@@ -2208,7 +2236,9 @@ fn run_late_route_search(rom_path: &PathBuf, base_events: &[(usize, u8)]) {
     run_search_steps(&mut state, 170_000_000, base_events, snapshot_frame)
         .expect("run to late-route snapshot");
     state.bus.io_log.clear();
+    state.bus.io_entries = 0;
     state.bus.bank_writes.clear();
+    state.bus.bank_writes_total = 0;
     state.bus.watch_log.clear();
     state.bus.watch_read_log.clear();
 
@@ -2531,7 +2561,9 @@ fn run_end_route_search(rom_path: &PathBuf, base_events: &[(usize, u8)]) {
     run_search_steps(&mut state, 190_000_000, base_events, snapshot_frame)
         .expect("run to end-route snapshot");
     state.bus.io_log.clear();
+    state.bus.io_entries = 0;
     state.bus.bank_writes.clear();
+    state.bus.bank_writes_total = 0;
     state.bus.watch_log.clear();
     state.bus.watch_read_log.clear();
 
@@ -2847,6 +2879,26 @@ fn main() {
         );
         RT_PPU_WRITE_FALLBACK_ADDR
     };
+    let rt_ppu_write_cont_addr = symbol_defs.get("rt_ppu_write_cont").map(|(_, addr)| *addr);
+    let log_ppu_values = std::env::var("SMS_LOG_PPU_VALUES")
+        .ok()
+        .map(|spec| {
+            spec.split(',')
+                .filter_map(|raw| {
+                    u8::from_str_radix(
+                        raw.trim().trim_start_matches("0x").trim_start_matches('$'),
+                        16,
+                    )
+                    .ok()
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let log_ppu_limit = std::env::var("SMS_LOG_PPU_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(200);
+    let mut logged_ppu_writes = 0usize;
     let mut bus = SmsBus::new(rom, controller_port_dc);
     if let Ok(spec) = std::env::var("SMS_WATCH_VRAM")
         && let Some((a, l)) = spec.split_once(':')
@@ -2907,6 +2959,14 @@ fn main() {
     let watch_exec_bank1 = std::env::var("SMS_WATCH_BANK1")
         .ok()
         .and_then(|s| u8::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
+    let watch_exec_after = std::env::var("SMS_WATCH_AFTER")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let watch_exec_limit = std::env::var("SMS_WATCH_LIMIT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(100_000);
     let mut watch_exec_log: Vec<WatchExecHit> = Vec::new();
     // Ring of last 64 control transfers (CALL/RET/JP-indirect/conditional).
     // Each entry: (kind, from_pc, to_pc). Kind is "call", "ret", or "jp".
@@ -3012,10 +3072,7 @@ fn main() {
         if first_irq_handler_step.is_none() && pc == 0x0038 {
             first_irq_handler_step = Some(step);
         }
-        if first_runtime_trap_step.is_none()
-            && (bus.ram[0x0B1D] & 0xF0) == 0xE0
-            && bus.ram[0x0B1D] != 0
-        {
+        if first_runtime_trap_step.is_none() && is_hard_runtime_trap(bus.ram[0x0B1D]) {
             first_runtime_trap_step = Some(step);
             let id = (bus.ram[0x0B1C] as u16) << 8 | bus.ram[0x0B1B] as u16;
             let sp = cpu.sp;
@@ -3032,7 +3089,10 @@ fn main() {
                 bus.ram[0x0B7D],
             );
             if std::env::var("SMS_TRAP_RING").is_ok() {
-                eprintln!("  emulated S=${:02X} stack page $C1E0-$C1FF:", bus.ram[0x0B02]);
+                eprintln!(
+                    "  emulated S=${:02X} stack page $C1E0-$C1FF:",
+                    bus.ram[0x0B02]
+                );
                 let hex: Vec<String> = (0x01E0..0x0200)
                     .map(|i| format!("{:02X}", bus.ram[i]))
                     .collect();
@@ -3071,7 +3131,24 @@ fn main() {
         if first_ram_exec_step.is_none() && pc >= 0xC000 {
             first_ram_exec_step = Some((step, pc));
         }
-        if pc == rt_ppu_write_addr {
+        if pc == rt_ppu_write_addr || Some(pc) == rt_ppu_write_cont_addr {
+            let ppu_addr = ((bus.ram[0x0B0F] as u16) << 8) | bus.ram[0x0B10] as u16;
+            if cpu.b == 7
+                && (0x2000..0x3000).contains(&ppu_addr)
+                && log_ppu_values.contains(&cpu.a)
+                && logged_ppu_writes < log_ppu_limit
+            {
+                eprintln!(
+                    "SMS_PPU_WRITE step={step} frame={irqs_fired} entry=${pc:04X} bank1={} from=${:04X} ret=${:04X} cont=${:04X} addr=${ppu_addr:04X} value=${:02X} ctrl=${:02X}",
+                    bus.slot_bank[1],
+                    last_pc.unwrap_or(pc),
+                    bus.watch_ret,
+                    (cpu.h as u16) << 8 | cpu.l as u16,
+                    cpu.a,
+                    bus.ram[0x0B08],
+                );
+                logged_ppu_writes += 1;
+            }
             bus.record_trace_ppu_write_call_at(cpu.b, cpu.a, step, irqs_fired);
         }
         runtime_materializer_monitor.observe_pc(step, pc, cpu.sp, &bus);
@@ -3081,15 +3158,21 @@ fn main() {
         *pc_counts.entry(pc).or_insert(0) += 1;
         if Some(pc) == watch_exec_addr
             && watch_exec_bank1.is_none_or(|bank| bank == bus.slot_bank[1])
+            && step >= watch_exec_after
+            && watch_exec_log.len() < watch_exec_limit
         {
             watch_exec_log.push(WatchExecHit {
                 step,
                 pc,
+                from_pc: last_pc.unwrap_or(pc),
+                from_op: last_op.unwrap_or(op),
                 bank1: bus.slot_bank[1],
                 sp: cpu.sp,
                 ret: bus.watch_ret,
                 op,
                 a: cpu.a,
+                b: cpu.b,
+                c: cpu.c,
                 f: cpu.f,
                 p_shadow: bus.ram[0x0B03],
                 x_shadow: bus.ram[0x0B00],
@@ -3110,6 +3193,8 @@ fn main() {
                 eb: bus.ram[0x00EB],
                 vertical_force: bus.ram[0x070E],
                 area_obj_dispatch: bus.ram[0x0000].wrapping_add(bus.ram[0x0007]),
+                translated_return_ptr: u16::from_le_bytes([bus.ram[0x0B76], bus.ram[0x0B77]]),
+                stack_6502: bus.ram[0x0B02],
             });
         }
         if ring.len() == 8192 {
@@ -3546,6 +3631,13 @@ fn main() {
     println!("=== trace-sms summary ===");
     println!("ROM: {}", rom_path.display());
     println!("steps run: {taken}");
+    println!("game frames delivered: {game_frames}");
+    if let Some(base) = script_frame_base {
+        println!(
+            "script frames delivered: {}",
+            game_frames.saturating_sub(base)
+        );
+    }
     if let Some(e) = &last_err {
         println!("stopped on error: {e:?}");
     }
@@ -3633,7 +3725,10 @@ fn main() {
     println!("\nMilestones:");
     print_milestone("entered translated slot-1 code", first_translated_step);
     print_milestone("entered IRQ/NMI bridge at $0038", first_irq_handler_step);
-    print_milestone("hit runtime trap marker $CB1D=$E1", first_runtime_trap_step);
+    print_milestone(
+        "hit hard runtime trap marker at $CB1D",
+        first_runtime_trap_step,
+    );
     match first_ram_exec_step {
         Some((step, pc)) => println!("  yes: executed RAM at ${pc:04X} at step {step}"),
         None => println!("   no: executed RAM at $C000-$FFFF"),
@@ -3726,14 +3821,14 @@ fn main() {
     if let Some(snapshot) = &first_fall_snapshot {
         print_fall_snapshot(snapshot);
     }
-    println!("VDP control I/O entries: {}", bus.io_log.len());
+    println!("VDP control I/O entries: {}", bus.io_entries);
     println!("IRQs fired: {irqs_fired}");
     println!("Line IRQs fired: {line_irqs_fired}");
     println!(
         "Bank mapping: slot0={} slot1={} slot2={}",
         bus.slot_bank[0], bus.slot_bank[1], bus.slot_bank[2]
     );
-    println!("Mapper writes total: {}", bus.bank_writes.len());
+    println!("Mapper writes total: {}", bus.bank_writes_total);
     for (port, value) in bus.bank_writes.iter().take(20) {
         println!("  W ${port:04X} = ${value:02X}");
     }
@@ -3764,13 +3859,17 @@ fn main() {
                 write.player_state
             );
         }
-        if bus.watch_log.len() > 40 {
-            println!("  ... last 40 writes:");
+        let watch_tail = std::env::var("SMS_WATCH_TAIL")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(40);
+        if bus.watch_log.len() > 40 && watch_tail > 0 {
+            println!("  ... last {watch_tail} writes:");
             for write in bus
                 .watch_log
                 .iter()
                 .rev()
-                .take(40)
+                .take(watch_tail)
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
@@ -4018,14 +4117,18 @@ fn main() {
         println!();
         for hit in watch_exec_log.iter().take(40) {
             println!(
-                "  step {}: pc=${:04X} bank1=${:02X} sp=${:04X} ret=${:04X} op=${:02X} a=${:02X} f=${:02X} p=${:02X} xsh=${:02X} ysh=${:02X} ppos={:02X}:{:02X} y={:02X}:{:02X} yspd=${:02X} eb=${:02X} vf=${:02X} zp00=${:02X} zp02=${:02X} zp03=${:02X} zp04=${:02X} zp05=${:02X} zp06=${:02X} zp07=${:02X} zp08=${:02X} disp=${:02X}",
+                "  step {}: pc=${:04X} from=${:04X}/${:02X} bank1=${:02X} sp=${:04X} ret=${:04X} op=${:02X} a=${:02X} bc=${:02X}{:02X} f=${:02X} p=${:02X} xsh=${:02X} ysh=${:02X} ppos={:02X}:{:02X} y={:02X}:{:02X} yspd=${:02X} eb=${:02X} vf=${:02X} zp00=${:02X} zp02=${:02X} zp03=${:02X} zp04=${:02X} zp05=${:02X} zp06=${:02X} zp07=${:02X} zp08=${:02X} disp=${:02X} trptr=${:04X} s6502=${:02X}",
                 hit.step,
                 hit.pc,
+                hit.from_pc,
+                hit.from_op,
                 hit.bank1,
                 hit.sp,
                 hit.ret,
                 hit.op,
                 hit.a,
+                hit.b,
+                hit.c,
                 hit.f,
                 hit.p_shadow,
                 hit.x_shadow,
@@ -4045,7 +4148,9 @@ fn main() {
                 hit.zp06,
                 hit.zp07,
                 hit.zp08,
-                hit.area_obj_dispatch
+                hit.area_obj_dispatch,
+                hit.translated_return_ptr,
+                hit.stack_6502
             );
         }
         if watch_exec_log.len() > 40 {
@@ -4059,14 +4164,18 @@ fn main() {
                 .rev()
             {
                 println!(
-                    "  step {}: pc=${:04X} bank1=${:02X} sp=${:04X} ret=${:04X} op=${:02X} a=${:02X} f=${:02X} p=${:02X} xsh=${:02X} ysh=${:02X} ppos={:02X}:{:02X} y={:02X}:{:02X} yspd=${:02X} eb=${:02X} vf=${:02X} zp00=${:02X} zp02=${:02X} zp03=${:02X} zp04=${:02X} zp05=${:02X} zp06=${:02X} zp07=${:02X} zp08=${:02X} disp=${:02X}",
+                    "  step {}: pc=${:04X} from=${:04X}/${:02X} bank1=${:02X} sp=${:04X} ret=${:04X} op=${:02X} a=${:02X} bc=${:02X}{:02X} f=${:02X} p=${:02X} xsh=${:02X} ysh=${:02X} ppos={:02X}:{:02X} y={:02X}:{:02X} yspd=${:02X} eb=${:02X} vf=${:02X} zp00=${:02X} zp02=${:02X} zp03=${:02X} zp04=${:02X} zp05=${:02X} zp06=${:02X} zp07=${:02X} zp08=${:02X} disp=${:02X} trptr=${:04X} s6502=${:02X}",
                     hit.step,
                     hit.pc,
+                    hit.from_pc,
+                    hit.from_op,
                     hit.bank1,
                     hit.sp,
                     hit.ret,
                     hit.op,
                     hit.a,
+                    hit.b,
+                    hit.c,
                     hit.f,
                     hit.p_shadow,
                     hit.x_shadow,
@@ -4086,7 +4195,9 @@ fn main() {
                     hit.zp06,
                     hit.zp07,
                     hit.zp08,
-                    hit.area_obj_dispatch
+                    hit.area_obj_dispatch,
+                    hit.translated_return_ptr,
+                    hit.stack_6502
                 );
             }
         }
@@ -4106,8 +4217,9 @@ fn main() {
     );
     let unresolved_id = (bus.read(0xCB1C) as u16) << 8 | bus.read(0xCB1B) as u16;
     println!(
-        "Runtime diagnostics: unresolved_id=${unresolved_id:04X} trap_marker=${:02X} vbuf_used=${:02X} ppu_addr=${:02X}{:02X} ppu_mask=${:02X} split_flags=${:02X} split_pre=${:02X}:${:02X} split_post=${:02X}:${:02X}",
+        "Runtime diagnostics: unresolved_id=${unresolved_id:04X} trap_marker=${:02X} guard_depth=${:02X} vbuf_used=${:02X} ppu_addr=${:02X}{:02X} ppu_mask=${:02X} split_flags=${:02X} split_pre=${:02X}:${:02X} split_post=${:02X}:${:02X}",
         bus.read(0xCB1D),
+        bus.read(0xD47F),
         bus.read(0xC800),
         bus.read(0xCB0F),
         bus.read(0xCB10),
@@ -4450,7 +4562,7 @@ fn main() {
                 "EXPECT FAIL: runtime trap marker hit at step {step}, unresolved_id=${id:04X}"
             );
             acceptance_failed = true;
-        } else if bus.ram[0x0B1D] == 0xE1 {
+        } else if is_hard_runtime_trap(bus.ram[0x0B1D]) {
             let id = (bus.ram[0x0B1C] as u16) << 8 | bus.ram[0x0B1B] as u16;
             eprintln!("EXPECT FAIL: runtime trap marker set, unresolved_id=${id:04X}");
             acceptance_failed = true;
@@ -6912,12 +7024,14 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
         } else {
             0x0000
         };
+        let sprite_height = if bus.vdp_regs[1] & 0x02 != 0 { 16 } else { 8 };
+        let tile = if sprite_height == 16 { tile & !1 } else { tile };
         let tile_addr = sprite_base + tile * 32;
-        if tile_addr + 32 > 0x4000 {
+        if tile_addr + sprite_height * 4 > 0x4000 {
             continue;
         }
         active_sprites += 1;
-        for py in 0..8 {
+        for py in 0..sprite_height {
             let p0 = bus.vram[tile_addr + py * 4];
             let p1 = bus.vram[tile_addr + py * 4 + 1];
             let p2 = bus.vram[tile_addr + py * 4 + 2];
@@ -6960,6 +7074,15 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recoverable_rts_fallback_is_not_a_hard_runtime_trap() {
+        assert!(!is_hard_runtime_trap(0x00));
+        assert!(!is_hard_runtime_trap(0xE3));
+        for marker in [0xE1, 0xE2, 0xE4, 0xEE] {
+            assert!(is_hard_runtime_trap(marker), "marker ${marker:02X}");
+        }
+    }
 
     #[test]
     fn parses_button_event_and_active_low_buttons() {
@@ -7976,6 +8099,16 @@ mod tests {
         assert_eq!(bus.read(0x8000), 0x34);
         bus.write(0xFFFC, 0x00);
         assert_eq!(bus.read(0x8000), 0x22);
+    }
+
+    #[test]
+    fn dffc_ram_write_does_not_alias_mapper_control() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        bus.write(0xFFFC, 0x08);
+        bus.write(0xDFFC, 0x55);
+
+        assert_eq!(bus.read(0xDFFC), 0x55);
+        assert_eq!(bus.read(0xFFFC), 0x08);
     }
 
     #[test]

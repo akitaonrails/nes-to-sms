@@ -1,0 +1,16 @@
+# SMS trace route. Inject NES Start separately with --pause-at-frame 600.
+# Hold Right and whip through the first candle group; the large heart must be
+# collected and gameplay must continue after the translated return escape.
+1450:right
+1500:right,b
+1510:right
+1580:right,b
+1590:right
+1660:right,b
+1670:right
+1740:right,b
+1750:right
+1820:right,b
+1830:right
+1900:right,b
+1910:right
