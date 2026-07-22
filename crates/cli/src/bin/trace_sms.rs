@@ -2734,6 +2734,7 @@ fn main() {
         Some(p) => PathBuf::from(p),
         None => {
             eprintln!("usage: trace-sms <rom.sms> [--steps N] [--log-pcs]");
+            eprintln!("                     [--game-frames N]");
             eprintln!("                     [--buttons a,b,start,up,down,left,right]");
             eprintln!("                     [--buttons-at-frame FRAME:buttons]");
             eprintln!("                     [--buttons-script path]");
@@ -2748,6 +2749,7 @@ fn main() {
         }
     };
     let mut steps: usize = 200_000;
+    let mut target_game_frames: Option<usize> = None;
     let mut log_pcs = false;
     let mut inject_irq = true;
     let mut controller_port_dc = 0xFF;
@@ -2768,6 +2770,10 @@ fn main() {
             "--steps" => {
                 i += 1;
                 steps = args[i].parse().expect("steps int");
+            }
+            "--game-frames" => {
+                i += 1;
+                target_game_frames = Some(args[i].parse().expect("game frames int"));
             }
             "--log-pcs" => log_pcs = true,
             "--search-late-routes" => search_late_routes = true,
@@ -2999,6 +3005,7 @@ fn main() {
     // advance the script clock: routes are recorded on the NES frame timeline
     // (frame-diff drives one NMI per frame and never overruns).
     let mut game_frames: usize = 0;
+    let mut stop_after_frame_handler = false;
     let mut checkpoint_dump_failed = false;
     let zpy_log_pc: Option<u16> = std::env::var("SMS_LOG_ZPY")
         .ok()
@@ -3295,6 +3302,7 @@ fn main() {
             let script_frame = script_frame_base.map(|base| game_frames - base);
             if runs_translated_nmi {
                 game_frames += 1;
+                stop_after_frame_handler = target_game_frames == Some(game_frames);
             }
             while next_button_event < button_events.len()
                 && script_frame.is_some_and(|f| f >= button_events[next_button_event].0)
@@ -3543,6 +3551,9 @@ fn main() {
                 {
                     frame_costs.push(cpu.cycles.saturating_sub(start));
                     frame_cost_start = None;
+                    if stop_after_frame_handler {
+                        break;
+                    }
                 }
                 let materializer_vdp_writes = bus
                     .vdp_data_writes
@@ -3631,6 +3642,7 @@ fn main() {
     println!("=== trace-sms summary ===");
     println!("ROM: {}", rom_path.display());
     println!("steps run: {taken}");
+    println!("Z80 cycles: {}", cpu.cycles);
     println!("game frames delivered: {game_frames}");
     if let Some(base) = script_frame_base {
         println!(

@@ -1303,143 +1303,40 @@ _rph_nrom_di:
   ld   a, b
   ret
 .else
-  ld   a, ($d47f)
-  cp   2
-  jp   nc, _rph_overflow
-  ; Inline frame snapshot (depth 0/1).
-  or   a
-  jr   nz, _rph_f1
-  ; Most translated fixed-PRG reads begin at an operation boundary where
-  ; slot 2 is already the canonical mapper window and SRAM is disabled. In
-  ; that common depth-0 case, restoring from the mapper shadow is equivalent
-  ; to saving four bytes of mapper state for every table byte. Keep the full
-  ; snapshot below for nested/private callers with a temporary mapping.
-  ld   a, ($fffc)
-  or   a
-  jr   nz, _rph_f0
-  ld   a, ($cb62)
-  and  NES_PRG_BANK_MASK
-  add  a, NES_PRG_BANK_BASE
-  ld   b, a
-  ld   a, ($ffff)
-  cp   b
-  jr   nz, _rph_f0
+  ; Mapper builds keep the selected NES bank live in slot 2. Do not disturb
+  ; it merely to read the fixed bank: this helper executes from slot 0, so it
+  ; can map the fixed PRG image into slot 1, read it at $4000-$7FFF, and
+  ; restore the translated-code bank from its authoritative $CB14 shadow.
+  ; Keeping the transaction interrupt-atomic prevents an IRQ from entering
+  ; while slot 1 contains data rather than translated code. This path needs
+  ; no mapper guard depth, SRAM snapshot, or selected-bank reconstruction
+  ; because slot 2 and $FFFC remain untouched.
   ld   a, i
   di
-  jp   po, _rph_fast_i0
-  ld   a, $01
-  jr   _rph_fast_map
-_rph_fast_i0:
-  xor  a
-_rph_fast_map:
-  ld   ($ca19), a
+  jp   po, _rph_slot1_di
+_rph_slot1_ei:
   ld   a, :data_prg_high
-  ld   ($ffff), a
+  ld   ($fffe), a
   ld   a, h
-  sub  $40
+  sub  $80
   ld   h, a
   ld   b, (hl)
-  ld   a, ($cb62)
-  and  NES_PRG_BANK_MASK
-  add  a, NES_PRG_BANK_BASE
-  ld   ($ffff), a
-  ld   a, ($ca19)
-  bit  0, a
+  ld   a, ($cb14)
+  ld   ($fffe), a
   ld   a, b
-  ret  z
   ei
   ret
-_rph_f0:
-  ld   a, i
-  di
-  jp   po, _rph_i0
-  ld   a, $01
-  jr   _rph_s0
-_rph_i0:
-  xor  a
-_rph_s0:
-  ld   ($ca19), a
-  ld   a, ($fffc)
-  ld   ($ca1a), a
-  ld   a, ($ffff)
-  ld   ($ca1b), a
-  ld   a, ($cb62)
-  ld   ($ca1c), a
-  jr   _rph_map
-_rph_f1:
-  ld   a, i
-  di
-  jp   po, _rph_i1
-  ld   a, $01
-  jr   _rph_s1
-_rph_i1:
-  xor  a
-_rph_s1:
-  ld   ($ca1d), a
-  ld   a, ($fffc)
-  ld   ($ca1e), a
-  ld   a, ($ffff)
-  ld   ($ca1f), a
-  ld   a, ($cb62)
-  ld   ($d3ff), a
-_rph_map:
-  ld   a, ($d47f)
-  inc  a
-  ld   ($d47f), a
-  xor  a
-  ld   ($fffc), a
+_rph_slot1_di:
   ld   a, :data_prg_high
-  ld   ($ffff), a
+  ld   ($fffe), a
   ld   a, h
-  sub  $40
+  sub  $80
   ld   h, a
   ld   b, (hl)
-  ; exact inline exit
-  ld   a, ($d47f)
-  or   a
-  jp   z, _rph_underflow
-  cp   3
-  jp   nc, _rph_corrupt
-  dec  a
-  ld   ($d47f), a
-  jr   nz, _rph_x1
-  xor  a
-  ld   ($fffc), a
-  ld   a, ($ca1c)
-  ld   ($cb62), a
-  ld   a, ($ca1b)
-  ld   ($ffff), a
-  ld   a, ($ca1a)
-  ld   ($fffc), a
-  ld   a, ($ca19)
-  jr   _rph_ret
-_rph_x1:
-  xor  a
-  ld   ($fffc), a
-  ld   a, ($d3ff)
-  ld   ($cb62), a
-  ld   a, ($ca1f)
-  ld   ($ffff), a
-  ld   a, ($ca1e)
-  ld   ($fffc), a
-  ld   a, ($ca1d)
-_rph_ret:
-  bit  0, a
+  ld   a, ($cb14)
+  ld   ($fffe), a
   ld   a, b
-  ret  z
-  ei
   ret
-_rph_overflow:
-  ld   a, RT_GUARD_OVERFLOW
-  jr   _rph_trap
-_rph_underflow:
-  ld   a, RT_GUARD_UNDERFLOW
-  jr   _rph_trap
-_rph_corrupt:
-  ld   a, RT_GUARD_CORRUPT
-_rph_trap:
-  di
-  ld   ($cb1d), a
 .endif
 _rph_bad:
   di

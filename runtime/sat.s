@@ -260,47 +260,17 @@ _dof_no_v:
   ld   a, (SAT_VARIANT_ATTR)
   and  $40                   ; H-flip?
   jr   z, _dof_row_done
-  ; Inline bit-reversal for H-flip. Stackless and preserves B (row counter)
-  ; and C (output row index): E is shifted right, A accumulates reversed bits.
+  ; Table-driven bit reversal. The pinned slot-0 page keeps this stackless and
+  ; preserves B/C/DE; HL is dead once the source planes have been staged.
   ld   a, (SAT_VARIANT_P0)
-  ld   e, a
-  xor  a
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
+  ld   l, a
+  ld   h, >rt_bit_reverse_table
+  ld   a, (hl)
   ld   (SAT_VARIANT_P0), a
   ld   a, (SAT_VARIANT_P1)
-  ld   e, a
-  xor  a
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
-  srl  e
-  rla
+  ld   l, a
+  ld   h, >rt_bit_reverse_table
+  ld   a, (hl)
   ld   (SAT_VARIANT_P1), a
 _dof_row_done:
   ld   a, (SAT_VARIANT_P0)
@@ -498,10 +468,14 @@ _sat_pair_have_offset:
   bit  6, a
   jr   z, _sat_pair_emit
   ld   a, (SAT_VARIANT_P0)
-  call _sat_reverse_a
+  ld   l, a
+  ld   h, >rt_bit_reverse_table
+  ld   a, (hl)
   ld   (SAT_VARIANT_P0), a
   ld   a, (SAT_VARIANT_P1)
-  call _sat_reverse_a
+  ld   l, a
+  ld   h, >rt_bit_reverse_table
+  ld   a, (hl)
   ld   (SAT_VARIANT_P1), a
 _sat_pair_emit:
   ld   a, (SAT_VARIANT_P0)
@@ -532,29 +506,6 @@ _sat_pair_p3_ready:
   cp   16
   jr   c, _sat_pair_row_loop
   call rt_raw_ciram_sram_disable
-  ret
-
-_sat_reverse_a:
-  ; Reverse all eight bits with three constant-time permutation stages. The
-  ; former shift loop cost eight iterations for every plane row of every
-  ; horizontally flipped 8x16 sprite, making ordinary animation a dominant
-  ; frame expense. B is dead inside _sat_build_pair_8x16 after the attribute
-  ; key has been parked in RAM.
-  ld   b, a
-  rrca
-  rrca
-  xor  b
-  and  $aa
-  xor  b                    ; swap adjacent 2-bit groups
-  ld   b, a
-  rrca
-  rrca
-  rrca
-  rrca
-  xor  b
-  and  $66
-  xor  b                    ; reverse around the nibble boundary
-  rrca                      ; align the reversed bit order
   ret
 
 ; Each OAM entry owns one even SMS pair slot. Rebuild its pair only when the

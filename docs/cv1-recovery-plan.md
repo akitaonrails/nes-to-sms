@@ -73,8 +73,8 @@ Reclaiming the allocator on complete screen rebuilds therefore preserves the
 NES attribute palettes without recycling visible patterns. The Stage 1 trace
 now matches the reference's blue sky, green canopy, dark lower backdrop, and
 gray fence/ground layout. The canonical ROM SHA-256 after the accumulator,
-performance, and candle-route stack fixes is
-`d7c6ed256619b9f68b23c95324329a9d46418b0ecfd6e1cf3dfee04297b74c11`.
+candle-route, and measured performance fixes is
+`806a99ea25cea62758aa327d040922291770b6b30f8be991e69bb06069ea4099`.
 Stock-timing emulation remains slow.
 
 ## Performance hardening and candle-route repair
@@ -85,9 +85,24 @@ instructions while scanning as many as 897 records. Generated projects now
 sort dispatch records by NES address, preserve fixed-bank precedence at
 duplicate addresses, and emit a 128-entry high-byte page directory. The same
 route attributes about 0.80% to `_bd_loop`; its Stage 1 completion upload moves
-from synthetic IRQ frame 1904 to 1370. CHR-RAM 8x16 bit reversal is now a
-constant-time permutation, and depth-0 fixed-PRG reads use a checked canonical
-mapper-window fast path while nested mappings retain the exact snapshot path.
+from synthetic IRQ frame 1904 to 1370.
+
+A second profile-driven pass removed mapper state churn from fixed-bank reads:
+slot 2 keeps the selected UxROM bank while the helper maps fixed PRG into slot
+1 for the duration of the read, then restores the translated-code bank. The
+transaction remains interrupt-atomic and leaves SRAM and the UxROM shadow
+untouched. Sprite horizontal flips now use a pinned 256-byte bit-reversal table
+at `$3D00` instead of per-plane permutations.
+
+The reproducible benchmark stops after the same 2,200 translated game frames
+on the heart route. Against commit `842c086`, sampled instructions fall from
+143,713,111 to 143,282,703 (-0.30%) and Z80 cycles from 1,123,618,391 to
+1,114,904,425 (-0.78%). More importantly for missed-vblank work, frame-handler
+median falls from 100,181 to 92,181 cycles (-8.0%) and average from 119,800 to
+114,537 (-4.4%). Both runs collect the heart, remain in gameplay, and trap
+nowhere. Host wall time is intentionally excluded because it varied between
+runs. A direct-address lowering experiment was rejected after it raised the
+same route's total cycles by 0.16% despite executing fewer instructions.
 
 A repeated Right/whip route isolated the reported broken-candle hang in two
 steps. The first failure was a valid fixed-bank branch from `$DE32` to `$DE04`;
@@ -128,6 +143,13 @@ SMS_DUMP_PPM=out/cv1/graphics-acceptance/stage.ppm \
 # the large heart, remains in gameplay, and soaks after the event.
 target/release/trace-sms out/cv1/sms.sms --steps 180000000 \
   --pause-at-frame 600 \
+  --buttons-script profiles/cv1/acceptance/heart-smoke.sms.buttons \
+  --expect-no-trap --expect-ram 0x0071=0A \
+  --expect-ram 0x0018=05 --expect-ram 0x0019=06
+
+# Fixed-work performance benchmark used for the before/after measurements.
+target/release/trace-sms out/cv1/sms.sms --steps 300000000 \
+  --game-frames 2200 --pause-at-frame 600 \
   --buttons-script profiles/cv1/acceptance/heart-smoke.sms.buttons \
   --expect-no-trap --expect-ram 0x0071=0A \
   --expect-ram 0x0018=05 --expect-ram 0x0019=06
