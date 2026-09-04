@@ -948,6 +948,21 @@ impl Program {
     pub fn rl_a(&mut self) {
         self.emit_cb(0x17, "rl a");
     }
+    pub fn rl_b(&mut self) {
+        self.emit_cb(0x10, "rl b");
+    }
+    pub fn sla_hl_ptr(&mut self) {
+        self.emit_cb(0x26, "sla (hl)");
+    }
+    pub fn srl_hl_ptr(&mut self) {
+        self.emit_cb(0x3E, "srl (hl)");
+    }
+    pub fn rl_hl_ptr(&mut self) {
+        self.emit_cb(0x16, "rl (hl)");
+    }
+    pub fn rr_hl_ptr(&mut self) {
+        self.emit_cb(0x1E, "rr (hl)");
+    }
     pub fn rr_a(&mut self) {
         self.emit_cb(0x1F, "rr a");
     }
@@ -1148,6 +1163,37 @@ impl Program {
         self.referenced_labels.insert(continuation.to_string());
     }
 
+    /// Native-discipline JSR (profile `stack_discipline = "native"`): a
+    /// same-section target is a plain `call`; a cross-section target goes
+    /// through the slot-0 far shim, which pushes a [saved bank][restore
+    /// thunk] frame so the callee's native RET restores this section's
+    /// bank. A (6502 accumulator) rides through in A; H carries the bank.
+    pub fn native_call(&mut self, label: &str) {
+        if self.label_section.get(label) == Some(&self.current) {
+            self.call(label);
+        } else {
+            self.ld_bc_label(label);
+            self.emit_bytes_asm(&[0x26, 0x00], &format!("  ld h,:{label}"));
+            self.call("rt_far_tail");
+        }
+        self.referenced_labels.insert(label.to_string());
+    }
+
+    /// Native-discipline tail JMP: same-section is a plain `jp`; a
+    /// cross-section target transfers through the far shim, which skips the
+    /// frame push when the top of the native stack is already the restore
+    /// thunk (so cross-bank tail cycles cannot leak stack).
+    pub fn native_tail_jmp(&mut self, label: &str) {
+        if self.label_section.get(label) == Some(&self.current) {
+            self.jp(label);
+        } else {
+            self.ld_bc_label(label);
+            self.emit_bytes_asm(&[0x26, 0x00], &format!("  ld h,:{label}"));
+            self.jp("rt_far_tail");
+        }
+        self.referenced_labels.insert(label.to_string());
+    }
+
     /// Tail jump to a translated label, switching slot 1 for cross-section
     /// targets without leaving a native helper return frame behind.
     pub fn translated_tail_jmp(&mut self, label: &str) {
@@ -1170,6 +1216,35 @@ impl Program {
     pub fn translated_banked_tail_dispatch(&mut self, addr: u16) {
         self.ld_bc_imm(addr);
         self.jp("rt_banked_tail_dispatch");
+    }
+
+    /// `translated_call_with_continuation` variant for NES switchable-window
+    /// addresses that intentionally do not encode a physical UxROM bank
+    /// (same shape as `translated_banked_tail_dispatch`): push the
+    /// continuation frame first, then tail-dispatch the literal address
+    /// through the runtime's bank-aware dispatcher. The dispatched routine's
+    /// RTS unwinds the continuation frame exactly like the label variant.
+    pub fn translated_banked_call_with_continuation(
+        &mut self,
+        addr: u16,
+        continuation: &str,
+        stack_return_bytes: u8,
+    ) {
+        let overflow = self.fresh_label("tr_call_overflow");
+        let frame_flags = match stack_return_bytes {
+            0 => 0,
+            2 => 0x40,
+            other => panic!("unsupported translated stack return size: {other}"),
+        };
+
+        self.emit_translated_call_frame(continuation, &overflow, Some(continuation), frame_flags);
+        self.ld_a_hl_ptr();
+        self.translated_banked_tail_dispatch(addr);
+        self.label(&overflow);
+        self.ld_a_imm(0xE4);
+        self.ld_abs_a(0xCB1D);
+        self.jp("rt_unresolved_jsr_flash");
+        self.referenced_labels.insert(continuation.to_string());
     }
 
     fn emit_translated_call_frame(

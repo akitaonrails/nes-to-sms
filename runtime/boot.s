@@ -227,8 +227,6 @@ boot_main:
   ld  ($cb7e), a            ; in-handler flag starts clear
   ld  ($cb7f), a            ; deferred FC-flush flag
   ld  ($ca0e), a            ; dispatch MRU invalid
-  ld  ($ca0f), a            ; beacon: first-IRQ
-  ld  ($ca10), a            ; beacon: first-NMI
   ld  ($ca11), a            ; translated-NMI nesting depth
   ld  ($ca12), a            ; presentation-in-progress guard
   ld  ($ca18), a            ; no CHR-RAM full-screen rebuild pending
@@ -456,11 +454,6 @@ _sram_halt:
   jr   _sram_halt
 _sram_ok:
 .endif
-  ; BEACON green: runtime init complete, entering translated reset.
-.ifdef NES_CHR_RAM
-  ld   a, $0C
-  call rt_boot_beacon
-.endif
 .ifdef DIAG_WILDJUMP
   ; Arm the wild-jump canary: fill the nametable sub-palette shadow (the
   ; region a real-emulator run was caught executing, PC $CE0A) with $F7 =
@@ -554,8 +547,12 @@ _wjd_halt:
   jr   _wjd_halt
 .endif
 
-; Boot beacon: A = border color (CRAM format); writes VDP reg 7 so the
-; overscan color reports boot progress on real emulators.
+; Boot beacon: A = border color (CRAM format); writes CRAM index 17 and
+; points VDP reg 7 (backdrop) at it. Diagnostic use only: halt paths (SRAM
+; self-test failure) and DIAG_WILDJUMP builds. It must NEVER run during
+; normal play — clobbering sprite palette entry 1 and the backdrop showed
+; up as full-screen white blinks on display-off frames (the SMS fills a
+; disabled display with the backdrop color).
 rt_boot_beacon:
   push af
   ld   a, $11                ; CRAM index 17 (sprite palette entry 1)
@@ -595,16 +592,6 @@ irq_handler:
 .endif
   ld  a, $01
   ld  ($cb7e), a            ; in-handler flag (nesting-aware ei gating)
-.ifdef NES_CHR_RAM
-  ld  a, ($ca0f)
-  or  a
-  jr  nz, _hb_done
-  ld  a, $01
-  ld  ($ca0f), a
-  ld  a, $0C                ; BEACON cyan: first frame IRQ reached
-  call rt_boot_beacon
-_hb_done:
-.endif
   ; Phase R: DE carries the resident 6502 X/Y of the interrupted thread.
   ; Sync to the RAM shadows now; exits restore DE from those shadows instead of
   ; spending native stack on a saved DE word. The translated NMI may update the
@@ -769,10 +756,6 @@ _present_no_screen_rebuild:
   jr  z, _present_no_reg1
   ld  b, 1
   call vdp_set_register
-.ifdef NES_CHR_RAM
-  ld  a, $3F                ; BEACON white: display-enable applied
-  call rt_boot_beacon
-.endif
   xor a
   ld  ($cb2d), a
 .ifdef DIAG_WILDJUMP
@@ -832,8 +815,8 @@ _present_band_clean:
   ld  ($ca34), a
 .endif
   ; Project columns entering the visible window (E.5c) with the same
-  ; playfield scroll the apply below will present: post pair when the
-  ; split captured one this frame, else the live latch.
+  ; playfield scroll the apply below will present: the last post pair when
+  ; one exists (bit2 is sticky), else the live latch.
   ld  a, ($cb20)
   bit 2, a
   jr  z, _irq_proj_live
@@ -866,7 +849,18 @@ _present_skip_all:
   ; complete without scanline-level NES PPU emulation.
   xor a
   ld  ($cb12), a
-  ld  ($cb20), a            ; clear per-frame split flags; keep last latches
+  ; Clear the per-frame split flags (bit0 hit phase, bit1 pre pair) but keep
+  ; bit2 STICKY: once a post-split pair exists it remains the playfield
+  ; scroll of record. On frames where the game's scroll sequence has not
+  ; completed (preempted resident NMI, rendering-off transitions that run
+  ; their sprite-0 wait to timeout), presentation must show the last post
+  ; pair rather than a status-bar pair sampled from the live latch — the
+  ; latch mid-sequence reads as a scroll-0 teleport, which both flashes the
+  ; origin on screen and tricks rt_nt_project_scroll into a full-window
+  ; re-materialization (~500K-step handler bursts).
+  ld  a, ($cb20)
+  and $04
+  ld  ($cb20), a
 
   ; Do not invoke the translated NMI handler until NES PPUCTRL bit 7 has enabled
   ; NMI at least once. The SMS frame IRQ is our timing source, but NES reset code
@@ -943,6 +937,24 @@ _irq_call_translated_nmi:
 _irq_nmi_save_bank_slot:
   ld  a, ($cb14)
   ld  (hl), a
+.ifdef NATIVE_CALLS
+  ; The native far shim's scratch pair may hold live main-thread state
+  ; (an IRQ can land mid-shim); the translated NMI's own far transfers
+  ; reuse it. Save per depth, restore after the NMI body.
+  ld  a, ($ca11)
+  or  a
+  ld  a, ($ca2a)
+  jr  nz, _irq_native_save_d1
+  ld  ($ca2c), a
+  ld  a, ($ca2b)
+  ld  ($ca2e), a
+  jr  _irq_native_save_done
+_irq_native_save_d1:
+  ld  ($ca2d), a
+  ld  a, ($ca2b)
+  ld  ($ca2f), a
+_irq_native_save_done:
+.endif
   ld  a, :translated_nmi
   ld  ($cb14), a
   ld  ($fffe), a
@@ -955,16 +967,6 @@ _irq_nmi_save_bank_slot:
   ; by the $CB08 check on the nested entry — NES-equivalent either way.
   xor a
   ld  ($cb7e), a            ; leaving handler context (helpers may ei)
-.ifdef NES_CHR_RAM
-  ld  a, ($ca10)
-  or  a
-  jr  nz, _nb_done
-  ld  a, $01
-  ld  ($ca10), a
-  ld  a, $0F                ; BEACON: first translated NMI
-  call rt_boot_beacon
-_nb_done:
-.endif
   ld  a, ($ca11)
   inc a
   ld  ($ca11), a
@@ -987,6 +989,24 @@ _nb_done:
   jr  z, _irq_nmi_restore_bank_slot
   inc hl
 _irq_nmi_restore_bank_slot:
+.ifdef NATIVE_CALLS
+  ; Restore the far-shim scratch pair for the interrupted thread. A holds
+  ; the post-decrement depth (0 or 1) from above; it is zero exactly when
+  ; HL stayed at the depth-0 slot.
+  or  a
+  ld  a, ($ca2c)
+  jr  z, _irq_native_restore_store
+  ld  a, ($ca2d)
+_irq_native_restore_store:
+  ld  ($ca2a), a
+  ld  a, ($ca11)
+  or  a
+  ld  a, ($ca2e)
+  jr  z, _irq_native_restore_bank
+  ld  a, ($ca2f)
+_irq_native_restore_bank:
+  ld  ($ca2b), a
+.endif
   ld  a, $01
   ld  ($cb7e), a            ; back in handler context
   ; Phase R: the NMI may have changed X/Y — new truth back to the shadows.
@@ -1118,8 +1138,9 @@ _apply_frame_scroll:
   jp  _disable_line_irq
 
 _apply_playfield_direct:
-  ; Out-of-vblank presentation: apply the post/playfield pair when one was
-  ; captured, else the live latch pair; never arm the line IRQ.
+  ; Out-of-vblank presentation: apply the last post/playfield pair when one
+  ; exists (bit2 is sticky — see _present_skip_all), else the live latch
+  ; pair; never arm the line IRQ.
   ld  a, ($cb20)
   bit 2, a
   jr  z, _apd_live
@@ -1135,12 +1156,12 @@ _apd_live:
 
 _apply_frame_split_scroll:
 .ifdef NO_SCROLL_SPLIT
-  ; Profile disabled the split: present the pre/live scroll and keep
-  ; line IRQs off. Line-counter/pending semantics differ across
-  ; emulators (GPGX latched pending line IRQs into a storm that
-  ; starved the frame handler on CV1).
-  call _apply_pre_or_live_scroll
-  jp  _disable_line_irq
+  ; Profile disabled the split: no status band is presented, so the pre/top
+  ; pair has no on-screen meaning — show the playfield scroll (post pair
+  ; when one exists, else the live latch) and keep line IRQs off.
+  ; Line-counter/pending semantics differ across emulators (GPGX latched
+  ; pending line IRQs into a storm that starved the frame handler on CV1).
+  jp  _apply_playfield_direct
 .else
   call _apply_pre_or_live_scroll
 

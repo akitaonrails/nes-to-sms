@@ -23,12 +23,15 @@
 ;   $CB11  ppudata read buffer
 ;   $CB12  synthetic sprite-0 phase (0 = before hit, 1 = hit reached)
 ;   $CB20  split-scroll flags: bit0 = after sprite-0 hit this frame,
-;                              bit1 = pre-split scroll valid,
-;                              bit2 = post-split scroll valid
+;                              bit1 = pre-split scroll valid this frame,
+;                              bit2 = post-split scroll valid (STICKY:
+;                                     set by the first post-split capture,
+;                                     never cleared — $CB23/$CB24 stay the
+;                                     playfield scroll of record)
 ;   $CB21  pre-split scroll X
 ;   $CB22  pre-split scroll Y
-;   $CB23  post-split scroll X
-;   $CB24  post-split scroll Y
+;   $CB23  post-split scroll X (last post pair; persists across frames)
+;   $CB24  post-split scroll Y (last post pair; persists across frames)
 ;
 ; VBlank flag at $CB05 (set by irq_handler, cleared when $2002 is read).
 ;
@@ -1187,11 +1190,10 @@ _ppu_r_status:
   ; Reading $2002 clears the VBlank flag and resets the $2005/$2006 toggles.
   ;
   ; SMB uses sprite 0 as a split-screen timing barrier: wait for bit 6 to
-  ; clear, then wait for it to set. We do not emulate scanlines yet, so each
-  ; frame starts with $CB12=0 and the first status poll while rendering is
-  ; enabled returns no sprite-0 hit and arms the synthetic hit for subsequent
-  ; polls. This preserves the clear-then-hit handshake without SMB-specific
-  ; Rust or hard-coded translated labels.
+  ; clear, then wait for it to set. We do not emulate scanlines yet; $CB12
+  ; walks a stale -> clear -> hit sequence across each frame's first three
+  ; polls (see _ppu_r_status_sprite0) so the clear-then-hit handshake
+  ; completes without SMB-specific Rust or hard-coded translated labels.
   ld   a, ($cb05)           ; VBlank pending flag
   ld   c, a
   ; Clear VBlank flag.
@@ -1212,21 +1214,44 @@ _ppu_r_status_no_vbl:
 
 _ppu_r_status_sprite0:
   ; Only report sprite-0 hit while NES background/sprite rendering is enabled
-  ; (PPUMASK bits 3 or 4). When disabled, keep the synthetic phase clear.
+  ; (PPUMASK bits 3 or 4). When disabled, report no hit and keep the phase.
   ld   a, ($cb09)
   and  $18
   jr   z, _ppu_r_status_return
+  ; Three-phase synthetic sprite-0 timing ($CB12, reset to 0 each frame IRQ):
+  ;   phase 0 (stale): reads return hit=1 — on NES the flag from the previous
+  ;     frame's hit is still set through VBlank, so the game's vblank-ack
+  ;     read (CV1: $C058, at the top of its NMI) sees it set. Advances to 1.
+  ;   phase 1 (clear): the next read returns hit=0 (rendering restarted).
+  ;     Advances to 2.
+  ;   phase 2 (hit):   reads return hit=1 and mark subsequent $2005 pairs
+  ;     post-split ($CB20 bit0).
+  ; The stale phase is what keeps an ack read from consuming the "clear"
+  ; observation: pairs the game writes BEFORE its own clear->set barrier
+  ; completes (the status-bar pair) stay pre-split. With the old two-phase
+  ; arm-on-first-read model, CV1's NMI ack read armed the phase, the game's
+  ; status pair captured as POST, and presentation flashed the status scroll
+  ; whole-frame whenever the playfield pair was delayed (9-frame scroll-0
+  ; plateaus plus the full-window re-materialization bursts they trigger).
   ld   a, ($cb12)
   or   a
-  jr   z, _ppu_r_status_arm_sprite0
+  jr   nz, _pps_not_stale
+  ld   a, $01
+  ld   ($cb12), a
+  jr   _pps_report_hit
+_pps_not_stale:
+  cp   1
+  jr   nz, _pps_hit
+  ld   a, $02
+  ld   ($cb12), a
+  jr   _ppu_r_status_return     ; the "clear" observation: no bit 6
+_pps_hit:
   ld   hl, $cb20
   set  0, (hl)                ; subsequent $2005 pairs are post-sprite-0 hit
+_pps_report_hit:
   ld   a, c
   or   $40
   jp   _ppu_r_done
-_ppu_r_status_arm_sprite0:
-  ld   a, $01
-  ld   ($cb12), a
 
 _ppu_r_status_return:
   ld   a, c

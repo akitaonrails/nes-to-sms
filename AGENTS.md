@@ -1,34 +1,314 @@
 # Agent Notes
 
-## Read first
+This file is the on-ramp for AI coding agents working on `nes-to-sms`.
+Read it first. The project is a Rust workspace that translates NES
+(mapper 0 / NROM) ROMs into buildable Sega Master System projects.
 
-- `docs/master-plan.md` is the canonical architecture/principles doc. `docs/completion-plan.md` is the current ordered work queue. `docs/current-status-and-gaps.md` is inventory only; its old slice-driven "next step" is explicitly out of policy.
-- This is now a Rust workspace, not a planning-only repo. The root `Cargo.toml` owns 13 crates under `crates/`; `poc/` is legacy/disposable experiment history unless the user asks for it.
+## Project overview
 
-## Commands that matter
+`nes-to-sms` is a pipeline, not a hand-port of any one game:
 
-- Full local check: `cargo test --workspace` (currently passes; `trace-sms` emits one unused-parens warning).
-- Focused checks: `cargo test -p <crate>` or `cargo test -p validation <test_name>`; useful validation tests live in `crates/validation/tests/{single_ops,known_slices}.rs`.
-- Format/lint before code handoff: `cargo fmt --all` then `cargo clippy --workspace --all-targets --all-features`.
-- Generate an SMS project: `cargo run --release -p nes_to_sms --bin nes-to-sms -- <rom.nes> profiles/smb.toml out/smb --runtime runtime`. Add `--validate --validate-vectors N` for the differential report. Unresolved translated labels trap by default; use `--debug-unresolved-stubs` only for visual experiments.
-- Assemble generated output with WLA-DX: `make -C out/smb` (writes `out/smb/sms.sms`). WLA-DX/Mednafen belong in Docker, not host installs.
-- Docker gotcha: `compose.yaml` defaults to the legacy `poc/` working dir. For workspace commands use `docker compose run --rm --workdir /work poc bash -lc '<command>'`.
-- Trace a built SMS ROM: `cargo run -p nes_to_sms --bin trace-sms -- out/smb/sms.sms --steps 200000`; add `--buttons start` or `--pad1-raw DF` to simulate controller input. Optional env knobs include `SMS_WATCH_ADDR=0xC000`, `SMS_DUMP_PPM=<file>`, and `SMS_DUMP_EACH_FRAME=<dir>`.
+```
+.nes ROM + profile.toml
+    → parse / classify / discover
+    → lift 6502 to semantic IR
+    → lower IR to Z80
+    → emit WLA-DX project (Makefile, link script, runtime, assets)
+    → assemble to .sms
+```
 
-## Architecture boundaries
+Super Mario Bros. is the active regression target, but the engine stays
+game-agnostic. Game-specific facts live in TOML profiles and the Z80
+runtime, not in Rust source.
 
-- CLI entrypoint is `crates/cli/src/main.rs`; pipeline wiring is `crates/cli/src/pipeline.rs`.
-- Crate roles: `nes_rom` parses ROMs, `cpu6502` decodes 2A03, `analysis` discovers/classifies code, `profile` loads TOML profiles, `ir` lifts 6502, `lower` emits Z80, `z80_emit` encodes/lists Z80, `z80_emu` and `oracle_6502` power validation, `assets` converts CHR/palette data, `sms_project` writes the WLA-DX tree, `validation` compares oracle vs lowered Z80.
-- Game-specific SMB facts belong in `profiles/smb.toml` or `runtime/*.s`, not in Rust source. Avoid `if SMB` logic and hard-coded SMB addresses in `.rs` files.
-- Runtime helper behavior exists twice: hand-written Z80 in `runtime/*.s` and Rust-emitted test stubs in `crates/validation/src/runtime_stubs.rs`; keep them semantically aligned.
+Current state (measured from the workspace):
 
-## Project constraints
+- Rust workspace with **13 crates** under `crates/`.
+- About **35 kLOC of Rust** and **9.5 kLOC of hand-written Z80 runtime**.
+- **`cargo test --workspace` passes** with roughly **478 tests**.
+- The pipeline runs end-to-end on `Super Mario Bros. (World).nes` and
+  emits a complete WLA-DX project tree.
+- Generated ROMs boot under Mednafen; real-SMS speed remains an open
+  issue. Phase S (docs/speed-recovery-plan.md, 2026-09-04) brought SMB
+  from ~4.4× to ~2.5× over the frame budget (full speed at ~260%
+  emulator overclock); docs/handport-comparison.md explains the ceiling.
+- SMB builds use `[translation] stack_discipline = "native"` (native
+  CALL/RET via `rt_far_tail`) and seven `[[replacement]]` hooks in
+  `runtime/hooks_smb.s`. The canonical SMB test ROM is `.roms/smb.nes`
+  (NOT the EmuDeck "Super Mario Bros. (World).nes" — different dump;
+  the profile's `MoveLakitu` at $CF28 is data there).
 
-- The deliverable is a general NES-to-SMS conversion tool: given an NES binary, the pipeline should convert it to an SMS project/ROM as close to 1:1 as the hardware allows. SMB is the active stress-test and regression target, not the product boundary.
-- Do not treat this as a proof-of-concept, demo, or World 1-1-only milestone. Short routes and SMB-specific traces are diagnostics for the converter, not the end goal.
-- Do not make progress by Rust-side hand-porting SMB gameplay/rendering or by adding SMB-only logic to the converter. Game-specific knowledge belongs in profiles/data/runtimes where the architecture explicitly supports profile-driven conversion, and any SMB fix should be framed as a generic converter capability whenever possible.
-- Do not make progress by lifting isolated slices that are not reachable through the analyzer/profile pipeline.
-- Fail closed: unsupported opcodes, unknown indirect targets, and untagged/unsupported memory semantics should report errors or validation skips, not silently emit bogus Z80.
-- `--validate` writes `reports/validation.txt` but intentionally does not fail the project generation on red results.
-- Do not commit ROMs or generated ROM artifacts. `.gitignore` excludes `*.nes`, `*.sms`, `out/`, `**/out/`, and `target/`; use local ROM paths only in examples/docs.
-- External retro tooling (assemblers, emulators, trace tools) should stay reproducible through `docker/`/`compose.yaml`, not ad hoc host setup.
+## Canonical documentation
+
+- `docs/master-plan.md` — architecture, principles, RAM/ROM layout,
+  phased goals, and validation strategy. This wins when docs conflict.
+- `docs/completion-plan.md` — the current ordered work queue.
+- `docs/current-status-and-gaps.md` — status inventory only; do not use
+  its old slice-driven "next step" as policy.
+- `README.md` — operational on-ramp, but some counts (crates, tests,
+  progress percentages) can become stale; trust the workspace and the
+  docs above.
+
+## Technology stack
+
+- **Language:** Rust 1.95+ with edition 2024.
+- **Build system:** Cargo workspace rooted at `Cargo.toml`.
+- **Assembler / linker:** WLA-DX (Z80) and `wlalink`.
+- **Emulators for validation:** Mednafen, Genesis Plus GX via Docker,
+    Emulicious as a cross-check.
+- **Containerization:** `docker/Dockerfile.toolchain` + `compose.yaml`.
+- **No host installs policy:** WLA-DX, Mednafen, and other retro tooling
+  should only be installed inside the Docker image, not on the host.
+
+## Workspace layout
+
+```
+Cargo.toml              workspace root (resolver = "3", edition 2024)
+crates/
+  nes_rom/              iNES / NES 2.0 header parsing, PRG/CHR/vectors
+  cpu6502/              2A03 instruction decoder (all official + stable
+                        unofficial opcodes; unstable opcodes decode to
+                        mnemonics but fail closed in the pipeline)
+  analysis/             function discovery, CFG, code/data classification
+  profile/              TOML profile schema + loader
+  ir/                   semantic IR with explicit flags + memory tags
+  lower/                IR → Z80 lowering (shadow flags, runtime calls)
+  z80_emit/             Z80 instruction encoder + WLA-DX asm text emitter
+  z80_emu/              in-Rust Z80 interpreter for differential tests
+  oracle_6502/          in-Rust 6502 interpreter for differential tests
+  assets/               CHR → SMS 4bpp, palette mapping, PPM previews
+  sms_project/          WLA-DX project writer (Makefile, link.cfg, sms.asm)
+  validation/           differential harness: oracle vs. z80_emu
+  cli/                  `nes-to-sms` binary + `trace-sms`, `frame-diff`,
+                        `z80-diff`, `replay-state` utilities
+runtime/                hand-written Z80 SMS runtime (.s files)
+profiles/               game profiles: smb.toml, cv1.toml, alterego.toml, cv3.toml
+profiles/smb/           SMB-specific acceptance routes / checkpoints
+docs/                   plans, status, research notes
+tools/                  small shell/python helpers for iteration
+tests/synthetic/        synthetic test ROM inputs (managed by tests)
+poc/                    legacy proof-of-concept history; treat as
+                        disposable unless a task explicitly asks for it
+```
+
+## Crate responsibilities
+
+| Crate | Responsibility |
+|-------|----------------|
+| `nes_rom` | Parse iNES headers, split PRG/CHR, read reset/NMI/IRQ vectors. |
+| `cpu6502` | Decode every 6502 opcode and addressing mode. |
+| `analysis` | Discover functions from vectors + JSR walk + profile roots; classify code vs. data; tag memory accesses. |
+| `profile` | Load TOML profiles: vectors, functions, labels, data regions, jump tables, replacements, RAM tags. |
+| `ir` | Lift 6502 into semantic IR with explicit flags and region-tagged memory ops. |
+| `lower` | Lower IR to Z80 using SMS RAM shadows for X/Y/S/P and runtime calls for hardware. |
+| `z80_emit` | Encode Z80 bytes and emit readable WLA-DX assembly. |
+| `z80_emu` | Minimal Z80 interpreter covering exactly the opcode subset the back end emits. |
+| `oracle_6502` | Instruction-accurate 6502 interpreter; decimal mode is a no-op (2A03). |
+| `assets` | Convert NES CHR to SMS 4bpp tiles, build palettes, emit name tables. |
+| `sms_project` | Write the complete buildable WLA-DX project tree. |
+| `validation` | Run randomized differential tests: 6502 oracle vs. lowered Z80 under emu. |
+| `cli` / `nes_to_sms` | Command-line pipeline orchestrator and helper binaries. |
+
+## Build and test commands
+
+Full workspace check:
+
+```sh
+cargo test --workspace
+```
+
+Focused checks:
+
+```sh
+cargo test -p <crate>
+cargo test -p validation --test single_ops
+cargo test -p validation --test known_slices
+cargo test -p nes_to_sms --test synthetic_pipeline
+```
+
+Format and lint before handoff:
+
+```sh
+cargo fmt --all
+cargo clippy --workspace --all-targets --all-features
+```
+
+Clippy currently emits warnings in several binaries/tests but finishes
+successfully. Do not mask warnings unless a task explicitly requires it;
+prefer fixing them or leaving them visible.
+
+Generate an SMS project:
+
+```sh
+cargo run --release -p nes_to_sms --bin nes-to-sms -- \
+    "/path/to/rom.nes" \
+    profiles/smb.toml \
+    out/smb \
+    --runtime runtime
+```
+
+Add `--validate --validate-vectors N` to run the differential harness over
+every lifted routine (slow on a large ROM; defaults to 32 vectors per
+routine). By default unresolved translated labels trap at runtime via
+`rt_unresolved_jsr`; use `--debug-unresolved-stubs` only for visual
+experiments.
+
+Assemble the generated output with WLA-DX:
+
+```sh
+make -C out/smb
+```
+
+This writes `out/smb/sms.sms`. WLA-DX and Mednafen should be used through
+Docker, not installed on the host.
+
+Docker commands:
+
+```sh
+# Build the toolchain image
+docker compose build poc
+
+# The compose service defaults to the legacy /work/poc working dir.
+# For workspace commands, override the workdir:
+docker compose run --rm --workdir /work poc bash -lc \
+    'cargo run --release -p nes_to_sms -- /roms/nes/Super\ Mario\ Bros.\ \(World\).nes profiles/smb.toml out/smb --runtime runtime && cd out/smb && make'
+
+# Mednafen smoke test (requires a built ROM)
+docker compose run --rm poc bash scripts/smoke_sms.sh out/smb/sms.sms
+```
+
+Trace a built SMS ROM:
+
+```sh
+cargo run -p nes_to_sms --bin trace-sms -- out/smb/sms.sms --steps 200000
+```
+
+Options include `--buttons start`, `--pad1-raw DF`, `--expect-no-trap`.
+Environment knobs include `SMS_WATCH_ADDR=0xC000`, `SMS_DUMP_PPM=<file>`,
+and `SMS_DUMP_EACH_FRAME=<dir>`.
+
+Other helper binaries:
+
+```sh
+cargo run -p nes_to_sms --bin frame-diff -- ...
+cargo run -p nes_to_sms --bin z80-diff -- ...
+cargo run -p nes_to_sms --bin replay-state -- ...
+```
+
+## Code style guidelines
+
+- Match the surrounding file: naming, comment density, and structure.
+- Keep the engine **game-agnostic**. SMB facts belong in `profiles/smb.toml`
+  or `runtime/*.s`, never in Rust source. Avoid `if game == "smb"` and
+  hard-coded SMB addresses in `.rs` files.
+- **Fail closed:** unsupported opcodes, unknown indirect targets, and
+  untagged/unsupported memory semantics must report errors or validation
+  skips, not silently emit bogus Z80.
+- Make **minimal** changes. A bug fix does not need a surrounding cleanup,
+  and a small feature does not need premature abstraction.
+- Runtime helper behavior is implemented twice: hand-written Z80 in
+  `runtime/*.s` and Rust-emitted stubs in
+  `crates/validation/src/runtime_stubs.rs`. Keep them semantically aligned;
+  a divergence surfaced by the harness is a bug.
+- Use workspace-level dependencies. Each crate's `Cargo.toml` should
+  reference workspace crates with `{ workspace = true }`.
+- Comments and docstrings that describe old behavior must be updated when
+  the code changes.
+
+## Testing instructions
+
+The test pyramid:
+
+1. **Unit tests** inside each crate (`cargo test -p <crate>`).
+2. **Decoder tests** in `cpu6502` for every opcode/addressing mode.
+3. **Oracle/emu tests** in `oracle_6502` and `z80_emu` for instruction
+   semantics.
+4. **Differential tests** in `validation/tests/single_ops.rs` and
+   `validation/tests/known_slices.rs`. These lift tiny 6502 routines,
+   lower them to Z80, and compare the 6502 oracle against the Z80 emulator
+   on randomized input vectors.
+5. **Integration tests** in `crates/cli/tests/synthetic_pipeline.rs` run
+   synthetic NES ROMs through the full pipeline.
+6. **End-to-end validation** on real ROMs: generate a project, assemble it,
+   and run it under Mednafen or `trace-sms` with acceptance routes stored
+   in `profiles/smb/acceptance/`.
+
+Validation constraints:
+
+- The differential harness skips routines that touch hardware (PPU/APU/
+  OAM-DMA/controller/mapper) or use indirect dispatch, because those need
+  the full runtime to validate meaningfully.
+- `--validate` writes `reports/validation.txt` but intentionally does not
+  fail project generation on red results.
+- Every translated routine should eventually be validated against the
+  in-Rust 6502 oracle; do not accept ad-hoc toy interpreters as proof.
+
+## Security and repository policies
+
+- **Do not commit commercial ROM files.** `.gitignore` excludes `*.nes`,
+  `*.sms`, `out/`, `**/out/`, `target/`, and generated artifacts.
+- Keep local ROM paths out of committed code and docs; examples may use
+  placeholder paths.
+- Do not commit secrets, credentials, or personal paths.
+- Docker bind-mounts ROM directories read-only (`:ro`) where possible.
+- Generated reports under `out/<project>/reports/` may contain excerpts of
+  PRG bytes or asset data; they are gitignored and should not be committed.
+
+## Architecture boundaries and constraints
+
+- **Pipeline-driven, not slice-driven.** A unit of work is "the pipeline can
+  now cover X end-to-end," not "I lifted one more SMB micro-routine."
+  Routines must be reachable through the analyzer/profile pipeline.
+- **No Rust-side hand-ports.** Do not reimplement SMB rendering or game
+  logic in Rust. Either translate the routine through the pipeline, or
+  label the screen a fixture.
+- **Generic engine, game-specific profile.** The Rust crates stay
+  SMB-agnostic. Labels, RAM maps, replacements, jump tables, and data
+  regions live in `profiles/*.toml` and the Z80 runtime.
+- **Verbose and boring first.** Conservative Z80 with shadow flags and
+  RAM-backed X/Y is the default. Native-Z80-flag shortcuts and register
+  allocation come only after correctness is proven.
+- **Banked from day one.** The SMS output assumes a banked ROM layout even
+  for NROM games, so future MMC1/MMC3 targets are not a rewrite.
+
+## SMS RAM layout (contract with the runtime)
+
+The lower crate and runtime agree on these addresses:
+
+```
+$C000-$C0FF   NES zero page mirror
+$C100-$C1FF   Emulated 6502 stack page
+$C200-$C7FF   NES RAM mirror ($0200-$07FF)
+$C800-$C8FF   VRAM update buffer
+$C900-$CAFF   Sprite attribute staging
+$CB00-$CBFF   Runtime state (X at $CB00, Y at $CB01, shadow P at $CB03, etc.)
+$CC00-$D2FF   Folded SMS per-cell subpalette shadow (temporary)
+$D300-$D3FF   Dirty-metadata reserve
+$D600-$D9FF   BG variant cache
+$DA00-$DD7F   BG base-slot shadow
+$DD80-$DFFD   Native Z80 stack headroom
+```
+
+The Z80 SP lives at `$DFFE` and grows down. Native Z80 stack and emulated
+6502 stack are separate.
+
+## Common gotchas
+
+- `compose.yaml` sets `working_dir: /work/poc` by default. Use
+  `--workdir /work` for workspace commands.
+- `trace-sms` currently expects a ROM path even for `--help` and will
+  panic if none is supplied.
+- The README and older docs may cite stale test counts or crate counts;
+  verify with `cargo test --workspace` and `ls crates/`.
+- The `poc/` directory is legacy. Unless a task says otherwise, work in
+  the root workspace.
+- `--validate` is slow on SMB because it runs every discovered routine.
+  Use it intentionally, not on every edit.
+- Unresolved translated labels trap by default. Only enable
+  `--debug-unresolved-stubs` for short visual experiments.
+
+## License
+
+Project code is MIT OR Apache-2.0. Profile data and runtime assembly are
+MIT. ROM files and extracted assets remain subject to their original
+copyright and are not redistributed.

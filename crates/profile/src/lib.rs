@@ -56,6 +56,35 @@ pub struct Profile {
     pub input: Input,
     #[serde(default)]
     pub render: Render,
+    #[serde(default)]
+    pub translation: Translation,
+}
+
+/// Code-generation policy assertions the profile author certifies for the
+/// game (verified empirically by the differential oracle and the acceptance
+/// routes, not provable from the instruction stream).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Translation {
+    /// Assembly-time defines forwarded to the runtime (e.g. a guard for a
+    /// game-specific hooks file such as `SMB_RUNTIME_HOOKS`).
+    #[serde(default)]
+    pub runtime_defines: Vec<String>,
+    /// JSR/RTS discipline. `software` (default) routes every translated
+    /// call through the runtime continuation stack — correct for any 6502
+    /// stack usage. `native` asserts strict LIFO JSR/RTS pairing (no code
+    /// consumes JSR return bytes outside declared `[[jump_engine]]` sites)
+    /// and lowers calls to native Z80 CALL/RET with a slot-0 far shim for
+    /// cross-bank targets. Requires mapper 0 and no `[[return_escape]]`.
+    #[serde(default)]
+    pub stack_discipline: StackDiscipline,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum StackDiscipline {
+    #[default]
+    Software,
+    Native,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -692,6 +721,12 @@ impl Profile {
         self.return_escapes
             .iter()
             .find(|site| site.caller == caller && site.bank == bank)
+    }
+
+    /// True when the profile certifies native Z80 CALL/RET lowering
+    /// (see `Translation::stack_discipline`).
+    pub fn native_calls(&self) -> bool {
+        self.translation.stack_discipline == StackDiscipline::Native
     }
 
     pub fn replacement_for(&self, addr: u16) -> Option<&Replacement> {

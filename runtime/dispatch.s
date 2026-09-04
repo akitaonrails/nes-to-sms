@@ -65,7 +65,86 @@
 ;
 ; Cross-bank translated software calls/tails enter slot-0 gates below for the
 ; mapper write; generated slot-1 code must not write $FFFE inline.
+; ─── native-discipline far transfer (S1.2) ───────────────────────────────────
+; NATIVE_CALLS builds (profile `stack_discipline = "native"`) replace the
+; software continuation stack with the native Z80 stack: JSR lowers to
+; CALL, RTS to RET. Cross-bank transfers preserve the invariant "every
+; native return address is executed with the slot-1 bank it was emitted
+; for" by pushing a [saved bank][restore thunk] frame before switching;
+; the callee's RET unwinds through the thunk, which restores the bank.
+;
+; rt_far_tail — entry: BC = target label address, H = target SMS bank,
+;               A = 6502 accumulator (rides through), DE = resident X/Y.
+;   far JSR sites: ld bc,T / ld h,:T / call rt_far_tail
+;   far JMP sites: ld bc,T / ld h,:T / jp  rt_far_tail
+; A tail transfer whose top-of-stack is already the restore thunk skips
+; the push: nothing executes between the two restores, so the
+; intermediate bank is dead. This keeps cross-bank tail-jump cycles from
+; leaking native stack. (Call sites always push: their own return address
+; sits on top, and slot-1 return addresses can never equal the slot-0
+; thunk address.)
+;
+; Scratch: NATIVE_FAR_A/NATIVE_FAR_BANK are main-thread-owned; the IRQ
+; bridge saves/restores them per NMI depth (boot.s) so translated-NMI
+; far transfers cannot corrupt an interrupted shim.
+.define NATIVE_FAR_A    $ca2a
+.define NATIVE_FAR_BANK $ca2b
+
+.ifdef NATIVE_CALLS
+rt_far_tail:
+  ld   (NATIVE_FAR_A), a
+  ld   a, h
+  ld   (NATIVE_FAR_BANK), a
+  ld   hl, $0000
+  add  hl, sp
+  ld   a, (hl)
+  cp   <_far_ret_thunk
+  jr   nz, _far_push_frame
+  inc  hl
+  ld   a, (hl)
+  cp   >_far_ret_thunk
+  jr   z, _far_no_frame
+_far_push_frame:
+  ld   a, ($cb14)
+  ld   l, a                  ; frame word: L = saved bank (H is don't-care)
+  push hl
+  ld   hl, _far_ret_thunk
+  push hl
+_far_no_frame:
+  ld   a, (NATIVE_FAR_BANK)
+  ld   ($cb14), a
+  ld   ($fffe), a
+  ld   a, (NATIVE_FAR_A)
+  push bc
+  ret                        ; transfer to BC
+
+_far_ret_thunk:
+  ld   (NATIVE_FAR_A), a
+  pop  hl                    ; L = saved bank
+  ld   a, l
+  ld   ($cb14), a
+  ld   ($fffe), a
+  ld   a, (NATIVE_FAR_A)
+  ret
+.endif
+
 ; ─── translated software transfer gates ───────────────────────────────────────
+.ifdef NATIVE_CALLS
+; Runtime-internal dispatchers (computed RTS/JMP, RTI recovery) still name
+; the tail gate; adapt its register contract onto the native far shim so
+; every dispatch transfer maintains the bank-restore invariant.
+rt_translated_tail_gate:
+  ; Entry: BC=target, A=target bank, H=entry 6502 A.
+  ld   l, a
+  ld   a, h
+  ld   h, l
+  jp   rt_far_tail
+rt_translated_call_gate:
+  ; Software continuation frames do not exist in native builds.
+  ld   a, $E6
+  ld   ($cb1d), a
+  jp   rt_unresolved_jsr
+.else
 rt_translated_call_gate:
   ; Entry: BC=target, A=target bank, HL=software frame base, DE=resident X/Y.
   ld   ($cb14), a
@@ -97,6 +176,7 @@ rt_translated_tail_gate:
   ld   a, ($ca3f)
   .endif
   jp   (hl)
+.endif
 
 ; ─── rt_far_gate ──────────────────────────────────────────────────────────────
 ; Compact far dispatch (H2): the call site loads DE = target and A = bank
@@ -640,7 +720,7 @@ _btd_target_ok:
   ld   ($fffe), a
   ld   a, ($cb1c)
   cp   $80
-  jr   c, _btd_miss
+  jp   c, _btd_miss
   sub  $80
   add  a, a
   ld   l, a
@@ -706,6 +786,22 @@ _btd_hit:
   ld   c, (hl)                 ; label lo
   inc  hl
   ld   b, (hl)                 ; label hi
+.ifdef NATIVE_CALLS
+  ; Native discipline: a computed dispatch is a tail transfer — route it
+  ; through the far shim so a bank change leaves the restore-thunk frame
+  ; (or merges with the pending one). BC already holds the label.
+  ld   a, (TR_RET_SCRATCH_BANK)
+  ld   h, a                    ; H = target bank
+  ld   a, ($cb7e)
+  or   a
+  jr   nz, _btd_native_di
+  ld   a, (TR_RET_SCRATCH_A)
+  ei
+  jp   rt_far_tail
+_btd_native_di:
+  ld   a, (TR_RET_SCRATCH_A)
+  jp   rt_far_tail
+.endif
   ld   a, (TR_RET_SCRATCH_BANK)
   ld   ($cb14), a
   ld   ($fffe), a
@@ -923,6 +1019,13 @@ _btd_trap_flash:
 ; restore on return included). Miss -> loud trap ($CB1D=$E2, target in
 ; $CB1B/1C) — fail closed, never run raw NES bytes.
 rt_banked_dispatch:
+  ; Entry A is the 6502 accumulator the callee expects: the transfer gate
+  ; restored it from the pushed call frame before jumping to the stub.
+  ; The lookup below clobbers A, and rt_far_gate re-reads the caller A from
+  ; $CB15, so park it there first — otherwise a banked callee whose first
+  ; instruction stores A (CV1's sound-trigger entry STA $E5 at $8187)
+  ; silently receives a stale accumulator.
+  ld   ($cb15), a
   ; MRU fast path: repeated dispatches to the same (bank, target) —
   ; loops far-calling one routine — skip the table scan entirely.
   ; $CA08..$CA0E: tgt lo, tgt hi, nes bank, sms bank, label lo, label hi, valid.
@@ -1272,26 +1375,12 @@ rt_read_prg_high:
   cp   $c0
   jp   c, _rph_bad
 .ifndef NES_PRG_BANK_BASE
-  ; NROM has no mutable NES bank shadow. Keep the temporary slot-2 mapping
-  ; atomic against IRQ presentation, but avoid the mapper-2 guard snapshot on
-  ; this very hot table-read path. Op boundaries always expose ROM with the
-  ; NROM low image selected, so the two paths restore that exact invariant.
-  ld   a, i
-  di
-  jp   po, _rph_nrom_di
-_rph_nrom_ei:
-  ld   a, :data_prg_high
-  ld   ($ffff), a
-  ld   a, h
-  sub  $40
-  ld   h, a
-  ld   b, (hl)
-  ld   a, :data_prg_low
-  ld   ($ffff), a
-  ld   a, b
-  ei
-  ret
-_rph_nrom_di:
+  ; NROM has no mutable NES bank shadow, and irq_handler saves/restores the
+  ; interrupted slot-2 bank on its own re-entrant stack frame (boot.s). A
+  ; map/read/restore sequence here is therefore IRQ-safe with interrupts
+  ; enabled — an IRQ landing mid-sequence presents from the canonical low
+  ; bank and puts data_prg_high back before returning. No DI, no IFF juggle.
+  ; (The generated inline fixed-high reads already rely on this invariant.)
   ld   a, :data_prg_high
   ld   ($ffff), a
   ld   a, h

@@ -73,8 +73,9 @@ Reclaiming the allocator on complete screen rebuilds therefore preserves the
 NES attribute palettes without recycling visible patterns. The Stage 1 trace
 now matches the reference's blue sky, green canopy, dark lower backdrop, and
 gray fence/ground layout. The canonical ROM SHA-256 after the accumulator,
-candle-route, and measured performance fixes is
-`806a99ea25cea62758aa327d040922291770b6b30f8be991e69bb06069ea4099`.
+candle-route, measured performance, and banked-dispatch audio fixes was
+`676803e7f7698f4e209619e81b01d9af30e5b66a2315c97c9fd173a0924b0220`
+(superseded by the rendering fixes below).
 Stock-timing emulation remains slow.
 
 ## Performance hardening and candle-route repair
@@ -126,6 +127,139 @@ stalling. The focused route also collects the large heart: the heart counter at
 `$0071` finishes at `$0A` (the initial `$05` plus five) while system state
 `$0018=$05`, substate `$0019=$06` confirms gameplay continues.
 
+## Audio: banked-dispatch accumulator fix
+
+CV1's sound driver (bank 0: trigger entry `$8187`, per-frame driver `$838A`
+called from both NMI paths, channel streams at `$879F`+) was already rooted
+and translated; the silence was a runtime bug, not a discovery gap. Every
+call into a switchable-window stub flows through `rt_translated_call_gate`,
+which restores the 6502 accumulator from the pushed call frame, and then
+`rt_banked_dispatch`, which clobbers A during the (bank, addr) lookup while
+`rt_far_gate` re-reads the caller A from `$CB15` — a slot the dispatch path
+never wrote. Banked callees therefore entered with a stale accumulator.
+`$8187`'s first instruction (`STA $E5`) stores the sound index, so
+`PlayMusic` always triggered sound `$00` and no channel ever activated.
+`rt_banked_dispatch` now parks entry A into `$CB15` on entry
+(`runtime/dispatch.s`). The validation harness does not model the banked
+dispatch (indirect-dispatch routines are skipped), so
+`crates/validation/src/runtime_stubs.rs` needs no parallel change.
+
+With the fix, the canonical route matches the NES reference's audio
+trajectory: `PlayMusic($55)` (all-stop, boot), `PlayMusic($27)` when
+Stage 1 starts, then `PlayMusic($55)`/`PlayMusic($2A)`. APU shadow writes
+land in `$CB30-$CB47` and `apu_frame_tick` drives the PSG: the acceptance
+route logs 1,989 port-$7F writes (previously 8, init-only), with all three
+tone channels sweeping ~30 distinct periods each and noise-rate changes.
+`trace-sms` gained `SMS_LOG_PSG=<path>` to stream every PSG write for
+offline pitch-trajectory analysis (audio plan F.5). Generation stats are
+unchanged (416 functions, 898 lifted, 80 strict unresolved traps): the
+canonical routes reach no new stubs, so none were resolved.
+
+## Rendering: scroll presentation, sprite-0 phasing, and beacons
+
+Three user-visible defects shared one presentation path. The scroll
+presentation could read a torn or misclassified `$2005` pair:
+
+- The per-frame flag clear (`$CB20`) also dropped bit2, so a frame whose
+  game scroll sequence had not completed fell back to the live latch —
+  which mid-sequence holds the status-bar value (0). CV1's timed split
+  routine (`$F868` status pair, sprite-0 wait loops, `$F8EE` playfield
+  pair) leaves that window open for ~14K steps per game frame and for
+  ~564K steps across its screen-boundary transitions: presentation then
+  showed scroll 0 for up to 9 consecutive frames and
+  `rt_nt_project_scroll` read the 32-to-0 jump as a teleport, firing a
+  full 896-cell re-materialization (~520K-step handler bursts) on both
+  the drop and the snap back.
+- Worse, CV1's NMI ack read of `$2002` (`$C058`) consumed the synthetic
+  sprite-0 arm every frame, so the STATUS pair itself captured as
+  post-split and even a persistent post pair would have presented 0.
+- The `NO_SCROLL_SPLIT` profile path presented the pre/status pair
+  whole-frame whenever it ran; with no split band on screen the pre pair
+  has no meaning.
+
+Fixes (all generic, shared with SMB): `$CB20` bit2 is now sticky, making
+`$CB23/$CB24` the persistent last-post playfield pair presented whenever
+no fresh pair exists; the sprite-0 machine walks a three-phase
+stale -> clear -> hit sequence per frame (the ack read observes the stale
+hit, as on NES, instead of consuming the arm), implemented identically in
+`runtime/ppu.s` and `crates/lower/src/lib.rs`'s inline status read; the
+`NO_SCROLL_SPLIT` branch presents the playfield pair like the direct
+path; and the production boot beacons (which wrote CRAM index 17 and
+pointed the reg-7 backdrop at it on every deferred reg-1 apply — the
+white full-screen blinks on display-off frames, since the SMS fills a
+disabled display with the backdrop) are removed, leaving only halt-path
+and DIAG_WILDJUMP diagnostic uses.
+
+Measured on the 180M-step Right-hold route (3,000 frame dumps): before,
+21 frames presented scroll 0 mid-walk (two plateaus at f2918-f2928 and
+f2989-f2998) with three teleport presentations and five ~500K-step
+glitch-driven handler bursts; after, zero torn presentations, zero
+teleport jumps, and the four remaining ~500K frames are the game's own
+`$2007` transition uploads (projection delta 0). CRAM writes dropped
+2,826 -> 192 (the eliminated beacon traffic). Fixed-work benchmark:
+1,117,808,472 cycles over 2,200 frames (handler p50 92,045, avg 112,979)
+versus 1,114,904,425 (p50 92,181, avg 114,537) before — neutral, as
+expected: the bursts were few, the win is correctness. The canonical ROM
+SHA-256 after the scroll-presentation, sprite-0 phase, and beacon fixes
+is `2fb3780aa38f601dbff48fb798b335c51609b9800d8a2af2efa11bc3db2ecdcd`.
+
+## Deep Stage-1 traversal
+
+The long traversal route (`profiles/cv1/acceptance/stage1-traverse-v2.sms.buttons`,
+Start at frame 600, hold Right with periodic jump/whip pulses plus Up-hold
+windows at the page-13 stairs) runs the full 570M-step budget (9,495 frame
+dumps) with **zero runtime traps**. Depth evidence: 42 latchX wraps, Simon
+reaches player page `$006D=09`/`ppos=0A` deep in the castle interior, the
+courtyard and door transition render correctly, and the final frames show the
+Stage-1 boss room (HUD "ENEMY" bar present, boss fight underway). Frame scan
+over all 9,495 dumps: (a) 5 presented-scroll backward jumps, all in the known
+benign `$2007` upload-stream family; (b) 0 near-white frames; (c) 111
+double-image HUD candidates, all lag-24 r≈0.76-0.78 Simon-sprite overlap
+false positives; (d) 334 handler frames >400K steps, all ~500K-step legitimate
+`$2007` transition uploads. HUD digit strings show residual tile corruption
+("SCORE-222323") late in the route — cosmetic, not one of the gating
+signatures.
+
+Two translation defects were found and fixed on this route:
+
+1. **`$2525` NMI-epilogue trap (step 419,116,949).** The `$F3DA` jump engine
+   (`JSR $CA6D` with a 32-entry inline table) pushes a `$F3/$7C` return pair
+   the dispatched handler's RTS pops to resume at `$F37D`, but its profile
+   annotation lacked `return_target`, so every case arm lowered to a bare
+   tail dispatch. Handlers ending in a plain RTS unwound the *caller's*
+   translated-return frame instead: the loop was truncated and the emulated
+   pair leaked, leaving the 6502 stack two bytes short so the next NMI
+   epilogue RTI popped a misaligned frame (`PC=$2525`, marker `$E2`).
+   Chains that happened to pop a bit-6 frame masked the leak (balanced stack,
+   wrong control flow), which is why the defect hid until a rare selector
+   fired. Fix: `return_target = "L_F37D"` + `stack_return_bytes = 2` on the
+   engine (no `tail_indices` — the ROM has zero `rt_rts_dispatch` sites and
+   no reachable return-escape, so no chain self-consumes the pair), plus a
+   new generic `translated_banked_call_with_continuation` emitter in
+   `z80_emit` used by `emit_jump_engine_target` when a stack-aware
+   continuation targets an unqualified switchable-window address (mapper 2).
+   The fast repro for this class: an idle title screen traps the same way at
+   step ~100.5M (selector `$14` → banked `$8867`).
+2. **`$97EB` unresolved-dispatch trap (step 481,237,131, marker `$E2`).**
+   Bank-6 `$97EB` (a per-frame poll routine the reference executes from frame
+   3400 on) was never discovered, so the intra-bank `BCS $97EB` at `$9841`
+   lowered to a fail-closed stub. Fixed with a reference-validated
+   `[[bank_entry]] bank = 6, addr = 0x97eb` (FD_TRACE_PC oracle), which lifts
+   the routine; unresolved labels drop 80 → 79. Nine other referenced-but-
+   unlifted banked stubs remain latent (bank 5: `$8057/$80EE/$81D4/$8A72`,
+   bank 6: `$81F7/$824D/$971D/$9ECB`); the reference did not execute them on
+   this route, so by policy they stay fail-closed rather than being added
+   from subject-side trap evidence.
+
+Known remaining issue, off the acceptance route: an idle title screen (no
+Start) still traps at step 100,655,295 with `unresolved_id=$0043`
+(marker `$E1`, nes_bank=1) — the attract-demo path diverges from the
+reference around frame ~1266 (reference spawns demo objects, subject does
+not). The acceptance routes press Start at frame 600 and never hit it.
+
+The canonical ROM SHA-256 after the traversal fixes is
+`d7492a91cba647914aab5a27b4ccb7fb0b2b72f2dac8efa4cb253d99897a5a84`.
+
 ## Reproduce CV1 acceptance
 
 ```sh
@@ -153,6 +287,13 @@ target/release/trace-sms out/cv1/sms.sms --steps 300000000 \
   --buttons-script profiles/cv1/acceptance/heart-smoke.sms.buttons \
   --expect-no-trap --expect-ram 0x0071=0A \
   --expect-ram 0x0018=05 --expect-ram 0x0019=06
+
+# Deep Stage-1 traversal: full budget must complete with no trap.
+SMS_DUMP_EACH_FRAME=out/cv1_traverse/f10 \
+  target/release/trace-sms out/cv1/sms.sms --steps 570000000 \
+  --pause-at-frame 600 \
+  --buttons-script profiles/cv1/acceptance/stage1-traverse-v2.sms.buttons \
+  --expect-no-trap
 ```
 
 For canonical-reference checks, use
@@ -179,7 +320,11 @@ These are follow-on improvements, not mapper-2 blockers:
 - continue stock-timing work on fixed-PRG reads and CHR-RAM sprite builds;
 - author a human route through the Stage 1 boss and Stage 2 entry;
 - resolve additional strict stubs only when canonical execution reaches them;
-- extend real-emulator soak coverage and audio quality.
+- extend real-emulator soak coverage;
+- audio quality: music and SFX are live through the APU shim (see the audio
+  section above); remaining gaps are DMC (silent by design), noise-rate
+  quantization to three PSG rates, triangle bass octave-folding, and
+  240 Hz sequencer timing approximated per video frame.
 
 Never raise routine limits, translate filler/data walks, add Rust-side CV1
 gameplay, or harvest roots from SMS traps to make these items appear green.

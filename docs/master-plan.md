@@ -436,6 +436,15 @@ If any of these are true, stop adding features and fix the trajectory:
 
 ## Progress snapshot
 
+**2026-09-04: Phase S (speed recovery) first session.** After studying
+lackoftrack27's hand-made SMB SMS port (docs/handport-comparison.md),
+implemented Tier-1 generic codegen upgrades (native CALL/RET stack
+discipline, carry-threaded shift runs, inline memory shifts, fill-loop
+lifting, indexed-EA cleanups) and Tier-2 profile replacements (3 hooks in
+runtime/hooks_smb.s). SMB steady frame: 261.6K → 178.9K cycles (4.38× →
+3.00× over budget), byte-parity on all three acceptance routes, 479
+tests green. Plan + results: docs/speed-recovery-plan.md.
+
 **2026-07-04: v1 COMPLETE.** Byte-for-byte NES parity on three full
 routes (1-1 clear, death/game-over, bonus-pipe with the underground
 coin room), all four audio channels (Phase 5.2 done early via the

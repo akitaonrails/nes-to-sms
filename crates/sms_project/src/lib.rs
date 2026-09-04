@@ -97,6 +97,11 @@ pub struct ProjectConfig<'a> {
     pub top_tile_remap_from: Vec<u8>,
     pub top_tile_remap_to: u8,
     pub chr_ram_bg_identity: bool,
+    /// Native CALL/RET stack discipline (profile `stack_discipline =
+    /// "native"`): emits `.define NATIVE_CALLS 1` for the runtime.
+    pub native_calls: bool,
+    /// Profile-driven assembly defines (each emitted as `.define X 1`).
+    pub runtime_defines: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -414,6 +419,12 @@ fn sms_asm_content(
                 "\n.define PROFILE_TOP_TILE_REMAP_FROM_{index} ${tile:02X}"
             ));
         }
+    }
+    if cfg.native_calls {
+        mapper_define.push_str("\n.define NATIVE_CALLS 1");
+    }
+    for def in &cfg.runtime_defines {
+        mapper_define.push_str(&format!("\n.define {def} 1"));
     }
     if cfg.chr_ram_bg_identity {
         mapper_define.push_str("\n.define PROFILE_CHR_RAM_BG_IDENTITY 1");
@@ -772,6 +783,8 @@ mod tests {
             title: "TEST",
             mirroring: NesMirroring::Vertical,
             raw_ciram_backend: RawCiramBackend::None,
+            native_calls: false,
+            runtime_defines: Vec::new(),
         }
     }
 
@@ -908,6 +921,8 @@ mod tests {
             title: "TOOLONGTITLE", // 12 chars
             mirroring: NesMirroring::Vertical,
             raw_ciram_backend: RawCiramBackend::None,
+            native_calls: false,
+            runtime_defines: Vec::new(),
         };
 
         let err = emit_project(&out, &build, &assets, &cfg, None).unwrap_err();
@@ -938,6 +953,8 @@ mod tests {
             title: "TEST",
             mirroring: NesMirroring::Vertical,
             raw_ciram_backend: RawCiramBackend::None,
+            native_calls: false,
+            runtime_defines: Vec::new(),
         };
 
         let err = emit_project(&out, &build, &assets, &cfg, None).unwrap_err();
@@ -968,6 +985,8 @@ mod tests {
             title: "BANKS4",
             mirroring: NesMirroring::Vertical,
             raw_ciram_backend: RawCiramBackend::None,
+            native_calls: false,
+            runtime_defines: Vec::new(),
         };
 
         emit_project(&out, &build, &assets, &cfg, None).unwrap();
@@ -1043,6 +1062,8 @@ mod tests {
             title: "TEST",
             mirroring: NesMirroring::Vertical,
             raw_ciram_backend: RawCiramBackend::None,
+            native_calls: false,
+            runtime_defines: Vec::new(),
         };
 
         let err = emit_project(&out, &build, &assets, &cfg, None).unwrap_err();
@@ -1096,6 +1117,8 @@ mod tests {
             title: "TEST",
             mirroring: NesMirroring::Vertical,
             raw_ciram_backend: RawCiramBackend::None,
+            native_calls: false,
+            runtime_defines: Vec::new(),
         };
 
         emit_project(&out, &build, &assets, &cfg, None).unwrap();
@@ -1150,6 +1173,8 @@ mod tests {
             title: "TEST",
             mirroring: NesMirroring::Horizontal,
             raw_ciram_backend: RawCiramBackend::None,
+            native_calls: false,
+            runtime_defines: Vec::new(),
         };
 
         emit_project(&out, &build, &assets, &cfg, None).unwrap();
@@ -1183,6 +1208,8 @@ mod tests {
             title: "TEST",
             mirroring: NesMirroring::Vertical,
             raw_ciram_backend: RawCiramBackend::SramSlot2,
+            native_calls: false,
+            runtime_defines: Vec::new(),
         };
 
         emit_project(&out, &build, &assets, &cfg, None).unwrap();

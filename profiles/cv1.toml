@@ -85,8 +85,14 @@ target_entry_a = [
 # This fixed-bank table deliberately contains switchable-window addresses.
 # Unqualified L_8xxx labels mean "the currently selected UxROM bank" and are
 # lowered through the runtime's bank-aware tail dispatcher.
+# The JSR $CA6D caller pushes a $F3/$7C return pair the dispatched handler's
+# RTS pops to resume at $F37D, so every case needs the stack-aware
+# continuation frame (stack_return_bytes = 2); no case self-consumes the
+# pair, so tail_indices stays empty.
 [[jump_engine]]
 caller = 0xf3da
+return_target = "L_F37D"
+stack_return_bytes = 2
 targets = [
     "L_F41D", "L_805D", "L_F54C", "L_F533", "L_F53F", "L_F558",
     "L_F56E", "L_849A", "L_84B9", "L_F41D", "L_89F5", "L_F41D",
@@ -490,6 +496,13 @@ addr = 0x9782
 [[bank_entry]]
 bank = 6
 addr = 0x97aa
+
+# Reference-validated (FD_TRACE_PC): bank-6 idle/poll routine entered by the
+# intra-bank BCS at $9841; without this root the branch lowered to an
+# unresolved stub and trapped on the deep traversal route.
+[[bank_entry]]
+bank = 6
+addr = 0x97eb
 
 [[bank_entry]]
 bank = 6
@@ -1185,3 +1198,150 @@ target_entry_a = [0xEF, 0xF0, 0xF0, 0xF0, 0xF0, 0xEF]
 caller = 0xf084
 targets = ["L_F095", "L_F0B7", "L_F0FC", "L_F11D", "L_F13E", "L_F14E", "L_F15A"]
 target_entry_a = [0xF0, 0xF0, 0xF0, 0xF1, 0xF1, 0xF1, 0xF1]
+
+# Ground-truth window entries: reference oracle, 7000 frames of the
+# stage1-traverse-v2 route (deep Stage 1: stairs approach + door code).
+# Harvested via FD_LOG_BANK_ENTRIES (out/cv1_traverse/ref_bank_entries_v2.txt);
+# includes bank-6 $98B7, the stairs/door state routine the translated build
+# previously trapped on as unresolved when Simon first climbed.
+[[bank_entry]]
+bank = 0
+addr = 0x82b5
+
+[[bank_entry]]
+bank = 0
+addr = 0x8328
+
+[[bank_entry]]
+bank = 0
+addr = 0x8347
+
+[[bank_entry]]
+bank = 0
+addr = 0x8352
+
+[[bank_entry]]
+bank = 0
+addr = 0x8383
+
+[[bank_entry]]
+bank = 0
+addr = 0x83e4
+
+[[bank_entry]]
+bank = 0
+addr = 0x8455
+
+[[bank_entry]]
+bank = 0
+addr = 0x8478
+
+[[bank_entry]]
+bank = 0
+addr = 0x8782
+
+[[bank_entry]]
+bank = 5
+addr = 0x8008
+
+[[bank_entry]]
+bank = 5
+addr = 0x824d
+
+[[bank_entry]]
+bank = 5
+addr = 0x8272
+
+[[bank_entry]]
+bank = 6
+addr = 0x805d
+
+[[bank_entry]]
+bank = 6
+addr = 0x8076
+
+[[bank_entry]]
+bank = 6
+addr = 0x80e3
+
+[[bank_entry]]
+bank = 6
+addr = 0x8161
+
+[[bank_entry]]
+bank = 6
+addr = 0x98b7
+
+[[bank_entry]]
+bank = 6
+addr = 0x9ccd
+
+[[bank_entry]]
+bank = 6
+addr = 0xa011
+
+[[bank_entry]]
+bank = 6
+addr = 0xa038
+
+[[bank_entry]]
+bank = 6
+addr = 0xa2af
+
+[[bank_entry]]
+bank = 6
+addr = 0xa724
+
+[[bank_entry]]
+bank = 6
+addr = 0xa75e
+
+# Ground-truth window entries: reference oracle, 9500 frames of
+# stage1-traverse-v2 (castle-door transition + interior load path).
+[[bank_entry]]
+bank = 6
+addr = 0x947d
+
+[[bank_entry]]
+bank = 6
+addr = 0x9605
+
+[[bank_entry]]
+bank = 6
+addr = 0x962d
+
+[[bank_entry]]
+bank = 6
+addr = 0x9c43
+
+[[bank_entry]]
+bank = 6
+addr = 0x9c6f
+
+[[bank_entry]]
+bank = 6
+addr = 0x9d96
+
+[[bank_entry]]
+bank = 6
+addr = 0x9db3
+
+[[bank_entry]]
+bank = 6
+addr = 0x9dc1
+
+[[bank_entry]]
+bank = 6
+addr = 0x9e2b
+
+[[bank_entry]]
+bank = 6
+addr = 0x9e3c
+
+[[bank_entry]]
+bank = 6
+addr = 0x9f56
+
+[[bank_entry]]
+bank = 6
+addr = 0x9ff3

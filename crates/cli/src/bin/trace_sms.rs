@@ -645,6 +645,9 @@ struct SmsBus {
     display_enabled_edge: bool,
     psg_writes: u64,
     psg_log: Vec<u8>,
+    /// SMS_LOG_PSG=<path>: stream every PSG (port $40-$7F) write to a file,
+    /// one hex byte per line, for offline pitch-trajectory analysis (F.5).
+    psg_log_out: Option<std::sync::Arc<std::sync::Mutex<std::io::BufWriter<std::fs::File>>>>,
     /// VRAM 16 KiB and CRAM 32 B (for inspection if needed).
     vram: [u8; 0x4000],
     cram: [u8; 0x20],
@@ -949,6 +952,12 @@ impl SmsBus {
             display_enabled_edge: false,
             psg_writes: 0,
             psg_log: Vec::new(),
+            psg_log_out: std::env::var("SMS_LOG_PSG").ok().map(|path| {
+                std::sync::Arc::new(std::sync::Mutex::new(std::io::BufWriter::new(
+                    std::fs::File::create(&path)
+                        .unwrap_or_else(|err| panic!("SMS_LOG_PSG create {path}: {err}")),
+                )))
+            }),
             vram: if real_pacing() {
                 [0xFF; 0x4000]
             } else {
@@ -1909,6 +1918,12 @@ impl Bus for SmsBus {
             self.psg_writes += 1;
             if self.psg_log.len() < 4096 {
                 self.psg_log.push(value);
+            }
+            if let Some(out) = &self.psg_log_out {
+                use std::io::Write as _;
+                if let Ok(mut out) = out.lock() {
+                    let _ = writeln!(out, "{value:02X}");
+                }
             }
             return;
         }

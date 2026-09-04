@@ -610,33 +610,47 @@ rt_sat_resolve:
   ; frames) take a fast path: their resolved value is never uploaded
   ; (phase-1 compaction skips them by Y), so the old "preserve timing"
   ; full resolve for hidden slots was pure waste.
+  ; Both buffers are page-aligned ($C900 staging, $D400 resolved), so the
+  ; loop walks L/E only, and B stays the live counter: the hidden-sprite
+  ; majority pays no per-slot push/pop and no 16-bit pointer arithmetic.
   ld   hl, $c900             ; OAM staging
   ld   de, SAT_RESOLVED
   ld   b, 64
 _res_loop:
-  push bc
   ld   a, (hl)               ; raw NES Y
   cp   $cf
-  jr   nc, _res_hidden
-  inc  hl                    ; -> tile
+  jr   c, _res_visible
+_res_hidden:
+  ld   a, SAT_BLANK_REL      ; resolved value unused for hidden slots
+_res_store_common:           ; A = resolved value; L at the entry's Y byte
+  ld   (de), a
+  inc  e
+  ld   a, l
+  add  a, $04
+  ld   l, a
+  djnz _res_loop
+  ret
+_res_visible:
+  push bc                    ; B is the loop counter; calls below need B/C
+  inc  l                     ; -> tile
   ld   a, (hl)               ; A = NES tile
-  inc  hl                    ; -> attr
+  inc  l                     ; -> attr
   ld   b, (hl)               ; B = attr
-  inc  hl                    ; -> X
-  inc  hl                    ; -> next entry Y
+  dec  l
+  dec  l                     ; L back at the entry's Y byte
   call rt_map_sprite_tile    ; A = mapped rel tile (preserves BC, DE, HL)
   ld   c, a                  ; C = rel tile (default resolved value)
 .ifndef NES_CHR_RAM
   cp   SAT_BLANK_REL         ; blank tile? leave transparent, no variant
-  jr   z, _res_store
+  jr   z, _res_vdone
 .endif
   ld   a, b
   and  $c3                   ; palette bits + H/V flip; ignore priority bit 5
-  jr   z, _res_store         ; base palette, no flip -> use mapped tile
+  jr   z, _res_vdone         ; base palette, no flip -> use mapped tile
   ld   b, a                  ; B = variant attr key
   ld   a, ($cb08)            ; PPUCTRL bit3 => SMS base $0000: no safe scratch
   bit  3, a
-  jr   nz, _res_store
+  jr   nz, _res_vdone
 _res_visible_variant:
   push hl                    ; preserve OAM pointer
   push de
@@ -644,26 +658,10 @@ _res_visible_variant:
   pop  de
   pop  hl
   ld   c, a                  ; C = resolved
-_res_store:
+_res_vdone:
   ld   a, c
-  ld   (de), a               ; resolved[i]
-  inc  de
   pop  bc
-  dec  b
-  jp   nz, _res_loop
-  ret
-_res_hidden:
-  ld   a, SAT_BLANK_REL
-  ld   (de), a               ; resolved value unused for hidden slots
-  inc  de
-  inc  hl
-  inc  hl
-  inc  hl
-  inc  hl
-  pop  bc
-  dec  b
-  jp   nz, _res_loop
-  ret
+  jr   _res_store_common
 
 ; ─── rt_sat_upload ────────────────────────────────────────────────────────────
 ; Copies sprite data from NES OAM staging at $C900 into SMS VRAM SAT at $3F00,

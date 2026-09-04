@@ -371,6 +371,19 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // 2. Load the profile.
     let prof = profile::load_from_path(&args.profile)?;
 
+    if prof.native_calls() && prof.rom.mapper != 0 {
+        return Err(Error::Diagnostic(format!(
+            "stack_discipline = \"native\" requires mapper 0 (NROM); profile mapper is {}",
+            prof.rom.mapper
+        )));
+    }
+    if prof.native_calls() && !prof.return_escapes.is_empty() {
+        return Err(Error::Diagnostic(
+            "stack_discipline = \"native\" is incompatible with [[return_escape]] sites"
+                .to_string(),
+        ));
+    }
+
     // Sanity-check the profile against the parsed ROM.
     let actual_prg_kib = image.prg.len() / 1024;
     if prof.rom.prg_kib as usize != actual_prg_kib {
@@ -1046,10 +1059,15 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
 
         // Pre-declare runtime symbols (real bodies live in runtime/*.s;
-        // placeholders keep z80_emit patch resolution happy).
+        // placeholders keep z80_emit patch resolution happy). Profile
+        // replacement targets are runtime labels too.
         program.section("runtime_forward_decls");
         for sym in RUNTIME_SYMBOLS {
             program.label(sym);
+            program.ret();
+        }
+        for rep in &prof.replacements {
+            program.label(&rep.runtime_label);
             program.ret();
         }
 
@@ -1110,6 +1128,16 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 None => (0xFF, r.entry, format_label(r.entry)),
             })
             .collect::<Vec<_>>();
+        // Computed dispatch honors profile replacements too: a dispatched
+        // NES address whose routine is replaced lands on the runtime hook
+        // (slot 0) instead of the translated body.
+        for rec in dispatch_records.iter_mut() {
+            if rec.0 == 0xFF
+                && let Some(rep) = prof.replacement_for(rec.1)
+            {
+                rec.2 = rep.runtime_label.clone();
+            }
+        }
         // Preserve the dispatch table's precedence at duplicate addresses:
         // fixed-bank entries historically appeared before mapper-window
         // entries and therefore win the runtime's first-match search.
@@ -1270,8 +1298,145 @@ pub fn run(args: &Args) -> Result<String, Error> {
         top_tile_remap_from: prof.render.top_tile_remap_from.clone(),
         top_tile_remap_to: prof.render.top_tile_remap_to,
         chr_ram_bg_identity: prof.render.chr_ram_bg_identity,
+        native_calls: prof.native_calls(),
+        runtime_defines: prof.translation.runtime_defines.clone(),
     };
     sms_project::emit_project(&args.out, &build, &project_assets, &cfg, runtime_dir)?;
+
+    // Phase S3.1 — Tier-3 relayout closure analysis (report only, no
+    // codegen). For every RAM address reached by an indexed access, record
+    // how the program touches it; a candidate array is transposable only
+    // if every access inside its span is index-register-relative to its
+    // own base and no dynamic pointer ((zp),Y / (zp,X)) can alias RAM at
+    // all without further value analysis. See docs/speed-recovery-plan.md.
+    {
+        use ir::{AddrExpr, MemRegion, Op};
+        use std::collections::BTreeMap;
+        let mut idx_bases: BTreeMap<u16, (u32, u32)> = BTreeMap::new(); // base -> (x_count, y_count)
+        let mut const_hits: BTreeMap<u16, u32> = BTreeMap::new();
+        let mut zp_indexed: BTreeMap<u8, u32> = BTreeMap::new();
+        let mut ind_ptrs: BTreeMap<u8, u32> = BTreeMap::new();
+        let ram_region =
+            |r: MemRegion| matches!(r, MemRegion::Ram | MemRegion::RamMirror | MemRegion::ZeroPage);
+        for r in &routines {
+            for op in &r.ops {
+                let acc: Option<(&AddrExpr, MemRegion)> = match op {
+                    Op::LdaMem { addr, region }
+                    | Op::LdxMem { addr, region }
+                    | Op::LdyMem { addr, region }
+                    | Op::StaMem { addr, region }
+                    | Op::StxMem { addr, region }
+                    | Op::StyMem { addr, region }
+                    | Op::AdcMem { addr, region }
+                    | Op::SbcMem { addr, region }
+                    | Op::CmpMem { addr, region }
+                    | Op::CpxMem { addr, region }
+                    | Op::CpyMem { addr, region }
+                    | Op::AndMem { addr, region }
+                    | Op::OraMem { addr, region }
+                    | Op::EorMem { addr, region }
+                    | Op::BitMem { addr, region }
+                    | Op::IncMem { addr, region }
+                    | Op::DecMem { addr, region }
+                    | Op::AslMem { addr, region }
+                    | Op::LsrMem { addr, region }
+                    | Op::RolMem { addr, region }
+                    | Op::RorMem { addr, region }
+                    | Op::SaxMem { addr, region } => Some((addr, *region)),
+                    _ => None,
+                };
+                let Some((addr, region)) = acc else { continue };
+                match addr {
+                    AddrExpr::AbsIndexedX(b) if ram_region(region) => {
+                        idx_bases.entry(*b).or_default().0 += 1;
+                    }
+                    AddrExpr::AbsIndexedY(b) if ram_region(region) => {
+                        idx_bases.entry(*b).or_default().1 += 1;
+                    }
+                    AddrExpr::Const(a) if ram_region(region) => {
+                        *const_hits.entry(*a).or_default() += 1;
+                    }
+                    AddrExpr::ZpConst(z) => {
+                        *const_hits.entry(*z as u16).or_default() += 1;
+                    }
+                    AddrExpr::ZpIndexedX(z) | AddrExpr::ZpIndexedY(z) => {
+                        *zp_indexed.entry(*z).or_default() += 1;
+                    }
+                    AddrExpr::IndirectX(z) | AddrExpr::IndirectY(z) => {
+                        *ind_ptrs.entry(*z).or_default() += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut txt = String::new();
+        txt.push_str(
+            "Tier-3 relayout closure analysis (S3.1)\n\
+             ========================================\n\
+             A candidate parallel array [base .. next_base) is transposable only\n\
+             when every access in its span is `base,X`/`base,Y` with the SAME\n\
+             base and index meaning, no bare Const access lands inside the span\n\
+             (or each such access is individually relocatable), and no dynamic\n\
+             pointer can alias it. Dynamic pointers below alias ALL of RAM\n\
+             absent value analysis, so any nonzero pointer-access count keeps\n\
+             whole-program relayout in research territory.\n\n",
+        );
+        txt.push_str(&format!(
+            "dynamic-pointer accesses ((zp),Y / (zp,X)): {} sites across {} zero-page pointers\n",
+            ind_ptrs.values().sum::<u32>(),
+            ind_ptrs.len()
+        ));
+        for (zp, n) in &ind_ptrs {
+            txt.push_str(&format!("  ptr zp ${zp:02X}: {n} sites\n"));
+        }
+        txt.push_str(&format!(
+            "\nzp,X / zp,Y indexed sites: {} (zero-page relayout candidates share these)\n\n",
+            zp_indexed.values().sum::<u32>()
+        ));
+        txt.push_str("indexed bases (span = to next observed base):\n");
+        let bases: Vec<u16> = idx_bases.keys().copied().collect();
+        for (bi, base) in bases.iter().enumerate() {
+            let (xs, ys) = idx_bases[base];
+            let span_end = bases
+                .get(bi + 1)
+                .copied()
+                .unwrap_or_else(|| base.saturating_add(0x100).min(0x0800))
+                .max(base.saturating_add(1));
+            let aliased: Vec<String> = const_hits
+                .range(base + 1..span_end)
+                .map(|(a, n)| format!("${a:04X}x{n}"))
+                .collect();
+            txt.push_str(&format!(
+                "  ${base:04X} span ${:04X}: {xs:>3} ,X  {ys:>3} ,Y  {}\n",
+                span_end,
+                if aliased.is_empty() {
+                    "CLEAN".to_string()
+                } else {
+                    format!("ALIASED by const: {}", aliased.join(" "))
+                }
+            ));
+        }
+        let clean = bases
+            .iter()
+            .enumerate()
+            .filter(|(bi, base)| {
+                let span_end = bases
+                    .get(bi + 1)
+                    .copied()
+                    .unwrap_or_else(|| base.saturating_add(0x100).min(0x0800))
+                    .max(base.saturating_add(1));
+                const_hits.range(**base + 1..span_end).next().is_none()
+            })
+            .count();
+        txt.push_str(&format!(
+            "\nsummary: {} indexed bases, {clean} with const-clean spans, {} dynamic-pointer sites\n",
+            bases.len(),
+            ind_ptrs.values().sum::<u32>()
+        ));
+        let reports_dir = args.out.join("reports");
+        std::fs::create_dir_all(&reports_dir)?;
+        std::fs::write(reports_dir.join("relayout.txt"), &txt)?;
+    }
 
     // 10. Reports.
     let reports_dir = args.out.join("reports");
@@ -1793,6 +1958,7 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_translated_return_escape",
     "rt_translated_call_gate",
     "rt_translated_tail_gate",
+    "rt_far_tail",
     "rt_indirect_jmp",
     "rt_unresolved_jsr",
     "rt_unresolved_jsr_flash",

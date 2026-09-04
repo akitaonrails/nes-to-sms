@@ -227,16 +227,19 @@ impl IdxReg {
 // dispatcher's runtime range classification is dead weight — emit the
 // direct add + access inline.
 
-/// SMS base for a direct indexed access into plain NES RAM: the folded
-/// base must leave `base+$FF` inside the $C000-$C7FF shadow (no NES
-/// hardware window, no mirror-fold crossing).
+/// SMS base for a direct indexed access into plain NES RAM. The whole
+/// $C000-$C7FF shadow qualifies: the runtime fallback (`rt_read_indexed` /
+/// `rt_write_indexed`) performs the same unfolded 16-bit add with no
+/// mirror handling, so the inline form is behavior-identical for every
+/// base in the window — including bases whose `base+idx` could cross
+/// $C7FF (both paths would read the same out-of-shadow byte).
 fn indexed_plain_ram_base(base: u16, region: ir::MemRegion) -> Option<u16> {
     use ir::MemRegion as R;
     if !matches!(region, R::ZeroPage | R::Ram | R::RamMirror | R::Stack) {
         return None;
     }
     let sms = indexed_base_to_sms(base, region);
-    ((0xC000..=0xC700).contains(&sms)).then_some(sms)
+    ((0xC000..=0xC7FF).contains(&sms)).then_some(sms)
 }
 
 /// PRG bases whose whole `base+$FF` span stays inside the always-mapped
@@ -262,11 +265,15 @@ fn emit_prg_high_read_direct(
         p.ld_hl_imm(nes_addr);
         p.call(runtime_symbols::READ_PRG_HIGH);
     } else {
+        // NROM: $FFFC is 0 at op boundaries and irq_handler restores the
+        // interrupted slot-2 bank itself, so the restore is two plain
+        // instructions — no helper call, no SRAM-control clear.
         p.ld_a_bank_imm("data_prg_high");
         p.ld_abs_a(0xFFFF);
         p.ld_a_abs(nes_addr - 0x4000);
         p.ld_c_a();
-        p.call("rt_restore_prg_window");
+        p.ld_a_bank_imm("data_prg_low");
+        p.ld_abs_a(0xFFFF);
         p.ld_a_c();
     }
 }
@@ -296,7 +303,8 @@ fn emit_prg_high_indexed_direct(
         p.ld_h_a();
         p.ld_a_hl_ptr();
         p.ld_c_a();
-        p.call("rt_restore_prg_window");
+        p.ld_a_bank_imm("data_prg_low");
+        p.ld_abs_a(0xFFFF);
         p.ld_a_c();
     }
 }
@@ -1183,7 +1191,9 @@ fn emit_ppu_status_read_inline(p: &mut z80_emit::Program) {
     let body = p.fresh_label("ppu_status_body");
     let no_vblank = p.fresh_label("ppu_status_no_vblank");
     let sprite0 = p.fresh_label("ppu_status_sprite0");
-    let arm_sprite0 = p.fresh_label("ppu_status_arm_sprite0");
+    let not_stale = p.fresh_label("ppu_status_not_stale");
+    let hit = p.fresh_label("ppu_status_hit");
+    let report_hit = p.fresh_label("ppu_status_report_hit");
     let finish = p.fresh_label("ppu_status_finish");
     let done = p.fresh_label("ppu_status_done");
 
@@ -1218,19 +1228,30 @@ fn emit_ppu_status_read_inline(p: &mut z80_emit::Program) {
     p.ld_a_abs(PPU_MASK);
     p.and_imm(0x18);
     p.jr_z(&finish);
+    // Three-phase stale -> clear -> hit sprite-0 timing; mirrors
+    // `_ppu_r_status_sprite0` in runtime/ppu.s. Keep the two aligned.
     p.ld_a_abs(PPU_SPRITE0_PHASE);
     p.or_a();
-    p.jr_z(&arm_sprite0);
+    p.jr_nz(&not_stale);
+    p.ld_a_imm(1);
+    p.ld_abs_a(PPU_SPRITE0_PHASE);
+    p.jr(&report_hit);
+
+    p.label(&not_stale);
+    p.cp_imm(1);
+    p.jr_nz(&hit);
+    p.ld_a_imm(2);
+    p.ld_abs_a(PPU_SPRITE0_PHASE);
+    p.jr(&finish); // the "clear" observation: no bit 6
+
+    p.label(&hit);
     p.ld_hl_imm(SPLIT_SCROLL_FLAGS);
     p.set_n_hl_ptr(0);
+
+    p.label(&report_hit);
     p.ld_a_c();
     p.or_imm(0x40);
     p.ld_c_a();
-    p.jr(&finish);
-
-    p.label(&arm_sprite0);
-    p.ld_a_imm(1);
-    p.ld_abs_a(PPU_SPRITE0_PHASE);
 
     p.label(&finish);
     p.ld_a_abs(PPU_IFF_RESTORE);
@@ -1475,22 +1496,18 @@ fn emit_hl_for_rw_mem(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir
             p.ld_hl_imm(nes_ram_addr_to_sms(*a));
         }
         AddrExpr::AbsIndexedX(base) => {
-            p.push_af();
+            // Resident X is D: build the EA without touching A (native
+            // flags are clobbered, as everywhere between IR ops).
             p.ld_hl_imm(indexed_base_to_sms(*base, region));
-            p.ld_a_d();
-            p.ld_c_a();
+            p.ld_c_d();
             p.ld_b_imm(0);
             p.add_hl_bc();
-            p.pop_af();
         }
         AddrExpr::AbsIndexedY(base) => {
-            p.push_af();
             p.ld_hl_imm(indexed_base_to_sms(*base, region));
-            p.ld_a_e_reg();
-            p.ld_c_a();
+            p.ld_c_e();
             p.ld_b_imm(0);
             p.add_hl_bc();
-            p.pop_af();
         }
         AddrExpr::ZpIndexedX(z) => {
             p.push_af();
@@ -2502,6 +2519,297 @@ fn emit_copy_loop(program: &mut z80_emit::Program, plan: &CopyLoopPlan) {
     }
 }
 
+/// S1.3a: a maximal run of consecutive accumulator shifts/rotates
+/// (ASL/LSR/ROL/ROR A, Source-transparent). The 6502 carry threads
+/// natively through the run, so shadow-P is touched at most twice: read
+/// once before the run when the first element consumes carry (ROL/ROR),
+/// and written once after it — only when a flag reader survives and the
+/// trailing branches couldn't be fused natively.
+#[derive(Clone)]
+struct ShiftRunPlan {
+    shifts: Vec<ir::Op>,
+    last_idx: usize,
+    /// Exclusive end of a fused trailing branch run (None = no fusion).
+    fuse_end: Option<usize>,
+    consumes_carry: bool,
+    write_back: bool,
+}
+
+fn emit_shift_run(
+    program: &mut z80_emit::Program,
+    routine: &ir::Routine,
+    ops_slice: &[ir::Op],
+    plan: &ShiftRunPlan,
+    emit_comments: bool,
+) {
+    use ir::Op;
+    if plan.consumes_carry {
+        // Shadow C -> native carry, preserving A.
+        program.ld_b_a();
+        program.ld_a_abs(sms_layout::SHADOW_P);
+        program.rrca();
+        program.ld_a_b();
+    }
+    let n = plan.shifts.len();
+    for (k, op) in plan.shifts.iter().enumerate() {
+        // Intermediate elements only need the carry chain (4-cycle rla/rra);
+        // the final element uses the CB forms so S/Z are native for fusion.
+        let last = k + 1 == n;
+        match op {
+            Op::AslA => program.add_a_a(),
+            Op::LsrA => program.srl_a(),
+            Op::RolA if last => program.rl_a(),
+            Op::RolA => program.rla(),
+            Op::RorA if last => program.rr_a(),
+            Op::RorA => program.rra(),
+            _ => unreachable!("non-shift op in shift run"),
+        }
+    }
+    if let Some(end) = plan.fuse_end {
+        emit_fused_branches(
+            program,
+            routine,
+            ops_slice,
+            plan.last_idx + 1,
+            end,
+            emit_comments,
+            direct_cond_to_z80,
+        );
+    } else if plan.write_back {
+        // Materialize shadow N/Z/C once: C from native carry, N/Z from the
+        // pinned $3E00 lookup table. V is untouched by rotates.
+        program.ld_c_a();
+        program.ld_b_imm(0);
+        program.rl_b(); // B = new 6502 carry bit
+        program.ld_a_abs(sms_layout::SHADOW_P);
+        program.and_imm(0x7C); // clear N, Z, C; keep V and the rest
+        program.or_b();
+        program.ld_b_a();
+        program.ld_a_c();
+        program.ld_l_a();
+        program.ld_h_imm(0x3E);
+        program.ld_a_b();
+        program.or_hl_ptr();
+        program.ld_abs_a(sms_layout::SHADOW_P);
+        program.ld_a_c();
+    }
+}
+
+/// S1.3c: strided fill-until-wrap loop:
+///   L: STA base,idx ; INX/INY × stride ; BNE L
+/// (SMB's MoveSpritesOffscreen shape: fill every `stride`-th byte of the
+/// 256-byte window at `base` from the current index up to the wrap.)
+/// The fill value is whatever A holds at loop entry — no constant needed.
+/// Exit state is architectural: idx = 0, Z set, N clear (the final INY/INX
+/// wrapped to zero), C/V untouched, A preserved.
+///
+/// Soundness: the loop terminates on the 6502 only when the entry index is
+/// a multiple of `stride` (otherwise it never hits zero and hangs); the
+/// lifted form computes count = (256 - idx) / stride, which matches every
+/// terminating entry state.
+#[derive(Clone)]
+struct FillLoopPlan {
+    /// Exclusive end (index just past the back-branch).
+    end: usize,
+    sms_base: u16,
+    stride: u8,
+    use_x: bool,
+}
+
+fn match_fill_loop(ops: &[ir::Op], i: usize, routine: &ir::Routine) -> Option<FillLoopPlan> {
+    use ir::{Cond, Op};
+    let label = match ops.get(i)? {
+        Op::Label(l) => l.clone(),
+        _ => return None,
+    };
+    let sta = skip_source(ops, i + 1);
+    let (base, region, use_x) = match ops.get(sta)? {
+        Op::StaMem {
+            addr: ir::AddrExpr::AbsIndexedY(b),
+            region,
+        } => (*b, *region, false),
+        Op::StaMem {
+            addr: ir::AddrExpr::AbsIndexedX(b),
+            region,
+        } => (*b, *region, true),
+        _ => return None,
+    };
+    if !matches!(
+        region,
+        ir::MemRegion::Ram | ir::MemRegion::RamMirror | ir::MemRegion::Stack
+    ) {
+        return None;
+    }
+    let sms_base = indexed_base_to_sms(base, region);
+    // The whole 256-byte index window must stay inside the RAM shadow.
+    if sms_base < 0xC000 || sms_base.checked_add(0xFF)? > 0xC7FF {
+        return None;
+    }
+    // Count the INY/INX run.
+    let mut j = skip_source(ops, sta + 1);
+    let mut stride = 0u16;
+    loop {
+        match (ops.get(j)?, use_x) {
+            (Op::Iny, false) | (Op::Inx, true) => {
+                stride += 1;
+                j = skip_source(ops, j + 1);
+            }
+            _ => break,
+        }
+    }
+    if stride == 0 || 256 % stride != 0 {
+        return None;
+    }
+    match ops.get(j)? {
+        Op::BranchIf {
+            cond: Cond::NotZero,
+            target,
+        } if *target == label => {}
+        _ => return None,
+    }
+    // The loop head must have no referrer besides the back-branch.
+    let refs = routine
+        .ops
+        .iter()
+        .filter(|op| match op {
+            Op::BranchIf { target, .. } | Op::Jmp { target } => *target == label,
+            _ => false,
+        })
+        .count();
+    if refs != 1 {
+        return None;
+    }
+    Some(FillLoopPlan {
+        end: j + 1,
+        sms_base,
+        stride: stride as u8,
+        use_x,
+    })
+}
+
+fn emit_fill_loop(program: &mut z80_emit::Program, plan: &FillLoopPlan) {
+    let max_count = (256 / plan.stride as u16) as u8; // 256/stride, mod-256 for stride 1
+    let loop_top = program.fresh_label("fill_loop");
+    let count_ok = program.fresh_label("fill_count_ok");
+    // C = fill value (A preserved for the 6502), HL = base + idx,
+    // B = (256 - idx) / stride with the idx=0 case meaning a full window.
+    program.ld_c_a();
+    program.ld_hl_imm(plan.sms_base);
+    if plan.use_x {
+        program.ld_a_d();
+    } else {
+        program.ld_a_e_reg();
+    }
+    program.ld_b_a();
+    program.ld_a_imm(0);
+    program.sub_b();
+    for _ in 0..plan.stride.trailing_zeros() {
+        program.rrca();
+    }
+    if plan.stride > 1 {
+        program.and_imm((0xFFu16 >> plan.stride.trailing_zeros()) as u8);
+    }
+    program.or_a();
+    program.jr_nz(&count_ok);
+    program.ld_a_imm(max_count);
+    program.label(&count_ok);
+    program.ld_b_a();
+    if plan.use_x {
+        program.ld_a_d();
+    } else {
+        program.ld_a_e_reg();
+    }
+    program.add_a_l();
+    program.ld_l_a();
+    program.ld_a_h();
+    program.adc_a_imm0();
+    program.ld_h_a();
+    program.label(&loop_top);
+    program.ld_hl_ptr_c();
+    for _ in 0..plan.stride {
+        program.inc_hl();
+    }
+    program.djnz(&loop_top);
+    // Architectural exit state: idx = 0; Z set, N clear; A restored.
+    if plan.use_x {
+        program.ld_d_imm(0);
+    } else {
+        program.ld_e_imm(0);
+    }
+    program.ld_a_abs(sms_layout::SHADOW_P);
+    program.and_imm(0x7D); // clear N, keep the rest
+    program.or_imm(0x02); // set Z
+    program.ld_abs_a(sms_layout::SHADOW_P);
+    program.ld_a_c();
+}
+
+/// S1.3b: flag-aware memory shift/rotate (ASL/LSR/ROL/ROR on memory).
+/// The CB (hl) forms produce native S/Z/C directly; shadow-P is read only
+/// when the op consumes carry (ROL/ROR) and written only when a flag
+/// reader survives an unfused site. A (untouched by 6502 memory shifts)
+/// is preserved without the native stack.
+#[allow(clippy::too_many_arguments)]
+fn emit_shift_mem(
+    program: &mut z80_emit::Program,
+    routine: &ir::Routine,
+    ops_slice: &[ir::Op],
+    op_idx: usize,
+    op: &ir::Op,
+    fused: Option<usize>,
+    opts: &LowerOptions,
+) {
+    use ir::Op;
+    let (addr, region, consumes_carry) = match op {
+        Op::AslMem { addr, region } => (addr, *region, false),
+        Op::LsrMem { addr, region } => (addr, *region, false),
+        Op::RolMem { addr, region } => (addr, *region, true),
+        Op::RorMem { addr, region } => (addr, *region, true),
+        _ => unreachable!("emit_shift_mem on non-shift op"),
+    };
+    emit_hl_for_rw_mem(program, addr, region);
+    if consumes_carry {
+        program.ld_b_a();
+        program.ld_a_abs(sms_layout::SHADOW_P);
+        program.rrca();
+        program.ld_a_b();
+    }
+    match op {
+        Op::AslMem { .. } => program.sla_hl_ptr(),
+        Op::LsrMem { .. } => program.srl_hl_ptr(),
+        Op::RolMem { .. } => program.rl_hl_ptr(),
+        Op::RorMem { .. } => program.rr_hl_ptr(),
+        _ => unreachable!(),
+    }
+    if let Some(end) = fused {
+        emit_fused_branches(
+            program,
+            routine,
+            ops_slice,
+            op_idx + 1,
+            end,
+            opts.emit_source_comments,
+            direct_cond_to_z80,
+        );
+        return;
+    }
+    if !flags_live_after(ops_slice, op_idx, F_N | F_Z | F_C, opts.routine_flag_reads) {
+        return;
+    }
+    // Materialize shadow N/Z/C once from the result and the native carry.
+    program.ld_c_a();
+    program.ld_b_imm(0);
+    program.rl_b(); // B = new 6502 carry bit
+    program.ld_a_hl_ptr(); // shifted result
+    program.ld_l_a();
+    program.ld_h_imm(0x3E);
+    program.ld_a_abs(sms_layout::SHADOW_P);
+    program.and_imm(0x7C);
+    program.or_b();
+    program.or_hl_ptr();
+    program.ld_abs_a(sms_layout::SHADOW_P);
+    program.ld_a_c();
+}
+
 fn emit_add16(program: &mut z80_emit::Program, plan: &Add16Plan) {
     program.comment("[lifted 16-bit add]");
     // low byte: A = lo_src + lo_op  (CLC absorbed → plain add)
@@ -2654,6 +2962,19 @@ pub fn lower_routine(
             copy_loop_plans[i] = Some(plan);
         }
     }
+    // S1.3c: strided fill-until-wrap loops (lifted whole).
+    let mut fill_loop_plans: Vec<Option<FillLoopPlan>> = vec![None; ops_slice.len()];
+    for i in 0..ops_slice.len() {
+        if fuse_consumed[i] || copy_loop_plans[i].is_some() {
+            continue;
+        }
+        if let Some(plan) = match_fill_loop(ops_slice, i, routine) {
+            for slot in fuse_consumed.iter_mut().take(plan.end).skip(i + 1) {
+                *slot = true;
+            }
+            fill_loop_plans[i] = Some(plan);
+        }
+    }
     // 16-bit add idiom next (it spans 7 ops and subsumes the LDA/CLC/ADC
     // fusions that would otherwise match its pieces).
     for i in 0..ops_slice.len() {
@@ -2667,8 +2988,67 @@ pub fn lower_routine(
             add16_plans[i] = Some(plan);
         }
     }
+    // S1.3a: carry-threaded shift/rotate runs. Matched before the generic
+    // single-producer fusions so a run's head isn't claimed as a lone
+    // ASL/LSR fusion.
+    let mut shift_run_plans: Vec<Option<ShiftRunPlan>> = vec![None; ops_slice.len()];
+    {
+        let is_shift = |op: &Op| matches!(op, Op::AslA | Op::LsrA | Op::RolA | Op::RorA);
+        let mut i = 0;
+        while i < ops_slice.len() {
+            if fuse_consumed[i]
+                || copy_loop_plans[i].is_some()
+                || add16_plans[i].is_some()
+                || !is_shift(&ops_slice[i])
+            {
+                i += 1;
+                continue;
+            }
+            let mut shifts = vec![ops_slice[i].clone()];
+            let mut last_idx = i;
+            let mut j = i + 1;
+            while j < ops_slice.len() {
+                match &ops_slice[j] {
+                    Op::Source { .. } => j += 1,
+                    op if is_shift(op) && !fuse_consumed[j] => {
+                        shifts.push(op.clone());
+                        last_idx = j;
+                        j += 1;
+                    }
+                    _ => break,
+                }
+            }
+            // Lone ASL/LSR keep their existing tuned paths; runs and lone
+            // ROL/ROR (whose only path was the full shadow body) plan here.
+            if shifts.len() == 1 && matches!(ops_slice[i], Op::AslA | Op::LsrA) {
+                i = j;
+                continue;
+            }
+            let fuse_end = scan_run(last_idx, direct_cond_to_z80, F_N | F_Z | F_C);
+            let write_back = fuse_end.is_none()
+                && flags_live_after(
+                    ops_slice,
+                    last_idx,
+                    F_N | F_Z | F_C,
+                    opts.routine_flag_reads,
+                );
+            let consumes_carry = matches!(ops_slice[i], Op::RolA | Op::RorA);
+            let plan_end = fuse_end.unwrap_or(last_idx + 1);
+            for slot in fuse_consumed.iter_mut().take(plan_end).skip(i + 1) {
+                *slot = true;
+            }
+            shift_run_plans[i] = Some(ShiftRunPlan {
+                shifts,
+                last_idx,
+                fuse_end,
+                consumes_carry,
+                write_back,
+            });
+            i = j;
+        }
+    }
     for i in 0..ops_slice.len() {
-        if fuse_consumed[i] || add16_plans[i].is_some() {
+        if fuse_consumed[i] || add16_plans[i].is_some() || shift_run_plans[i].is_some() {
             continue;
         }
         let (end, target) = match &ops_slice[i] {
@@ -2697,6 +3077,15 @@ pub fn lower_routine(
                 scan_run(i, direct_cond_to_z80, F_N | F_Z | F_C),
                 &mut fuse_direct_end,
             ),
+            // S1.3b: memory shifts via the CB (hl) forms — native S/Z/C.
+            Op::AslMem { .. } | Op::LsrMem { .. } | Op::RolMem { .. } | Op::RorMem { .. } => (
+                scan_run(i, direct_cond_to_z80, F_N | F_Z | F_C),
+                &mut fuse_direct_end,
+            ),
+            // INC/DEC memory set only N/Z; `inc/dec (hl)` gives native S/Z.
+            Op::IncMem { .. } | Op::DecMem { .. } => {
+                (scan_run(i, nz_cond_to_z80, F_N | F_Z), &mut fuse_nz_end)
+            }
             // LDA/AND/ORA/EOR (imm) set only N/Z (C/V untouched, stay valid
             // in shadow P). AND/ORA/EOR set Z80 flags directly; LDA needs a
             // trailing `or a` (added at emit time).
@@ -2737,9 +3126,24 @@ pub fn lower_routine(
             a_holds_nz = false; // A is dead post-loop; index restored explicitly
             continue;
         }
+        if let Some(plan) = &fill_loop_plans[op_idx] {
+            // The loop-head label still exists for the (single) back-branch
+            // reference bookkeeping; emit it, then the lifted fill.
+            if let Op::Label(name) = op {
+                program.label(name);
+            }
+            emit_fill_loop(program, plan);
+            a_holds_nz = false; // exit N/Z are the INY/INX wrap, not A's
+            continue;
+        }
         if let Some(plan) = &add16_plans[op_idx] {
             emit_add16(program, plan);
             a_holds_nz = false; // lifted add's flags are dead; don't claim A's N/Z
+            continue;
+        }
+        if let Some(plan) = &shift_run_plans[op_idx] {
+            emit_shift_run(program, routine, ops_slice, plan, opts.emit_source_comments);
+            a_holds_nz = true; // A holds the run result; its N/Z are the live N/Z
             continue;
         }
         // Native N/Z branch: re-derive the flag from A instead of reading
@@ -3078,8 +3482,10 @@ pub fn lower_routine(
                 ) {
                     return Err(LowerError::UnsupportedMapperStore {
                         pc: None,
-                        reason: "STX to expansion space, PRG RAM, or PRG ROM is unsupported"
-                            .to_string(),
+                        reason: format!(
+                            "STX to expansion space, PRG RAM, or PRG ROM is unsupported \
+                             (addr {addr:?}, region {region:?})"
+                        ),
                     });
                 }
                 // STX must NOT modify A. Bracket with push/pop AF, mirror
@@ -3655,9 +4061,16 @@ pub fn lower_routine(
                 }
             }
 
-            Op::AslMem { addr, region } => {
-                emit_hl_for_rw_mem(program, addr, *region);
-                program.call(ASL_MEM);
+            Op::AslMem { .. } => {
+                emit_shift_mem(
+                    program,
+                    routine,
+                    ops_slice,
+                    op_idx,
+                    op,
+                    fuse_direct_end[op_idx],
+                    opts,
+                );
             }
 
             Op::LsrA => {
@@ -3679,27 +4092,48 @@ pub fn lower_routine(
                 }
             }
 
-            Op::LsrMem { addr, region } => {
-                emit_hl_for_rw_mem(program, addr, *region);
-                program.call(LSR_MEM);
+            Op::LsrMem { .. } => {
+                emit_shift_mem(
+                    program,
+                    routine,
+                    ops_slice,
+                    op_idx,
+                    op,
+                    fuse_direct_end[op_idx],
+                    opts,
+                );
             }
 
             Op::RolA => {
                 emit_rol_a_flags_inline(program);
             }
 
-            Op::RolMem { addr, region } => {
-                emit_hl_for_rw_mem(program, addr, *region);
-                program.call(ROL_MEM);
+            Op::RolMem { .. } => {
+                emit_shift_mem(
+                    program,
+                    routine,
+                    ops_slice,
+                    op_idx,
+                    op,
+                    fuse_direct_end[op_idx],
+                    opts,
+                );
             }
 
             Op::RorA => {
                 emit_ror_a_flags_inline(program);
             }
 
-            Op::RorMem { addr, region } => {
-                emit_hl_for_rw_mem(program, addr, *region);
-                program.call(ROR_MEM);
+            Op::RorMem { .. } => {
+                emit_shift_mem(
+                    program,
+                    routine,
+                    ops_slice,
+                    op_idx,
+                    op,
+                    fuse_direct_end[op_idx],
+                    opts,
+                );
             }
 
             // ------------------------------------------------------------------
@@ -3707,7 +4141,19 @@ pub fn lower_routine(
             // ------------------------------------------------------------------
             Op::IncMem { addr, region } => {
                 emit_hl_for_rw_mem(program, addr, *region);
-                if !flags_live_after(ops_slice, op_idx, F_N | F_Z, opts.routine_flag_reads) {
+                if let Some(end) = fuse_nz_end[op_idx] {
+                    // `inc (hl)` sets native S/Z: fuse the trailing branches.
+                    program.inc_hl_ptr();
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        nz_cond_to_z80,
+                    );
+                } else if !flags_live_after(ops_slice, op_idx, F_N | F_Z, opts.routine_flag_reads) {
                     // H.8: no flag consumer — the helper's only extra work
                     // is the shadow N/Z update.
                     program.inc_hl_ptr();
@@ -3718,7 +4164,18 @@ pub fn lower_routine(
 
             Op::DecMem { addr, region } => {
                 emit_hl_for_rw_mem(program, addr, *region);
-                if !flags_live_after(ops_slice, op_idx, F_N | F_Z, opts.routine_flag_reads) {
+                if let Some(end) = fuse_nz_end[op_idx] {
+                    program.dec_hl_ptr();
+                    emit_fused_branches(
+                        program,
+                        routine,
+                        ops_slice,
+                        op_idx + 1,
+                        end,
+                        opts.emit_source_comments,
+                        nz_cond_to_z80,
+                    );
+                } else if !flags_live_after(ops_slice, op_idx, F_N | F_Z, opts.routine_flag_reads) {
                     program.dec_hl_ptr();
                 } else {
                     program.call(DEC_MEM);
@@ -3842,8 +4299,25 @@ pub fn lower_routine(
                 // gate so no native far-gate return frame is left behind.
                 // Runtime helpers (rt_*) live in bank 0 and are reachable via
                 // plain jp.
+                // A tail JMP into a replaced routine behaves like the
+                // replacement followed by the original's RTS: call the
+                // hook, then return to this routine's caller.
+                if let Some(profile) = opts.profile
+                    && let Some(replacement) =
+                        parse_label_addr(target).and_then(|a| profile.replacement_for(a))
+                {
+                    program.call(&replacement.runtime_label.clone());
+                    if profile.native_calls() {
+                        program.ret();
+                    } else {
+                        program.jp(TRANSLATED_RTS);
+                    }
+                    continue;
+                }
                 if target.starts_with("rt_") {
                     program.jp(target);
+                } else if opts.profile.is_some_and(|p| p.native_calls()) {
+                    program.native_tail_jmp(target);
                 } else {
                     program.translated_tail_jmp(target);
                 }
@@ -3853,6 +4327,14 @@ pub fn lower_routine(
                 target,
                 return_addr,
             } => {
+                if opts.profile.is_some_and(|p| p.native_calls()) {
+                    return Err(LowerError::UnsupportedMapperStore {
+                        pc: None,
+                        reason: "return-escape sites are incompatible with \
+                                 stack_discipline = \"native\""
+                            .to_string(),
+                    });
+                }
                 // Some 6502 tail escapes discard their own JSR return bytes
                 // with PLA/PLA, then let a later RTS return through the caller
                 // below. Pop the equivalent translated frame and materialize
@@ -3887,6 +4369,8 @@ pub fn lower_routine(
                 // `call` is correct and faster.
                 if target.starts_with("rt_") {
                     program.call(target);
+                } else if opts.profile.is_some_and(|p| p.native_calls()) {
+                    program.native_call(target);
                 } else {
                     program.translated_call(target);
                 }
@@ -3914,6 +4398,7 @@ pub fn lower_routine(
                 target_entry_a,
             } => {
                 let banked_mapper = opts.profile.is_some_and(|p| p.rom.mapper == 2);
+                let native_calls = opts.profile.is_some_and(|p| p.native_calls());
                 if targets.is_empty() {
                     program.comment("JumpEngineCall with empty targets — unreachable".to_string());
                     program.call(UNRESOLVED_JSR);
@@ -3939,6 +4424,8 @@ pub fn lower_routine(
                                 *stack_return_bytes,
                                 target_entry_a,
                                 banked_mapper,
+                                native_calls,
+                                opts.profile,
                             );
                         } else {
                             let skip = program.fresh_label("je_skip");
@@ -3953,6 +4440,8 @@ pub fn lower_routine(
                                 *stack_return_bytes,
                                 target_entry_a,
                                 banked_mapper,
+                                native_calls,
+                                opts.profile,
                             );
                             program.label(&skip);
                         }
@@ -3961,7 +4450,11 @@ pub fn lower_routine(
             }
 
             Op::Rts => {
-                program.jp(TRANSLATED_RTS);
+                if opts.profile.is_some_and(|p| p.native_calls()) {
+                    program.ret();
+                } else {
+                    program.jp(TRANSLATED_RTS);
+                }
             }
 
             Op::Rti => {
@@ -4065,21 +4558,90 @@ fn emit_jump_engine_target(
     stack_return_bytes: u8,
     target_entry_a: &[u8],
     banked_mapper: bool,
+    native_calls: bool,
+    profile: Option<&profile::Profile>,
 ) {
     if let Some(&entry_a) = target_entry_a.get(index) {
         program.ld_a_imm(entry_a);
     }
-    if let Some(continuation) = return_target
-        && !tail_indices.contains(&index)
-    {
-        program.translated_call_with_continuation(target, continuation, stack_return_bytes);
-    } else if banked_mapper
-        && let Some(addr) = target
+    if native_calls {
+        // Native stack discipline: tail entries transfer directly (the
+        // handler's RET unwinds to the outer caller through the native
+        // stack); stack-aware entries native-call the handler, then consume
+        // the emulated-stack return bytes the NES caller pushed before
+        // resuming the statically resolved continuation. Equivalent to the
+        // software frame's bit-6 consumption as long as the handler never
+        // reads S — part of the `stack_discipline = "native"` assertion.
+        //
+        // Jump-engine targets may be profile display NAMES rather than
+        // L_XXXX labels; resolve both forms so `[[replacement]]` hooks
+        // intercept dispatched handlers too.
+        let hook = profile
+            .and_then(|p| {
+                parse_label_addr(target)
+                    .or_else(|| {
+                        p.functions
+                            .iter()
+                            .find(|f| f.name == *target)
+                            .map(|f| f.addr)
+                    })
+                    .and_then(|a| p.replacement_for(a))
+            })
+            .map(|r| r.runtime_label.clone());
+        if let Some(continuation) = return_target
+            && !tail_indices.contains(&index)
+        {
+            match &hook {
+                Some(h) => program.call(h),
+                None => program.native_call(target),
+            }
+            if stack_return_bytes > 0 {
+                program.ld_c_a();
+                program.ld_a_abs(sms_layout::SHADOW_S);
+                program.add_a_imm(stack_return_bytes);
+                program.ld_abs_a(sms_layout::SHADOW_S);
+                program.ld_a_c();
+            }
+            program.native_tail_jmp(continuation);
+        } else {
+            match &hook {
+                Some(h) => {
+                    program.call(h);
+                    program.ret();
+                }
+                None => program.native_tail_jmp(target),
+            }
+        }
+        return;
+    }
+    // Unqualified `L_8xxx`-style labels on a banked mapper name an address in
+    // the switchable window: they resolve against the live UxROM bank through
+    // the runtime's bank-aware dispatcher instead of a translated label.
+    let banked_window_addr = if banked_mapper {
+        target
             .strip_prefix("L_")
             .filter(|hex| !hex.contains('_'))
             .and_then(|hex| u16::from_str_radix(hex, 16).ok())
             .filter(|addr| (0x8000..0xC000).contains(addr))
+    } else {
+        None
+    };
+    if let Some(continuation) = return_target
+        && !tail_indices.contains(&index)
     {
+        match banked_window_addr {
+            Some(addr) => {
+                program.translated_banked_call_with_continuation(
+                    addr,
+                    continuation,
+                    stack_return_bytes,
+                );
+            }
+            None => {
+                program.translated_call_with_continuation(target, continuation, stack_return_bytes)
+            }
+        }
+    } else if let Some(addr) = banked_window_addr {
         program.translated_banked_tail_dispatch(addr);
     } else {
         program.translated_tail_jmp(target);
@@ -4312,11 +4874,16 @@ chr_kib = 8
         program.ret();
         program.label("data_prg_high");
         program.ret();
+        program.label("data_prg_low");
+        program.ret();
         lower_routine(&mut program, &routine, &opts).unwrap();
         let build = program.finish().unwrap();
 
         assert_eq!(build.asm.matches("ld a,:data_prg_high").count(), 2);
-        assert_eq!(build.asm.matches("call rt_restore_prg_window").count(), 2);
+        // The restore is inlined (two instructions); no helper call: $FFFC
+        // is 0 at op boundaries and irq_handler restores the slot-2 bank.
+        assert_eq!(build.asm.matches("ld a,:data_prg_low").count(), 2);
+        assert!(!build.asm.contains("call rt_restore_prg_window"));
         assert!(!build.asm.contains("call rt_read_prg_high"));
         assert!(!build.asm.contains("call rt_read_prg_high_indexed"));
     }
@@ -4670,27 +5237,35 @@ chr_kib = 0
     }
 
     #[test]
-    fn adc_abs_indexed_y_runtime_read_preserves_accumulator() {
+    fn adc_abs_indexed_y_direct_read_preserves_accumulator() {
         let build = lower_and_finish(vec![Op::AdcMem {
-            // $07D7,Y can cross the directly folded $C000-$C7FF RAM window,
-            // so it must use rt_read_indexed. The helper clobbers BC; saving
-            // A in C here corrupted SMB's DigitsMathRoutine (ADC $07D7,Y).
+            // $07D7,Y sits at the top of the directly folded $C000-$C7FF RAM
+            // window and takes the inline read. Historical guarantee (from the
+            // rt_read_indexed era, which corrupted SMB's DigitsMathRoutine by
+            // parking A in a helper-clobbered register): the accumulator must
+            // survive the operand fetch, with the operand landing in B.
             addr: AddrExpr::AbsIndexedY(0x07D7),
             region: MemRegion::Ram,
         }]);
 
-        let call = build
-            .asm
-            .find("call rt_read_indexed")
-            .expect("indexed ADC should call rt_read_indexed");
-        let before = &build.asm[..call];
-        let after = &build.asm[call..];
         assert!(
-            before.contains("push af"),
-            "A must be stacked before helper"
+            !build.asm.contains("call rt_read_indexed"),
+            "in-window indexed ADC should read inline, not via helper"
         );
-        assert!(after.contains("pop af"), "A must be restored after helper");
-        assert!(after.contains("adc a,b"), "operand should remain in B");
+        // Inline shape: A parked in C, EA built in HL from the resident Y (E),
+        // operand into B, A restored from C before the add.
+        assert!(build.asm.contains("ld c,a"), "A must be parked in C");
+        assert!(build.asm.contains("ld b,(hl)"), "operand should land in B");
+        assert!(build.asm.contains("adc a,b"), "operand should remain in B");
+        let park = build.asm.find("ld c,a").unwrap();
+        let restore = build.asm[park..]
+            .find("ld a,c")
+            .expect("A must be restored from C after the operand fetch");
+        let between = &build.asm[park..park + restore];
+        assert!(
+            !between.contains("ld c,") || between.find("ld c,").unwrap() == 0,
+            "nothing may clobber C while A is parked there"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -5015,6 +5590,51 @@ chr_kib = 0
         assert!(build.asm.contains("or $40"));
         assert!(build.asm.contains("jp L_returning"));
         assert!(build.asm.contains("jp L_tail"));
+    }
+
+    #[test]
+    fn stack_aware_jump_engine_uses_banked_dispatch_for_window_target() {
+        let prof = profile::load_from_str(
+            r#"
+[rom]
+name = "uxrom-test"
+mapper = 2
+prg_kib = 128
+chr_kib = 0
+"#,
+        )
+        .unwrap();
+        let opts = LowerOptions {
+            profile: Some(&prof),
+            emit_source_comments: true,
+            routine_flag_reads: None,
+        };
+        let routine = make_routine(
+            "test_routine",
+            vec![Op::JumpEngineCall {
+                targets: vec!["L_8123".to_string()],
+                return_target: Some("L_cont".to_string()),
+                tail_indices: Vec::new(),
+                stack_return_bytes: 2,
+                target_entry_a: vec![0x81],
+            }],
+        );
+        let mut prog = z80_emit::Program::new();
+        define_runtime_stubs(&mut prog);
+        prog.org(0x0000);
+        prog.label("L_cont");
+        prog.ret();
+        lower_routine(&mut prog, &routine, &opts).unwrap();
+        let build = prog.finish().unwrap();
+
+        // Continuation frame (bit 6 = consume 2 emulated-stack bytes on the
+        // handler's RTS) followed by the live-bank literal dispatch.
+        assert!(build.asm.contains("ld a,$81"));
+        assert!(build.asm.contains("ld bc,L_cont"));
+        assert!(build.asm.contains("or $40"));
+        assert!(build.asm.contains("ld bc,$8123"));
+        assert!(build.asm.contains("jp rt_banked_tail_dispatch"));
+        assert!(!build.asm.contains("jp rt_translated_tail_gate"));
     }
 
     // -------------------------------------------------------------------

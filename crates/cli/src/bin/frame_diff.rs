@@ -1162,10 +1162,95 @@ fn is_deferred_audio_addr(addr: usize) -> bool {
 /// pre-roll through SMS boot + SMB's translated reset-init until SMB
 /// enables NMI (PPUCTRL shadow $CB08 bit 7), capture init RAM, then
 /// fire one IRQ per frame (gated on the same NMI-enable bit).
+/// FD_PROFILE=1: attribute subject cycles inside the measured NMI window of
+/// steady frames (last third) to WLA symbols from the `.sym` file next to
+/// the ROM. Key = (slot region, mapped bank, pc).
+fn profile_report(
+    prof: &std::collections::HashMap<(u8, u8, u16), u64>,
+    sym_path: &std::path::Path,
+) {
+    // Parse "[labels]" lines of form "bb:aaaa name".
+    let mut tables: std::collections::HashMap<(u8, u8), Vec<(u16, String)>> =
+        std::collections::HashMap::new();
+    if let Ok(text) = std::fs::read_to_string(sym_path) {
+        let mut in_labels = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_labels = line == "[labels]";
+                continue;
+            }
+            if !in_labels || line.is_empty() || line.starts_with(';') {
+                continue;
+            }
+            let Some((bank_s, rest)) = line.split_once(':') else {
+                continue;
+            };
+            let Some((addr_s, name)) = rest.split_once(' ') else {
+                continue;
+            };
+            let (Ok(bank), Ok(addr)) = (
+                u8::from_str_radix(bank_s, 16),
+                u16::from_str_radix(addr_s, 16),
+            ) else {
+                continue;
+            };
+            let region = match addr {
+                0x0000..=0x3FFF => 0u8,
+                0x4000..=0x7FFF => 1,
+                _ => 2,
+            };
+            tables
+                .entry((region, bank))
+                .or_default()
+                .push((addr, name.to_string()));
+        }
+    } else {
+        eprintln!("  [profile] no sym file at {}", sym_path.display());
+    }
+    for v in tables.values_mut() {
+        v.sort();
+    }
+    let resolve = |region: u8, bank: u8, pc: u16| -> String {
+        let bank = if region == 0 { 0 } else { bank };
+        if let Some(tab) = tables.get(&(region, bank)) {
+            let i = tab.partition_point(|(a, _)| *a <= pc);
+            if i > 0 {
+                let (addr, name) = &tab[i - 1];
+                return format!("{name} (+{:X})", pc - addr);
+            }
+        }
+        format!("?r{region}b{bank:02X}:{pc:04X}")
+    };
+    // Aggregate per symbol (drop the +offset for grouping).
+    let mut by_sym: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let total: u64 = prof.values().sum();
+    for (&(region, bank, pc), &cyc) in prof {
+        let sym = resolve(region, bank, pc);
+        let base = sym.split(" (+").next().unwrap_or(&sym).to_string();
+        *by_sym.entry(base).or_default() += cyc;
+    }
+    let mut rows: Vec<(String, u64)> = by_sym.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    eprintln!("  [profile] steady-frame NMI cycles by symbol (total {total}):");
+    let mut cum = 0u64;
+    for (name, cyc) in rows.iter().take(45) {
+        cum += cyc;
+        eprintln!(
+            "    {:>10} cyc  {:5.1}%  (cum {:5.1}%)  {}",
+            cyc,
+            *cyc as f64 * 100.0 / total.max(1) as f64,
+            cum as f64 * 100.0 / total.max(1) as f64,
+            name
+        );
+    }
+}
+
 fn run_subject(
     rom: Vec<u8>,
     frames: usize,
     timeline: &ButtonTimeline,
+    sym_path: Option<std::path::PathBuf>,
 ) -> ([u8; 0x800], Vec<[u8; 0x800]>) {
     use z80_emu::{Bus, Cpu};
     let mut cpu = Cpu::new();
@@ -1320,6 +1405,12 @@ fn run_subject(
     let measure_nmi = std::env::var("FD_MEASURE_NMI").is_ok();
     let mut nmi_costs: Vec<usize> = Vec::new();
 
+    // FD_PROFILE=1 — per-symbol cycle attribution over the same NMI window,
+    // steady frames only (last third, matching steady_avg).
+    let profile = std::env::var("FD_PROFILE").is_ok();
+    let steady_start = frames.saturating_sub(frames / 3);
+    let mut prof: std::collections::HashMap<(u8, u8, u16), u64> = std::collections::HashMap::new();
+
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for _frame in 0..frames {
         bus.port_dc = timeline.sms_dc_at(_frame);
@@ -1333,13 +1424,24 @@ fn run_subject(
         fire_irq(&mut cpu, &mut bus);
         let fired = cpu.pc == 0x0038;
         let mut nmi_done = !fired;
+        let prof_this_frame = profile && _frame >= steady_start;
         for _ in 0..subj_insn_per_frame() {
             if cpu.halted {
                 break;
             }
             bus.last_pc = cpu.pc;
+            let cyc0 = cpu.cycles;
             if cpu.step(&mut bus).is_err() {
                 break;
+            }
+            if prof_this_frame && !nmi_done {
+                let pc = bus.last_pc;
+                let key = match pc {
+                    0x0000..=0x3FFF => (0u8, 0u8, pc),
+                    0x4000..=0x7FFF => (1, bus.slot_bank[1], pc),
+                    _ => (2, bus.slot_bank[2], pc),
+                };
+                *prof.entry(key).or_default() += cpu.cycles - cyc0;
             }
             if !nmi_done && cpu.sp >= sp_before {
                 nmi_done = true;
@@ -1370,6 +1472,12 @@ fn run_subject(
             "  [NMI cost] frames={n} avg={} min={min} max={max} steady_avg={tail_avg} cycles/frame  (SMS budget ~59736)",
             total / n
         );
+    }
+    if profile
+        && !prof.is_empty()
+        && let Some(sym) = sym_path
+    {
+        profile_report(&prof, &sym);
     }
     (init_snap, snaps)
 }
@@ -1495,7 +1603,8 @@ fn main() {
         "Subject: running SMS ROM ({} bytes) for {frames} frames",
         rom.len()
     );
-    let (subj_init, subj_snaps) = run_subject(rom, frames, &timeline);
+    let sym_path = std::path::Path::new(&sms_path).with_extension("sym");
+    let (subj_init, subj_snaps) = run_subject(rom, frames, &timeline, Some(sym_path));
 
     // First, compare the init snapshot (RAM at the NMI-enable point).
     // If reset-init translation is faithful, these match and we move on
@@ -1691,11 +1800,43 @@ fn main() {
                 "\n{diverged_frames}/{frames} frames diverged (first at frame {f}). \
                  Persistently-diverging addresses (addr: #frames, first frame):"
             );
-            let mut hits: Vec<(usize, usize)> = addr_hits.into_iter().collect();
+            let mut hits: Vec<(usize, usize)> = addr_hits.iter().map(|(a, n)| (*a, *n)).collect();
             hits.sort_by(|a, b| b.1.cmp(&a.1));
             for (a, n) in hits.iter().take(30) {
                 let first = addr_first.get(a).copied().unwrap_or(0);
                 println!("    ${a:04X}: {n} frames, first={first}", a = a, n = n);
+            }
+            // Late-onset view: init artifacts diverge from frame 0 and crowd
+            // out the signal on long routes. The addresses whose FIRST
+            // divergence happens latest are the ones that snowball into
+            // end-of-route failures (traps, wrong-state dispatch).
+            let mut late: Vec<(usize, usize)> = addr_first
+                .iter()
+                .map(|(a, f)| (*a, *f))
+                .filter(|(_, f)| *f > 0)
+                .collect();
+            late.sort_by(|a, b| b.1.cmp(&a.1));
+            println!("\nLatest-onset divergences (addr, first diverging frame, values then):");
+            for (a, f) in late.iter().take(30) {
+                let rv = ref_snaps[*f][*a];
+                let sv = subj_snaps[*f][*a];
+                println!("    ${a:04X}: first={f} ref=${rv:02X} subj=${sv:02X}");
+            }
+            // Full ascending first-divergence timeline (opt-in): every
+            // address that ever diverged, in onset order, with hit counts.
+            // Transient one-frame diffs (phase noise) are distinguishable
+            // from persistent absences via the hit count.
+            if std::env::var("FD_FULL_TIMELINE").is_ok() {
+                let mut all: Vec<(usize, usize)> =
+                    addr_first.iter().map(|(a, f)| (*a, *f)).collect();
+                all.sort_by_key(|(_, f)| *f);
+                println!("\nFull first-divergence timeline (addr, first, hits, values at onset):");
+                for (a, f) in all {
+                    let rv = ref_snaps[f][a];
+                    let sv = subj_snaps[f][a];
+                    let n = addr_hits.get(&a).copied().unwrap_or(0);
+                    println!("    ${a:04X}: first={f} hits={n} ref=${rv:02X} subj=${sv:02X}");
+                }
             }
         }
     }

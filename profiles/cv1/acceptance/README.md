@@ -35,12 +35,20 @@ the large heart (`$0071=$0A`), and remain in gameplay state `$0018=$05`,
 substate `$0019=$06`:
 
 ```sh
-target/release/trace-sms out/cv1/sms.sms --steps 106200000 \
+target/release/trace-sms out/cv1/sms.sms --steps 116000000 \
   --pause-at-frame 600 \
   --buttons-script profiles/cv1/acceptance/heart-smoke.sms.buttons \
   --expect-no-trap --expect-ram 0x0071=0A \
   --expect-ram 0x0018=05 --expect-ram 0x0019=06
 ```
+
+The 116M-step budget (previously 106.2M) covers the slower whip animation
+since the banked-dispatch accumulator fix (`rt_banked_dispatch` parks entry A
+in `$CB15`): the whip sound trigger now receives the correct sound ID, the
+sound driver runs the SFX each frame, and game logic dilates roughly 2x
+against the tracer's 60K-step injection frames while the effect is active.
+The candle still breaks and the large heart still drops; Simon simply needs
+more injection frames to walk into it.
 
 The focused framebuffer must still show the Stage 1 playfield rather than the
 former white/stalled frame. The longer soak command is recorded in
