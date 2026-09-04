@@ -196,7 +196,31 @@ dynamic call-pair frequencies (PGO via FD_PROFILE), not static edges.
 | Hook: 8x16 sprite-pair OAM writer ($F282) | out/smb-s20 | 134,863 | 2.26× | ✓ | flip flag is $03 bit 1 (LSR LSR) — second elided-listing catch |
 | SAT page-walk uploads + cond-dec loop idiom | out/smb-s21 | 133,597 | 2.24× | ✓ | S1.3d lifts `LDA a,X/BEQ/DEC a,X/DEX/BPL` whole (2 sites; loop heads may keep outside referrers) |
 
-**Net: −48.9% (4.38× → 2.24× over budget).**
+| stub_body replacements | out/smb-s24 | 127,551 | 2.14× | ✓ | replaced bodies emit `call hook / ret`, so conditional branches from neighbors reach hooks too (found via a BNE into StoreMT); StoreMT + far-ncall split + (zp),Y inline landed alongside |
+| ROR-chain idiom (S1.3e) + hook loop tuning | out/smb-s28 | 125,721 | 2.10× | ✓ | PRNG rotate chain lifted; renderer-loop invariants hoisted; flush loops IFF-split |
+
+**Net: −51.9% (4.38× → 2.10× over budget).**
+
+Second negative packing result: profile-guided `hot_group` (from the new
+FD_PROFILE far-transfer histogram) also measured worse (126.7K → 128.3K)
+— each moved cluster exposes the next ring of callees. Bank placement
+needs a real edge-weighted placer over emitted sizes; the histogram
+instrumentation and the `hot_group` mechanism are in place for it.
+
+## The remaining path to sub-2.0× (full speed inside GPGX's ≤200% menu)
+
+~6.2K cycles short. The safe-increment well is dry; what remains:
+1. **Folded-BG model redesign** (~10K in the $2007 tile/attr paths). The
+   blocker for safe increments: skip/memo shortcuts interact with the
+   variant ring's recycling, whose staleness the RAM-parity oracle
+   cannot see. Prerequisite: a VDP-state oracle (extend frame-diff's
+   subject bus to model VRAM writes and compare against a golden
+   rendering of raw CIRAM) so rendering-model changes gate like RAM
+   changes do.
+2. **Edge-weighted bank placement** using the far-transfer histogram +
+   per-routine emitted sizes (three-pass layout).
+3. **Tier-3 relayout**, gated on the $00/$04/$06 pointer audit
+   (reports/relayout.txt).
 
 Toward sub-2.0× (full speed inside GPGX's standard ≤200% menu):
 needs ~14K more. Identified pools: enemy-parser region (~3.8%,

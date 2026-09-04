@@ -2902,6 +2902,152 @@ fn emit_cond_dec_loop(program: &mut z80_emit::Program, plan: &CondDecLoopPlan) {
     }
 }
 
+/// S1.7: inline (zp),Y read for a constant zero-page pointer (the common
+/// LDA (zp),Y). Mirrors rt_read_zp_ptr_y: 16-bit pointer from the zp pair,
+/// + Y, then RAM/mirror remap or a fixed-high PRG helper read. `zp = $FF`
+/// (page-wrap pair) keeps the helper. A := byte; clobbers BC/HL/flags.
+fn emit_read_zp_ptr_y_inline(p: &mut z80_emit::Program, zp: u8) {
+    use runtime_symbols::READ_ZP_PTR_Y;
+    if zp == 0xFF {
+        p.ld_b_imm(zp);
+        p.call(READ_ZP_PTR_Y);
+        return;
+    }
+    let high = p.fresh_label("rzpy_high");
+    let deref = p.fresh_label("rzpy_deref");
+    let mirror = p.fresh_label("rzpy_mirror");
+    let done = p.fresh_label("rzpy_done");
+    p.ld_hl_abs(sms_layout::NES_ZP_BASE + zp as u16);
+    p.ld_c_e();
+    p.ld_b_imm(0);
+    p.add_hl_bc();
+    p.ld_a_h();
+    p.cp_imm(0xC0);
+    p.jr_nc(&high);
+    p.cp_imm(0x08);
+    p.jr_nc(&mirror);
+    p.add_a_imm(0xC0);
+    p.ld_h_a();
+    p.jr(&deref);
+    p.label(&mirror);
+    p.cp_imm(0x20);
+    p.jr_nc(&deref);
+    p.and_imm(0x07);
+    p.add_a_imm(0xC0);
+    p.ld_h_a();
+    p.label(&deref);
+    p.ld_a_hl_ptr();
+    p.jr(&done);
+    p.label(&high);
+    p.call("rt_read_prg_high");
+    p.label(&done);
+}
+
+/// S1.3e: memory rotate chain (SMB's PRNG shape):
+///   L: ROR base,X ; INX ; DEY ; BNE L
+/// The 6502 carry threads through the chain of bytes; the lift loads
+/// shadow C once, runs `rr (hl)` across Y bytes, and materializes the
+/// final carry only if a reader survives. The head label may have other
+/// referrers (the seed's CLC/SEC paths converge there): external entries
+/// read the shadow carry those paths just wrote.
+/// Exit: X += entry Y, Y = 0, shadow Z set / N clear (the DEY), C = the
+/// final rotate's carry-out.
+#[derive(Clone)]
+struct RorChainPlan {
+    end: usize,
+    sms_base: u16,
+    write_flags: bool,
+}
+
+fn match_ror_chain(
+    ops: &[ir::Op],
+    i: usize,
+    routine: &ir::Routine,
+    reads: Option<&std::collections::HashMap<String, u8>>,
+) -> Option<RorChainPlan> {
+    use ir::{AddrExpr, Cond, Op};
+    let head = match ops.get(i)? {
+        Op::Label(l) => l.clone(),
+        _ => return None,
+    };
+    let ror = skip_source(ops, i + 1);
+    let (base, region) = match ops.get(ror)? {
+        Op::RorMem {
+            addr: AddrExpr::AbsIndexedX(b),
+            region,
+        } => (*b, *region),
+        _ => return None,
+    };
+    if !matches!(
+        region,
+        ir::MemRegion::Ram | ir::MemRegion::RamMirror | ir::MemRegion::Stack
+    ) {
+        return None;
+    }
+    let sms_base = indexed_base_to_sms(base, region);
+    if !(0xC000..=0xC7FF).contains(&sms_base) {
+        return None;
+    }
+    let inx = skip_source(ops, ror + 1);
+    if !matches!(ops.get(inx)?, Op::Inx) {
+        return None;
+    }
+    let dey = skip_source(ops, inx + 1);
+    if !matches!(ops.get(dey)?, Op::Dey) {
+        return None;
+    }
+    let bne = skip_source(ops, dey + 1);
+    match ops.get(bne)? {
+        Op::BranchIf {
+            cond: Cond::NotZero,
+            target,
+        } if *target == head => {}
+        _ => return None,
+    }
+    let _ = routine;
+    let write_flags = flags_live_after(ops, bne, F_N | F_Z | F_C, reads);
+    Some(RorChainPlan {
+        end: bne + 1,
+        sms_base,
+        write_flags,
+    })
+}
+
+fn emit_ror_chain(program: &mut z80_emit::Program, plan: &RorChainPlan) {
+    let loop_top = program.fresh_label("rorc_loop");
+    let done = program.fresh_label("rorc_done");
+    program.ld_hl_imm(plan.sms_base);
+    program.ld_c_d();
+    program.ld_b_imm(0);
+    program.add_hl_bc();
+    program.ld_c_a(); // park A: the 6502 loop never touches it
+    program.ld_a_d();
+    program.add_a_e();
+    program.ld_d_a_reg(); // X += Y up front (memory walk uses HL)
+    program.ld_b_e(); // count
+    program.ld_a_e();
+    program.or_a();
+    program.jr_z(&done); // Y = 0 would mean 256 DEYs on the 6502; SMB never does
+    program.ld_a_abs(sms_layout::SHADOW_P);
+    program.rrca(); // shadow C -> native carry
+    program.label(&loop_top);
+    program.rr_hl_ptr();
+    program.inc_hl();
+    program.djnz(&loop_top);
+    program.label(&done);
+    program.ld_e_imm(0);
+    if plan.write_flags {
+        program.ld_b_imm(0);
+        program.rl_b(); // B = final carry
+        program.ld_a_abs(sms_layout::SHADOW_P);
+        program.and_imm(0x7C); // clear N/Z/C
+        program.or_imm(0x02); // Z set (the final DEY hit zero)
+        program.or_b();
+        program.ld_abs_a(sms_layout::SHADOW_P);
+    }
+    program.ld_a_c(); // restore the parked accumulator
+}
+
 /// S1.3b: flag-aware memory shift/rotate (ASL/LSR/ROL/ROR on memory).
 /// The CB (hl) forms produce native S/Z/C directly; shadow-P is read only
 /// when the op consumes carry (ROL/ROR) and written only when a flag
@@ -3147,6 +3293,23 @@ pub fn lower_routine(
             cond_dec_plans[i] = Some(plan);
         }
     }
+    // S1.3e: memory rotate chains (lifted whole).
+    let mut ror_chain_plans: Vec<Option<RorChainPlan>> = vec![None; ops_slice.len()];
+    for i in 0..ops_slice.len() {
+        if fuse_consumed[i]
+            || copy_loop_plans[i].is_some()
+            || fill_loop_plans[i].is_some()
+            || cond_dec_plans[i].is_some()
+        {
+            continue;
+        }
+        if let Some(plan) = match_ror_chain(ops_slice, i, routine, opts.routine_flag_reads) {
+            for slot in fuse_consumed.iter_mut().take(plan.end).skip(i + 1) {
+                *slot = true;
+            }
+            ror_chain_plans[i] = Some(plan);
+        }
+    }
     // 16-bit add idiom next (it spans 7 ops and subsumes the LDA/CLC/ADC
     // fusions that would otherwise match its pieces).
     for i in 0..ops_slice.len() {
@@ -3314,6 +3477,14 @@ pub fn lower_routine(
             }
             emit_cond_dec_loop(program, plan);
             a_holds_nz = false; // exit N/Z are the DEX/DEY wrap, not A's
+            continue;
+        }
+        if let Some(plan) = &ror_chain_plans[op_idx] {
+            if let Op::Label(name) = op {
+                program.label(name);
+            }
+            emit_ror_chain(program, plan);
+            a_holds_nz = false;
             continue;
         }
         if let Some(plan) = &add16_plans[op_idx] {
@@ -3498,8 +3669,7 @@ pub fn lower_routine(
                         program.ld_a_hl_ptr();
                     }
                     (AddrExpr::IndirectY(zp), _) => {
-                        program.ld_b_imm(*zp);
-                        program.call(READ_ZP_PTR_Y);
+                        emit_read_zp_ptr_y_inline(program, *zp);
                     }
                     (AddrExpr::IndirectX(zp), _) => {
                         program.comment("WARN: IndirectX LDA not fully implemented");

@@ -1073,7 +1073,7 @@ impl Program {
     }
 
     /// Bank-aware cross-section call. Emits:
-    ///   call rt_far_call
+    ///   call rt_far_ncall
     ///   .dw <label>      ; logical slot-1 address
     ///   .db :<label>     ; bank number (resolved by WLA-DX at link)
     ///
@@ -1174,7 +1174,7 @@ impl Program {
         } else {
             self.ld_bc_label(label);
             self.emit_bytes_asm(&[0x26, 0x00], &format!("  ld h,:{label}"));
-            self.call("rt_far_tail");
+            self.call("rt_far_ncall");
         }
         self.referenced_labels.insert(label.to_string());
     }

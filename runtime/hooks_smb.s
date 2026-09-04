@@ -405,9 +405,13 @@ rt_smb_render_attr_tables:
   xor  a
   ld   ($c004), a
   ld   d, a                  ; X = 0
+  ; loop-invariant: pair-index base = ((($071F)&1)^1)<<1
+  ld   a, ($c71f)
+  and  $01
+  xor  $01
+  add  a, a
+  ld   ($ca29), a
 _rag_loop:
-  ld   a, d
-  ld   ($c001), a
   ; attr = ($06A1+X); $03 = attr & $C0; quadrant = attr >> 6
   ld   a, $a1
   add  a, d
@@ -420,35 +424,32 @@ _rag_loop:
   rlca
   rlca                       ; A = attr >> 6 (ASL/ROL/ROL on the 6502)
   ld   c, a
-  ; metatile gfx pointer: $06 = ($8B08+q), $07 = ($8B0C+q) — PRG low, direct
+  ; $02 = attr << 2; E = pair-base + $02 (zp $01/$06/$07 get their final
+  ; values after the loop — no mid-loop reader exists)
+  ld   a, b
+  add  a, a
+  add  a, a
+  ld   ($c002), a
+  ld   b, a
+  ld   a, ($ca29)
+  add  a, b
+  ld   e, a                  ; E = tile-pair index
+  ; tile pair via ($8B08+q)/($8B0C+q) + E — PRG low, direct
   ld   h, $8b
   ld   a, $08
   add  a, c
   ld   l, a
   ld   a, (hl)
-  ld   ($c006), a
+  ld   b, a                  ; B = ptr lo
   ld   a, $0c
   add  a, c
   ld   l, a
   ld   a, (hl)
-  ld   ($c007), a
-  ; $02 = attr << 2; Y = ((($071F)&1)^1)<<1 + $02
+  ld   c, a                  ; C = ptr hi
   ld   a, b
-  add  a, a
-  add  a, a
-  ld   ($c002), a
-  ld   c, a
-  ld   a, ($c71f)
-  and  $01
-  xor  $01
-  add  a, a
-  add  a, c
-  ld   e, a                  ; E = tile-pair index
-  ; tile pair = (ptr+E), (ptr+E+1) — ROM pages, direct slot-2 reads
-  ld   a, ($c006)
   add  a, e
   ld   l, a
-  ld   a, ($c007)
+  ld   a, c
   adc  a, $00
   ld   h, a
   ld   b, (hl)               ; tile 0
@@ -474,7 +475,7 @@ _rag_loop:
   ld   a, ($c005)
   or   a
   jr   nz, _rag_p1
-  ld   a, ($c001)
+  ld   a, d                  ; current column (zp $01 is written post-loop)
   rrca                       ; CY = column & 1
   jr   c, _rag_lsr2
   ld   hl, $c003             ; ROL $03 x3 (carry-in 0 on this path)
@@ -483,7 +484,7 @@ _rag_loop:
   rl   (hl)
   jr   _rag_attr
 _rag_p1:
-  ld   a, ($c001)
+  ld   a, d
   rrca
   jr   c, _rag_inc4
   ld   hl, $c003             ; LSR $03 x4
@@ -514,11 +515,30 @@ _rag_attr:
   ld   hl, $c000
   inc  (hl)
   inc  (hl)
-  ld   a, ($c001)
-  inc  a
-  ld   d, a
+  inc  d
+  ld   a, d
   cp   $0d
   jp   c, _rag_loop
+  ; architectural zp state the loop no longer writes per iteration:
+  ; $01 = 12 (the last column), $06/$07 = the last column's gfx pointer.
+  ld   a, $0c
+  ld   ($c001), a
+  ld   a, ($c6ad)            ; attr of column 12
+  and  $c0
+  rlca
+  rlca
+  ld   c, a
+  ld   h, $8b
+  ld   a, $08
+  add  a, c
+  ld   l, a
+  ld   a, (hl)
+  ld   ($c006), a
+  ld   a, $0c
+  add  a, c
+  ld   l, a
+  ld   a, (hl)
+  ld   ($c007), a
   ; trailer: Y = ($00)+3; ($0341+Y) = 0; ($0340) = Y
   ld   a, ($c000)
   add  a, $03
@@ -734,6 +754,152 @@ _gyo_skip:
   jp   p, _gyo_loop
   jr   _osb_exhaust
 
+; ─── rt_smb_store_mt ──────────────────────────────────────────────────────────
+; Replaces NES $9488 StoreMT (entered by tail JMP from two parser sites):
+; phase 1 renders the terrain bit patterns into the metatile buffer —
+; outer: $00 = [$93DC + ($0727<<1) + pass], $01 = index+1 (both PRG-low),
+; with the cloud-type quirk ($0743 set and X>0 masks $00 to bit 3);
+; inner: for each of 8 mask bits [$C68A+Y] (fixed-high PRG), if it hits
+; $00, buffer[$06A1+X] = $07; X caps at $0D (with the castle-floor $54
+; swap at X=$0B when $074E==2); outer repeats through the table bytes
+; until 13 rows are placed. Phase 2: JSR $9508 and $9BE1 (delegated to
+; the translated routines), then for X=0..$0C: A = buffer[$06A1+X],
+; zeroed unless >= threshold[$9504 + (attr>>6)], stored through the
+; block-buffer pointer ($06),Y with Y stepping +$10.
+; Exit: X = $0D, Y = last store index + $10, A = last stored value;
+; shadow Z and C set (the closing CPX #$0D), N clear. V dead.
+rt_smb_store_mt:
+  ld   ($c007), a            ; STA $07
+  ld   d, $00                ; X = 0
+  ld   a, ($c727)
+  add  a, a
+  ld   c, a                  ; C = terrain index*2 (the 6502 Y)
+_smt_outer:
+  ; PRG-low read of the terrain header byte
+  ld   h, $93
+  ld   a, $dc
+  add  a, c
+  ld   l, a
+  jr   nc, +
+  inc  h
++:
+  ld   a, (hl)
+  ld   ($c000), a            ; $00 = pattern byte
+  inc  c
+  ld   a, c
+  ld   ($c001), a            ; $01 = next index (STY after INY)
+  ; cloud-type quirk
+  ld   a, ($c743)
+  or   a
+  jr   z, _smt_inner_init
+  ld   a, d
+  or   a
+  jr   z, _smt_inner_init
+  ld   a, ($c000)
+  and  $08
+  ld   ($c000), a
+_smt_inner_init:
+  ; masks live in fixed-high PRG: map for the inner loop
+  ld   a, :data_prg_high
+  ld   ($ffff), a
+  ld   e, $00                ; Y = 0
+_smt_inner:
+  ld   h, $86                ; NES $C68A -> $868A
+  ld   a, $8a
+  add  a, e
+  ld   l, a
+  ld   a, (hl)               ; mask bit
+  ld   hl, $c000
+  and  (hl)                  ; BIT $00 (Z result only)
+  jr   z, _smt_nobit
+  ld   a, ($c007)
+  ld   h, $c6
+  ld   a, $a1
+  add  a, d
+  ld   l, a
+  ld   a, ($c007)
+  ld   (hl), a               ; buffer[$06A1+X] = $07
+_smt_nobit:
+  inc  d                     ; INX
+  ld   a, d
+  cp   $0d
+  jr   z, _smt_phase2        ; 13 rows placed
+  ld   a, ($c74e)
+  cp   $02
+  jr   nz, _smt_next
+  ld   a, d
+  cp   $0b
+  jr   nz, _smt_next
+  ld   a, $54
+  ld   ($c007), a            ; castle-floor metatile swap
+_smt_next:
+  inc  e                     ; INY
+  ld   a, e
+  cp   $08
+  jr   nz, _smt_inner
+  ; pattern byte exhausted: restore PRG-low, next header byte
+  ld   a, :data_prg_low
+  ld   ($ffff), a
+  ld   a, ($c001)
+  ld   c, a                  ; LDY $01 (always non-zero here)
+  jr   _smt_outer
+_smt_phase2:
+  ld   a, :data_prg_low
+  ld   ($ffff), a
+  ld   bc, L_9508
+  ld   h, :L_9508
+  call rt_far_ncall          ; JSR $9508 (translated)
+  ld   a, ($c6a0)
+  ld   bc, L_9BE1
+  ld   h, :L_9BE1
+  call rt_far_ncall          ; JSR $9BE1: sets the $06/$07 block pointer
+  ld   d, $00
+  ld   e, $00
+_smt_store:
+  ld   a, e
+  ld   ($c000), a            ; STY $00
+  ld   h, $c6
+  ld   a, $a1
+  add  a, d
+  ld   l, a
+  ld   b, (hl)               ; B = metatile
+  ld   a, b
+  and  $c0
+  rlca
+  rlca                       ; quadrant = attr >> 6 (ASL/ROL/ROL)
+  ld   c, a
+  ld   h, $95                ; thresholds at $9504 (PRG-low)
+  ld   a, $04
+  add  a, c
+  ld   l, a
+  ld   a, b
+  cp   (hl)                  ; CMP $9504,quadrant
+  jr   nc, _smt_keep
+  xor  a                     ; below threshold: store 0
+_smt_keep:
+  ld   c, a                  ; value to store
+  ld   a, ($c006)
+  add  a, e
+  ld   l, a
+  ld   a, ($c007)
+  adc  a, $c0                ; remap the NES block-buffer pointer
+  ld   h, a
+  ld   (hl), c               ; STA ($06),Y
+  ld   a, e
+  add  a, $10
+  ld   e, a                  ; Y += $10
+  inc  d
+  ld   a, d
+  cp   $0d
+  jr   c, _smt_store
+  ; exit: A = last stored value; shadow Z+C set, N clear (CPX #$0D)
+  ld   a, ($cb03)
+  and  $7c
+  or   $03
+  ld   ($cb03), a
+  ld   a, c
+  ret
+
 ; ─── rt_smb_draw_sprite_pair ──────────────────────────────────────────────────
 ; Replaces NES $F282 (entered by tail JMP): writes one 8x16 sprite pair
 ; into OAM staging from zp inputs — $00/$01 tiles (order swapped when
@@ -877,7 +1043,7 @@ _se_active:
   jr   z, _se_sq2
   ld   bc, L_F41B
   ld   h, :L_F41B
-  call rt_far_tail
+  call rt_far_ncall
 _se_sq2:
   ld   a, ($c0fe)
   ld   hl, $c0f2
@@ -885,7 +1051,7 @@ _se_sq2:
   jr   z, _se_noise
   ld   bc, L_F57C
   ld   h, :L_F57C
-  call rt_far_tail
+  call rt_far_ncall
 _se_noise:
   ld   a, ($c0fd)
   ld   hl, $c0f3
@@ -893,11 +1059,11 @@ _se_noise:
   jr   z, _se_music
   ld   bc, L_F667
   ld   h, :L_F667
-  call rt_far_tail
+  call rt_far_ncall
 _se_music:
   ld   bc, L_F694
   ld   h, :L_F694
-  call rt_far_tail
+  call rt_far_ncall
   ; clear the frame's queues
   xor  a
   ld   ($c0fb), a
@@ -1203,6 +1369,11 @@ _fvb_seq_loop:               ; B = count, C = step, HL = src
   ld   a, ($cb10)
   ld   e, a
 _fvb_sl:
+  ; IFF split: pick the EI or no-EI loop body once (captured at entry).
+  ld   a, ($ca26)
+  or   a
+  jr   z, _fvb_sl_di
+_fvb_sl_ei:
   ld   a, (hl)
   ld   ($cb18), a
   push hl
@@ -1210,11 +1381,7 @@ _fvb_sl:
   push bc
   di
   call rt_ppudata_apply
-  ld   a, ($ca26)
-  or   a
-  jr   z, +
   ei
-+:
   pop  bc
   pop  de
   pop  hl
@@ -1225,7 +1392,26 @@ _fvb_sl:
   jr   nc, +
   inc  d
 +:
-  djnz _fvb_sl
+  djnz _fvb_sl_ei
+  ret
+_fvb_sl_di:
+  ld   a, (hl)
+  ld   ($cb18), a
+  push hl
+  push de
+  push bc
+  call rt_ppudata_apply
+  pop  bc
+  pop  de
+  pop  hl
+  inc  hl
+  ld   a, e
+  add  a, c
+  ld   e, a
+  jr   nc, +
+  inc  d
++:
+  djnz _fvb_sl_di
   ret
 
 _fvb_rep_loop:               ; B = count, C = step, HL = the one src byte
@@ -1235,27 +1421,39 @@ _fvb_rep_loop:               ; B = count, C = step, HL = the one src byte
   ld   e, a
 _fvb_rl:
   ld   a, (hl)
-  ld   ($cb18), a
-  push hl
+  ld   ($cb18), a            ; the one repeated byte: latch it once
+  ld   a, ($ca26)
+  or   a
+  jr   z, _fvb_rl_di
+_fvb_rl_ei:
   push de
   push bc
   di
   call rt_ppudata_apply
-  ld   a, ($ca26)
-  or   a
-  jr   z, +
   ei
-+:
   pop  bc
   pop  de
-  pop  hl
   ld   a, e
   add  a, c
   ld   e, a
   jr   nc, +
   inc  d
 +:
-  djnz _fvb_rl
+  djnz _fvb_rl_ei
+  ret
+_fvb_rl_di:
+  push de
+  push bc
+  call rt_ppudata_apply
+  pop  bc
+  pop  de
+  ld   a, e
+  add  a, c
+  ld   e, a
+  jr   nc, +
+  inc  d
++:
+  djnz _fvb_rl_di
   ret
 
 _mt_deleg_all:

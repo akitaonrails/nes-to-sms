@@ -65,6 +65,12 @@ pub struct Profile {
 /// routes, not provable from the instruction stream).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Translation {
+    /// Profile-guided bank grouping: routines whose NES entry address is
+    /// listed here are emitted first, in list order, so they pack into the
+    /// same early section(s) and their mutual calls become near CALLs.
+    /// Populate from frame-diff's FD_PROFILE far-transfer histogram.
+    #[serde(default)]
+    pub hot_group: Vec<u16>,
     /// Assembly-time defines forwarded to the runtime (e.g. a guard for a
     /// game-specific hooks file such as `SMB_RUNTIME_HOOKS`).
     #[serde(default)]
@@ -215,6 +221,13 @@ pub struct Replacement {
     pub runtime_label: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// When true, the translated body itself is emitted as a
+    /// `call runtime_label / ret` stub, so EVERY entry mechanism —
+    /// including conditional branches from neighboring routines — reaches
+    /// the hook. Must stay false for replacements whose hook delegates
+    /// back into this routine's own translated body.
+    #[serde(default)]
+    pub stub_body: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

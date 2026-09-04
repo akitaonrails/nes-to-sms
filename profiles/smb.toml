@@ -18,6 +18,11 @@ chr_kib = 8
 # differential oracle and the acceptance routes.
 [translation]
 stack_discipline = "native"
+# hot_group (profile-guided bank packing) measured WORSE than address
+# order on SMB (126.7K -> 128.3K): each moved cluster exposes the next
+# ring of callees. Leave empty; a real edge-weighted placer with emitted
+# sizes is the remaining approach (docs/speed-recovery-plan.md).
+hot_group = []
 runtime_defines = ["SMB_RUNTIME_HOOKS"]
 
 # Phase S2: native replacements for per-frame NMI chores. Bodies live in
@@ -25,36 +30,43 @@ runtime_defines = ["SMB_RUNTIME_HOOKS"]
 # byte-parity oracle on the acceptance routes.
 [[replacement]]
 addr = 0x8F97
+stub_body = true
 runtime_label = "rt_smb_top_score_pair"
 reason = "TopScoreCheck x2 (JSR + fall-through); ~4% of steady frame"
 
 [[replacement]]
 addr = 0x81C6
+stub_body = true
 runtime_label = "rt_smb_sprite_shuffler"
 reason = "SpriteShuffler; ~2.7% of steady frame"
 
 [[replacement]]
 addr = 0x8E5C
+stub_body = true
 runtime_label = "rt_smb_read_joypads"
 reason = "ReadJoypads serial bit loop; ~3% of steady frame"
 
 [[replacement]]
 addr = 0xE3F0
+stub_body = true
 runtime_label = "rt_smb_block_buffer_collision"
 reason = "BlockBufferCollision + GetBlockBufferAddr; ~5% of steady frame"
 
 [[replacement]]
 addr = 0x88AE
+stub_body = true
 runtime_label = "rt_smb_render_attr_tables"
 reason = "attribute-table renderer (reached via computed dispatch); ~5% of steady frame"
 
 [[replacement]]
 addr = 0xF1F6
+stub_body = true
 runtime_label = "rt_smb_get_x_offscreen"
 reason = "GetXOffscreenBits + DividePDiff; ~3% of steady frame"
 
 [[replacement]]
 addr = 0xF239
+stub_body = true
 runtime_label = "rt_smb_get_y_offscreen"
 reason = "GetYOffscreenBits + DividePDiff; ~2% of steady frame"
 
@@ -75,8 +87,15 @@ reason = "NMI VRAM stripe flush: per-byte guard/dispatch/helper overhead dropped
 
 [[replacement]]
 addr = 0xF282
+stub_body = true
 runtime_label = "rt_smb_draw_sprite_pair"
 reason = "8x16 sprite-pair OAM writer; ~1.5% of steady frame"
+
+[[replacement]]
+addr = 0x9488
+stub_body = true
+runtime_label = "rt_smb_store_mt"
+reason = "StoreMT terrain render + block-buffer store; ~1.4% of steady frame"
 
 [vectors]
 nmi   = 0x8082

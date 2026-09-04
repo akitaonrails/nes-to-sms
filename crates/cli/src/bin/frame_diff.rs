@@ -1410,6 +1410,26 @@ fn run_subject(
     let profile = std::env::var("FD_PROFILE").is_ok();
     let steady_start = frames.saturating_sub(frames / 3);
     let mut prof: std::collections::HashMap<(u8, u8, u16), u64> = std::collections::HashMap::new();
+    let mut far_hist: std::collections::HashMap<(u8, u16), u32> = std::collections::HashMap::new();
+    // Addresses of the native far-shim entries, from the sym file.
+    let far_entries: Vec<u16> = sym_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|text| {
+            text.lines()
+                .filter_map(|l| {
+                    let l = l.trim();
+                    let (bank_addr, name) = l.split_once(' ')?;
+                    if name == "rt_far_ncall" || name == "rt_far_tail" {
+                        let (_b, a) = bank_addr.split_once(':')?;
+                        u16::from_str_radix(a, 16).ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for _frame in 0..frames {
@@ -1442,6 +1462,12 @@ fn run_subject(
                     _ => (2, bus.slot_bank[2], pc),
                 };
                 *prof.entry(key).or_default() += cpu.cycles - cyc0;
+                // Far-transfer histogram: at the shim entries BC = target
+                // label address and H = target bank.
+                if far_entries.contains(&cpu.pc) {
+                    let tgt = ((cpu.b as u16) << 8) | cpu.c as u16;
+                    *far_hist.entry((cpu.h, tgt)).or_default() += 1u32;
+                }
             }
             if !nmi_done && cpu.sp >= sp_before {
                 nmi_done = true;
@@ -1478,6 +1504,14 @@ fn run_subject(
         && let Some(sym) = sym_path
     {
         profile_report(&prof, &sym);
+        if !far_hist.is_empty() {
+            let mut rows: Vec<((u8, u16), u32)> = far_hist.into_iter().collect();
+            rows.sort_by(|a, b| b.1.cmp(&a.1));
+            eprintln!("  [profile] far transfers by (bank, target), steady frames:");
+            for ((bank, tgt), n) in rows.iter().take(20) {
+                eprintln!("    {n:>7} x  bank {bank:02} target ${tgt:04X}");
+            }
+        }
     }
     (init_snap, snaps)
 }

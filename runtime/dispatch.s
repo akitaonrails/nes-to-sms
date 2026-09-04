@@ -91,6 +91,15 @@
 .define NATIVE_FAR_BANK $ca2b
 
 .ifdef NATIVE_CALLS
+; rt_far_ncall: same contract as rt_far_tail, minus the top-of-stack merge
+; check — a CALL site's own return address was just pushed, so it can
+; never be the restore thunk and the frame push is unconditional.
+rt_far_ncall:
+  ld   (NATIVE_FAR_A), a
+  ld   a, h
+  ld   (NATIVE_FAR_BANK), a
+  jr   _far_push_frame
+
 rt_far_tail:
   ld   (NATIVE_FAR_A), a
   ld   a, h

@@ -317,6 +317,27 @@ fn emit_translated_routine(
     let pre_routine_program = program.clone();
     let pre_routine_labels = defined_labels.clone();
     let auto = routine_auto_label(r);
+    // A stub-body replacement supersedes the whole translated body: any
+    // entry (JSR, JMP, computed dispatch, or a conditional branch from a
+    // neighboring routine) lands on `call hook / ret`. Interior labels are
+    // not emitted; a surviving external reference to one fails closed
+    // through the unresolved-label machinery.
+    if let Some(profile) = opts.profile
+        && let Some(rep) = profile.replacement_for(r.entry)
+        && rep.stub_body
+    {
+        if !defined_labels.contains(&auto) {
+            program.label(&auto);
+        }
+        defined_labels.insert(auto.clone());
+        if r.name != auto && !defined_labels.contains(&r.name) {
+            program.label(&r.name);
+        }
+        defined_labels.insert(r.name.clone());
+        program.call(&rep.runtime_label.clone());
+        program.ret();
+        return Ok(());
+    }
     let lifter_emits_auto = r.branch_labels.contains(&auto) || r.name == auto;
     if r.ops.len() > 600 {
         *program = pre_routine_program;
@@ -940,6 +961,32 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 }
             }
         }
+    }
+
+    // Phase S: profile-guided hot grouping. Routines named in the profile's
+    // `[translation] hot_group` (from the measured far-transfer histogram)
+    // are emitted first, in list order, so the per-frame call cluster packs
+    // into the same early section(s); everything else keeps address order.
+    if !prof.translation.hot_group.is_empty() {
+        let rank = |r: &ir::Routine| -> usize {
+            prof.translation
+                .hot_group
+                .iter()
+                .position(|&a| a == r.entry)
+                .unwrap_or(usize::MAX)
+        };
+        let mut hot: Vec<ir::Routine> = Vec::new();
+        let mut rest: Vec<ir::Routine> = Vec::new();
+        for r in routines.drain(..) {
+            if rank(&r) != usize::MAX {
+                hot.push(r);
+            } else {
+                rest.push(r);
+            }
+        }
+        hot.sort_by_key(|r| rank(r));
+        hot.extend(rest);
+        routines = hot;
     }
 
     // 5. Lower into Z80. Pre-declare all runtime symbols so the linker can
@@ -1962,6 +2009,7 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_translated_call_gate",
     "rt_translated_tail_gate",
     "rt_far_tail",
+    "rt_far_ncall",
     "rt_indirect_jmp",
     "rt_unresolved_jsr",
     "rt_unresolved_jsr_flash",
@@ -1984,7 +2032,6 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_write_indexed",
     "rt_read_zp_ptr_y",
     "rt_write_zp_ptr_y",
-    "rt_far_call",
     "rt_far_jmp",
 ];
 
