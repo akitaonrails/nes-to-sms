@@ -63,6 +63,8 @@
 ;   $CA1D-$CA1F/$D3FF Slot-2 guard frame 1: IFF2, $FFFC, $FFFF, $CB62
 ;   $D3FC-$D3FE  PPU continuation pointer/mode; $D3FF is guard frame-1 CB62
 ;   $D4C0-$D4FF  Far slot-1 bank/continuation stack entries (dispatch.s)
+;   $DD80-$DE3F  BG variant ring-slot NT refcounts (chrmap.s BGV_REFCNT;
+;                below the native stack: SP low-water measured $DFC4)
 ;   $CB80-$CBFF  Raw mirrored NES attribute shadow (2 CIRAM pages × 64 bytes)
 ;   $CB13-$CB1F  13-byte scratch ("temp w")
 ;   $CB1D        Runtime trap marker for trace-sms diagnostics
@@ -396,6 +398,10 @@ boot_main:
   xor a
   ld  ($ca00), a            ; bg variant pool next-free slot = 0
   ld  ($ca07), a            ; bg variant ring has not wrapped yet
+  ld  hl, $dd80             ; ring-slot NT refcounts (chrmap.s BGV_REFCNT)
+  ld  bc, $00c0             ; 192 entries for slots 64-255
+  xor a
+  call mem_fill
 .ifdef NES_CHR_RAM
   ; 8x16 sprite cache: tile key per OAM entry at $D400 and attribute key per
   ; entry at $D480. $D400 is shared with the ordinary 8x8 resolved table, so

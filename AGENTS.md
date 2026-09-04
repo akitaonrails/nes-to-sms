@@ -32,8 +32,16 @@ Current state (measured from the workspace):
   issue. Phase S (docs/speed-recovery-plan.md, 2026-09-04) brought SMB
   from ~4.4× to ~1.98× over the frame budget — full speed fits GPGX's
   standard ≤200% overclock menu; frame-diff has RAM-parity AND
-  VDP-parity oracles (FD_VDP_DUMP/FD_VDP_CHECK golden workflow) plus an
+  VDP-parity oracles (FD_VDP_DUMP/FD_VDP_CHECK golden workflow — hashes
+  are timing-sensitive, see docs/visual-parity.md) plus an
   FD_FAR_EDGES profile feeding the profile-driven bank placer; docs/handport-comparison.md explains the ceiling.
+- Visual fidelity is gated by the NES ground-truth frame oracle
+  (FD_NES_DUMP + scripts/nesref/compare_frames.py, docs/visual-parity.md).
+  The BG variant ring uses NT refcounts (chrmap.s BGV_REFCNT) so visible
+  slots are never recycled; `SMS_EXPECT_BGV_CONSISTENT=0` on the
+  1-1-clear route is the regression guard. Known cosmetic limits
+  (sprite behind-priority, unmapped score-popup tiles) are listed in
+  docs/visual-parity.md.
 - SMB builds use `[translation] stack_discipline = "native"` (native
   CALL/RET via `rt_far_tail`) and thirteen `[[replacement]]` hooks in
   `runtime/hooks_smb.s`. The canonical SMB test ROM is `.roms/smb.nes`

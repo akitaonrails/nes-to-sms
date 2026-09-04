@@ -1,0 +1,15 @@
+FROM ubuntu:22.04
+
+# NES reference-render rig: FCEUX (Qt build with Lua 5.1) under Xvfb.
+# Used to capture ground-truth NES framebuffers along the acceptance routes
+# for visual comparison against the generated SMS build (scripts/nesref/).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        fceux \
+        xvfb \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV HOME=/tmp \
+    SDL_AUDIODRIVER=dummy \
+    PATH="/usr/games:${PATH}"

@@ -36,6 +36,7 @@ of relying only on final RAM state.
 After generating and assembling `out/smb/sms.sms`, run:
 
 ```sh
+SMS_EXPECT_BGV_CONSISTENT=0 \
 target/release/trace-sms out/smb/sms.sms --steps 301000000 \
   --buttons-script profiles/smb/acceptance/1-1-clear.buttons \
   --checkpoint-script profiles/smb/acceptance/1-1-clear.checkpoints \
@@ -53,6 +54,14 @@ trap and reached the expected post-1-1 state: LevelNumber `$075C=01`
 dying). The script was re-recorded 2026-07-04 against the frame-diff NES
 reference after the translation reached byte-for-byte parity; the old
 script encoded pre-parity buggy behavior and dies on a real NES.
+
+`SMS_EXPECT_BGV_CONSISTENT=0` is the stale-variant regression guard: at every
+checkpoint it verifies each painted nametable cell still references the tile
+slot its folded-BG bookkeeping resolves to. The pre-refcount allocator failed
+this with 2 stale cells at the flagpole checkpoint (variant ring recycled
+slots under live cells while the camera was scroll-locked), so the check makes
+that bug class `git bisect`-able. It applies to folded-BG (CHR-ROM) profiles
+only — identity-mode CHR-RAM profiles (CV1) use different bookkeeping.
 
 The checkpoint directory should contain inspectable route artifacts such as
 `00060_title-before-start.ppm` / `.txt` through

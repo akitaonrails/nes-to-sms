@@ -657,6 +657,14 @@ struct SmsBus {
     /// (screen line, top/pre reg8, top/pre reg9). After the injected line IRQ
     /// runs, the live VDP regs hold the bottom/post scroll values.
     render_scroll_split: Option<(usize, u8, u8)>,
+    /// The split of the frame that just ended. Frame-IRQ injection moves the
+    /// live split here before clearing it; checkpoint dumps land one loop
+    /// iteration after injection, so without this latch they would render the
+    /// whole frame with the playfield scroll (status bar visibly scrolled).
+    render_scroll_split_latched: Option<(usize, u8, u8)>,
+    /// True while the frame-IRQ period has elapsed but the IRQ has not been
+    /// injected yet (level-held frame INT). Drives status-port bit 7.
+    frame_int_pending: bool,
     /// VDP address latch state (toggles between low/high byte).
     vdp_addr_high: u8,
     vdp_addr_low: u8,
@@ -966,6 +974,8 @@ impl SmsBus {
             cram: [0; 0x20],
             vdp_regs: [0; 16],
             render_scroll_split: None,
+            render_scroll_split_latched: None,
+            frame_int_pending: false,
             vdp_addr_high: 0,
             vdp_addr_low: 0,
             bank_writes: Vec::new(),
@@ -1892,12 +1902,13 @@ impl Bus for SmsBus {
                     self.vdp_addr_latched = false;
                     return status;
                 }
-                // Make bit 7 toggle every 1000 reads so polling loops advance.
-                let vblank = if (self.vdp_status_reads / 100) & 1 == 0 {
-                    0x80
-                } else {
-                    0x00
-                };
+                // Bit 7 = frame interrupt pending (the period elapsed and the
+                // IRQ has not been taken yet). The runtime's end-of-handler
+                // pacing read uses this to detect real overruns; the previous
+                // toggle-every-N-reads fake set the sticky overrun counter at
+                // random and permanently suppressed the status-bar scroll
+                // split inside the tracer.
+                let vblank = if self.frame_int_pending { 0x80 } else { 0x00 };
                 // Reading also resets the VDP address latch toggle.
                 self.vdp_addr_latched = false;
                 vblank
@@ -2996,6 +3007,14 @@ fn main() {
     // Inject an IRQ every 60k steps (roughly one "frame" of Z80 work).
     let mut next_irq_at = irq_period();
     let mut line_irq_at: Option<usize> = None;
+    let mut min_native_sp: u16 = 0xFFFF;
+    // SMS_EXPECT_BGV_CONSISTENT=<max>: at every checkpoint, verify the folded
+    // background bookkeeping against the live nametable and fail acceptance
+    // if more than <max> cells disagree (stale variant-ring regression guard).
+    let bgv_consistency_max: Option<usize> = std::env::var("SMS_EXPECT_BGV_CONSISTENT")
+        .ok()
+        .map(|v| v.trim().parse().unwrap_or(0));
+    let mut bgv_worst: (usize, usize, String) = (0, 0, String::new());
     let mut irqs_fired = 0usize;
     let mut line_irqs_fired = 0usize;
     // SMS_PC_PROFILE=1: per-(bank,pc) execution histogram, folded by
@@ -3375,6 +3394,16 @@ fn main() {
                     );
                     checkpoint_dump_failed = true;
                 }
+                if bgv_consistency_max.is_some() {
+                    let bad = bgv_inconsistent_cells(&bus);
+                    println!(
+                        "bgv consistency at checkpoint {} (frame {}): {} inconsistent cell(s)",
+                        checkpoint.name, checkpoint.frame, bad
+                    );
+                    if bad > bgv_worst.0 {
+                        bgv_worst = (bad, checkpoint.frame, checkpoint.name.clone());
+                    }
+                }
                 next_checkpoint += 1;
             }
             // Per-frame peek of game state: mode/task plus key SMB gameplay
@@ -3522,7 +3551,7 @@ fn main() {
                 interrupt_at_step = Some(step);
             }
             line_irq_at = None;
-            bus.render_scroll_split = None;
+            bus.render_scroll_split_latched = bus.render_scroll_split.take();
             cpu.sp = cpu.sp.wrapping_sub(2);
             bus.write(cpu.sp, (cpu.pc & 0xFF) as u8);
             bus.write(cpu.sp.wrapping_add(1), (cpu.pc >> 8) as u8);
@@ -3555,6 +3584,7 @@ fn main() {
             };
             *map.entry((bank, pc)).or_insert(0u64) += 1;
         }
+        bus.frame_int_pending = inject_irq && step >= next_irq_at;
         let materializer_render_before = current_render_state(&bus);
         let materializer_vdp_writes_before = bus.vdp_data_writes;
         match cpu.step(&mut bus) {
@@ -3581,6 +3611,9 @@ fn main() {
                     materializer_render_before,
                 );
                 runtime_materializer_monitor.observe_after_step(op, cpu.sp);
+                if cpu.sp >= 0xC000 && cpu.sp < min_native_sp {
+                    min_native_sp = cpu.sp;
+                }
                 if abort_bad_sp && cpu.sp < 0xDD80 {
                     eprintln!(
                         "SMS_ABORT_BAD_SP: step={step} pc=${pc:04X} op=${op:02X} sp_after=${:04X} ret_after=${:04X} bank1=${:02X}",
@@ -3654,6 +3687,7 @@ fn main() {
             println!("VRAM tile {tile:03X}: {}", hex.join(" "));
         }
     }
+    println!("min native SP observed: ${min_native_sp:04X}");
     println!("=== trace-sms summary ===");
     println!("ROM: {}", rom_path.display());
     println!("steps run: {taken}");
@@ -4582,6 +4616,20 @@ fn main() {
         );
         acceptance_failed = true;
     }
+    if let Some(max_bad) = bgv_consistency_max {
+        if bgv_worst.0 > max_bad {
+            eprintln!(
+                "EXPECT FAIL: bgv consistency worst {} cell(s) at frame {} ({}) exceeds max {}",
+                bgv_worst.0, bgv_worst.1, bgv_worst.2, max_bad
+            );
+            acceptance_failed = true;
+        } else {
+            println!(
+                "EXPECT ok: bgv consistency (worst {} cell(s), max {})",
+                bgv_worst.0, max_bad
+            );
+        }
+    }
     if expect_no_trap {
         if let Some(step) = first_runtime_trap_step {
             let id = (bus.ram[0x0B1C] as u16) << 8 | bus.ram[0x0B1B] as u16;
@@ -5028,6 +5076,7 @@ fn dump_route_checkpoint(
         bus.ram[0x0B23],
         bus.ram[0x0B24],
         bus.render_scroll_split
+            .or(bus.render_scroll_split_latched)
             .map(|(line, top_x, top_y)| format!(
                 "line={line} top_reg8=${top_x:02X} top_reg9=${top_y:02X}"
             ))
@@ -5035,8 +5084,9 @@ fn dump_route_checkpoint(
     )?;
     writeln!(
         f,
-        "vdp: r0=${:02X} r10=${:02X} vram_writes={} cram_writes={} data_writes={} control_writes={} status_reads={} controller_reads={}",
+        "vdp: r0=${:02X} r1=${:02X} r10=${:02X} vram_writes={} cram_writes={} data_writes={} control_writes={} status_reads={} controller_reads={}",
         bus.vdp_regs[0],
+        bus.vdp_regs[1],
         bus.vdp_regs[10],
         bus.vram_writes,
         bus.cram_writes,
@@ -6933,6 +6983,30 @@ fn load_mednafen_state(path: &str, cpu: &mut Cpu, bus: &mut SmsBus) {
     }
 }
 
+/// Count visible NT cells whose written slot disagrees with the folded-BG
+/// bookkeeping (base-shadow $DA00 + folded S $CC00 -> FC cache $D600). A
+/// painted cell must reference FC[base*4+S]; a disagreement means a variant
+/// ring slot was recycled under a live cell — the stale-tile class fixed by
+/// the BGV_REFCNT allocator (runtime/chrmap.s). Only meaningful for the
+/// folded-BG model (CHR-ROM games); identity-mode profiles should not enable
+/// the SMS_EXPECT_BGV_CONSISTENT check.
+fn bgv_inconsistent_cells(bus: &SmsBus) -> usize {
+    let mut bad = 0;
+    for cell in 0..896usize {
+        let base = bus.ram[0x1A00 + cell] as usize;
+        if base == 0 {
+            continue;
+        }
+        let s = (bus.ram[0x0C00 + cell * 2 + 1] & 3) as usize;
+        let fc = bus.ram[0x1600 + base * 4 + s];
+        let nt = bus.vram[0x3700 + cell * 2];
+        if fc == 0xFF || fc != nt {
+            bad += 1;
+        }
+    }
+    bad
+}
+
 fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
     use std::io::Write;
     const W: usize = 256;
@@ -6949,12 +7023,29 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
         (scale(r), scale(g), scale(bl))
     };
 
+    // VDP register 1 bit 6 = display enable. The runtime mirrors NES PPUMASK
+    // blanking here (ppu.s _ppu_sync_vdp_reg1); a blanked frame shows the
+    // backdrop color (register 7, sprite-palette index), like real hardware.
+    if bus.vdp_regs[1] & 0x40 == 0 {
+        let (r, g, b) = cram_to_rgb(bus.cram[16 + (bus.vdp_regs[7] & 0x0F) as usize]);
+        for px in pixels.chunks_exact_mut(3) {
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+        }
+        let mut f = std::fs::File::create(path)?;
+        write!(f, "P6\n{W} {H}\n255\n")?;
+        f.write_all(&pixels)?;
+        return Ok(());
+    }
+
     for screen_y in 0..H {
         // Split timing and R0 top-row horizontal lock are output-scanline
         // decisions. Pick the scroll registers for this displayed line first,
         // then sample the nametable through the inverse scroll transform.
-        let (base_reg8, reg9) =
-            if let Some((split_line, top_reg8, top_reg9)) = bus.render_scroll_split {
+        let (base_reg8, reg9) = if let Some((split_line, top_reg8, top_reg9)) =
+            bus.render_scroll_split.or(bus.render_scroll_split_latched)
+        {
                 if screen_y < split_line {
                     (top_reg8 as usize, top_reg9 as usize)
                 } else {

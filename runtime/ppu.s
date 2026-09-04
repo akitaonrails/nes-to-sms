@@ -621,38 +621,15 @@ _ppudata_tile_in:
   or   a
   jr   z, _ppudata_samev_paint0
   ; Pre-wrap, every FC entry — ring slots included — is assign-once, so
-  ; any painted cell's slot still equals FC[base,S]: skip without the
-  ; sub-palette/FC lookups. After the first wrap only pinned slots stay
-  ; immutable and the full check below applies.
-  ld   c, a                  ; C = painted base slot
-  ld   a, ($ca07)            ; BGV_RING_WRAPPED
-  or   a
-  jr   nz, _ppudata_samev_full
+  ; any painted cell's slot still equals FC[base,S]. Since the ring-slot
+  ; NT refcounts landed (chrmap.s BGV_REFCNT), a referenced slot is never
+  ; recycled, so a painted cell's slot stays valid for its (base,S) after
+  ; the wrap too — the skip is unconditional for painted cells.
   pop  hl
   pop  de
   ret
-_ppudata_samev_full:
-  pop  hl
-  call rt_bgv_sub_palette      ; A = S (clobbers A, HL)
-  ld   l, c
-  ld   h, $00
-  add  hl, hl
-  add  hl, hl
-  add  a, l
-  ld   l, a
-  jr   nc, +
-  inc  h
-+:
-  ld   de, $d600             ; BGV_CACHE: FC[base*4+S]
-  add  hl, de
-  ld   a, (hl)
-  cp   64
-  jr   nc, _ppudata_samev_paint1
-  pop  de
-  ret                        ; pinned: the repaint would be identical
 _ppudata_samev_paint0:
   pop  hl
-_ppudata_samev_paint1:
   pop  de
 .endif
 _ppudata_tile_paint:

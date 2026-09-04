@@ -17,6 +17,24 @@ services:
       - /roms/nes/Super Mario Bros. (World).nes
       - out/smb
 
+  nesref:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.nesref
+    working_dir: /work
+    volumes:
+      - .:/work
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    command:
+      - xvfb-run
+      - -a
+      - timeout
+      - "300"
+      - fceux
+      - --loadlua
+      - out/nesref/capture.lua
+      - .roms/smb.nes
+
   sms-smoke:
     build:
       context: .

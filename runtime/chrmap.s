@@ -47,6 +47,15 @@
 .define BGV_ATTR_S     $ca06
 .define BGV_RING_WRAPPED $ca07
 .define BGV_REV_BASE   $ca40   ; 192 bytes: base tile for slots 64..255
+; Nametable reference counts for ring slots 64-255 (BGV_REFCNT - 64 + slot).
+; Maintained by _bgv_nt_write (the single NT-entry writer): the old slot is
+; read back from VRAM before the write, so counts track the nametable exactly.
+; The allocator skips slots with a nonzero count — a slot that is still on
+; screen is never recycled, which is what used to paint stale garbage when the
+; ring wrapped while the camera was locked (e.g. SMB's flagpole screen).
+; Lives in the measured native-stack headroom: SP low-water over a full
+; 1-1-clear route is $DFC4, so $DD80-$DE3F is safely below the stack.
+.define BGV_REFCNT     $dd80   ; 192 bytes: NT refcount for slots 64..255
 
 .section "chrmap" free
 
@@ -210,6 +219,154 @@ _gv_row:
 .endif
 
 ; ─── rt_bg_get_variant ──────────────────────────────────────────────────────
+; ─── _bgv_nt_write ──────────────────────────────────────────────────────────
+; The single writer for background nametable entries.
+;   Entry: HL = NT low-byte VRAM address, C = variant slot.
+;   Preserves BC, DE, HL. Clobbers AF.
+; Reads the old slot back from VRAM first (code-0 prefetch read) and moves the
+; ring refcount from it to the new slot, so BGV_REFCNT tracks the nametable
+; exactly — no shadow-state inference, no drift.
+_bgv_nt_write:
+  ; Pre-wrap every ring slot is assign-once, so counts are not consulted;
+  ; skip the read-back and keep the hot path as cheap as the old inline
+  ; write. _bgv_ref_rebuild reconstructs the counts when the ring first
+  ; wraps, and from then on this maintains them incrementally.
+  ld   a, (BGV_RING_WRAPPED)
+  or   a
+  jr   nz, _bgv_nt_write_counted
+  ld   a, l
+  out  ($bf), a
+  ld   a, h
+  and  $3f
+  or   $40
+  out  ($bf), a
+  ld   a, c
+  out  ($be), a              ; tile low byte = variant slot
+  xor  a
+  out  ($be), a              ; high byte = 0 (palette 0, tile bit 8 = 0)
+  ret
+_bgv_nt_write_counted:
+  ld   a, l
+  out  ($bf), a
+  ld   a, h
+  and  $3f
+  out  ($bf), a              ; code 0 = VRAM read: prefetches the old byte
+  push af                    ; small delay for the VDP prefetch
+  pop  af
+  in   a, ($be)              ; old slot (tile low byte)
+  call _bgv_ref_dec
+  ; re-set the address for writing (the prefetch advanced it)
+  ld   a, l
+  out  ($bf), a
+  ld   a, h
+  and  $3f
+  or   $40
+  out  ($bf), a
+  ld   a, c
+  out  ($be), a              ; tile low byte = variant slot
+  xor  a
+  out  ($be), a              ; high byte = 0 (palette 0, tile bit 8 = 0)
+  ld   a, c
+  ; fall through: count the new reference
+
+; _bgv_ref_inc: A = slot. Saturating ++ for ring slots (64-255); $FF sticks.
+; Preserves BC, DE, HL. Clobbers AF.
+_bgv_ref_inc:
+  cp   64
+  ret  c
+  push hl
+  call _bgv_refcnt_addr
+  ld   a, (hl)
+  inc  a
+  jr   z, _bgv_ref_inc_done  ; saturated at $FF: pinned forever (safe side)
+  ld   (hl), a
+_bgv_ref_inc_done:
+  pop  hl
+  ret
+
+; _bgv_ref_dec: A = slot. Saturating -- (0 and $FF are sticky).
+; Preserves BC, DE, HL. Clobbers AF.
+_bgv_ref_dec:
+  cp   64
+  ret  c
+  push hl
+  call _bgv_refcnt_addr
+  ld   a, (hl)
+  or   a
+  jr   z, _bgv_ref_dec_done
+  cp   $ff
+  jr   z, _bgv_ref_dec_done
+  dec  (hl)
+_bgv_ref_dec_done:
+  pop  hl
+  ret
+
+; Rebuild the ring refcounts from the live nametable. Called once, at the
+; moment the ring first wraps (BGV_RING_WRAPPED 0 -> 1): before that no slot
+; is ever reused so no counts are needed, and afterwards _bgv_nt_write
+; maintains them incrementally. One 896-cell VRAM scan (~55k cycles) — a
+; one-frame hiccup at most once per scene, instead of a per-write tax.
+; Clobbers AF, BC, DE, HL. Leaves the VDP address pointing into the NT
+; (every caller re-sets the address before its next VRAM access).
+; Mark the ring wrapped; on the 0 -> 1 transition rebuild the refcounts from
+; the live nametable. Preserves BC, DE, HL. Clobbers AF.
+_bgv_ring_mark_wrapped:
+  ld   a, (BGV_RING_WRAPPED)
+  or   a
+  ret  nz
+  ld   a, $01
+  ld   (BGV_RING_WRAPPED), a
+  push bc
+  push de
+  push hl
+  call _bgv_ref_rebuild
+  pop  hl
+  pop  de
+  pop  bc
+  ret
+
+_bgv_ref_rebuild:
+  ld   hl, BGV_REFCNT
+  ld   de, BGV_REFCNT + 1
+  ld   bc, 191
+  ld   (hl), $00
+  ldir
+  xor  a
+  out  ($bf), a
+  ld   a, $37                ; NT base $3700, code 0 (VRAM read)
+  out  ($bf), a
+  ld   bc, 896
+_bgv_rr_loop:
+  in   a, ($be)              ; tile low byte (auto-increment)
+  cp   64
+  jr   c, _bgv_rr_skip
+  push bc
+  call _bgv_refcnt_addr
+  ld   a, (hl)
+  inc  a
+  jr   z, _bgv_rr_sat        ; saturate at $FF
+  ld   (hl), a
+_bgv_rr_sat:
+  pop  bc
+_bgv_rr_skip:
+  in   a, ($be)              ; discard the high byte
+  dec  bc
+  ld   a, b
+  or   c
+  jr   nz, _bgv_rr_loop
+  ret
+
+; HL = &BGV_REFCNT[A - 64] (caller guarantees A >= 64). Clobbers AF, HL.
+_bgv_refcnt_addr:
+  ld   l, a
+  ld   h, $dd                ; BGV_REFCNT - 64 = $DD40
+  ld   a, l
+  add  a, $40
+  ld   l, a
+  ret  nc
+  inc  h
+  ret
+
 ; Resolve (base slot, S) to a bg pool slot, generating + caching on first use.
 ;   Entry: C = base slot, B = S (0-3).  Exit: A = pool slot.
 ;   Clobbers AF, DE, HL (B, C consumed).
@@ -276,7 +433,35 @@ _gbv_alloc:
   ; for the common tiles allocated on the first screen (sky, ground, brick,
   ; pipe, bush, status bar, ...) so the recurring graphics stay correct all
   ; level; only rarer mid-level-specific tiles ride the ring.
+  ; Probe the ring for a slot no nametable cell references (BGV_REFCNT == 0).
+  ; Recycling a still-visible slot painted stale garbage when the ring wrapped
+  ; while the screen was static (SMB flagpole endgame). If every ring slot is
+  ; referenced (a denser screen than the ring can hold), fall back to stealing
+  ; the current candidate — the pre-refcount behaviour.
   ld   a, (BGV_POOL_NEXT)
+  ld   e, a
+  ld   d, 192
+_gbv_probe:
+  ld   a, e
+  cp   64
+  jr   c, _gbv_chosen        ; pre-ring slots are always fresh
+  push hl
+  call _bgv_refcnt_addr
+  ld   a, (hl)
+  pop  hl
+  or   a
+  jr   z, _gbv_chosen        ; unreferenced: take it
+  ld   a, e
+  inc  a
+  jr   nz, _gbv_probe_next
+  call _bgv_ring_mark_wrapped
+  ld   a, 64                 ; wrap back to the ring start (0-63 pinned)
+_gbv_probe_next:
+  ld   e, a
+  dec  d
+  jr   nz, _gbv_probe
+_gbv_chosen:
+  ld   a, e
   ld   (BGV_SLOT), a
   push hl                    ; save FC[idx] for the new mapping
   push bc                    ; keep B=S, C=base for variant generation
@@ -299,8 +484,7 @@ _gbv_remember_done:
   ld   a, (BGV_SLOT)
   inc  a
   jr   nz, _gbv_set          ; 255 -> 0 means the ring wrapped
-  ld   a, $01
-  ld   (BGV_RING_WRAPPED), a
+  call _bgv_ring_mark_wrapped
   ld   a, 64                 ; wrap back to the start of the ring (pin 0-63)
 _gbv_set:
   ld   (BGV_POOL_NEXT), a
@@ -360,6 +544,14 @@ rt_bg_reset_variant_cache:
   ld   de, BGV_CACHE + 1
   ld   bc, $03ff
   ld   (hl), $ff
+  ldir
+  ; The full rebuild rewrites every cell through _bgv_nt_write, which reads
+  ; the stale slots back and would decrement counts for content that is being
+  ; discarded wholesale — start the refcounts from zero instead.
+  ld   hl, BGV_REFCNT
+  ld   de, BGV_REFCNT + 1
+  ld   bc, 191
+  ld   (hl), $00
   ldir
   xor  a
   ld   (BGV_POOL_NEXT), a
@@ -554,17 +746,7 @@ _bgw_have_s:
   ld   l, a
   ld   a, ($cb13)
   ld   h, a
-  ld   a, l
-  out  ($bf), a
-  ld   a, h
-  and  $3f
-  or   $40
-  out  ($bf), a
-  ld   a, c
-  out  ($be), a              ; tile low byte = variant slot
-  xor  a
-  out  ($be), a              ; high byte = 0 (palette 0, tile bit 8 = 0)
-  ret
+  jp   _bgv_nt_write         ; HL = NT low addr, C = variant slot
 
 ; ─── rt_write_mapped_bg_tile_s ──────────────────────────────────────────────
 ; Helper-only explicit-subpalette variant of rt_write_mapped_bg_tile.
@@ -633,16 +815,7 @@ _bgw_s_no_base_shadow:
   ld   l, a
   ld   a, ($cb13)
   ld   h, a
-  ld   a, l
-  out  ($bf), a
-  ld   a, h
-  and  $3f
-  or   $40
-  out  ($bf), a
-  ld   a, c
-  out  ($be), a              ; tile low byte = variant slot
-  xor  a
-  out  ($be), a              ; high byte = 0 (palette 0, tile bit 8 = 0)
+  call _bgv_nt_write         ; HL = NT low addr, C = variant slot
 
   pop  bc
   pop  de
@@ -666,23 +839,18 @@ rt_write_mapped_bg_tile_s_noshadow:
   push bc
   call rt_bg_map_base_slot    ; -> A = base slot, preserves B=S and DE=addr
   ld   c, a                   ; C = base slot, B = explicit S
-  call rt_bg_get_variant      ; -> A = pool slot
-  ld   h, a                   ; keep variant while restoring caller registers
-  pop  bc
-  pop  de
+  call rt_bg_get_variant      ; -> A = pool slot (clobbers DE, HL)
+  pop  bc                     ; caller B/C
+  pop  de                     ; entry DE = NT low-byte address
+  push bc
 
   ; Write the nametable entry. Variant generation may have moved the VDP addr.
-  ld   a, e
-  out  ($bf), a
-  ld   a, d
-  and  $3f
-  or   $40
-  out  ($bf), a
-  ld   a, h
-  out  ($be), a              ; tile low byte = variant slot
-  xor  a
-  out  ($be), a              ; high byte = 0 (palette 0, tile bit 8 = 0)
+  ld   c, a                  ; C = variant slot
+  ld   h, d
+  ld   l, e
+  call _bgv_nt_write         ; HL = NT low addr, C = variant slot
 
+  pop  bc
   pop  hl
   ret
 
@@ -862,16 +1030,7 @@ _chrmap_attr_write_one:
   call rt_bg_get_variant     ; -> A = variant slot
   ld   c, a
   pop  hl                    ; HL = NT low-byte address
-  ld   a, l
-  out  ($bf), a
-  ld   a, h
-  and  $3f
-  or   $40
-  out  ($bf), a
-  ld   a, c
-  out  ($be), a              ; tile low byte = variant slot
-  xor  a
-  out  ($be), a              ; high byte = 0
+  call _bgv_nt_write         ; HL = NT low addr, C = variant slot
 _caw_done:
   pop  de
   ret
@@ -891,16 +1050,7 @@ _chrmap_attr_write_one_s:
   call rt_bg_get_variant     ; -> A = variant slot
   ld   c, a
   pop  hl                    ; HL = NT low-byte address
-  ld   a, l
-  out  ($bf), a
-  ld   a, h
-  and  $3f
-  or   $40
-  out  ($bf), a
-  ld   a, c
-  out  ($be), a              ; tile low byte = variant slot
-  xor  a
-  out  ($be), a              ; high byte = 0
+  call _bgv_nt_write         ; HL = NT low addr, C = variant slot
   pop  de
   ret
 

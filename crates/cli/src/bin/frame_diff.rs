@@ -235,6 +235,13 @@ struct NesBus {
     mapper_policy: nes_rom::MapperPolicy,
     /// CHR-RAM store for pattern-space $2007 writes (ground truth).
     chr_ram: Vec<u8>,
+    /// PPU palette RAM ($3F00-$3F1F) captured from $2007 writes, so the
+    /// reference can render ground-truth frames (FD_NES_DUMP).
+    palette_ram: [u8; 32],
+    /// Last $2005 first-write (X scroll) seen; SMB writes the playfield
+    /// scroll after the sprite-0 hit, so at frame end this holds the
+    /// playfield X of the frame.
+    scroll_x_last: u8,
 }
 
 impl NesBus {
@@ -304,6 +311,8 @@ impl NesBus {
             prg_bank: 0,
             mapper_policy,
             chr_ram: vec![0u8; 0x3000],
+            palette_ram: [0u8; 32],
+            scroll_x_last: 0,
         }
     }
 
@@ -459,9 +468,21 @@ impl oracle_6502::Bus for NesBus {
                     if (a as usize) < self.chr_ram.len() {
                         self.chr_ram[a as usize] = value;
                     }
+                    if (0x3F00..0x4000).contains(&a) {
+                        let mut p = (a & 0x1F) as usize;
+                        // $3F10/$14/$18/$1C are hardware mirrors of
+                        // $3F00/04/08/0C (SMB parks the sky color at $3F10).
+                        if p & 0x13 == 0x10 {
+                            p &= !0x10;
+                        }
+                        self.palette_ram[p] = value;
+                    }
                     // Writes advance the VRAM address like reads do.
                     let inc = if self.ppu_ctrl & 0x04 != 0 { 32 } else { 1 };
                     self.ppu_addr = self.ppu_addr.wrapping_add(inc);
+                }
+                if reg == 0x2005 && !self.addr_latch_toggle {
+                    self.scroll_x_last = value;
                 }
                 if reg == 0x2005 || reg == 0x2006 {
                     self.addr_latch_toggle = !self.addr_latch_toggle;
@@ -565,6 +586,134 @@ const REF_PREROLL_CAP: usize = 2_000_000;
 
 /// Returns (init_snapshot, per_frame_snapshots). The init snapshot is
 /// RAM at the moment SMB first enables NMI ($2000 bit 7) — i.e. when
+/// Canonical NTSC NES master palette (Nestopia/Blargg), $00-$3F.
+const NES_PALETTE: [u32; 64] = [
+    0x545454, 0x001E74, 0x081090, 0x300088, 0x440064, 0x5C0030, 0x540400, 0x3C1800,
+    0x202A00, 0x083A00, 0x004000, 0x003C00, 0x00323C, 0x000000, 0x000000, 0x000000,
+    0x989698, 0x084CC4, 0x3032EC, 0x5C1EE4, 0x8814B0, 0xA01464, 0x982220, 0x783C00,
+    0x545A00, 0x287200, 0x087C00, 0x007628, 0x006678, 0x000000, 0x000000, 0x000000,
+    0xECEEEC, 0x4C9AEC, 0x787CEC, 0xB062EC, 0xE454EC, 0xEC58B4, 0xEC6A64, 0xD48820,
+    0xA0AA00, 0x74C400, 0x4CD020, 0x38CC6C, 0x38B4CC, 0x3C3C3C, 0x000000, 0x000000,
+    0xECEEEC, 0xA8CCEC, 0xBCBCEC, 0xD4B2EC, 0xECAEEC, 0xECAED4, 0xECB4B0, 0xE4C490,
+    0xCCD278, 0xB4DE78, 0xA8E290, 0x98E2B4, 0xA0D6E4, 0xA0A2A0, 0x000000, 0x000000,
+];
+
+/// Render the NES reference's current display state to a PPM: background from
+/// the captured nametable/attribute shadow (vertical mirroring), sprites from
+/// the OAM page ($0200), colors from captured palette RAM. Approximates SMB's
+/// sprite-0 split: rows above y=32 render unscrolled (status bar), the rest
+/// with the frame's last $2005 X write plus the $2000 nametable-select bit —
+/// the same presentation model the SMS runtime implements.
+fn render_nes_ppm(bus: &NesBus, path: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    const W: usize = 256;
+    const H: usize = 240;
+    let bg_pattern = if bus.ppu_ctrl & 0x10 != 0 { 0x1000 } else { 0 };
+    let spr_pattern = if bus.ppu_ctrl & 0x08 != 0 { 0x1000 } else { 0 };
+    let chr = |addr: usize| -> u8 {
+        // Pattern reads come from CHR ROM when present, else the CHR-RAM shadow.
+        if !bus.chr.is_empty() {
+            bus.chr[addr % bus.chr.len()]
+        } else {
+            bus.chr_ram[addr & 0x1FFF]
+        }
+    };
+    let nt = |addr: usize| -> u8 { bus.chr_ram[0x2000 + (addr & 0x7FF)] };
+    let color = |idx: u8| -> (u8, u8, u8) {
+        let rgb = NES_PALETTE[(idx & 0x3F) as usize];
+        ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+    };
+    let scroll9 = bus.scroll_x_last as usize + (((bus.ppu_ctrl & 1) as usize) << 8);
+
+    let bg_show = bus.ppu_mask & 0x08 != 0;
+    let spr_show = bus.ppu_mask & 0x10 != 0;
+    let mut pix = vec![0u8; W * H * 3];
+    let mut bg_opaque = vec![false; W * H];
+    if !bg_show {
+        // Rendering disabled: the PPU shows the universal background color.
+        let (r, g, b) = color(bus.palette_ram[0]);
+        for o in (0..pix.len()).step_by(3) {
+            pix[o] = r;
+            pix[o + 1] = g;
+            pix[o + 2] = b;
+        }
+    }
+    for y in 0..if bg_show { H } else { 0 } {
+        let scroll = if y < 32 { 0 } else { scroll9 };
+        for x in 0..W {
+            let sx = (x + scroll) & 0x1FF;
+            let page = sx >> 8;
+            let fx = sx & 0xFF;
+            let (col, row) = (fx / 8, y / 8);
+            let nt_off = page * 0x400 + row * 32 + col;
+            let tile = nt(nt_off) as usize;
+            let attr = nt(page * 0x400 + 0x3C0 + (row / 4) * 8 + col / 4);
+            let quad = ((row & 2) | ((col & 2) >> 1)) as u8;
+            let pal = (attr >> (quad * 2)) & 3;
+            let (py, px) = (y % 8, fx % 8);
+            let lo = chr(bg_pattern + tile * 16 + py);
+            let hi = chr(bg_pattern + tile * 16 + 8 + py);
+            let bit = 7 - px;
+            let v = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
+            let c = if v == 0 {
+                bus.palette_ram[0]
+            } else {
+                bus.palette_ram[(pal * 4 + v) as usize]
+            };
+            let (r, g, b) = color(c);
+            let o = (y * W + x) * 3;
+            pix[o] = r;
+            pix[o + 1] = g;
+            pix[o + 2] = b;
+            bg_opaque[y * W + x] = v != 0;
+        }
+    }
+    // Sprites, back to front so lower OAM indices win overlaps.
+    for i in (0..if spr_show { 64 } else { 0 }).rev() {
+        let o = 0x200 + i * 4;
+        let sy = bus.ram[o] as usize;
+        if sy >= 0xEF {
+            continue;
+        }
+        let tile = bus.ram[o + 1] as usize;
+        let attr = bus.ram[o + 2];
+        let sx = bus.ram[o + 3] as usize;
+        let behind = attr & 0x20 != 0;
+        let pal = 0x10 + ((attr & 3) as usize) * 4;
+        for py in 0..8usize {
+            let ty = if attr & 0x80 != 0 { 7 - py } else { py };
+            let lo = chr(spr_pattern + tile * 16 + ty);
+            let hi = chr(spr_pattern + tile * 16 + 8 + ty);
+            let y = sy + 1 + py;
+            if y >= H {
+                continue;
+            }
+            for px in 0..8usize {
+                let tx = if attr & 0x40 != 0 { px } else { 7 - px };
+                let v = ((lo >> tx) & 1) | (((hi >> tx) & 1) << 1);
+                if v == 0 {
+                    continue;
+                }
+                let x = sx + px;
+                if x >= W {
+                    continue;
+                }
+                if behind && bg_opaque[y * W + x] {
+                    continue;
+                }
+                let (r, g, b) = color(bus.palette_ram[pal + v as usize]);
+                let d = (y * W + x) * 3;
+                pix[d] = r;
+                pix[d + 1] = g;
+                pix[d + 2] = b;
+            }
+        }
+    }
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "P6\n{W} {H}\n255")?;
+    f.write_all(&pix)
+}
+
 /// reset-init is essentially done and the game wants frames. From
 /// there each frame fires one NMI.
 fn run_reference(
@@ -728,6 +877,22 @@ fn run_reference(
     // RAM-driven title/gameplay face-button remap. This reference-only knob
     // keeps scripted `start` events as NES Start for those profiles.
     let pause_is_start = std::env::var("FD_PAUSE_START").is_ok();
+    // FD_NES_DUMP=dir:f1,f2,... — render the NES reference's ground-truth
+    // framebuffer (from captured nametable/palette/OAM/scroll state) to
+    // dir/ref_NNNNN.ppm at the listed frames.
+    let nes_dump: Option<(String, Vec<usize>)> = std::env::var("FD_NES_DUMP")
+        .ok()
+        .and_then(|spec| {
+            let (dir, list) = spec.split_once(':')?;
+            let frames_wanted = list
+                .split(',')
+                .filter_map(|f| f.trim().parse::<usize>().ok())
+                .collect();
+            Some((dir.to_string(), frames_wanted))
+        });
+    if let Some((dir, _)) = &nes_dump {
+        let _ = std::fs::create_dir_all(dir);
+    }
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for frame in 0..frames {
         bus.current_frame = Some(frame);
@@ -837,6 +1002,28 @@ fn run_reference(
                 "REF frame {frame}: task$18={:02X} $19={:02X} $0D={:02X}",
                 bus.ram[0x18], bus.ram[0x19], bus.ram[0x0D]
             );
+        }
+        if let Some((dir, frames_wanted)) = &nes_dump {
+            if frames_wanted.contains(&frame) {
+                let path = format!("{dir}/ref_{frame:05}.ppm");
+                match render_nes_ppm(&bus, &path) {
+                    Ok(()) => {
+                        let pal: Vec<String> = bus
+                            .palette_ram
+                            .iter()
+                            .map(|b| format!("{b:02X}"))
+                            .collect();
+                        eprintln!(
+                            "FD_NES_DUMP wrote {path} ctrl=${:02X} mask=${:02X} scrollx=${:02X} pal={}",
+                            bus.ppu_ctrl,
+                            bus.ppu_mask,
+                            bus.scroll_x_last,
+                            pal.join(" ")
+                        );
+                    }
+                    Err(e) => eprintln!("FD_NES_DUMP failed for {path}: {e}"),
+                }
+            }
         }
         snaps.push(bus.ram);
     }
@@ -2101,6 +2288,51 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use oracle_6502::Bus as _;
+
+    fn test_nes_bus() -> NesBus {
+        NesBus::new(
+            vec![0u8; 0x8000],
+            vec![0u8; 0x2000],
+            nes_rom::MapperPolicy::Nrom { prg_len: 0x8000 },
+        )
+    }
+
+    fn ppu_write(bus: &mut NesBus, addr: u16, value: u8) {
+        bus.read(0x2002); // reset the address latch
+        bus.write(0x2006, (addr >> 8) as u8);
+        bus.write(0x2006, (addr & 0xFF) as u8);
+        bus.write(0x2007, value);
+    }
+
+    /// $3F10/$14/$18/$1C are hardware mirrors of $3F00/04/08/0C. SMB parks
+    /// the sky color at $3F10; rendering it from an unmirrored slot painted
+    /// the reference frames with a black sky (regression: FD_NES_DUMP).
+    #[test]
+    fn palette_write_to_3f10_mirrors_universal_background() {
+        let mut bus = test_nes_bus();
+        ppu_write(&mut bus, 0x3F00, 0x0F);
+        assert_eq!(bus.palette_ram[0], 0x0F);
+        ppu_write(&mut bus, 0x3F10, 0x22);
+        assert_eq!(bus.palette_ram[0], 0x22, "$3F10 write must land at $3F00");
+        // Non-mirror sprite entries stay where they are written.
+        ppu_write(&mut bus, 0x3F11, 0x16);
+        assert_eq!(bus.palette_ram[0x11], 0x16);
+        assert_eq!(bus.palette_ram[0x01], 0x00);
+    }
+
+    /// The last $2005 first-write is the playfield X scroll of the frame
+    /// (SMB writes it after the sprite-0 split). $2002 reads reset the
+    /// latch so a stray second write must not be captured as X.
+    #[test]
+    fn scroll_capture_tracks_first_write_only() {
+        let mut bus = test_nes_bus();
+        bus.read(0x2002);
+        bus.write(0x2005, 0x77); // X
+        bus.write(0x2005, 0x00); // Y — must not overwrite the captured X
+        assert_eq!(bus.scroll_x_last, 0x77);
+    }
 
     #[test]
     fn parses_acceptance_button_event_as_sms_port() {
