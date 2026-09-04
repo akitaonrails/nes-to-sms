@@ -1167,9 +1167,18 @@ fn emit_ppu_reg1_latch_inline(p: &mut z80_emit::Program, display_done: &str, spr
     p.ld_abs_a(PENDING_VDP_REG1);
 }
 
-fn emit_ppu_write_callless(program: &mut z80_emit::Program, reg: u8) {
+fn emit_ppu_write_callless(program: &mut z80_emit::Program, reg: u8, native_calls: bool) {
     use runtime_symbols::*;
 
+    if native_calls {
+        // The stackless-continuation scheme exists to keep deep translated
+        // NMI chains off the native stack; native stack discipline uses the
+        // native stack anyway, so a plain call is both cheaper (no cont-ptr
+        // store, no exit dispatch) and simpler.
+        program.ld_b_imm(reg);
+        program.call(PPU_WRITE);
+        return;
+    }
     let cont = program.fresh_label("ppu_write_cont");
     program.ld_b_imm(reg);
     program.ld_hl_label(&cont);
@@ -4481,7 +4490,11 @@ pub fn lower_routine(
                         emit_ppu_mask_write_inline(program, chr_ram);
                     }
                     5 => emit_ppu_scroll_write_inline(program),
-                    _ => emit_ppu_write_callless(program, *reg),
+                    _ => emit_ppu_write_callless(
+                        program,
+                        *reg,
+                        opts.profile.is_some_and(|p| p.native_calls()),
+                    ),
                 }
             }
 

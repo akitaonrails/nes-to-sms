@@ -205,8 +205,15 @@ _rt_ppu_write_body:
   ; BC/HL/native flags are scratch. No alternate AF or native stack is used.
   ld   ($cb18), a
   ld   ($cb1e), de
-  ; Dispatch on register index in B.
+  ; Dispatch on register index in B, hottest first: $2007 data writes
+  ; dominate (stripe flush + column streaming), then the $2006 pairs.
   ld   a, b
+  cp   7
+  jp   z, _ppu_w_ppudata
+  cp   6
+  jp   z, _ppu_w_ppuaddr
+  cp   5
+  jp   z, _ppu_w_scroll
   cp   0
   jp   z, _ppu_w_ctrl
   cp   1
@@ -217,12 +224,6 @@ _rt_ppu_write_body:
   jp   z, _ppu_w_oamaddr
   cp   4
   jp   z, _ppu_w_oamdata
-  cp   5
-  jp   z, _ppu_w_scroll
-  cp   6
-  jp   z, _ppu_w_ppuaddr
-  cp   7
-  jp   z, _ppu_w_ppudata
   ; Unknown register — ignore.
   jp   _ppu_w_done
 

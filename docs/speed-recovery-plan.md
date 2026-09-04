@@ -187,7 +187,22 @@ dynamic call-pair frequencies (PGO via FD_PROFILE), not static edges.
 | S2 hook: attribute-table renderer | out/smb-s13 | 158,266 | 2.65× | ✓ | `$88AE` whole-routine (reached via computed dispatch); one shift-count bug caught by the oracle |
 | S2 hooks: X/Y offscreen bits | out/smb-s14 | 150,650 | 2.52× | ✓ | `$F1F6`/`$F239`/`$F26D`; code now fits 8 banks (was 12) |
 
-**Net: −42.4% (4.38× → 2.52× over budget).** Full-speed gameplay now needs
+| Sound stage 1: SoundEngine native shell | out/smb-s15 | 149,720 | 2.51× | ✓ | idle-guarded SFX handlers, delegated event paths |
+| Sound stage 2: native music tick | out/smb-s16 | 149,194 | 2.50× | ✓ | steady tick native; note fetches delegate at channel labels |
+| PPU: plain-call writes (native mode) + hot-first dispatch | out/smb-s18 | 145,880 | 2.44× | ✓ | stackless-cont scheme moot under native calls; $2007/$2006 tested first |
+
+**Net: −44.2% (4.38× → 2.44× over budget).**
+
+Sound-engine measurement note: stubbing SoundEngine entirely measured
+only ~5.8K cycles/frame — the earlier "sound ~17%" symbol-class estimate
+had misattributed the F-range offscreen-bits routines. After the two
+sound stages, the engine's remaining profile footprint is sub-1%
+diffuse; what remains of the stub delta is the APU→PSG shim work and
+active-SFX processing, which are real work, not overhead. The remaining
+big-ticket item is the folded-BG/variant machinery inside the $2007
+tile-write path (rt_write_mapped_bg_tile + _bgv_*: map lookup, base
+shadow, sub-palette resolve, variant pool — ~250-400 T per tile write,
+~5-6K/frame): that is a rendering-model redesign, not a pass. Full-speed gameplay now needs
 a ~300% emulator overclock (GPGX exposes up to 500%), vs ~450%+ at S0 and
 ~600-700% at the July baseline (330-410K).
 
