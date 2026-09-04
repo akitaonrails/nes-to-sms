@@ -73,6 +73,11 @@ addr = 0x8EDD
 runtime_label = "rt_smb_flush_vram_buffer"
 reason = "NMI VRAM stripe flush: per-byte guard/dispatch/helper overhead dropped"
 
+[[replacement]]
+addr = 0xF282
+runtime_label = "rt_smb_draw_sprite_pair"
+reason = "8x16 sprite-pair OAM writer; ~1.5% of steady frame"
+
 [vectors]
 nmi   = 0x8082
 reset = 0x8000

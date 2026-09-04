@@ -734,6 +734,102 @@ _gyo_skip:
   jp   p, _gyo_loop
   jr   _osb_exhaust
 
+; ─── rt_smb_draw_sprite_pair ──────────────────────────────────────────────────
+; Replaces NES $F282 (entered by tail JMP): writes one 8x16 sprite pair
+; into OAM staging from zp inputs — $00/$01 tiles (order swapped when
+; $03 bit1 = horizontal flip, attr base $40), $04 attr bits, $02 Y
+; coordinate (both halves), $05 X (and X+8) — then $02 += 8, Y += 8,
+; X += 2, RTS. All eight OAM writes stay within the $0200 page.
+; Exit: A = Y+8 (the new Y), E = Y+8, D = X+2; shadow N/Z from the new X
+; (final INX), shadow C = carry of Y+8. V dead.
+rt_smb_draw_sprite_pair:
+  ld   a, ($c003)
+  rrca
+  rrca                       ; CY = flip bit ($03 bit 1 — LSR LSR on the 6502)
+  ld   a, ($c000)
+  ld   b, a                  ; tile0 (ld preserves CY)
+  ld   a, ($c001)
+  ld   c, a                  ; tile1
+  jr   c, _dsp_flip
+  ld   a, $01
+  add  a, e
+  ld   l, a
+  ld   h, $c2
+  ld   (hl), b               ; $0201+Y = tile0
+  ld   a, $05
+  add  a, e
+  ld   l, a
+  ld   (hl), c               ; $0205+Y = tile1
+  xor  a
+  jr   _dsp_attr
+_dsp_flip:
+  ld   a, $05
+  add  a, e
+  ld   l, a
+  ld   h, $c2
+  ld   (hl), b               ; $0205+Y = tile0
+  ld   a, $01
+  add  a, e
+  ld   l, a
+  ld   (hl), c               ; $0201+Y = tile1
+  ld   a, $40
+_dsp_attr:
+  ld   hl, $c004
+  or   (hl)
+  ld   b, a                  ; attr byte
+  ld   a, $02
+  add  a, e
+  ld   l, a
+  ld   h, $c2
+  ld   (hl), b
+  ld   a, $06
+  add  a, e
+  ld   l, a
+  ld   (hl), b
+  ld   a, ($c002)
+  ld   b, a                  ; Y coordinate
+  ld   l, e
+  ld   (hl), b               ; $0200+Y
+  ld   a, $04
+  add  a, e
+  ld   l, a
+  ld   (hl), b
+  ld   a, ($c005)
+  ld   c, a                  ; X coordinate
+  ld   a, $03
+  add  a, e
+  ld   l, a
+  ld   (hl), c
+  ld   a, c
+  add  a, $08
+  ld   c, a
+  ld   a, $07
+  add  a, e
+  ld   l, a
+  ld   (hl), c               ; X+8
+  ld   hl, $c002
+  ld   a, (hl)
+  add  a, $08
+  ld   (hl), a               ; $02 += 8
+  ld   a, e
+  add  a, $08
+  ld   e, a                  ; Y += 8; CY = exit carry
+  ld   b, $00
+  rl   b
+  inc  d
+  inc  d                     ; X += 2 (exit N/Z source)
+  ld   c, a
+  ld   a, d
+  ld   l, a
+  ld   h, $3e
+  ld   a, ($cb03)
+  and  $7c
+  or   b
+  or   (hl)
+  ld   ($cb03), a
+  ld   a, c
+  ret
+
 ; ─── rt_smb_sound_engine ──────────────────────────────────────────────────────
 ; Replaces NES $F2D0 SoundEngine's per-frame entry with a native shell.
 ; Strategy (Phase S sound stage 1): the steady-frame scaffolding is native;
