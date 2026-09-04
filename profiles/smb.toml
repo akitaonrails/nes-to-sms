@@ -58,6 +58,16 @@ addr = 0xF239
 runtime_label = "rt_smb_get_y_offscreen"
 reason = "GetYOffscreenBits + DividePDiff; ~2% of steady frame"
 
+[[replacement]]
+addr = 0xF2D0
+runtime_label = "rt_smb_sound_engine"
+reason = "SoundEngine native shell: idle-guarded SFX handlers, delegated event paths"
+
+[[replacement]]
+addr = 0xF73A
+runtime_label = "rt_smb_music_tick"
+reason = "per-frame music tick native; note fetches delegate to translated blocks"
+
 [vectors]
 nmi   = 0x8082
 reset = 0x8000

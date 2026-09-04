@@ -734,5 +734,246 @@ _gyo_skip:
   jp   p, _gyo_loop
   jr   _osb_exhaust
 
+; ─── rt_smb_sound_engine ──────────────────────────────────────────────────────
+; Replaces NES $F2D0 SoundEngine's per-frame entry with a native shell.
+; Strategy (Phase S sound stage 1): the steady-frame scaffolding is native;
+; anything eventful delegates to the translated engine at a routine
+; boundary, so rare paths keep translation-perfect fidelity:
+;   - OperMode == 0: APU $4015 = 0, return (silence path).
+;   - pause transitions ($07C6 != 0 or $FA == 1): tail-delegate the whole
+;     engine to translated L_F2D0 (reads-only up to this point, so the
+;     delegate re-runs the entry exactly once).
+;   - normal frames: $4017 = $FF, $4015 = $0F; each SFX handler runs only
+;     when its queue or active buffer is non-zero (the translated idle
+;     path reads two zero bytes and returns without writes — verified
+;     against $F45A/$F5C1/$F67F); the music handler always runs
+;     (translated, stage 2 makes it native); then the queue clears and
+;     the DMC throb ($07C0 ramp toward/away from $30, $4011 write).
+; Exit A/flags are architecturally dead: the only caller (NMI $80E4)
+; goes straight into ReadJoypads. D is preserved into the handlers
+; (translated handlers see the caller's X exactly as the original entry
+; left it); E ends as the original Y ($07C0 pre-ramp value).
+rt_smb_sound_engine:
+  ld   a, ($c770)            ; OperMode
+  or   a
+  jr   nz, _se_active
+  ld   hl, $4015
+  call rt_apu_write          ; A = 0: silence
+  ret
+_se_active:
+  ld   a, ($c7c6)
+  or   a
+  jp   nz, _se_delegate
+  ld   a, ($c0fa)
+  cp   $01
+  jp   z, _se_delegate
+  ; normal frame
+  ld   a, $ff
+  ld   hl, $4017
+  call rt_apu_write
+  ld   a, $0f
+  ld   hl, $4015
+  call rt_apu_write
+  ; Square 1 SFX: run only if queue ($FF) or buffer ($F1) is live.
+  ld   a, ($c0ff)
+  ld   hl, $c0f1
+  or   (hl)
+  jr   z, _se_sq2
+  ld   bc, L_F41B
+  ld   h, :L_F41B
+  call rt_far_tail
+_se_sq2:
+  ld   a, ($c0fe)
+  ld   hl, $c0f2
+  or   (hl)
+  jr   z, _se_noise
+  ld   bc, L_F57C
+  ld   h, :L_F57C
+  call rt_far_tail
+_se_noise:
+  ld   a, ($c0fd)
+  ld   hl, $c0f3
+  or   (hl)
+  jr   z, _se_music
+  ld   bc, L_F667
+  ld   h, :L_F667
+  call rt_far_tail
+_se_music:
+  ld   bc, L_F694
+  ld   h, :L_F694
+  call rt_far_tail
+  ; clear the frame's queues
+  xor  a
+  ld   ($c0fb), a
+  ld   ($c0fc), a
+  ld   ($c0ff), a
+  ld   ($c0fe), a
+  ld   ($c0fd), a
+  ld   ($c0fa), a
+  ; DMC throb: ramp $07C0 toward $30 while $F4 & 3, else back toward 0.
+  ld   a, ($c7c0)
+  ld   e, a
+  ld   a, ($c0f4)
+  and  $03
+  jr   z, _se_tya
+  ld   hl, $c7c0
+  inc  (hl)
+  ld   a, e
+  cp   $30
+  jr   c, _se_dmc
+_se_tya:
+  ld   a, e
+  or   a
+  jr   z, _se_dmc
+  ld   hl, $c7c0
+  dec  (hl)
+_se_dmc:
+  ld   a, e
+  ld   hl, $4011
+  call rt_apu_write
+  ret
+_se_delegate:
+  ld   bc, L_F2D0
+  ld   h, :L_F2D0
+  jp   rt_far_tail
+
+; ─── rt_smb_music_tick ────────────────────────────────────────────────────────
+; Replaces NES $F73A (the per-frame music processor; entered by JMP from
+; MusicHandler / the loaders, intercepted as call+ret). Sound stage 2:
+; the every-frame steady tick is native — per channel, decrement the note
+; length counter and run the envelope/sustain writes — while any frame on
+; which a channel's counter would hit zero (a note fetch, with its stream
+; reads and frequency setup) tail-delegates to the translated engine at
+; that channel's block label, keeping fetch paths translation-perfect:
+;   sq2 counter==1  -> L_F73A (whole routine)
+;   sq1 counter==1  -> L_F7BC (sq1 block onward)
+;   tri counter==1  -> L_F81A (triangle block onward)
+;   noise counter==1-> L_F86D (noise block onward)
+; Register contracts at the delegation labels were audited: no label
+; reads A before writing it; X at L_F7BC must be $7F when the sq2
+; envelope ran (mirrored via D), else the entry X (D untouched); Y at
+; L_F7BC is the sq2 sustain index when the envelope ran (mirrored via E).
+; Exit A/flags/X/Y are dead (the caller is rt_smb_sound_engine's
+; queue-clear sequence).
+rt_smb_music_tick:
+  ; square 2
+  ld   a, ($c7b4)
+  cp   $01
+  jp   z, _mt_deleg_all
+  dec  a
+  ld   ($c7b4), a
+  ld   a, ($c0f2)            ; sq2 SFX active?
+  or   a
+  jr   nz, _mt_sq1
+  ld   a, ($c7b1)
+  and  $91
+  jr   nz, _mt_sq1
+  ld   a, ($c7b5)            ; sustain counter (pre-dec value indexes)
+  ld   e, a
+  or   a
+  jr   z, +
+  dec  a
+  ld   ($c7b5), a
++:
+  call _mt_env
+  ld   hl, $4004
+  call rt_apu_write
+  ld   a, $7f
+  ld   hl, $4005
+  call rt_apu_write
+  ld   d, $7f                ; 6502 LDX #$7F
+_mt_sq1:
+  ; square 1 (skipped entirely while its music track pointer is 0)
+  ld   a, ($c0f8)
+  or   a
+  jr   z, _mt_tri
+  ld   a, ($c7b6)
+  cp   $01
+  jp   z, _mt_deleg_sq1
+  dec  a
+  ld   ($c7b6), a
+  ld   a, ($c0f1)            ; sq1 SFX active skips env AND the $4001 write
+  or   a
+  jr   nz, _mt_tri
+  ld   a, ($c7b1)
+  and  $91
+  jr   nz, _mt_sq1_reg1
+  ld   a, ($c7b7)
+  ld   e, a
+  or   a
+  jr   z, +
+  dec  a
+  ld   ($c7b7), a
++:
+  call _mt_env
+  ld   hl, $4000
+  call rt_apu_write
+_mt_sq1_reg1:
+  ld   a, ($c7ca)
+  or   a
+  jr   nz, +
+  ld   a, $7f
++:
+  ld   hl, $4001
+  call rt_apu_write
+_mt_tri:
+  ld   a, ($c7b9)
+  cp   $01
+  jp   z, _mt_deleg_tri
+  dec  a
+  ld   ($c7b9), a
+_mt_noise:
+  ld   a, ($c0f4)
+  and  $f3
+  ret  z                     ; $F8C4 RTS
+  ld   a, ($c7ba)
+  cp   $01
+  jp   z, _mt_deleg_noise
+  dec  a
+  ld   ($c7ba), a
+  ret
+
+_mt_env:                     ; in: E = index; out: A = envelope byte
+  ld   a, :data_prg_high
+  ld   ($ffff), a
+  ld   h, $bf                ; $FF96/$FF9A/$FFA2 -> $BF96/$BF9A/$BFA2
+  ld   a, ($c7b1)
+  and  $08
+  ld   a, $96
+  jr   nz, _mt_env_rd
+  ld   a, ($c0f4)
+  and  $7d
+  ld   a, $9a
+  jr   nz, _mt_env_rd
+  ld   a, $a2
+_mt_env_rd:
+  add  a, e
+  ld   l, a
+  jr   nc, +
+  inc  h
++:
+  ld   b, (hl)
+  ld   a, :data_prg_low
+  ld   ($ffff), a
+  ld   a, b
+  ret
+
+_mt_deleg_all:
+  ld   bc, L_F73A
+  ld   h, :L_F73A
+  jp   rt_far_tail
+_mt_deleg_sq1:
+  ld   bc, L_F7BC
+  ld   h, :L_F7BC
+  jp   rt_far_tail
+_mt_deleg_tri:
+  ld   bc, L_F81A
+  ld   h, :L_F81A
+  jp   rt_far_tail
+_mt_deleg_noise:
+  ld   bc, L_F86D
+  ld   h, :L_F86D
+  jp   rt_far_tail
+
 .ends
 .endif

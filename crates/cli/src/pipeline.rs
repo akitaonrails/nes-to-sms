@@ -1067,6 +1067,9 @@ pub fn run(args: &Args) -> Result<String, Error> {
             program.ret();
         }
         for rep in &prof.replacements {
+            if RUNTIME_SYMBOLS.contains(&rep.runtime_label.as_str()) {
+                continue; // already forward-declared above
+            }
             program.label(&rep.runtime_label);
             program.ret();
         }
