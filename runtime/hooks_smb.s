@@ -197,6 +197,23 @@ _rj_port1:
   xor  a                     ; exit A = value last stored ($074B) = 0
   ret
 
+; ─── BlockBufferCollision wrapper entries ─────────────────────────────────────
+; Replace the three 6502 fall-through wrappers ($E3E8 Feet: INY;
+; $E3E9 Head: LDA #$00 + the .db $2C BIT-skip; $E3EC Side: LDA #$01;
+; all: LDX #$00) with direct tails into the collision hook, collapsing
+; the wrapper hop chain (255 far transfers per 260 frames). The skipped
+; BIT $01A9 read has no observable effect and its flags die at $E3F0.
+rt_smb_bbc_feet:
+  inc  e
+rt_smb_bbc_head:
+  xor  a
+  ld   d, $00
+  jp   rt_smb_block_buffer_collision
+rt_smb_bbc_side:
+  ld   a, $01
+  ld   d, $00
+  jp   rt_smb_block_buffer_collision
+
 ; ─── rt_smb_block_buffer_collision ────────────────────────────────────────────
 ; Replaces NES $E3F0 BlockBufferCollision (and, through the JMP-replacement
 ; edge, the fall-through wrapper entries), including its inner JSR $9BE1

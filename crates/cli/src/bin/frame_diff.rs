@@ -1497,6 +1497,8 @@ fn run_subject(
     let steady_start = frames.saturating_sub(frames / 3);
     let mut prof: std::collections::HashMap<(u8, u8, u16), u64> = std::collections::HashMap::new();
     let mut far_hist: std::collections::HashMap<(u8, u16), u32> = std::collections::HashMap::new();
+    let mut far_edges: std::collections::HashMap<((u8, u16), (u8, u16)), u32> =
+        std::collections::HashMap::new();
     // FD_VDP_DUMP=<file>: record a per-frame FNV hash of VRAM+CRAM.
     // FD_VDP_CHECK=<file>: compare against a recorded golden run.
     let vdp_dump: Option<String> = std::env::var("FD_VDP_DUMP").ok();
@@ -1580,6 +1582,13 @@ fn run_subject(
                 if far_entries.contains(&cpu.pc) {
                     let tgt = ((cpu.b as u16) << 8) | cpu.c as u16;
                     *far_hist.entry((cpu.h, tgt)).or_default() += 1u32;
+                    // Edge collection for the bank placer: the transfer
+                    // site is last_pc (the call/jp into the shim).
+                    if (0x4000..0x8000).contains(&pc) {
+                        *far_edges
+                            .entry(((bus.slot_bank[1], pc), (cpu.h, tgt)))
+                            .or_default() += 1u32;
+                    }
                 }
                 if Some(cpu.pc) == gbv_alloc_pc {
                     gbv_allocs_steady += 1;
@@ -1648,6 +1657,7 @@ fn run_subject(
             total / n
         );
     }
+    let sym_path_copy = sym_path.clone();
     if profile
         && !prof.is_empty()
         && let Some(sym) = sym_path
@@ -1670,6 +1680,59 @@ fn run_subject(
             for ((bank, tgt), n) in rows.iter().take(20) {
                 eprintln!("    {n:>7} x  bank {bank:02} target ${tgt:04X}");
             }
+        }
+        // FD_FAR_EDGES=<file>: dump caller->target far edges resolved to
+        // NES addresses (via L_/func_ symbol names) for the profile's
+        // edge-weighted bank placer.
+        if let (Ok(path), Some(sym)) = (std::env::var("FD_FAR_EDGES"), sym_path_copy.as_ref()) {
+            let mut tables: std::collections::HashMap<u8, Vec<(u16, u16)>> = Default::default();
+            if let Ok(text) = std::fs::read_to_string(sym) {
+                for line in text.lines() {
+                    let line = line.trim();
+                    let Some((bank_addr, name)) = line.split_once(' ') else {
+                        continue;
+                    };
+                    let Some((b, a)) = bank_addr.split_once(':') else {
+                        continue;
+                    };
+                    let (Ok(bank), Ok(addr)) =
+                        (u8::from_str_radix(b, 16), u16::from_str_radix(a, 16))
+                    else {
+                        continue;
+                    };
+                    let nes = name
+                        .strip_prefix("L_")
+                        .or_else(|| name.strip_prefix("func_"))
+                        .and_then(|h| u16::from_str_radix(h, 16).ok());
+                    if let Some(nes) = nes
+                        && (0x4000..0x8000).contains(&addr)
+                    {
+                        tables.entry(bank).or_default().push((addr, nes));
+                    }
+                }
+            }
+            for t in tables.values_mut() {
+                t.sort();
+            }
+            let resolve = |bank: u8, pc: u16| -> Option<u16> {
+                let t = tables.get(&bank)?;
+                let i = t.partition_point(|&(a, _)| a <= pc);
+                t.get(i.checked_sub(1)?).map(|&(_, nes)| nes)
+            };
+            let mut agg: std::collections::HashMap<(u16, u16), u32> = Default::default();
+            for (((cb, cpc), (tb, tpc)), n) in &far_edges {
+                if let (Some(c), Some(t)) = (resolve(*cb, *cpc), resolve(*tb, *tpc)) {
+                    *agg.entry((c, t)).or_default() += n;
+                }
+            }
+            let mut rows: Vec<((u16, u16), u32)> = agg.into_iter().collect();
+            rows.sort_by(|a, b| b.1.cmp(&a.1));
+            let text: String = rows
+                .iter()
+                .map(|((c, t), n)| format!("{c:04X} {t:04X} {n}\n"))
+                .collect();
+            let _ = std::fs::write(&path, text);
+            eprintln!("  [profile] dumped {} far edges to {path}", rows.len());
         }
     }
     (init_snap, snaps)

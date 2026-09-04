@@ -620,7 +620,18 @@ _ppudata_tile_in:
   ld   a, (hl)
   or   a
   jr   z, _ppudata_samev_paint0
+  ; Pre-wrap, every FC entry — ring slots included — is assign-once, so
+  ; any painted cell's slot still equals FC[base,S]: skip without the
+  ; sub-palette/FC lookups. After the first wrap only pinned slots stay
+  ; immutable and the full check below applies.
   ld   c, a                  ; C = painted base slot
+  ld   a, ($ca07)            ; BGV_RING_WRAPPED
+  or   a
+  jr   nz, _ppudata_samev_full
+  pop  hl
+  pop  de
+  ret
+_ppudata_samev_full:
   pop  hl
   call rt_bgv_sub_palette      ; A = S (clobbers A, HL)
   ld   l, c

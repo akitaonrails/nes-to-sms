@@ -23,6 +23,7 @@ stack_discipline = "native"
 # ring of callees. Leave empty; a real edge-weighted placer with emitted
 # sizes is the remaining approach (docs/speed-recovery-plan.md).
 hot_group = []
+edge_profile = "smb/edges-start-right.txt"
 runtime_defines = ["SMB_RUNTIME_HOOKS"]
 
 # Phase S2: native replacements for per-frame NMI chores. Bodies live in
@@ -45,6 +46,24 @@ addr = 0x8E5C
 stub_body = true
 runtime_label = "rt_smb_read_joypads"
 reason = "ReadJoypads serial bit loop; ~3% of steady frame"
+
+[[replacement]]
+addr = 0xE3E8
+stub_body = true
+runtime_label = "rt_smb_bbc_feet"
+reason = "BlockBufferColli_Feet wrapper"
+
+[[replacement]]
+addr = 0xE3E9
+stub_body = true
+runtime_label = "rt_smb_bbc_head"
+reason = "BlockBufferColli_Head wrapper"
+
+[[replacement]]
+addr = 0xE3EC
+stub_body = true
+runtime_label = "rt_smb_bbc_side"
+reason = "BlockBufferColli_Side wrapper"
 
 [[replacement]]
 addr = 0xE3F0

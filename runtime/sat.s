@@ -676,7 +676,10 @@ rt_sat_upload:
   push bc
   push de
 
-  call rt_sat_resolve
+.ifdef NES_CHR_RAM
+  call rt_sat_resolve        ; 8x16 pair resolver (CHR-ROM resolves fused
+                             ; into the X/T sweep below)
+.endif
 
   ; ── Phase 1: compact visible Y positions to VRAM $3F00 ───────────────────
   ; NOTE: no SAT double buffering — a second table at $3E00 collided with
@@ -735,32 +738,67 @@ _sat_y_done:
   bit  5, a
   jr   nz, _sat_xt_8x16
 .endif
-  ld   hl, $c900             ; OAM (for X)
-  ld   de, SAT_RESOLVED      ; resolved tile numbers
-  ld   b, 64
+  ; CHR-ROM: variant resolution is FUSED into this sweep (H.5): each
+  ; visible sprite maps its tile and resolves flips/palette variants
+  ; in place, killing the separate 64-slot resolve pass and the $D400
+  ; intermediate. D shadows the next SAT XT VDP low address so the
+  ; write position can be re-established after a variant *generation*
+  ; touches the VDP scratch window (cache hits touch nothing; the
+  ; unconditional re-address after the variant path costs ~30 cycles on
+  ; the rare flip/palette sprites only).
+  ld   hl, $c900             ; OAM staging (page-aligned: walk L)
+  ld   e, 64                 ; slots
+  ld   d, $80                ; next XT VDP low address
 _sat_xt_loop:
-  ; staging ($C900) and the resolved table ($D400) are page-aligned:
-  ; walk L and E only.
   ld   a, (hl)               ; NES Y controls visibility/compaction
   cp   $cf
   jr   nc, _sat_xt_skip
-  ld   a, l
-  add  a, $03                ; -> X byte
-  ld   l, a
-  ld   a, (hl)               ; A = X
-  inc  l                     ; advance to next entry
+  inc  l
+  ld   c, (hl)               ; NES tile
+  inc  l
+  ld   b, (hl)               ; attr
+  inc  l
+  ld   a, (hl)               ; X
+  inc  l
   out  ($be), a              ; write X
-  ld   a, (de)               ; resolved SMS tile
-  inc  e
+  inc  d
+  ld   a, c
+  call rt_map_sprite_tile    ; A = mapped rel tile (preserves BC, DE, HL)
+  ld   c, a
+  cp   SAT_BLANK_REL
+  jr   z, _sat_xt_out
+  ld   a, b
+  and  $c3                   ; palette bits + H/V flip; ignore priority
+  jr   z, _sat_xt_out
+  ld   b, a
+  ld   a, ($cb08)            ; PPUCTRL bit3 => $0000 base: no safe scratch
+  bit  3, a
+  jr   nz, _sat_xt_out
+  push hl
+  push de
+  call variant_get_scratch   ; C=src, B=attr key -> A = scratch rel
+  pop  de
+  pop  hl
+  ld   c, a
+  ; re-establish the SAT XT write position (a generation moved it)
+  ld   a, d
+  out  ($bf), a
+  ld   a, $3f
+  or   $40
+  out  ($bf), a
+_sat_xt_out:
+  ld   a, c
   out  ($be), a              ; write tile
-  jr   _sat_xt_next
+  inc  d
+  dec  e
+  jp   nz, _sat_xt_loop
+  jr   _sat_upload_done
 _sat_xt_skip:
   ld   a, l
   add  a, $04                ; advance to next entry
   ld   l, a
-  inc  e                     ; skip resolved tile for this hidden sprite
-_sat_xt_next:
-  djnz _sat_xt_loop
+  dec  e
+  jp   nz, _sat_xt_loop
   jr   _sat_upload_done
 
 .ifdef NES_CHR_RAM

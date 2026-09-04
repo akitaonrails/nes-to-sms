@@ -201,7 +201,17 @@ dynamic call-pair frequencies (PGO via FD_PROFILE), not static edges.
 
 | VDP-parity oracle + pinned-slot same-value skip | out/smb-s29 | 123,644 | 2.07× | ✓ + VDP-exact | see the oracle section below |
 
-**Net: −52.7% (4.38× → 2.07× over budget).**
+| Wrap-gated same-value skip | out/smb-s30 | 122,708 | 2.05× | ✓+VDP | pre-wrap, ring slots are assign-once too |
+| Edge-weighted placer, fixed-point iterated | out/smb-s34/35 | 122,356 | 2.05× | ✓+VDP | THE packing insight: a far-edge profile only sees edges that were far in the measured build — union each build's edges and iterate to a fixed point (1,781 → 966 far transfers). Anchor ordering preserves address locality for unclustered routines. |
+| BlockBufferCollision wrapper stubs | out/smb-s36 | 121,510 | 2.03× | ✓+VDP | the E3E8/E3E9/E3EC hop chain collapses into the hook |
+| **SAT resolve fused into the X/T sweep** | out/smb-s37 | **118,296** | **1.98×** | ✓+VDP | CHR-ROM sprites resolve in place during upload; the 64-slot $D400 pre-pass is gone; VDP position re-established after variant generations |
+
+**Net: −54.8% (4.38× → 1.98× over budget). SUB-2.0×: full speed fits
+GPGX's standard ≤200% overclock menu.**
+
+Negative result (reverted): the (tile,table)→base one-entry memo in
+rt_write_mapped_bg_tile — miss overhead exceeded hit savings on the
+routes (changed-value writes rarely repeat tiles consecutively).
 
 Second negative packing result: profile-guided `hot_group` (from the new
 FD_PROFILE far-transfer histogram) also measured worse (126.7K → 128.3K)
@@ -234,19 +244,20 @@ The attribute-path analog was evaluated and rejected: a sound whole-skip
 needs 16 per-cell pinned checks (~1.4K) against ~2K of savings at a 56%
 hit rate.
 
-## The remaining path to sub-2.0× (full speed inside GPGX's ≤200% menu)
+## Beyond 1.98× (toward real-hardware speeds)
 
-~4.1K cycles short at 2.07×. In evidence-backed order:
-1. **Folded-BG deep work, now verifiable**: run-mode batching of
-   sequential changed-value writes (route/window/SRAM mapping cached
-   across a stripe), and a (tile,table)→base memo — each gated by
-   FD_VDP_CHECK goldens.
-2. **Edge-weighted bank placement** over the far-transfer histogram
-   (in FD_PROFILE) + per-routine emitted sizes; two manual grouping
-   attempts measured worse, so this needs the real placer.
-3. **Enemy-parser guarded hybrid** (ProcLoopCommand chain, ~3.5%
-   spread) and **Tier-3 relayout** (gated on the $00/$04/$06 pointer
-   audit in reports/relayout.txt).
+Sub-2.0× reached 2026-09-04. What remains, by size:
+1. **Enemy-parser guarded hybrid** (ProcLoopCommand chain, ~3.5%
+   spread) — transliteration with delegation, same recipe as the sound
+   engine.
+2. **Folded-BG run-mode batching** of sequential changed-value stripe
+   writes — now safely iterable under FD_VDP_CHECK goldens.
+3. **Tier-3 relayout** (gated on the $00/$04/$06 pointer audit in
+   reports/relayout.txt) — the only lever on the ~50% diffuse
+   translated logic.
+Golden workflow reminder: FD_VDP_DUMP on the trusted predecessor build
+per route, then FD_VDP_CHECK on every candidate; regenerate the
+edge_profile (FD_FAR_EDGES union) after layout-affecting changes.
 
 Toward sub-2.0× (full speed inside GPGX's standard ≤200% menu):
 needs ~14K more. Identified pools: enemy-parser region (~3.8%,

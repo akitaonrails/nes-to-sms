@@ -65,6 +65,13 @@ pub struct Profile {
 /// routes, not provable from the instruction stream).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Translation {
+    /// Measured far-transfer edge profile for the bank placer: a file of
+    /// `CALLER TARGET COUNT` lines (hex NES addresses, from frame-diff's
+    /// FD_FAR_EDGES), resolved relative to the profile's directory. The
+    /// pipeline clusters routines by edge weight under a section-size
+    /// estimate so hot cross-bank transfers become near CALLs.
+    #[serde(default)]
+    pub edge_profile: Option<String>,
     /// Profile-guided bank grouping: routines whose NES entry address is
     /// listed here are emitted first, in list order, so they pack into the
     /// same early section(s) and their mutual calls become near CALLs.

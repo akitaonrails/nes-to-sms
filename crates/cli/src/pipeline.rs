@@ -989,6 +989,96 @@ pub fn run(args: &Args) -> Result<String, Error> {
         routines = hot;
     }
 
+    // Phase S: edge-weighted bank placement from a measured far-transfer
+    // profile (FD_FAR_EDGES). Clusters routines connected by hot dynamic
+    // edges under a conservative size estimate; ordering anchors each
+    // cluster at its earliest member's original position, so routines
+    // outside clusters keep full address-order locality (the two earlier
+    // static/manual grouping attempts lost exactly that).
+    if let Some(rel) = prof.translation.edge_profile.clone() {
+        let path = args
+            .profile
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(&rel);
+        match std::fs::read_to_string(&path) {
+            Err(e) => eprintln!(
+                "warning: edge_profile {} unreadable ({e}); keeping address order",
+                path.display()
+            ),
+            Ok(text) => {
+                let mut ranges: Vec<(u16, u16, usize)> = routines
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (r.entry, r.end, i))
+                    .collect();
+                ranges.sort_unstable();
+                let starts: Vec<u16> = ranges.iter().map(|&(s, _, _)| s).collect();
+                let resolve = |addr: u16| -> Option<usize> {
+                    let p = starts.partition_point(|&s| s <= addr);
+                    let &(s, e, idx) = ranges.get(p.checked_sub(1)?)?;
+                    (addr >= s && addr < e).then_some(idx)
+                };
+                let mut edges: std::collections::HashMap<(usize, usize), u64> = Default::default();
+                for line in text.lines() {
+                    let mut it = line.split_whitespace();
+                    let (Some(c), Some(t), Some(n)) = (it.next(), it.next(), it.next()) else {
+                        continue;
+                    };
+                    let (Ok(c), Ok(t), Ok(n)) = (
+                        u16::from_str_radix(c, 16),
+                        u16::from_str_radix(t, 16),
+                        n.parse::<u64>(),
+                    ) else {
+                        continue;
+                    };
+                    if let (Some(ci), Some(ti)) = (resolve(c), resolve(t))
+                        && ci != ti
+                    {
+                        *edges.entry((ci.min(ti), ci.max(ti))).or_default() += n;
+                    }
+                }
+                let n = routines.len();
+                let est: Vec<usize> = routines.iter().map(|r| 32 + r.ops.len() * 12).collect();
+                fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+                    while parent[x] != x {
+                        parent[x] = parent[parent[x]];
+                        x = parent[x];
+                    }
+                    x
+                }
+                let mut parent: Vec<usize> = (0..n).collect();
+                let mut csize: Vec<usize> = est;
+                let mut sorted: Vec<((usize, usize), u64)> = edges.into_iter().collect();
+                sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                let mut merged = 0usize;
+                for ((i, j), _w) in sorted {
+                    let (ri, rj) = (uf_find(&mut parent, i), uf_find(&mut parent, j));
+                    if ri != rj && csize[ri] + csize[rj] <= TRANSLATED_SECTION_CAPACITY {
+                        parent[rj] = ri;
+                        csize[ri] += csize[rj];
+                        merged += 1;
+                    }
+                }
+                if merged > 0 {
+                    let cluster_of: Vec<usize> = (0..n).map(|i| uf_find(&mut parent, i)).collect();
+                    let mut anchor: std::collections::HashMap<usize, usize> = Default::default();
+                    for i in 0..n {
+                        anchor.entry(cluster_of[i]).or_insert(i);
+                    }
+                    let mut order: Vec<usize> = (0..n).collect();
+                    order.sort_by_key(|&i| (anchor[&cluster_of[i]], i));
+                    let mut slots: Vec<Option<ir::Routine>> =
+                        routines.drain(..).map(Some).collect();
+                    for i in order {
+                        routines.push(slots[i].take().expect("placement permutation"));
+                    }
+                    eprintln!("edge placer: {merged} merges from the measured profile");
+                }
+            }
+        }
+    }
+
     // 5. Lower into Z80. Pre-declare all runtime symbols so the linker can
     //    bind them; we emit calls to them but the actual implementations
     //    live in runtime/*.s.
