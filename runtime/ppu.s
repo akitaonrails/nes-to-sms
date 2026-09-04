@@ -456,6 +456,17 @@ _ppu_w_ppudata:
   ld   d, a
   ld   a, ($cb10)
   ld   e, a
+  call rt_ppudata_apply
+  jp   _ppudata_inc_addr
+
+; ─── rt_ppudata_apply ───────────────────────────────────────────────────────────
+; One $2007 byte, factored as a subroutine (Phase S): entry DE = NES VRAM
+; address, ($CB18) = value; classifies and performs the raw-CIRAM store and
+; folded/palette/attribute rendering, then RETs. No guard, no dispatch, no
+; PPUADDR shadow update — callers own those. Used by the normal $2007 path
+; above and by rt_smb_flush_vram_buffer's stripe loop (hooks_smb.s).
+; Clobbers A/BC/DE/HL.
+rt_ppudata_apply:
   ld   a, d
   cp   $3f
   jp   z, _ppudata_direct_palette
@@ -588,7 +599,7 @@ _ppudata_tile_in:
   out  ($bf), a
   ld   a, ($cb18)
   call rt_write_mapped_bg_tile
-  jp   _ppudata_inc_addr
+  ret
 
 _ppudata_pattern_write:
 .ifndef NES_CHR_RAM
@@ -796,12 +807,12 @@ _ppw_done:
   pop  hl
   pop  de
   pop  bc
-  jp   _ppudata_inc_addr
+  ret
 .endif
 
 _ppudata_discard_direct:
   ; non-nametable PPU writes are ignored for now
-  jp   _ppudata_inc_addr
+  ret
 
 _ppudata_direct_palette:
   ; NES palette RAM lives at $3F00-$3F1F mirrored through $3FFF. Convert the
@@ -842,23 +853,23 @@ _ppudata_direct_palette:
   cp   $10
   jr   z, _pal_universal
   cp   $04
-  jp   z, _ppudata_inc_addr
+  ret  z
   cp   $08
-  jp   z, _ppudata_inc_addr
+  ret  z
   cp   $0c
-  jp   z, _ppudata_inc_addr
+  ret  z
   cp   $14
-  jp   z, _ppudata_inc_addr
+  ret  z
   cp   $18
-  jp   z, _ppudata_inc_addr
+  ret  z
   cp   $1c
-  jp   z, _ppudata_inc_addr
+  ret  z
   ; normal entry: CRAM[P] = C
   ld   a, b
   call vdp_set_cram_addr
   ld   a, c
   out  ($be), a
-  jp   _ppudata_inc_addr
+  ret
 
 _pal_universal:
   xor  a
@@ -877,7 +888,7 @@ _pal_universal:
   call vdp_set_cram_addr
   ld   a, c
   out  ($be), a
-  jp   _ppudata_inc_addr
+  ret
 
 _ppudata_direct_attribute:
   ; Attribute byte at $23C0/$27C0/$2BC0/$2FC0. Store to the raw attr shadow,
@@ -886,7 +897,7 @@ _ppudata_direct_attribute:
   ld   ($cb15), a            ; attr byte
   call rt_nt_write_attr_shadow ; preserves DE; current folded rendering unchanged
   call _apply_attr_core
-  jp   _ppudata_inc_addr
+  ret
 
 ; ─── rt_apply_attr_byte ──────────────────────────────────────────────────────
 ; Apply one NES attribute byte to the folded window (window-gated).

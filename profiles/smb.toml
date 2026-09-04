@@ -68,6 +68,11 @@ addr = 0xF73A
 runtime_label = "rt_smb_music_tick"
 reason = "per-frame music tick native; note fetches delegate to translated blocks"
 
+[[replacement]]
+addr = 0x8EDD
+runtime_label = "rt_smb_flush_vram_buffer"
+reason = "NMI VRAM stripe flush: per-byte guard/dispatch/helper overhead dropped"
+
 [vectors]
 nmi   = 0x8082
 reset = 0x8000

@@ -191,7 +191,9 @@ dynamic call-pair frequencies (PGO via FD_PROFILE), not static edges.
 | Sound stage 2: native music tick | out/smb-s16 | 149,194 | 2.50× | ✓ | steady tick native; note fetches delegate at channel labels |
 | PPU: plain-call writes (native mode) + hot-first dispatch | out/smb-s18 | 145,880 | 2.44× | ✓ | stackless-cont scheme moot under native calls; $2007/$2006 tested first |
 
-**Net: −44.2% (4.38× → 2.44× over budget).**
+| PPU: rt_ppudata_apply factored + native stripe flush | out/smb-s19 | 136,475 | 2.28× | ✓ | $2007 apply core is now a subroutine; rt_smb_flush_vram_buffer drives it per byte with one normalized source pointer and a local address step — per-byte guard entry, register dispatch, PPUADDR shadow traffic, and the (zp),Y helper are gone from the flush |
+
+**Net: −47.8% (4.38× → 2.28× over budget).**
 
 Sound-engine measurement note: stubbing SoundEngine entirely measured
 only ~5.8K cycles/frame — the earlier "sound ~17%" symbol-class estimate

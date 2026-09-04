@@ -958,6 +958,210 @@ _mt_env_rd:
   ld   a, b
   ret
 
+; ─── rt_smb_flush_vram_buffer ─────────────────────────────────────────────────
+; Replaces NES $8EDD UpdateScreen — the NMI's VRAM stripe-buffer flush.
+; Original per stripe: two $2006 writes (address), a PPUCTRL write via
+; WritePPUReg1 ($8EED: STA $2000 + STA $0778) selecting +1/+32 increment,
+; then `count` bytes of LDA (ptr),Y / STA $2007 (bit6 of the length byte
+; repeats one source byte), pointer advance ($00/$01 += Y+1), the
+; $3F00/$0000 PPUADDR reset dance, an LDX $2002 latch reset, and loop
+; while the next header byte is non-zero; two $2005 writes (A=0) close.
+;
+; Native version drives the SAME emulation primitives per stripe
+; (rt_ppu_write/rt_ppu_read keep every latch/ctrl side effect exact) but
+; the per-byte path drops the per-write guard entry, register dispatch,
+; PPUADDR shadow load/increment/store, and the (zp),Y helper: the source
+; pointer is normalized once per stripe (RAM or PRG-low ROM; anything
+; else fail-safes by delegating the whole flush to translated L_8EDD),
+; and each byte is a `di / call rt_ppudata_apply / ei` with a locally
+; stepped NES VRAM address. EI is unconditional: the only caller is the
+; translated NMI ($80C3) and the reset path (fall-through from the
+; translated stripe writer); the IFF state is captured once at entry.
+; Exit: A = 0, X(D) = last PPUSTATUS read, Y(E) = 0; flags dead (caller
+; reloads via LDY/LDX/CPX). $CA25 is hook scratch (single-threaded game
+; code — see rt_smb_block_buffer_collision's note).
+rt_smb_flush_vram_buffer:
+  ; Capture the caller's interrupt state once: the byte loops bracket each
+  ; rt_ppudata_apply with DI, and must only re-enable when the caller had
+  ; interrupts on (the reset path runs this flush with them off).
+  ld   a, i
+  ld   a, $00
+  jp   po, +
+  inc  a
++:
+  ld   ($ca26), a
+  ld   b, $02
+  call rt_ppu_read           ; LDX $2002: latch reset + status side effects
+  ld   d, a
+_fvb_check:
+  ld   a, ($c001)            ; normalize the zp $00/$01 pointer
+  cp   $08
+  jr   c, _fvb_ram
+  cp   $80
+  jr   c, _fvb_deleg
+  cp   $c0
+  jr   nc, _fvb_deleg
+  ld   h, a                  ; PRG-low ROM: direct
+  jr   _fvb_hi
+_fvb_ram:
+  add  a, $c0
+  ld   h, a
+_fvb_hi:
+  ld   a, ($c000)
+  ld   l, a
+  ld   a, (hl)
+  or   a
+  jr   nz, _fvb_stripe
+  ; empty buffer: A = 0 scroll clears, then return
+  ld   b, $05
+  call rt_ppu_write
+  ld   b, $05
+  call rt_ppu_write
+  ld   e, $00
+  xor  a
+  ret
+_fvb_deleg:
+  ld   bc, L_8EDD
+  ld   h, :L_8EDD
+  jp   rt_far_tail
+
+_fvb_stripe:                 ; A = VRAM addr hi, HL -> header byte 0
+  push hl
+  ld   b, $06
+  call rt_ppu_write          ; $2006 high
+  pop  hl
+  inc  hl
+  ld   a, (hl)
+  push hl
+  ld   b, $06
+  call rt_ppu_write          ; $2006 low
+  pop  hl
+  inc  hl
+  ld   c, (hl)               ; C = length byte (b7 vertical, b6 repeat)
+  ld   a, ($c778)
+  or   $04
+  bit  7, c
+  jr   nz, +
+  and  $fb
++:
+  push hl
+  push bc
+  ld   b, $00
+  call rt_ppu_write          ; WritePPUReg1: $2000 semantics (A preserved)
+  ld   ($c778), a            ; ... + STA $0778
+  pop  bc
+  pop  hl
+  ld   a, c
+  and  $3f
+  ld   b, a                  ; B = count (0 means 256, like DEX/BNE)
+  ld   a, $01
+  bit  7, c
+  jr   z, +
+  ld   a, $20
++:
+  bit  6, c
+  ld   c, a                  ; C = address step (+1 / +32)
+  jr   nz, _fvb_rep
+  ; sequential: ptr advance = count + 3
+  ld   a, b
+  add  a, $03
+  ld   ($ca25), a
+  inc  hl                    ; first data byte
+  call _fvb_seq_loop
+  jr   _fvb_advance
+_fvb_rep:
+  ld   a, $04                ; repeat: ptr advance = 4
+  ld   ($ca25), a
+  inc  hl                    ; the single data byte
+  call _fvb_rep_loop
+_fvb_advance:
+  ld   a, ($ca25)
+  ld   c, a
+  ld   a, ($c000)
+  add  a, c
+  ld   ($c000), a
+  ld   a, ($c001)
+  adc  a, $00
+  ld   ($c001), a
+  ; PPUADDR reset dance: $3F00 then $0000
+  ld   a, $3f
+  ld   b, $06
+  call rt_ppu_write
+  xor  a
+  ld   b, $06
+  call rt_ppu_write
+  xor  a
+  ld   b, $06
+  call rt_ppu_write
+  xor  a
+  ld   b, $06
+  call rt_ppu_write
+  ld   b, $02
+  call rt_ppu_read           ; LDX $2002
+  ld   d, a
+  jp   _fvb_check
+
+_fvb_seq_loop:               ; B = count, C = step, HL = src
+  ld   a, ($cb0f)            ; NES VRAM address from the $2006 pair
+  ld   d, a
+  ld   a, ($cb10)
+  ld   e, a
+_fvb_sl:
+  ld   a, (hl)
+  ld   ($cb18), a
+  push hl
+  push de
+  push bc
+  di
+  call rt_ppudata_apply
+  ld   a, ($ca26)
+  or   a
+  jr   z, +
+  ei
++:
+  pop  bc
+  pop  de
+  pop  hl
+  inc  hl
+  ld   a, e
+  add  a, c
+  ld   e, a
+  jr   nc, +
+  inc  d
++:
+  djnz _fvb_sl
+  ret
+
+_fvb_rep_loop:               ; B = count, C = step, HL = the one src byte
+  ld   a, ($cb0f)
+  ld   d, a
+  ld   a, ($cb10)
+  ld   e, a
+_fvb_rl:
+  ld   a, (hl)
+  ld   ($cb18), a
+  push hl
+  push de
+  push bc
+  di
+  call rt_ppudata_apply
+  ld   a, ($ca26)
+  or   a
+  jr   z, +
+  ei
++:
+  pop  bc
+  pop  de
+  pop  hl
+  ld   a, e
+  add  a, c
+  ld   e, a
+  jr   nc, +
+  inc  d
++:
+  djnz _fvb_rl
+  ret
+
 _mt_deleg_all:
   ld   bc, L_F73A
   ld   h, :L_F73A
