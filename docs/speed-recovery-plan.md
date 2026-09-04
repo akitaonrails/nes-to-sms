@@ -199,7 +199,9 @@ dynamic call-pair frequencies (PGO via FD_PROFILE), not static edges.
 | stub_body replacements | out/smb-s24 | 127,551 | 2.14× | ✓ | replaced bodies emit `call hook / ret`, so conditional branches from neighbors reach hooks too (found via a BNE into StoreMT); StoreMT + far-ncall split + (zp),Y inline landed alongside |
 | ROR-chain idiom (S1.3e) + hook loop tuning | out/smb-s28 | 125,721 | 2.10× | ✓ | PRNG rotate chain lifted; renderer-loop invariants hoisted; flush loops IFF-split |
 
-**Net: −51.9% (4.38× → 2.10× over budget).**
+| VDP-parity oracle + pinned-slot same-value skip | out/smb-s29 | 123,644 | 2.07× | ✓ + VDP-exact | see the oracle section below |
+
+**Net: −52.7% (4.38× → 2.07× over budget).**
 
 Second negative packing result: profile-guided `hot_group` (from the new
 FD_PROFILE far-transfer histogram) also measured worse (126.7K → 128.3K)
@@ -207,20 +209,44 @@ FD_PROFILE far-transfer histogram) also measured worse (126.7K → 128.3K)
 needs a real edge-weighted placer over emitted sizes; the histogram
 instrumentation and the `hot_group` mechanism are in place for it.
 
+## The VDP-parity oracle (built 2026-09-04, closing the blindness)
+
+frame-diff's subject bus now models the VDP (control latch, VRAM, CRAM)
+and the cartridge SRAM backend. `FD_VDP_DUMP=<file>` records per-frame
+FNV hashes of VRAM+CRAM; `FD_VDP_CHECK=<file>` compares a candidate
+build against a golden run of the trusted predecessor — deterministic
+emulation makes this byte-exact. Rendering-model changes now gate
+exactly like RAM changes: record goldens on the current build, apply the
+change, require VDP PARITY OK on all three routes.
+
+Measured folded-BG data (start_right, 260 frames):
+- **67% of raw-CIRAM tile writes are same-value** (7,224 / 10,736);
+- 56% of attribute-shadow writes are same-value (472 / 839);
+- the variant ring allocates only **3 times in 86 steady frames**.
+
+First verified win — the **pinned-slot same-value repaint skip**
+(out/smb-s29, 123,644 cycles, 2.07×): a same-value tile write skips the
+folded repaint iff the cell's (base, S) resolves to a pinned variant
+slot (< 64, immutable), checked via the RAM-side base-shadow and folded
+sub-palette tables without the chr-map bank swap. Proven identical by
+construction AND byte-exact under FD_VDP_CHECK on all three routes.
+The attribute-path analog was evaluated and rejected: a sound whole-skip
+needs 16 per-cell pinned checks (~1.4K) against ~2K of savings at a 56%
+hit rate.
+
 ## The remaining path to sub-2.0× (full speed inside GPGX's ≤200% menu)
 
-~6.2K cycles short. The safe-increment well is dry; what remains:
-1. **Folded-BG model redesign** (~10K in the $2007 tile/attr paths). The
-   blocker for safe increments: skip/memo shortcuts interact with the
-   variant ring's recycling, whose staleness the RAM-parity oracle
-   cannot see. Prerequisite: a VDP-state oracle (extend frame-diff's
-   subject bus to model VRAM writes and compare against a golden
-   rendering of raw CIRAM) so rendering-model changes gate like RAM
-   changes do.
-2. **Edge-weighted bank placement** using the far-transfer histogram +
-   per-routine emitted sizes (three-pass layout).
-3. **Tier-3 relayout**, gated on the $00/$04/$06 pointer audit
-   (reports/relayout.txt).
+~4.1K cycles short at 2.07×. In evidence-backed order:
+1. **Folded-BG deep work, now verifiable**: run-mode batching of
+   sequential changed-value writes (route/window/SRAM mapping cached
+   across a stripe), and a (tile,table)→base memo — each gated by
+   FD_VDP_CHECK goldens.
+2. **Edge-weighted bank placement** over the far-transfer histogram
+   (in FD_PROFILE) + per-routine emitted sizes; two manual grouping
+   attempts measured worse, so this needs the real placer.
+3. **Enemy-parser guarded hybrid** (ProcLoopCommand chain, ~3.5%
+   spread) and **Tier-3 relayout** (gated on the $00/$04/$06 pointer
+   audit in reports/relayout.txt).
 
 Toward sub-2.0× (full speed inside GPGX's standard ≤200% menu):
 needs ~14K more. Identified pools: enemy-parser region (~3.8%,

@@ -437,29 +437,29 @@ _bg_map_base_slot_ready:
   pop  hl
   ret
 
-; ─── _bgv_sub_palette ───────────────────────────────────────────────────────
+; ─── rt_bgv_sub_palette ───────────────────────────────────────────────────────
 ; Read the per-cell sub-palette S (0-3) from the nametable shadow.
 ;   Entry: HL = SMS nametable low-byte address ($3700-$3EFE).
 ;   Exit:  A = S (0-3). Clobbers HL.
-_bgv_sub_palette:
+rt_bgv_sub_palette:
   inc  hl                    ; -> high-byte address
   ld   a, h
   cp   $3e
-  jr   nc, _bgv_sub_palette_s0 ; hidden rows are outside the active shadow
+  jr   nc, rt_bgv_sub_palette_s0 ; hidden rows are outside the active shadow
   add  a, $95                ; $37xx -> $CCxx shadow
   ld   h, a
   ld   a, (hl)
   and  $03
   ret
-_bgv_sub_palette_s0:
+rt_bgv_sub_palette_s0:
   xor  a
   ret
 
-; ─── _bgv_base_addr ─────────────────────────────────────────────────────────
+; ─── rt_bgv_base_addr ─────────────────────────────────────────────────────────
 ; Map an SMS nametable low-byte address to its per-cell base-slot shadow byte.
 ;   Entry: HL = NT low-byte address ($3700-$3EFE).
 ;   Exit:  HL = &BGV_BSHADOW[cell]. Clobbers A, DE.
-_bgv_base_addr:
+rt_bgv_base_addr:
   ld   de, $c900             ; + $C900 == - $3700 (mod 16-bit)
   add  hl, de
   srl  h
@@ -534,13 +534,13 @@ _bgw_map_ready:
   jr   c, _bgw_s0
   cp   $40
   jr   nc, _bgw_s0
-  call _bgv_base_addr        ; HL(low addr) -> base-shadow addr (preserves BC)
+  call rt_bgv_base_addr        ; HL(low addr) -> base-shadow addr (preserves BC)
   ld   (hl), c               ; base-shadow[cell] = base slot
   ld   a, ($cb17)
   ld   l, a
   ld   a, ($cb13)
   ld   h, a
-  call _bgv_sub_palette      ; A = S
+  call rt_bgv_sub_palette      ; A = S
   jr   _bgw_have_s
 _bgw_s0:
   xor  a
@@ -620,7 +620,7 @@ _bgw_s_map_ready:
   jr   c, _bgw_s_no_base_shadow
   cp   $3f
   jr   nc, _bgw_s_no_base_shadow
-  call _bgv_base_addr        ; HL(low addr) -> base-shadow addr (preserves BC)
+  call rt_bgv_base_addr        ; HL(low addr) -> base-shadow addr (preserves BC)
   ld   (hl), c               ; base-shadow[cell] = base slot
 _bgw_s_no_base_shadow:
   ld   a, ($cb16)
@@ -855,7 +855,7 @@ _chrmap_attr_write_one:
   ld   l, e
   dec  hl                    ; HL = NT low-byte address
   push hl                    ; save for the VDP write
-  call _bgv_base_addr        ; HL -> base-shadow addr
+  call rt_bgv_base_addr        ; HL -> base-shadow addr
   ld   c, (hl)               ; C = base slot
   ld   a, (BGV_ATTR_S)
   ld   b, a                  ; B = S
@@ -884,7 +884,7 @@ _chrmap_attr_write_one_s:
   ld   l, e
   dec  hl                    ; HL = NT low-byte address
   push hl                    ; save for the VDP write
-  call _bgv_base_addr        ; HL -> base-shadow addr
+  call rt_bgv_base_addr        ; HL -> base-shadow addr
   ld   c, (hl)               ; C = base slot
   ld   a, (BGV_ATTR_S)
   ld   b, a                  ; B = explicit S

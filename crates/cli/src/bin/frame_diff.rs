@@ -908,6 +908,17 @@ struct SmsBus {
     rom: Vec<u8>,
     slot_bank: [u8; 3],
     ram: [u8; 0x2000], // $C000-$DFFF, mirrored $E000-$FFFF
+    // Cartridge SRAM (raw-CIRAM / CHR-RAM backend): mapped into slot 2
+    // when $FFFC bit 3 is set.
+    sram: Vec<u8>,
+    sram_enabled: bool,
+    // VDP model (Phase S VDP-parity oracle): control-port latch, address
+    // register with the 2-bit code, 16 KiB VRAM, 32-byte CRAM.
+    vdp_latch: Option<u8>,
+    vdp_addr: u16,
+    vdp_code: u8,
+    vram: Vec<u8>,
+    cram: [u8; 32],
     // Controller: SMS port $DC, active-low (1 = released).
     port_dc: u8,
     // Debug: when Some, log writes to these NES addresses (as $Cxxx),
@@ -915,6 +926,11 @@ struct SmsBus {
     watch: Option<Vec<u16>>,
     watch_log: Vec<(u16, u8, u16)>,
     last_pc: u16,
+    // Phase S folded-BG analysis counters.
+    ciram_writes: u64,
+    ciram_same: u64,
+    attr_writes: u64,
+    attr_same: u64,
 }
 
 impl SmsBus {
@@ -923,11 +939,30 @@ impl SmsBus {
             rom,
             slot_bank: [0, 1, 2],
             ram: [0; 0x2000],
+            sram: vec![0; 0x4000],
+            sram_enabled: false,
+            vdp_latch: None,
+            vdp_addr: 0,
+            vdp_code: 0,
+            vram: vec![0; 0x4000],
+            cram: [0; 32],
             port_dc: 0xFF,
             watch: None,
             watch_log: Vec::new(),
             last_pc: 0,
+            ciram_writes: 0,
+            ciram_same: 0,
+            attr_writes: 0,
+            attr_same: 0,
         }
+    }
+    fn vdp_hash(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in self.vram.iter().chain(self.cram.iter()) {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
     }
     fn rom_byte(&self, bank: u8, off: u16) -> u8 {
         let i = bank as usize * SMS_BANK + off as usize;
@@ -941,7 +976,13 @@ impl z80_emu::Bus for SmsBus {
             0x0000..=0x03FF => self.rom_byte(0, addr), // fixed first 1 KiB
             0x0400..=0x3FFF => self.rom_byte(self.slot_bank[0], addr),
             0x4000..=0x7FFF => self.rom_byte(self.slot_bank[1], addr - 0x4000),
-            0x8000..=0xBFFF => self.rom_byte(self.slot_bank[2], addr - 0x8000),
+            0x8000..=0xBFFF => {
+                if self.sram_enabled {
+                    self.sram[(addr - 0x8000) as usize]
+                } else {
+                    self.rom_byte(self.slot_bank[2], addr - 0x8000)
+                }
+            }
             0xC000..=0xDFFF => self.ram[(addr - 0xC000) as usize],
             0xE000..=0xFFFB => self.ram[(addr - 0xE000) as usize],
             0xFFFC => 0,
@@ -952,8 +993,24 @@ impl z80_emu::Bus for SmsBus {
     }
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
+            0x8000..=0xBFFF if self.sram_enabled => {
+                let i = (addr - 0x8000) as usize;
+                if i < 0x800 {
+                    self.ciram_writes += 1;
+                    if self.sram[i] == value {
+                        self.ciram_same += 1;
+                    }
+                }
+                self.sram[i] = value;
+            }
             0x0000..=0xBFFF => {} // ROM
             0xC000..=0xDFFF => {
+                if (0xCB80..=0xCBFF).contains(&addr) {
+                    self.attr_writes += 1;
+                    if self.ram[(addr - 0xC000) as usize] == value {
+                        self.attr_same += 1;
+                    }
+                }
                 self.ram[(addr - 0xC000) as usize] = value;
                 if let Some(w) = &self.watch {
                     let nes = addr - 0xC000;
@@ -963,7 +1020,7 @@ impl z80_emu::Bus for SmsBus {
                 }
             }
             0xE000..=0xFFFB => self.ram[(addr - 0xE000) as usize] = value,
-            0xFFFC => {}
+            0xFFFC => self.sram_enabled = value & 0x08 != 0,
             0xFFFD => self.slot_bank[0] = value,
             0xFFFE => self.slot_bank[1] = value,
             0xFFFF => self.slot_bank[2] = value,
@@ -972,15 +1029,44 @@ impl z80_emu::Bus for SmsBus {
     fn in_port(&mut self, port: u8) -> u8 {
         match port & 0xC1 {
             0x80 => 0x00,         // VDP data port $BE
-            0x81 => 0xFF,         // VDP status/control $BF — ack reads
+            0x81 => {
+                self.vdp_latch = None; // control reads reset the write latch
+                0xFF // VDP status — ack reads
+            }
             0xC0 => self.port_dc, // controller port 1 ($DC)
             0xC1 => 0xFF,         // controller port 2 ($DD)
             0x40 => 0xFF,         // H/V counter
             _ => 0xFF,
         }
     }
-    fn out_port(&mut self, _port: u8, _value: u8) {
-        // VDP / PSG writes don't affect NES game RAM; ignore for the diff.
+    fn out_port(&mut self, port: u8, value: u8) {
+        // VDP model for the VDP-parity oracle. PSG and other ports are
+        // still ignored.
+        match port & 0xC1 {
+            0x81 => {
+                // Control port $BF: two-byte latch.
+                match self.vdp_latch.take() {
+                    None => self.vdp_latch = Some(value),
+                    Some(lo) => {
+                        self.vdp_code = value >> 6;
+                        self.vdp_addr = ((value as u16 & 0x3F) << 8) | lo as u16;
+                        // Code 2 is a register write; codes 0/1/3 set the
+                        // address for reads/writes (reads unmodeled).
+                    }
+                }
+            }
+            0x80 => {
+                // Data port $BE: write to VRAM or CRAM per the code.
+                self.vdp_latch = None;
+                if self.vdp_code == 3 {
+                    self.cram[(self.vdp_addr & 0x1F) as usize] = value;
+                } else {
+                    self.vram[(self.vdp_addr & 0x3FFF) as usize] = value;
+                }
+                self.vdp_addr = self.vdp_addr.wrapping_add(1) & 0x3FFF;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1411,6 +1497,33 @@ fn run_subject(
     let steady_start = frames.saturating_sub(frames / 3);
     let mut prof: std::collections::HashMap<(u8, u8, u16), u64> = std::collections::HashMap::new();
     let mut far_hist: std::collections::HashMap<(u8, u16), u32> = std::collections::HashMap::new();
+    // FD_VDP_DUMP=<file>: record a per-frame FNV hash of VRAM+CRAM.
+    // FD_VDP_CHECK=<file>: compare against a recorded golden run.
+    let vdp_dump: Option<String> = std::env::var("FD_VDP_DUMP").ok();
+    let vdp_check: Option<Vec<u64>> = std::env::var("FD_VDP_CHECK").ok().and_then(|p| {
+        std::fs::read_to_string(p).ok().map(|t| {
+            t.lines()
+                .filter_map(|l| u64::from_str_radix(l.trim(), 16).ok())
+                .collect()
+        })
+    });
+    let mut vdp_hashes: Vec<u64> = Vec::new();
+    let mut gbv_allocs_steady: u64 = 0;
+    let gbv_alloc_pc: Option<u16> = sym_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| {
+            text.lines().find_map(|l| {
+                let l = l.trim();
+                let (bank_addr, name) = l.split_once(' ')?;
+                if name == "_gbv_alloc" {
+                    let (_b, a) = bank_addr.split_once(':')?;
+                    u16::from_str_radix(a, 16).ok()
+                } else {
+                    None
+                }
+            })
+        });
     // Addresses of the native far-shim entries, from the sym file.
     let far_entries: Vec<u16> = sym_path
         .as_ref()
@@ -1468,6 +1581,9 @@ fn run_subject(
                     let tgt = ((cpu.b as u16) << 8) | cpu.c as u16;
                     *far_hist.entry((cpu.h, tgt)).or_default() += 1u32;
                 }
+                if Some(cpu.pc) == gbv_alloc_pc {
+                    gbv_allocs_steady += 1;
+                }
             }
             if !nmi_done && cpu.sp >= sp_before {
                 nmi_done = true;
@@ -1484,6 +1600,39 @@ fn run_subject(
             bus.watch = None;
         }
         snaps.push(snap_nes_ram(&bus));
+        if vdp_dump.is_some() || vdp_check.is_some() {
+            vdp_hashes.push(bus.vdp_hash());
+        }
+    }
+    if let Some(path) = &vdp_dump {
+        let text: String = vdp_hashes
+            .iter()
+            .map(|h| format!("{h:016x}\n"))
+            .collect();
+        let _ = std::fs::write(path, text);
+        eprintln!("  [vdp] dumped {} per-frame VRAM+CRAM hashes", vdp_hashes.len());
+    }
+    if let Some(golden) = &vdp_check {
+        let mut mismatches = 0usize;
+        let mut first: Option<usize> = None;
+        for (i, h) in vdp_hashes.iter().enumerate() {
+            if golden.get(i) != Some(h) {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(i);
+                }
+            }
+        }
+        match first {
+            None => eprintln!(
+                "  [vdp] VDP PARITY OK across {} frames (VRAM+CRAM byte-exact)",
+                vdp_hashes.len()
+            ),
+            Some(f) => eprintln!(
+                "  [vdp] VDP DIVERGENCE: {mismatches} of {} frames differ, first at frame {f}",
+                vdp_hashes.len()
+            ),
+        }
     }
     report_trap(&bus, &cpu, "after frames");
     if measure_nmi && !nmi_costs.is_empty() {
@@ -1504,6 +1653,16 @@ fn run_subject(
         && let Some(sym) = sym_path
     {
         profile_report(&prof, &sym);
+        eprintln!(
+            "  [folded-BG] raw-CIRAM tile writes: {} total, {} same-value ({:.0}%); attr-shadow writes: {} total, {} same-value ({:.0}%); variant allocations in steady frames: {}",
+            bus.ciram_writes,
+            bus.ciram_same,
+            bus.ciram_same as f64 * 100.0 / bus.ciram_writes.max(1) as f64,
+            bus.attr_writes,
+            bus.attr_same,
+            bus.attr_same as f64 * 100.0 / bus.attr_writes.max(1) as f64,
+            gbv_allocs_steady,
+        );
         if !far_hist.is_empty() {
             let mut rows: Vec<((u8, u16), u32)> = far_hist.into_iter().collect();
             rows.sort_by(|a, b| b.1.cmp(&a.1));

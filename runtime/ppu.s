@@ -515,6 +515,18 @@ _ppudata_direct_nametable_tile:
 
   ld   a, RAW_CIRAM_SRAM_CTRL
   ld   ($fffc), a
+.ifndef NES_CHR_RAM
+  ; Same-value flag for the pinned-slot repaint skip (see
+  ; _ppudata_tile_samev): 67% of SMB's steady-frame tile writes rewrite
+  ; the byte already present.
+  ld   a, (hl)
+  cp   c
+  ld   a, $00
+  jr   nz, +
+  inc  a
++:
+  ld   ($ca33), a
+.endif
   ld   (hl), c
   xor  a
   ld   ($fffc), a
@@ -580,6 +592,59 @@ _ppudata_tile_col_check:
   cp   32
   jp   nc, _ppudata_discard_direct
 _ppudata_tile_in:
+.ifndef NES_CHR_RAM
+  ; Pinned-slot repaint skip: a same-value write's repaint is
+  ; byte-identical iff the cell's (base, S) resolves to a PINNED variant
+  ; slot (< 64 — immutable for the cartridge's lifetime), because the
+  ; attribute path keeps the painted cell in sync with FC[base,S] and
+  ; pinned mappings never recycle. Base-shadow 0 is ambiguous with the
+  ; boot fill, and FC >= 64 rides the recycling ring: both fall through
+  ; to the normal repaint. Verified byte-exact by the FD_VDP_CHECK
+  ; parity oracle in addition to RAM parity.
+  ld   a, ($ca33)
+  or   a
+  jr   z, _ppudata_tile_paint
+  push de
+  ld   a, d
+  and  $03
+  ld   d, a
+  sla  e
+  rl   d
+  ld   a, d
+  add  a, $37
+  ld   d, a
+  ld   h, d
+  ld   l, e                  ; HL = NT low-byte address
+  push hl
+  call rt_bgv_base_addr        ; HL = &base-shadow[cell] (clobbers A, DE)
+  ld   a, (hl)
+  or   a
+  jr   z, _ppudata_samev_paint0
+  ld   c, a                  ; C = painted base slot
+  pop  hl
+  call rt_bgv_sub_palette      ; A = S (clobbers A, HL)
+  ld   l, c
+  ld   h, $00
+  add  hl, hl
+  add  hl, hl
+  add  a, l
+  ld   l, a
+  jr   nc, +
+  inc  h
++:
+  ld   de, $d600             ; BGV_CACHE: FC[base*4+S]
+  add  hl, de
+  ld   a, (hl)
+  cp   64
+  jr   nc, _ppudata_samev_paint1
+  pop  de
+  ret                        ; pinned: the repaint would be identical
+_ppudata_samev_paint0:
+  pop  hl
+_ppudata_samev_paint1:
+  pop  de
+.endif
+_ppudata_tile_paint:
   ; DE = NES nametable byte. Convert `(DE - $2000) & $03FF` to
   ; SMS `$3700 + offset * 2` (224-line-mode name table base), write tile
   ; low byte and clear attrs.

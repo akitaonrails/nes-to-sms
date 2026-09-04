@@ -30,8 +30,9 @@ Current state (measured from the workspace):
   emits a complete WLA-DX project tree.
 - Generated ROMs boot under Mednafen; real-SMS speed remains an open
   issue. Phase S (docs/speed-recovery-plan.md, 2026-09-04) brought SMB
-  from ~4.4× to ~2.10× over the frame budget (full speed at ~215%
-  emulator overclock); docs/handport-comparison.md explains the ceiling.
+  from ~4.4× to ~2.07× over the frame budget (full speed at ~210%
+  emulator overclock); frame-diff has RAM-parity AND VDP-parity oracles
+  (FD_VDP_DUMP/FD_VDP_CHECK golden workflow); docs/handport-comparison.md explains the ceiling.
 - SMB builds use `[translation] stack_discipline = "native"` (native
   CALL/RET via `rt_far_tail`) and thirteen `[[replacement]]` hooks in
   `runtime/hooks_smb.s`. The canonical SMB test ROM is `.roms/smb.nes`
