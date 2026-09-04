@@ -9,3 +9,4 @@ third_party/nesrecomp/
 *.mov
 *.mkv
 *.mc0
+__pycache__/
