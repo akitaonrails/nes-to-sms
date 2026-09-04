@@ -193,7 +193,16 @@ dynamic call-pair frequencies (PGO via FD_PROFILE), not static edges.
 
 | PPU: rt_ppudata_apply factored + native stripe flush | out/smb-s19 | 136,475 | 2.28× | ✓ | $2007 apply core is now a subroutine; rt_smb_flush_vram_buffer drives it per byte with one normalized source pointer and a local address step — per-byte guard entry, register dispatch, PPUADDR shadow traffic, and the (zp),Y helper are gone from the flush |
 
-**Net: −47.8% (4.38× → 2.28× over budget).**
+| Hook: 8x16 sprite-pair OAM writer ($F282) | out/smb-s20 | 134,863 | 2.26× | ✓ | flip flag is $03 bit 1 (LSR LSR) — second elided-listing catch |
+| SAT page-walk uploads + cond-dec loop idiom | out/smb-s21 | 133,597 | 2.24× | ✓ | S1.3d lifts `LDA a,X/BEQ/DEC a,X/DEX/BPL` whole (2 sites; loop heads may keep outside referrers) |
+
+**Net: −48.9% (4.38× → 2.24× over budget).**
+
+Toward sub-2.0× (full speed inside GPGX's standard ≤200% menu):
+needs ~14K more. Identified pools: enemy-parser region (~3.8%,
+transliteration-heavy), StoreMT (~1.4%), far-shim locality (~3.7%,
+needs PGO), folded-BG model (~6-8%, redesign). The first two are more
+hook work; the last two are the structural projects.
 
 Sound-engine measurement note: stubbing SoundEngine entirely measured
 only ~5.8K cycles/frame — the earlier "sound ~17%" symbol-class estimate

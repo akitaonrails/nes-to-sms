@@ -2752,6 +2752,156 @@ fn emit_fill_loop(program: &mut z80_emit::Program, plan: &FillLoopPlan) {
     program.ld_a_c();
 }
 
+/// S1.3d: conditional strided decrement loop (SMB's NMI timer loop shape):
+///   L: LDA base,idx ; BEQ S ; DEC base,idx ; S: DEX/DEY ; BPL L
+/// Lifted to a pointer walk: one EA computation, `dec (hl)` in place, and
+/// a 16-bit pointer decrement (page-crossing safe for any entry index).
+/// Exit state is architectural: idx = $FF, A = the last byte read, N set,
+/// Z clear (the final DEX/DEY wrapped), C/V untouched.
+#[derive(Clone)]
+struct CondDecLoopPlan {
+    end: usize,
+    sms_base: u16,
+    use_x: bool,
+    write_flags: bool,
+}
+
+fn match_cond_dec_loop(
+    ops: &[ir::Op],
+    i: usize,
+    routine: &ir::Routine,
+    reads: Option<&std::collections::HashMap<String, u8>>,
+) -> Option<CondDecLoopPlan> {
+    use ir::{AddrExpr, Cond, Op};
+    let head = match ops.get(i)? {
+        Op::Label(l) => l.clone(),
+        _ => return None,
+    };
+    let lda = skip_source(ops, i + 1);
+    let (base, region, use_x) = match ops.get(lda)? {
+        Op::LdaMem {
+            addr: AddrExpr::AbsIndexedX(b),
+            region,
+        } => (*b, *region, true),
+        Op::LdaMem {
+            addr: AddrExpr::AbsIndexedY(b),
+            region,
+        } => (*b, *region, false),
+        _ => return None,
+    };
+    if !matches!(
+        region,
+        ir::MemRegion::Ram | ir::MemRegion::RamMirror | ir::MemRegion::Stack
+    ) {
+        return None;
+    }
+    let sms_base = indexed_base_to_sms(base, region);
+    if !(0xC000..=0xC7FF).contains(&sms_base) {
+        return None;
+    }
+    let beq = skip_source(ops, lda + 1);
+    if base == 0x0780 {
+    }
+    let skip_lbl = match ops.get(beq)? {
+        Op::BranchIf {
+            cond: Cond::Zero,
+            target,
+        } => target.clone(),
+        _ => return None,
+    };
+    let dec = skip_source(ops, beq + 1);
+    match ops.get(dec)? {
+        Op::DecMem {
+            addr: AddrExpr::AbsIndexedX(b),
+            ..
+        } if use_x && *b == base => {}
+        Op::DecMem {
+            addr: AddrExpr::AbsIndexedY(b),
+            ..
+        } if !use_x && *b == base => {}
+        _ => return None,
+    }
+    let skip_at = skip_source(ops, dec + 1);
+    match ops.get(skip_at)? {
+        Op::Label(l) if *l == skip_lbl => {}
+        _ => return None,
+    }
+    let step = skip_source(ops, skip_at + 1);
+    match (ops.get(step)?, use_x) {
+        (Op::Dex, true) | (Op::Dey, false) => {}
+        _ => return None,
+    }
+    let bpl = skip_source(ops, step + 1);
+    match ops.get(bpl)? {
+        Op::BranchIf {
+            cond: Cond::Positive,
+            target,
+        } if *target == head => {}
+        _ => return None,
+    }
+    // The interior skip label must belong to this loop alone. The HEAD may
+    // have outside referrers: they enter at the label, which precedes the
+    // lifted loop, and the lift computes its pointer from the live index —
+    // identical semantics for any entry (SMB's NMI enters the timer loop
+    // from two BPL sites with different X).
+    {
+        let lbl = &skip_lbl;
+        let refs = routine
+            .ops
+            .iter()
+            .filter(|op| match op {
+                Op::BranchIf { target, .. } | Op::Jmp { target } => target == lbl,
+                _ => false,
+            })
+            .count();
+        if refs != 1 {
+            return None;
+        }
+    }
+    let write_flags = flags_live_after(ops, bpl, F_N | F_Z, reads);
+    Some(CondDecLoopPlan {
+        end: bpl + 1,
+        sms_base,
+        use_x,
+        write_flags,
+    })
+}
+
+fn emit_cond_dec_loop(program: &mut z80_emit::Program, plan: &CondDecLoopPlan) {
+    let loop_top = program.fresh_label("cdec_loop");
+    let skip = program.fresh_label("cdec_skip");
+    program.ld_hl_imm(plan.sms_base);
+    if plan.use_x {
+        program.ld_c_d();
+    } else {
+        program.ld_c_e();
+    }
+    program.ld_b_imm(0);
+    program.add_hl_bc();
+    program.label(&loop_top);
+    program.ld_a_hl_ptr();
+    program.or_a();
+    program.jr_z(&skip);
+    program.dec_hl_ptr();
+    program.label(&skip);
+    program.dec_hl();
+    if plan.use_x {
+        program.dec_d();
+    } else {
+        program.dec_e();
+    }
+    program.jp_p(&loop_top);
+    if plan.write_flags {
+        // Exit flags are constant: the final DEX/DEY wrapped to $FF.
+        program.ld_b_a();
+        program.ld_a_abs(sms_layout::SHADOW_P);
+        program.and_imm(0xFD); // clear Z
+        program.or_imm(0x80); // set N
+        program.ld_abs_a(sms_layout::SHADOW_P);
+        program.ld_a_b();
+    }
+}
+
 /// S1.3b: flag-aware memory shift/rotate (ASL/LSR/ROL/ROR on memory).
 /// The CB (hl) forms produce native S/Z/C directly; shadow-P is read only
 /// when the op consumes carry (ROL/ROR) and written only when a flag
@@ -2984,6 +3134,19 @@ pub fn lower_routine(
             fill_loop_plans[i] = Some(plan);
         }
     }
+    // S1.3d: conditional strided decrement loops (lifted whole).
+    let mut cond_dec_plans: Vec<Option<CondDecLoopPlan>> = vec![None; ops_slice.len()];
+    for i in 0..ops_slice.len() {
+        if fuse_consumed[i] || copy_loop_plans[i].is_some() || fill_loop_plans[i].is_some() {
+            continue;
+        }
+        if let Some(plan) = match_cond_dec_loop(ops_slice, i, routine, opts.routine_flag_reads) {
+            for slot in fuse_consumed.iter_mut().take(plan.end).skip(i + 1) {
+                *slot = true;
+            }
+            cond_dec_plans[i] = Some(plan);
+        }
+    }
     // 16-bit add idiom next (it spans 7 ops and subsumes the LDA/CLC/ADC
     // fusions that would otherwise match its pieces).
     for i in 0..ops_slice.len() {
@@ -3143,6 +3306,14 @@ pub fn lower_routine(
             }
             emit_fill_loop(program, plan);
             a_holds_nz = false; // exit N/Z are the INY/INX wrap, not A's
+            continue;
+        }
+        if let Some(plan) = &cond_dec_plans[op_idx] {
+            if let Op::Label(name) = op {
+                program.label(name);
+            }
+            emit_cond_dec_loop(program, plan);
+            a_holds_nz = false; // exit N/Z are the DEX/DEY wrap, not A's
             continue;
         }
         if let Some(plan) = &add16_plans[op_idx] {

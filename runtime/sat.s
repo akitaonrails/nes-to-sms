@@ -702,10 +702,10 @@ _sat_y_visible:
   out  ($be), a
   inc  c
 _sat_y_skip:
-  inc  hl
-  inc  hl
-  inc  hl
-  inc  hl
+  ; staging is page-aligned ($C900-$C9FF): stride the low byte only
+  ld   a, l
+  add  a, $04
+  ld   l, a
   djnz _sat_y_loop
 
   ; Hide every remaining SAT slot. The classic Y=$D0 end-of-list terminator
@@ -739,25 +739,26 @@ _sat_y_done:
   ld   de, SAT_RESOLVED      ; resolved tile numbers
   ld   b, 64
 _sat_xt_loop:
+  ; staging ($C900) and the resolved table ($D400) are page-aligned:
+  ; walk L and E only.
   ld   a, (hl)               ; NES Y controls visibility/compaction
   cp   $cf
   jr   nc, _sat_xt_skip
-  inc  hl                    ; skip Y
-  inc  hl                    ; skip tile
-  inc  hl                    ; skip attr
+  ld   a, l
+  add  a, $03                ; -> X byte
+  ld   l, a
   ld   a, (hl)               ; A = X
-  inc  hl                    ; advance to next entry
+  inc  l                     ; advance to next entry
   out  ($be), a              ; write X
   ld   a, (de)               ; resolved SMS tile
-  inc  de
+  inc  e
   out  ($be), a              ; write tile
   jr   _sat_xt_next
 _sat_xt_skip:
-  inc  hl                    ; skip Y
-  inc  hl                    ; skip tile
-  inc  hl                    ; skip attr
-  inc  hl                    ; advance to next entry
-  inc  de                    ; skip resolved tile for this hidden sprite
+  ld   a, l
+  add  a, $04                ; advance to next entry
+  ld   l, a
+  inc  e                     ; skip resolved tile for this hidden sprite
 _sat_xt_next:
   djnz _sat_xt_loop
   jr   _sat_upload_done
