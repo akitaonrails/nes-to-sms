@@ -617,6 +617,17 @@ _npc_row:
   ld   d, a
   call rt_raw_ciram_sram_read_locked ; presentation-locked, stackless read
   ld   ($cb13), a               ; park raw tile without spending native stack
+.ifdef NES_CHR_RAM
+  ; CHR-RAM only: resolve this cell's sub-palette S from the raw attribute
+  ; shadow now, while DE still holds the NES tile address; it is staged into
+  ; the folded $CCxx shadow below (after the fold) so the single tile write
+  ; picks the correct variant, replacing the removed second attribute pass
+  ; (see loop end). CHR-ROM (SMB) keeps the two-pass path: its authoritative
+  ; sub-palette state flows differently and the raw attr shadow read here is
+  ; not equivalent for it (verified: SMB bonus-pipe VDP parity regressed).
+  call rt_nt_attr_s_from_attr_shadow ; A = S (0..3); preserves DE, clobbers BC/HL
+  ld   c, a                          ; park S across the fold + VDP address set
+.endif
 .ifdef PROFILE_TOP_TILE_REMAP_ROWS
   ; Profile-owned, display-only cleanup for transition-fill tiles in a fixed
   ; top band. Never modify raw CIRAM: later projections must retain the game's
@@ -656,6 +667,16 @@ _npc_top_remap_done:
   ld   a, d
   add  a, $37
   ld   d, a
+.ifdef NES_CHR_RAM
+  ; Stage the resolved S (parked in C) into the folded $CCxx shadow for this
+  ; cell ($37xx -> $CCxx: high byte + $95) so rt_write_mapped_bg_tile reads the
+  ; correct sub-palette. Preserves D/E for the VDP address + tile write.
+  ld   a, d
+  add  a, $95
+  ld   h, a
+  ld   l, e
+  ld   (hl), c
+.endif
   ld   a, e
   out  ($bf), a
   ld   a, d
@@ -670,13 +691,25 @@ _npc_top_remap_done:
   ld   hl, $cb79
   cp   (hl)
   jr   c, _npc_row
+.ifdef NES_CHR_RAM
+  ; CHR-RAM: no second attribute pass. _npc_row staged each cell's correct S
+  ; into the folded $CCxx shadow (from the raw attribute shadow) before its
+  ; single tile write, so every projected cell already resolved the right
+  ; variant. The former _npc_attr / rt_apply_attr_byte pass re-resolved all
+  ; 4x4 groups (neighbour columns included) and cost ~11% of frame time while
+  ; scrolling; it also left window-gate-skipped scroll-edge cells with stale
+  ; sub-palettes (the "left part not refreshed" fragments). In-place attribute
+  ; changes to already-visible cells are still handled by the direct $2007
+  ; attribute path (ppu.s rt_apply_attr_byte).
+  ret
+.else
 
-  ; Re-apply the column's attributes from the raw attr shadow: the tile
-  ; writes above resolved their palette variants against the folded attr
-  ; state of the OLD column occupying these fold slots. Feeding the 8
-  ; governing attribute bytes through rt_apply_attr_byte re-resolves the
-  ; 4x4 groups with the correct sub-palettes (neighbor columns are
-  ; re-resolved too, harmlessly — their state is already correct).
+  ; CHR-ROM (SMB): re-apply the column's attributes from the raw attr shadow.
+  ; The tile writes above resolved their palette variants against the folded
+  ; attr state of the OLD column occupying these fold slots. Feeding the 8
+  ; governing attribute bytes through rt_apply_attr_byte re-resolves the 4x4
+  ; groups with the correct sub-palettes (neighbor columns are re-resolved too,
+  ; harmlessly — their state is already correct).
   xor  a
   ld   ($cb2c), a            ; attr group row 0..7
 _npc_attr:
@@ -713,3 +746,4 @@ _npc_attr:
   cp   8
   jr   c, _npc_attr
   ret
+.endif

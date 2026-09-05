@@ -349,6 +349,43 @@ mapper-read de-guard (needs the slot-1 IRQ-save redesign, ~5%). Each step must
 pass the CV1 acceptance gates + sprite/VDP byte comparison and carry a
 regression check, per the SMB Phase-S discipline.
 
+## Materializer single-pass attribute resolution (2026-09-05)
+
+First materializer-campaign step, and it fixes the motion glitch directly.
+`_nt_project_col` (runtime/ntmap.s) used to materialize each entering column in
+**two passes**: `_npc_row` wrote the 24 tiles resolving each variant against the
+*old* folded sub-palette state, then `_npc_attr` re-applied the 8 governing
+attribute bytes through `rt_apply_attr_byte`, re-resolving all 4x4 groups
+(including three neighbour columns already correct). That second pass was ~11%
+of frame time while scrolling AND — because its `_attr_quad_in_window` gate
+skipped quadrants at the window edge — it left scroll-edge cells with the
+previous screen's sub-palette: the "left part not refreshed" fragments (e.g. a
+`CONAMI` title sliver bleeding down the left edge during Stage 1 scroll).
+
+The fix (CHR-RAM only): `_npc_row` now resolves each cell's correct S from the
+raw attribute shadow (via the existing, proven `rt_nt_attr_s_from_attr_shadow`)
+and stages it into the folded `$CCxx` shadow *before* the single tile write, so
+every projected cell resolves the right variant the first time. The `_npc_attr`
+pass is dropped. In-place attribute changes to already-visible cells are still
+handled by the direct `$2007` path (`ppu.s rt_apply_attr_byte`).
+
+Results (continuous-scroll route): **p99 frame cost 3.87M -> 338k cycles
+(-91%, 65x -> 5.7x budget)** — the full-window rebuilds that caused the visible
+hitches; **avg 177k -> 143k (-19%, 2.97x -> 2.39x)**; max 4.6M -> 2.4M. The
+median rises slightly (per-cell S extraction on every projected cell) but that
+is moot under overclock where the win is killing the 65x tail. Verified: the
+entrance (full materialization, no scroll) renders **byte-identical** before/
+after (so the S extraction matches the old full-rebuild output exactly); the
+scroll-edge `CONAMI` bleed is gone; CV1 acceptance (smoke + heart) green; min
+native SP $DF8E (safe). **CHR-ROM (SMB) keeps the two-pass path** — its
+authoritative sub-palette flows differently and the single-pass regressed SMB's
+`bonus-pipe` VDP parity, so the optimization is `.ifdef NES_CHR_RAM`-gated and
+SMB stays VDP+RAM byte-exact on all three golden routes.
+
+Regression guards: SMB's `FD_VDP_CHECK` goldens catch any CHR-ROM breakage (they
+caught the ungated regression); CV1 acceptance + the scroll frame-cost
+distribution catch CHR-RAM breakage.
+
 ## Reproduce CV1 acceptance
 
 ```sh
