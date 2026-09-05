@@ -30,6 +30,16 @@ nmi   = 0xc052
 reset = 0xc008
 irq   = 0xc0bf
 
+[translation]
+runtime_defines = ["CV1_RUNTIME_HOOKS"]
+
+# The full NMI finishes DMA/stripe/split setup through this routine before
+# setting busy $1B. Lag callers keep the PPU semantics but do not publish.
+[[replacement]]
+addr = 0xc11f
+runtime_label = "rt_cv1_scroll_publish"
+reason = "Preserve scroll/control writes and publish the completed graphics prologue once"
+
 # Trap-driven bank annotations (see out/cv1/reports/unresolved_labels.txt
 # + $CB62 shadow at trap time).
 [[function]]

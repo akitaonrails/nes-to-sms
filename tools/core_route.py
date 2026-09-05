@@ -70,6 +70,10 @@ class Route:
         self.lag = 0
         self.max_lag = 0
         self.observed = set()
+        self.observation_ticks = {}
+        self.initial_state = None
+        self.latest_state = None
+        self.landmarks = {}
         self.events = self.spec["events"]
         event_ticks = [event["tick"] for event in self.events]
         if (not event_ticks or event_ticks[0] != 0
@@ -79,6 +83,9 @@ class Route:
         for event in self.events:
             if any(button not in BUTTONS for button in event["buttons"]):
                 raise RouteError("route contains an unknown libretro button")
+        marks = self.spec.get("landmarks", [])
+        if any(not isinstance(tick, int) or not 0 <= tick <= self.spec["ticks"] for tick in marks):
+            raise RouteError("landmarks must be integer ticks within the route")
 
     def buttons(self):
         if self.phase == "press_start":
@@ -101,6 +108,11 @@ class Route:
             self.phase = "stage"
             self.stage_frame = frame
             self.previous_tick = state["game_tick"]
+            self.initial_state = dict(state)
+            self.latest_state = dict(state)
+            for key, expected in self.spec.get("initial_expected", {}).items():
+                if state[key] != expected:
+                    raise RouteError(f"initial {key}: {state[key]}, expected {expected}")
         elif self.phase == "wait_title" and pair == boot["title_state"]:
             self.phase = "settle_title"
             self.title_frame = frame
@@ -124,13 +136,31 @@ class Route:
         if self.stage_frame is None and frame >= self.config["limits"]["boot_frames"]:
             raise RouteError("stage was not reached before the boot deadline")
         if self.phase == "stage":
+            self.latest_state = dict(state)
+            for tick in self.spec.get("landmarks", []):
+                if str(tick) in self.landmarks:
+                    continue
+                if self.ticks > tick:
+                    raise RouteError(f"physical sampling missed exact route landmark tick {tick}")
+                if self.ticks == tick:
+                    self.landmarks[str(tick)] = {
+                        "physical_frame": frame,
+                        "state": {key: state[key] for key in self.config.get("compare_fields", {})}}
             for key, minimum in self.spec.get("observe_min", {}).items():
                 if state[key] >= minimum:
                     self.observed.add(key)
+                    self.observation_ticks.setdefault(key, self.ticks)
         if self.ticks >= self.spec["ticks"]:
+            for key, minimum in self.spec.get("minimum_advance", {}).items():
+                advance = state[key] - self.initial_state[key]
+                if advance < minimum:
+                    raise RouteError(f"insufficient {key} movement: {advance}, need {minimum}")
             missing = set(self.spec.get("observe_min", {})) - self.observed
             if missing:
                 raise RouteError(f"route did not observe required state: {sorted(missing)}")
+            soak = self.spec.get("observation_soak_ticks", 0)
+            if any(self.ticks - tick < soak for tick in self.observation_ticks.values()):
+                raise RouteError(f"route did not run {soak} gameplay ticks after required observation")
             return True
         return False
 
@@ -140,7 +170,41 @@ class Route:
                 "gameplay_frame_intervals": intervals,
                 "game_ticks_per_second": self.ticks * fps / intervals if intervals else None,
                 "max_lag_frames": self.max_lag,
+                "advance": {key: self.latest_state[key] - self.initial_state[key]
+                            for key in self.spec.get("minimum_advance", {})}
+                           if self.initial_state is not None else {},
+                "landmarks": self.landmarks,
+                "observation_ticks": self.observation_ticks,
                 "required_observations": sorted(self.observed)}
+
+
+def compare_landmarks(baseline, candidate, fields):
+    """Compare game facts at the same ticks, not IRQ/time bytes or physical frames.
+
+Position tolerances belong in the profile and must account only for sampling a
+running producer at a physical boundary. This is not a visual/RAM parity oracle.
+"""
+    if baseline.get("status") != "passed":
+        raise RouteError("comparison baseline did not pass its route")
+    for key in ("core_sha256", "profile_sha256", "requested_options", "route", "route_spec", "core_fps"):
+        if baseline.get(key) != candidate.get(key):
+            raise RouteError(f"incompatible comparison baseline: {key}")
+    if not fields or not candidate["landmarks"]:
+        raise RouteError("comparison needs profile fields and route landmarks")
+    if set(baseline["landmarks"]) != set(candidate["landmarks"]):
+        raise RouteError("comparison landmark tick sets differ")
+    maximum = dict.fromkeys(fields, 0)
+    for tick, mark in candidate["landmarks"].items():
+        previous = baseline["landmarks"][tick]["state"]
+        for key, tolerance in fields.items():
+            if not isinstance(tolerance, int) or tolerance < 0:
+                raise RouteError("comparison tolerances must be nonnegative integers")
+            difference = abs(mark["state"][key] - previous[key])
+            maximum[key] = max(maximum[key], difference)
+            if difference > tolerance:
+                raise RouteError(f"landmark {tick}: {key} changed {previous[key]} -> "
+                                 f"{mark['state'][key]} (tolerance {tolerance})")
+    return {"baseline_rom_sha256": baseline["rom_sha256"], "maximum_landmark_difference": maximum}
 
 
 class Variable(C.Structure):
@@ -305,9 +369,13 @@ def sha256(path):
 
 def run(args):
     config = tomllib.loads(args.profile.read_text())
+    words = config.get("ram_words", {})
+    offsets = [*config["ram"].values(), *words.values()]
     if any(not isinstance(address, int) or isinstance(address, bool) or address < 0
-           for address in config["ram"].values()):
+           for address in offsets):
         raise RouteError("profile RAM offsets must be nonnegative integers")
+    if set(config["ram"]) & set(words):
+        raise RouteError("RAM byte and word observation names must be distinct")
     route = Route(config, args.route)
     requested = dict(config["core_options"])
     if args.overclock:
@@ -327,12 +395,13 @@ def run(args):
     previous_irq = None
     last_state = None
     try:
-        core.start(requested, max(config["ram"].values()) + 1)
+        core.start(requested, max([address + 1 for address in config["ram"].values()]
+                                  + [address + 2 for address in words.values()]))
         summary.update(core=core.info.name.decode(), core_version=core.info.version.decode(),
                        core_fps=core.av.timing.fps)
         with (args.output / "frames.csv").open("w", newline="") as log:
             fields = ["physical_frame", "route_tick", "phase", "buttons", "irq_total",
-                      "video_calls", "pixel_sha256", *config["ram"]]
+                      "video_calls", "pixel_sha256", *config["ram"], *words]
             writer = csv.DictWriter(log, fieldnames=fields)
             writer.writeheader()
             for frame in range(args.frames):
@@ -344,6 +413,8 @@ def run(args):
                 if core.video_calls == calls_before or core.pixels is None:
                     raise RouteError("physical frame had no core video callback/image")
                 state = {key: core.ram[address] for key, address in config["ram"].items()}
+                state.update({key: core.ram[address] | (core.ram[address + 1] << 8)
+                              for key, address in words.items()})
                 if previous_irq is not None:
                     irq_total += (state["irq"] - previous_irq) & 255
                 previous_irq = state["irq"]
@@ -371,6 +442,10 @@ def run(args):
             if summary["status"] != "passed":
                 raise RouteError("physical-frame limit reached before route completion")
         core.check_options(requested)
+        if args.compare:
+            summary.update(route.metrics(frame, core.av.timing.fps))
+            summary["comparison"] = compare_landmarks(
+                json.loads(args.compare.read_text()), summary, config.get("compare_fields", {}))
     except Exception as error:
         summary["status"] = "failed"
         summary["error"] = str(error)
@@ -394,6 +469,7 @@ def main():
     parser.add_argument("route")
     parser.add_argument("output", type=Path, help="new artifact directory (never overwritten)")
     parser.add_argument("--overclock", help="override the profile's numeric GPGX overclock")
+    parser.add_argument("--compare", type=Path, help="baseline summary.json; require matching tick landmarks before claiming improvement")
     parser.add_argument("--frames", type=int, default=12000, help="hard physical-frame bound")
     parser.add_argument("--capture-every", type=int, default=10, help="gameplay physical-frame capture stride; 1 records continuous output")
     args = parser.parse_args()

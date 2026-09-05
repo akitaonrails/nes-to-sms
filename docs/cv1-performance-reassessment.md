@@ -1,9 +1,94 @@
 # CV1 performance and presentation reassessment
 
-Date: 2026-09-05. Assessed runtime: `2123ef8`. This is a diagnosis and
-proposed work order, not an implemented scheduler fix. Keep the recent
+Date: 2026-09-05. Assessed baseline: `2123ef8`. The original diagnosis and
+work order follow; implementation evidence is recorded below. Keep the recent
 sprite-palette and CHR-RAM materializer fixes; their static correctness and
 cost improvements do not establish smooth real-emulator motion.
+
+## Implementation checkpoint: completed-prologue handoff
+
+The opt-in CV1 bridge now publishes its scroll/control context after the full
+NMI's DMA/stripe prologue (`$C11F`), before busy `$1B` is set. Lag NMIs retain
+their input/audio semantics without publishing another graphics generation.
+The IRQ consumes each packet once and preserves newer pending writes. Skipped
+nested entries no longer reset the producer's sprite-zero/split phase.
+
+A real-core boot test caught a startup race missed by instruction-paced tests:
+reset enables NMI before initializing saved PRG bank `$24`. The first translated
+NMI now waits for that initialization, without delaying subsequent bank-zero
+frames. An assembled-code boundary regression fails the first candidate and
+passes the corrected one.
+
+Matched 420-game-tick routes, same GPGX `a7985a9`, NTSC-U, overclock `500`:
+
+| Route | Baseline updates/s | Handoff updates/s | Longest physical-frame gap |
+| --- | ---: | ---: | ---: |
+| Walking | 15.7101 | 19.0808 | 28 → 6 |
+| Walking + whip/heart | 20.8859 | 20.9730 | 6 → 6 |
+
+Both routes pass state/area/heart checks; matched player/camera landmarks differ
+by at most one pixel. The heart is collected at game tick 119, with another
+301 ticks completed afterward. These are game-tick-entry rates, not rendered
+FPS. Candidate SHA-256:
+`9d84da1adf923bdeb713b0d4cc7535897634bd9fbc8fee3361317362fe406e1c`.
+The separately regenerated SMB ROM remains byte-identical to its baseline.
+
+This checkpoint does **not** stage all VRAM/CHR/CRAM writes or restore the HUD
+split. Sprite and background presentation remain follow-up work; a faster tick
+counter and clean endpoints are not proof of tear-free motion. Continuous core
+captures and summaries are retained locally under
+`out/cv1-presentation.ZNyZAL/phase2-r3-{walk,heart}/`.
+
+Continuous review rejected an earlier candidate: an interrupt inside translated
+`LDX $20` corrupted the stripe buffer's zero terminator, sending timer digits
+vertically through the sky. The lowerer's global A spills `$CB27` and `$CB18`
+were not interrupt-preserved. The CV1 bridge now saves both in one reentrant
+native-stack word and restores them on every exit. Eight assembled-code tests
+cover the producer contract, startup, instruction-boundary interruptions and
+nested/line/skip exits. The new interruption tests fail the preserved bad build.
+
+The corrected build has no stripe in the complete checked sky window (0/917
+walking callbacks; baseline 0/954). Matched physical-frame neighborhoods show
+no clearly new artifact. The walking capture has zero entirely black gameplay
+callbacks after tick 60 versus 12 in baseline; the existing scrolling HUD and
+Simon/flame overlay persist. This targeted check is not general pixel parity.
+
+The scratch protection is CV1-opt-in to preserve SMB's existing output. A
+generic IRQ/lowering fix remains necessary before claiming other profiles are
+protected against these shared-lowerer spill races; preserve stack and SMB
+RAM/VDP evidence when extending it.
+
+The old fixed-instruction heart script collects the heart without a trap but
+now ends in state `$0A/$00`, the courtyard door-transition task, rather than
+its old `$05/$06` endpoint. Its fixed-time, indefinitely held Right input is
+not a matched-work benchmark after scheduling changes. This is not an old
+assertion pass or proof of completing the door transition; use the game-tick
+anchored core route for matched heart acceptance. The long traversal still
+hits `$E2`/target `$0000` (also present in baseline), so deep-level playability
+remains unresolved.
+
+### Next implementation boundary
+
+1. Replace CV1's per-OAM-index sprite-pair cache with shared keys and explicit
+   current/next visible-slot pins. Actual walking samples contained only 25
+   distinct `(tile, attr & $C3)` keys; 4,438 of 4,801 sampled index-key changes
+   reused a key visible in the preceding sample. These are sharing opportunities,
+   not measured bake calls or a promised speedup. The earlier idle-only claim
+   that sharing cannot help is not supported by this walking evidence.
+2. Prepare the 192-byte SAT in unused CV1 buffer space `$C840-$C8FF`; commit
+   it with matching sprite base/size in an early, bounded VBlank interval.
+   Invalidate on partial CHR writes, never evict displayed or next-frame slots,
+   and explicitly blank/rebuild if the old/new slot union exceeds capacity.
+   Keep this separate from the existing `$C820-$C83D` handoff record.
+3. Stage bounded background/palette work while preserving active and pending
+   variant ownership; expose scroll only after its dependencies are ready.
+   Restore the HUD split only after real-core deadline evidence. Direct
+   `$2007` writes and transient register-6 changes remain live today.
+
+Keep each boundary measured against the same core routes, interrupted-code
+tests, physical captures and SMB regression floor. Do not merge sprite-cache
+and background scratch allocations independently or treat a queued VRAM write
+as though its active tile refcount had already changed.
 
 ## Measured baseline: approximately 18 gameplay updates/s at 500%
 
@@ -149,6 +234,7 @@ promised by this plan.
 
 Shared-runtime changes must retain SMB RAM/VDP goldens (right, bonus-pipe,
 death), the 1-1-clear route and real-core playability at its established
-overclock. Run workspace tests, format and Clippy before code handoff. This
-assessment changes no runtime, profile, Rust code, canonical ROM or emulator
-settings, and does not claim a new SMB regression-test pass.
+overclock. Run workspace tests, format and Clippy before code handoff. The
+original assessment changed no runtime, profile, Rust code, canonical ROM or
+emulator settings. The later implementation checkpoint and its bounded
+regression evidence are recorded at the top of this document.

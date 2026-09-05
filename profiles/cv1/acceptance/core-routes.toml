@@ -7,15 +7,41 @@ state = 0x0018
 substate = 0x0019
 game_tick = 0x001a
 game_busy = 0x001b
+area = 0x0028
 hearts = 0x0071
 input_held = 0x00f7
 oam_x = 0x0203
+player_x = 0x038c
+player_y = 0x0354
 present_guard = 0x0a12
 irq = 0x0b04
 input_latch = 0x0b06
 scroll_x = 0x0b0c
 trap = 0x0b1d
 window = 0x0b2a
+
+# Source proof: bank6 $992A-$9936 advances $2F:$2E with carry; fixed $F60F
+# copies it to playfield scroll and PPUCTRL. Unlike the PPU latch, this camera
+# position is not reset temporarily for the HUD ($F868). Screen X is $038C
+# ($98AB-$98ED moves it; $989D compares it to the $80 camera-lock point).
+# $98F3-$9908 adds screen X to camera into the world-X word $0040/$0041.
+# Neither coordinate is OAM slot 0 or SMB's unrelated $6D/$86 pair.
+[ram_words]
+camera_x = 0x002e
+player_world_x = 0x0040
+
+# Samples are taken at physical-frame boundaries while the producer runs.
+# Permit at most two pixels of position phase, but no game-state/item changes.
+# IRQ, busy, timer and renderer scratch bytes deliberately are not compared.
+[compare_fields]
+state = 0
+substate = 0
+area = 0
+hearts = 0
+camera_x = 2
+player_world_x = 2
+player_x = 2
+player_y = 2
 
 [core_options]
 genesis_plus_gx_overclock = "500"
@@ -33,6 +59,8 @@ stall_frames = 300
 
 [routes.walk]
 ticks = 420
+minimum_advance = { camera_x = 250, player_world_x = 340 }
+landmarks = [0, 60, 120, 180, 240, 300, 360, 420]
 events = [
   { tick = 0, buttons = [] },
   { tick = 60, buttons = ["right"] },
@@ -40,7 +68,13 @@ events = [
 
 [routes.heart]
 ticks = 420
+initial_expected = { hearts = 5 }
 observe_min = { hearts = 10 }
+observation_soak_ticks = 120
+minimum_advance = { camera_x = 70, player_world_x = 150 }
+# Avoid pickup around tick119: these checkpoints verify item state after a
+# completed collection, not on the uncertain physical sampling boundary.
+landmarks = [0, 60, 150, 210, 270, 330, 420]
 events = [
   { tick = 0, buttons = [] },
   { tick = 60, buttons = ["right"] },

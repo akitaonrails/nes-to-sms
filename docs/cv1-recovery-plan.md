@@ -15,6 +15,22 @@ The present acceptance bar follows the project owner's SMB precedent: boot,
 Start, recognizable first-stage rendering, responsive gameplay input, and a
 trap-free soak. It is not a pixel-perfect, real-time, or full-game claim.
 
+## Latest performance checkpoint (2026-09-05)
+
+The CV1 completed-prologue handoff raises matched real-core walking throughput
+from **15.71 to 19.08 game updates/s at 500%**, with worst lag falling from
+28 to 6 physical frames. Heart pickup and the following 301 game ticks pass;
+its route remains about 20.97 updates/s. SMB output stays byte-identical and
+passes actual-core walking at 300%. See
+[the reassessment and evidence](cv1-performance-reassessment.md#implementation-checkpoint-completed-prologue-handoff).
+
+The bridge also preserves the lowerer's interrupt-exposed `$CB18/$CB27` spills;
+without this, the faster schedule corrupts graphics-buffer terminators. These
+changes do not finish bounded graphics uploads or restore the HUD split.
+The deep traversal still traps; the historical full-traversal claim below is
+not a current pass. Fixed-instruction input scripts may now reach different
+states, so use the game-tick anchored core routes for before/after acceptance.
+
 ## Completed course correction
 
 The earlier work stalled because mapper banks were treated as interchangeable
@@ -415,6 +431,8 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \
 ```
 
 Use `walk` in place of `heart` and a new output directory for each run.
+Add `--compare out/cv1/core-heart-before/summary.json` on a later build's
+matching route to check state, item collection and player/camera landmarks.
 The profile requests 500% overclock; invalid/unqueried options, traps, stalled
 game ticks, missing heart collection, or incomplete routes fail the command.
 Outputs include provenance, physical-frame CSV, gameplay update rate and PPM
@@ -428,6 +446,17 @@ Compare within the same route: whip animation changes how much scrolling work
 is performed. Continuous and stride-10 heart capture produce identical CSVs.
 
 Runner tests: `python3 -m unittest discover -s tools -p test_core_route.py`.
+
+Assembled handoff/IRQ regression tests (requires the locally built CV1 project):
+
+```sh
+CV1_HANDOFF_PROJECT=out/cv1 cargo test -p nes_to_sms \
+  --test frame_handoff -- --ignored
+```
+
+These eight tests execute the assembled runtime in the in-repository Z80
+emulator, including interruptions inside translated instructions. They are
+explicitly ignored by the ordinary workspace run because ROMs are not shared.
 
 ### Instruction-paced functional checks
 

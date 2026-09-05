@@ -588,6 +588,17 @@ irq_handler:
   push hl
   push af
   push bc
+.ifdef CV1_RUNTIME_HOOKS
+  ; Stackless lowerings have interruptible live A spills: LDX/LDY uses
+  ; CB27; inline PPU stores use CB18 (including pre-DI and post-EI windows).
+  ; A nested translated NMI reuses both. Preserve them as ONE re-entrant
+  ; stack word, or a stripe terminator interrupted inside LDX becomes data.
+  ld  a, ($cb18)
+  ld  b, a
+  ld  a, ($cb27)
+  ld  c, a
+  push bc
+.endif
 .ifndef NES_PRG_BANK_BASE
   ; NROM fixed-high reads temporarily map data_prg_high inline. An IRQ may land
   ; between that map and its restore, so preserve the interrupted slot-2 bank
@@ -633,6 +644,13 @@ irq_handler:
   pop af
   ld  ($ffff), a
 .endif
+.ifdef CV1_RUNTIME_HOOKS
+  pop bc
+  ld  a, b
+  ld  ($cb18), a
+  ld  a, c
+  ld  ($cb27), a
+.endif
   pop bc
   pop af
   pop hl
@@ -667,33 +685,28 @@ _irq_runtime_ready:
   out ($bf), a
 .endif
 
-  ; PRESENT-THEN-COMPUTE (reordered 2026-07-05): flush LAST frame's
-  ; prepared state to the VDP first, while we are still inside VBlank —
-  ; sprites from the OAM staging, the scheduled scroll (and its line-IRQ
-  ; split arm), and the queued VRAM buffer. All three were produced
-  ; together by the previous translated NMI, so they are mutually
-  ; coherent. The old order (present AFTER this frame's NMI) only worked
-  ; when the whole handler fit in VBlank; at real hardware speed the NMI
-  ; overruns into active display and the late presentation caused torn
-  ; tiles at the top of the screen and sprites leading the background
-  ; scroll by a frame (observed in GPGX at 500%). The translated NMI's
-  ; direct $2007 background writes still land mid-frame on overrun, but
-  ; those enter at the scroll seam where they are effectively invisible.
-  ; VBlank alignment: under overrun this presentation block can start
-  ; mid-display; VRAM writes then race the beam (field report: constant
-  ; flicker in heavy scenes). If the beam is in the active area, wait for
-  ; the next VBlank start before touching VRAM. The main thread is idle
-  ; under sustained overrun, so the wait costs nothing real.
-  ; PRESENTATION RE-ENTRANCY GUARD: with a main-in-NMI game, every
-  ; per-frame handler is nested inside the resident NMI. If a nested
-  ; handler interrupts an IN-PROGRESS presentation (or its vblank
-  ; wait), doing another full presentation here livelocks the machine:
-  ; the wait burns a frame with DI, so an INT is always pending and
-  ; the interrupted code advances one instruction per frame. Skip
-  ; presentation entirely in that case (the outer one completes).
+  ; Present before delivering the next translated NMI. The CV1 opt-in
+  ; requires a completed-prologue packet; the legacy path uses the latest
+  ; available staging. Frozen control does NOT make direct $2007/CHR/CRAM
+  ; writes coherent or guarantee that conversion/upload fits VBlank.
+  ; The wait below aligns the start of work, but that work can still race
+  ; the beam and delay game computation. DI excludes CPU re-entry, not VDP
+  ; scanning; bounded preparation/commit remains separate work.
+  ; An overlong translated NMI may receive a nested lag handler (CV1's
+  ; full handler normally RTIs). Never restart an in-progress presentation
+  ; or its VBlank wait from a nested IRQ: repeated waits can starve the
+  ; interrupted work. Its outer presentation must finish instead.
   ld  a, ($ca12)
   or  a
   jp  nz, _present_skip_all
+.ifdef CV1_RUNTIME_HOOKS
+  ; An IRQ during a slow producer is not a new completed graphics frame.
+  ; In particular, do not burn another VBlank wait resolving the same OAM.
+  ld  a, (CV1_FRAME_READY)
+  or  a
+  jp  z, _present_skip_all
+  call rt_cv1_frame_begin
+.endif
   ld  a, $01
   ld  ($ca12), a
 .ifdef DIAG_WILDJUMP
@@ -839,6 +852,9 @@ _irq_proj_go:
   call rt_nt_project_scroll
   call _apply_frame_scroll
   call vbuf_flush
+.ifdef CV1_RUNTIME_HOOKS
+  call rt_cv1_frame_end
+.endif
   xor a
   ld  ($ca12), a            ; presentation complete (re-entrancy guard clear)
   jp  _present_skip_all
@@ -852,6 +868,7 @@ _present_slot2_halt:
   jr  _present_slot2_halt
 
 _present_skip_all:
+.ifndef CV1_RUNTIME_HOOKS
   ; Start each translated NMI before the approximated sprite-0 hit point.
   ; SMB first waits for PPUSTATUS bit 6 to clear, then waits for it to set.
   ; The status reader advances this phase on polling so those barriers can
@@ -870,6 +887,7 @@ _present_skip_all:
   ld  a, ($cb20)
   and $04
   ld  ($cb20), a
+.endif
 
   ; Do not invoke the translated NMI handler until NES PPUCTRL bit 7 has enabled
   ; NMI at least once. The SMS frame IRQ is our timing source, but NES reset code
@@ -896,16 +914,48 @@ _present_skip_all:
   jr  _irq_call_translated_nmi
 
 _irq_mark_nmi_started:
+.ifdef CV1_RUNTIME_HOOKS
+  ; The reset routine enables PPUCTRL.NMI at C106 before its epilogue sets
+  ; the saved PRG context ($24=6 at C02B). That epilogue fits before the next
+  ; NES VBlank, but translated timing can interrupt it. The first full NMI
+  ; would restore the still-zero $24 and dispatch task B7DC into bank0 data.
+  ; Keep driving IRQ/input while reset finishes; only the FIRST translated
+  ; NMI needs this profile-specific boot-context condition.
+  ld  a, ($cb1a)
+  or  a
+  jr  nz, _cv1_first_nmi_ready
+  ld  a, ($c024)
+  cp  6
+  jp  nz, _irq_skip_translated_nmi
+_cv1_first_nmi_ready:
+.endif
   ld  a, $01
   ld  ($cb1a), a
 
 _irq_call_translated_nmi:
-  ; Bound translated-NMI nesting. CV1's first translated NMI is resident; later
-  ; frame IRQs may enter one light nested handler, but deeper re-entry is stack
-  ; death for call-heavy code such as SMB.
+  ; Bound translated-NMI nesting. An overlong game handler may receive one
+  ; light nested handler, but deeper re-entry exhausts the native stack.
+  ; CV1's full handler normally clears $1B and RTIs after its game work.
   ld  a, ($ca11)
   cp  2
   jp  nc, _irq_skip_translated_nmi
+.ifdef CV1_RUNTIME_HOOKS
+  ; CV1 sets $1B only AFTER its DMA/stripe/split prologue. While that
+  ; prologue (or the busy-clear/RTI epilogue) is interrupted, a second full
+  ; handler would consume partial producer state. Only its real busy lag
+  ; path may nest. Skipped bodies must also leave CB12/CB20 untouched.
+  or  a
+  jr  z, _cv1_deliver_nmi
+  ld  a, ($c01b)
+  or  a
+  jp  z, _irq_skip_translated_nmi
+_cv1_deliver_nmi:
+  xor a
+  ld ($cb12), a
+  ld a, ($cb20)
+  and $04
+  ld ($cb20), a
+.endif
 
   ; Phase R: reload resident X/Y for the translated NMI.
   ld  a, ($cb00)
@@ -967,10 +1017,10 @@ _irq_native_save_done:
   ld  a, :translated_nmi
   ld  ($cb14), a
   ld  ($fffe), a
-  ; NES NMIs are edge-triggered: a game whose NMI never RTIs (CV1's
-  ; main flow lives inside the first NMI; its $7F guard routes nested
-  ; entries to a light lag path) still receives every later vblank.
-  ; Match that: run the translated NMI with interrupts ENABLED so the
+  ; NES NMIs are edge-triggered: a long-running NMI still receives later
+  ; VBlank edges. CV1's $1B busy flag routes these to its lag handler;
+  ; $7F separately guards shared audio work. Run translated code with
+  ; interrupts ENABLED so the
   ; next frame INT can nest through this same handler. Games that gate
   ; re-entry via PPUCTRL bit 7 (SMB clears it first thing) are skipped
   ; by the $CB08 check on the nested entry — NES-equivalent either way.
@@ -1080,6 +1130,13 @@ _pace_done:
   pop af
   ld  ($ffff), a            ; resume an interrupted inline fixed-high read
 .endif
+.ifdef CV1_RUNTIME_HOOKS
+  pop bc
+  ld  a, b
+  ld  ($cb18), a
+  ld  a, c
+  ld  ($cb27), a
+.endif
   pop bc
   pop af
   pop hl
@@ -1102,6 +1159,13 @@ _irq_line_scroll_split:
 .ifndef NES_PRG_BANK_BASE
   pop af
   ld  ($ffff), a
+.endif
+.ifdef CV1_RUNTIME_HOOKS
+  pop bc
+  ld  a, b
+  ld  ($cb18), a
+  ld  a, c
+  ld  ($cb27), a
 .endif
   pop bc
   pop af

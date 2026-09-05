@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from core_route import AVInfo, Core, Route, RouteError, counter_delta, pixel_rgb, run
+from core_route import AVInfo, Core, Route, RouteError, compare_landmarks, counter_delta, pixel_rgb, run
 
 
 def config():
@@ -70,6 +70,24 @@ class RouteTests(unittest.TestCase):
         route.update(1, state(2, hearts=10))
         self.assertTrue(route.update(2, state(4, hearts=5)))
 
+    def test_heart_requires_initial_count_and_post_pickup_soak(self):
+        data = config()
+        data["routes"]["test"].update(initial_expected={"hearts": 5},
+                                     observe_min={"hearts": 10}, observation_soak_ticks=2)
+        route = Route(data, "test")
+        with self.assertRaisesRegex(RouteError, "initial hearts"):
+            route.update(0, state(hearts=10))
+        self.assertEqual(route.metrics(0, 60)["game_ticks"], 0)
+        route = Route(data, "test")
+        route.update(0, state(hearts=5))
+        with self.assertRaisesRegex(RouteError, "gameplay ticks after"):
+            route.update(1, state(4, hearts=10))
+        route = Route(data, "test")
+        route.update(0, state(hearts=5))
+        route.update(1, state(2, hearts=10))
+        self.assertTrue(route.update(2, state(4, hearts=10)))
+        self.assertEqual(route.observation_ticks, {"hearts": 2})
+
     def test_wrap_and_initial_metrics(self):
         self.assertEqual(counter_delta(255, 0), 1)
         self.assertIsNone(Route(config(), "test").metrics(0, 60)["game_ticks_per_second"])
@@ -79,6 +97,47 @@ class RouteTests(unittest.TestCase):
         data["routes"]["test"]["events"][1]["tick"] = 0
         with self.assertRaisesRegex(RouteError, "increase strictly"):
             Route(data, "test")
+
+    def test_advancing_ticks_without_movement_is_not_a_walk(self):
+        data = config()
+        data["routes"]["test"]["minimum_advance"] = {"camera_x": 3}
+        route = Route(data, "test")
+        route.update(0, state(camera_x=250))
+        with self.assertRaisesRegex(RouteError, "insufficient camera_x movement"):
+            route.update(1, state(4, camera_x=250))
+        route = Route(data, "test")
+        route.update(0, state(camera_x=250))
+        self.assertTrue(route.update(1, state(4, camera_x=258)))
+        self.assertEqual(route.metrics(1, 60)["advance"], {"camera_x": 8})
+
+    def test_landmarks_are_tick_anchored(self):
+        data = config()
+        data["compare_fields"] = {"camera_x": 2}
+        data["routes"]["test"]["landmarks"] = [0, 2, 4]
+        route = Route(data, "test")
+        route.update(10, state(camera_x=0))
+        route.update(11, state(1, camera_x=1))
+        route.update(12, state(1, camera_x=1))
+        route.update(13, state(2, camera_x=2))
+        route.update(14, state(4, camera_x=4))
+        self.assertEqual(route.landmarks["2"], {"physical_frame": 13, "state": {"camera_x": 2}})
+        route = Route(data, "test")
+        route.update(0, state(camera_x=0))
+        with self.assertRaisesRegex(RouteError, "missed exact"):
+            route.update(1, state(3, camera_x=3))
+
+    def test_comparison_ignores_physical_timing_but_rejects_changed_route(self):
+        baseline = {"status": "passed", "rom_sha256": "baseline",
+                    "landmarks": {"2": {"physical_frame": 30, "state": {"camera_x": 260}}}}
+        candidate = {"landmarks": {"2": {"physical_frame": 20, "state": {"camera_x": 261}}}}
+        result = compare_landmarks(baseline, candidate, {"camera_x": 2})
+        self.assertEqual(result["maximum_landmark_difference"], {"camera_x": 1})
+        candidate["landmarks"]["2"]["state"]["camera_x"] = 250
+        with self.assertRaisesRegex(RouteError, "landmark 2"):
+            compare_landmarks(baseline, candidate, {"camera_x": 2})
+        candidate["requested_options"] = {"clock": "100"}
+        with self.assertRaisesRegex(RouteError, "incompatible"):
+            compare_landmarks(baseline, candidate, {"camera_x": 2})
 
 
 class PixelTests(unittest.TestCase):
@@ -186,7 +245,7 @@ events = [{tick = 0, buttons = []}]
 ''')
             args = SimpleNamespace(core=rom, rom=rom, profile=profile, route="test",
                                    output=root / "result", overclock=None,
-                                   frames=10, capture_every=1)
+                                   frames=10, capture_every=1, compare=None)
             with patch("core_route.Core", FakeCore), contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(RouteError, "late option failure"):
                     run(args)
