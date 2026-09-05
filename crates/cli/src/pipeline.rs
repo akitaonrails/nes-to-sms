@@ -214,6 +214,47 @@ fn profile_target_identity(label: &str) -> Option<(Option<u8>, u16)> {
         .map(|addr| (None, addr))
 }
 
+/// Resolve every profile spelling accepted by lowering, without treating an
+/// unqualified switchable address as a newly invented physical-bank fact.
+fn consume_target_identity(prof: &profile::Profile, label: &str) -> Option<(Option<u8>, u16)> {
+    profile_target_identity(label)
+        .or_else(|| {
+            prof.functions
+                .iter()
+                .find(|f| f.name == label)
+                .map(|f| (None, f.addr))
+        })
+        .or_else(|| {
+            prof.labels
+                .iter()
+                .find(|f| f.name == label)
+                .map(|f| (None, f.addr))
+        })
+}
+
+fn check_consume_entries(
+    prof: &profile::Profile,
+    entries: &[(Option<u8>, u16)],
+) -> Result<(), Error> {
+    for site in prof
+        .return_escapes
+        .iter()
+        .filter(|s| s.stack_bytes_already_consumed)
+    {
+        let start = site.consume_at.expect("validated profile");
+        if let Some(&(bank, addr)) = entries.iter().find(|(bank, addr)| {
+            *addr > start
+                && *addr <= site.caller
+                && (*addr >= 0xc000 || prof.rom.mapper == 0 || bank.is_none() || *bank == site.bank)
+        }) {
+            return Err(Error::Diagnostic(format!(
+                "return_escape consume_at ${start:04X} has bypass entry ${addr:04X} in bank {bank:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Re-run discovery until every decoded internal branch label is owned by a
 /// non-overlapping routine range. This matters when a separately discovered
 /// entry is embedded inside a larger routine: range normalization trims the
@@ -481,6 +522,27 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // switchable bank is analyzed separately below and is rooted only by its
     // verified [[bank_entry]] facts; vectors are never replayed in those views.
     let banked = policy.is_banked();
+    let mut consume_entries: Vec<(Option<u8>, u16)> = [vectors.nmi, vectors.reset, vectors.irq]
+        .into_iter()
+        .map(|pc| (None, pc))
+        .collect();
+    consume_entries.extend(prof.functions.iter().map(|f| (None, f.addr)));
+    consume_entries.extend(prof.bank_entries.iter().map(|f| (Some(f.bank), f.addr)));
+    consume_entries.extend(prof.bank_calls.iter().map(|f| (Some(f.bank), f.target)));
+    consume_entries.extend(
+        prof.jump_tables
+            .iter()
+            .flat_map(|t| t.targets.iter())
+            .map(|&pc| (None, pc)),
+    );
+    consume_entries.extend(prof.replacements.iter().map(|r| (None, r.addr)));
+    consume_entries.extend(
+        prof.jump_engines
+            .iter()
+            .flat_map(|s| s.targets.iter().chain(s.return_target.iter()))
+            .filter_map(|target| consume_target_identity(&prof, target)),
+    );
+    check_consume_entries(&prof, &consume_entries)?;
     let mut bank_entries_by_bank: std::collections::BTreeMap<u8, Vec<u16>> =
         std::collections::BTreeMap::new();
     for entry in &prof.bank_entries {
@@ -617,6 +679,15 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // the lowered output; internal branches that target the trimmed-off
     // tail become external references and resolve via the alias label.
     let mut funcs: Vec<analysis::DiscoveredFunction> = analyzed.functions.functions.clone();
+    for f in &funcs {
+        consume_entries.push((None, f.addr));
+        consume_entries.extend(
+            f.external_refs
+                .iter()
+                .chain(f.internal_labels.iter())
+                .map(|&pc| (None, pc)),
+        );
+    }
     funcs.sort_by_key(|f| f.addr);
     for i in 0..funcs.len() {
         if i + 1 < funcs.len() && funcs[i].end > funcs[i + 1].addr {
@@ -648,6 +719,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             target: site.target,
             return_addr: site.return_addr,
             stack_bytes_already_consumed: site.stack_bytes_already_consumed,
+            consume_at: site.consume_at,
         })
         .collect();
 
@@ -721,6 +793,15 @@ pub fn run(args: &Args) -> Result<String, Error> {
             );
             let mut bfuncs: Vec<analysis::DiscoveredFunction> =
                 banalyzed.functions.functions.clone();
+            for f in &bfuncs {
+                consume_entries.push((Some(bank), f.addr));
+                consume_entries.extend(
+                    f.external_refs
+                        .iter()
+                        .chain(f.internal_labels.iter())
+                        .map(|&pc| (Some(bank), pc)),
+                );
+            }
             bfuncs.sort_by_key(|f| f.addr);
             bfuncs.dedup_by_key(|f| f.addr);
             if std::env::var("N2S_DEBUG_BANKFUNCS").is_ok() {
@@ -756,6 +837,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     target: site.target,
                     return_addr: site.return_addr,
                     stack_bytes_already_consumed: site.stack_bytes_already_consumed,
+                    consume_at: site.consume_at,
                 })
                 .collect();
             // Interior-alias pass (mirrors the main funcs' two-pass):
@@ -893,6 +975,71 @@ pub fn run(args: &Args) -> Result<String, Error> {
     }
 
     routines.extend(banked_routines);
+
+    for routine in &routines {
+        let bank = profile_target_identity(&routine.name).and_then(|(bank, _)| bank);
+        for target in routine
+            .branch_labels
+            .iter()
+            .chain(routine.external_calls.iter())
+        {
+            if let Some((target_bank, addr)) = consume_target_identity(&prof, target) {
+                consume_entries.push((target_bank.or(bank), addr));
+            }
+        }
+    }
+    check_consume_entries(&prof, &consume_entries)?;
+
+    // Unlike ordinary unsupported routines, a profiled early ownership
+    // transfer cannot degrade to a missing stub while its later JMP remains.
+    let mut consume_owners = std::collections::HashSet::new();
+    for site in prof
+        .return_escapes
+        .iter()
+        .filter(|site| site.stack_bytes_already_consumed)
+    {
+        let start = site.consume_at.expect("profile validates consume_at");
+        let owners: Vec<_> =
+            routines
+                .iter()
+                .filter(|routine| {
+                    let matching_bank = match site.bank {
+                        Some(bank) => routine.name.starts_with(&format!("L_b{bank}_")),
+                        None => !routine.name.starts_with("L_b"),
+                    };
+                    matching_bank && routine.ops.windows(2).any(|ops| {
+                        matches!(
+                            (&ops[0], &ops[1]),
+                            (ir::Op::Source { pc, .. }, ir::Op::ReturnEscapeConsume { return_addr })
+                                if *pc == start && *return_addr == site.return_addr
+                        )
+                    }) && routine.ops.iter().any(|op| {
+                        matches!(op,
+                ir::Op::Source { pc, .. } if *pc == site.caller)
+                    })
+                })
+                .collect();
+        if owners.len() != 1 {
+            return Err(Error::Diagnostic(format!(
+                "return_escape consume_at ${start:04X} in bank {:?} must have exactly one fully lifted owner; found {}. {}",
+                site.bank,
+                owners.len(),
+                lift_failures.join("; ")
+            )));
+        }
+        consume_owners.insert(owners[0].name.clone());
+        if prof.replacement_for(owners[0].entry).is_some()
+            || prof
+                .replacements
+                .iter()
+                .any(|replacement| replacement.addr >= start && replacement.addr <= site.caller)
+        {
+            return Err(Error::Diagnostic(format!(
+                "return_escape consuming owner {} cannot be replaced",
+                owners[0].name
+            )));
+        }
+    }
 
     // Global interior-label dedup: overlapping fixed-region translations
     // (main vs bank-view discoveries) can each emit an interior label for
@@ -1142,7 +1289,16 @@ pub fn run(args: &Args) -> Result<String, Error> {
                             lower_failures: &mut Vec<String>,
                             r: &ir::Routine|
          -> Result<(), Error> {
-            emit_translated_routine(program, defined_labels, lower_failures, r, &opts)
+            let before = lower_failures.len();
+            emit_translated_routine(program, defined_labels, lower_failures, r, &opts)?;
+            if consume_owners.contains(&r.name) && lower_failures.len() != before {
+                return Err(Error::Diagnostic(format!(
+                    "return_escape consuming owner {} failed lowering: {}",
+                    r.name,
+                    lower_failures[before..].join("; ")
+                )));
+            }
+            Ok(())
         };
 
         let mut assigned_sections = Vec::with_capacity(routines.len());
@@ -2102,7 +2258,7 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_rts_dispatch",
     "rt_translated_rts",
     "rt_translated_return_escape",
-    "rt_translated_return_discard_consumed",
+    "rt_translated_return_consume",
     "rt_translated_call_gate",
     "rt_translated_tail_gate",
     "rt_far_tail",
@@ -2144,6 +2300,57 @@ mod tests {
             Some((Some(6), 0xA75E))
         );
         assert_eq!(profile_target_identity("runtime_helper"), None);
+    }
+
+    #[test]
+    fn consuming_entries_resolve_aliases_and_preserve_physical_bank_identity() {
+        let mut profile = profile::load_from_str("[rom]\nname=\"x\"\nmapper=2\nprg_kib=128\nchr_kib=0\n[[return_escape]]\ncaller=0x8010\ntarget=0xC100\nreturn_addr=0xC200\nbank=3\nstack_bytes_already_consumed=true\nconsume_at=0x8000\n").unwrap();
+        profile.functions.push(profile::Function {
+            addr: 0xc123,
+            name: "Friendly".into(),
+            note: None,
+        });
+        profile.labels.push(profile::Label {
+            addr: 0x8001,
+            name: "Interior".into(),
+        });
+        assert_eq!(
+            consume_target_identity(&profile, "Friendly"),
+            Some((None, 0xc123))
+        );
+        assert_eq!(
+            consume_target_identity(&profile, "Interior"),
+            Some((None, 0x8001))
+        );
+        assert_eq!(
+            consume_target_identity(&profile, "L_b4_8001"),
+            Some((Some(4), 0x8001))
+        );
+        assert!(
+            check_consume_entries(
+                &profile,
+                &[(Some(4), 0x8001), (Some(3), 0x8000), (Some(3), 0x8011)]
+            )
+            .is_ok()
+        );
+        for entry in [
+            (Some(3), 0x8001),
+            (Some(3), 0x8003),
+            (Some(3), 0x8010),
+            (None, 0x8001),
+        ] {
+            assert!(
+                check_consume_entries(&profile, &[entry]).is_err(),
+                "{entry:?}"
+            );
+        }
+        profile.return_escapes[0].consume_at = Some(0xc000);
+        profile.return_escapes[0].caller = 0xc010;
+        profile.return_escapes[0].bank = None;
+        assert!(
+            check_consume_entries(&profile, &[(Some(4), 0xc001)]).is_err(),
+            "fixed window is shared"
+        );
     }
 
     fn physical_maps() -> [[Option<u16>; 256]; 2] {

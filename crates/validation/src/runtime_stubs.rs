@@ -35,7 +35,7 @@ pub const REQUIRED_HELPERS: &[&str] = &[
     "rt_indirect_jmp",
     "rt_translated_rts",
     "rt_translated_return_escape",
-    "rt_translated_return_discard_consumed",
+    "rt_translated_return_consume",
     "rt_translated_call_gate",
     "rt_translated_tail_gate",
     "rt_unresolved_jsr",
@@ -190,7 +190,7 @@ fn emit_translated_rts(p: &mut Program) {
 }
 
 fn emit_translated_return_escape(p: &mut Program) {
-    p.label("rt_translated_return_discard_consumed");
+    p.label("rt_translated_return_consume");
     p.push_af();
     p.ld_a_i();
     p.di();
@@ -295,6 +295,8 @@ fn emit_translated_return_escape(p: &mut Program) {
     p.push_hl();
     p.ld_a_abs(SHADOW_S);
     p.ld_l_a();
+    p.inc_l();
+    p.inc_l();
     p.ld_h_imm(0xC1);
     p.ld_a_hl_ptr();
     p.cp_b();

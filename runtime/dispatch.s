@@ -512,9 +512,11 @@ _tr_rts_underflow:
 ; push BCH then BCL using 6502 stack order, and return with A and DE preserved.
 ; Invalid/empty translated stacks fail closed with marker $E5.
 .ifdef CONSUMED_RETURN_ESCAPE
-; BC is the expected return already consumed by guest PLA/PLA. Bit 7 in
-; the guarded IFF scratch selects discard-only; no guest stack synthesis.
-rt_translated_return_discard_consumed:
+; BC is the expected return still LIVE above guest S, immediately before a
+; profiled PLA/PLA pair. Transfer software ownership now; interrupts may
+; reuse freed guest bytes after either PLA. No later freed-byte check exists.
+; Bit 7 in the guarded IFF scratch selects discard-only; no guest synthesis.
+rt_translated_return_consume:
   push af
   ld   a, i
   di
@@ -629,8 +631,10 @@ _tr_escape_discard_consumed:
   push hl
   ld   a, ($cb02)
   ld   l, a
+  inc  l
+  inc  l                    ; high return byte is still live at S+2
   ld   h, $c1
-  ld   a, (hl)              ; consumed high byte remains at current S
+  ld   a, (hl)
   cp   b
   jp   nz, _tr_escape_underflow
   dec  l                    ; guest stack page wraps independently
@@ -639,6 +643,15 @@ _tr_escape_discard_consumed:
   jp   nz, _tr_escape_underflow
   pop  hl
   ld   (TR_RET_PTR), hl
+.ifdef DIAG_CONSUMED_ESCAPE
+_tr_escape_consumed_success:
+  ; Diagnostic only: live-byte checks and ownership transfer succeeded,
+  ; before the following unchanged, profiled PLA pair executes.
+  ; Original AF is already saved; no extra native word or producer mutation.
+  ld   a, ($c81f)
+  inc  a
+  ld   ($c81f), a
+.endif
   jp   _tr_escape_restore_iff
 .endif
 

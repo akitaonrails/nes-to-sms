@@ -1,7 +1,83 @@
 # CV1 Acceptance Inputs
 
-`stage1-smoke.buttons` is a canonical-reference input timeline. Run it with
-`frame-diff` and `FD_PAUSE_START=1` so its `start` event remains NES Start:
+Use the canonical, gitignored `.roms/cv1.nes` and `profiles/cv1.toml`.
+Keep commercial ROMs, generated projects and captures out of commits.
+
+## Interactive testing
+
+After generating and assembling `out/cv1/sms.sms`:
+
+```sh
+OVERCLOCK=500 docker/run_gpgx.sh out/cv1/sms.sms
+```
+
+Keyboard fallback: arrows, `Z`/`X`, and `Enter` for SMS Pause/NES Start.
+The launcher warns if its configured gamepad is absent;
+`GPGX_REQUIRE_GAMEPAD=1` makes that fatal. Wait for Simon to appear: a
+background-only setup frame is not gameplay. Stock speed is not playable.
+
+## Matched walking and heart routes
+
+`core-routes.toml` is the frozen 420-game-tick comparison contract. The runner
+boots through real input, captures actual libretro video callbacks, checks
+state/movement/traps, and observes heart collection plus subsequent progress.
+It does not use screenshot timing or synthetic IRQ counts as game updates.
+
+```sh
+docker run --rm --network none --user "$(id -u):$(id -g)" \
+  --entrypoint python3 -v "$PWD:/work" -w /work nes-to-sms-retroarch \
+  tools/core_route.py out/emulator-host/genesis_plus_gx_libretro.so \
+  out/cv1/sms.sms profiles/cv1/acceptance/core-routes.toml \
+  walk out/cv1/acceptance/walk --capture-every 1
+```
+
+Repeat with `heart` and a different output directory. Output directories must
+not already exist. Add `--compare PATH/summary.json` to enforce the frozen
+state/landmark comparison against a prior run. Preserve the core, profile,
+runner and ROM hashes when comparing measurements; do not loosen tolerances
+or replace the baseline to hide a failure.
+
+Current measured cadence, continuous HUD checks and timing limits are in
+[the performance reassessment](../../../docs/cv1-performance-reassessment.md).
+These routes cover the courtyard and first heart, not a complete stage.
+
+## First door and indoor traversal
+
+The separate `core-traversal.toml` route requires the ordered door animation,
+room setup, its one canonical game-counter reset, and sustained indoor
+movement. It rejects traps, stalls, missing phases and discontinuities. Raw
+coordinates remain in the CSV; neighboring callbacks must confirm the
+16-bit movement endpoint so a torn RAM sample cannot finish the test.
+
+```sh
+docker run --rm --network none --user "$(id -u):$(id -g)" \
+  --entrypoint python3 -v "$PWD:/work" -w /work nes-to-sms-retroarch \
+  tools/core_traversal.py out/emulator-host/genesis_plus_gx_libretro.so \
+  out/cv1/sms.sms profiles/cv1/acceptance/core-traversal.toml \
+  indoor out/cv1/acceptance/indoor
+```
+
+Normal `indoor` requires 1,306 indoor ticks and at least 608 pixels of
+confirmed movement. It does not claim that a specific helper ran. To test
+the repaired consumed-return helper, generate a **separate** project, add
+`.define DIAG_CONSUMED_ESCAPE 1` beside the runtime defines in its `sms.asm`,
+then assemble it. Run that ROM with `indoor_escape` and a new output path.
+This mode requires an actual success-counter increment, followed by at least
+120 ticks and 80 pixels of confirmed movement. Never substitute this
+instrumented ROM's timing for normal-ROM performance.
+
+The counter marks validated software-return ownership transfer **before**
+the original `PLA; PLA` consumes the live guest bytes. It is not a claim
+that the subsequent tail jump has already finished.
+
+Both modes record hashes, core options, raw callback observations, transition
+captures and `summary.json`. A passed route covers the first indoor stair
+approach, not a stage clear or boss.
+
+## Canonical NES reference inputs
+
+`stage1-smoke.buttons` and `heart-smoke.buttons` record reference-NES input
+intent. For example:
 
 ```sh
 FD_PAUSE_START=1 target/release/frame-diff \
@@ -9,53 +85,27 @@ FD_PAUSE_START=1 target/release/frame-diff \
   --buttons-script profiles/cv1/acceptance/stage1-smoke.buttons --ref-only
 ```
 
-On SMS, NES Start is the hardware Pause NMI, so `trace-sms` must inject it
-separately. The accepted smoke route waits for CV1 gameplay state `$0018=05`,
-substate `$0019=06`, then holds Right. It asserts CV1's held-input byte:
+The historical `*.sms.buttons` files use instruction/injected-IRQ timing.
+Their old fixed-step endpoints are not current acceptance after scheduling
+changes. The coherent renderer also needs a progressing video counter; the
+tracer's legacy constant-`E0` mode is not a compatible CV1 gameplay clock.
+Use actual-core routes for speed, motion and hardware-timing claims.
+
+## Functional tracer smoke
+
+The opt-in [functional video clock](../../../docs/functional-video-trace.md)
+allows bounded runtime debugging without weakening graphics admission guards:
 
 ```sh
-SMS_DUMP_PPM=out/cv1/graphics-acceptance/stage.ppm \
-  target/release/trace-sms out/cv1/sms.sms --steps 180000000 \
-  --pause-at-frame 600 --buttons-at-frame 1850:right \
-  --expect-no-trap --expect-ram 0x0018=05 --expect-ram 0x0019=06 \
-  --expect-ram 0x00F7=01
+SMS_ABORT_BAD_SP=1 SMS_DUMP_RAM=C000:40 \
+  target/release/trace-sms out/cv1/sms.sms \
+  --functional-video ntsc224 --steps 180000000 \
+  --pause-at-frame 600 --buttons-at-frame 1850:right --expect-no-trap
 ```
 
-The output framebuffer must show the Stage 1 playfield and sprites rather than
-the earlier title-fill/random-pattern corruption. This is a boot/input/graphics
-smoke route, not a full Stage 1 completion script.
+This schedule has reached outdoor gameplay with movement and a clean native
+stack. Its synthetic epochs and delivered interrupts are not gameplay ticks
+or physical frames; it does not replace the indoor or performance routes.
 
-## Candle/heart regression
-
-`heart-smoke.buttons` records the reference-NES input intent. The translated
-route is `heart-smoke.sms.buttons`; it uses hardware Pause for NES Start, walks
-right, and whips across the first candle group. It must cross
-`$E7D0 -> $EC60` without consuming the NMI frame or trapping at `$0000`, collect
-the large heart (`$0071=$0A`), and remain in gameplay state `$0018=$05`,
-substate `$0019=$06`:
-
-```sh
-target/release/trace-sms out/cv1/sms.sms --steps 116000000 \
-  --pause-at-frame 600 \
-  --buttons-script profiles/cv1/acceptance/heart-smoke.sms.buttons \
-  --expect-no-trap --expect-ram 0x0071=0A \
-  --expect-ram 0x0018=05 --expect-ram 0x0019=06
-```
-
-The 116M-step budget (previously 106.2M) covers the slower whip animation
-since the banked-dispatch accumulator fix (`rt_banked_dispatch` parks entry A
-in `$CB15`): the whip sound trigger now receives the correct sound ID, the
-sound driver runs the SFX each frame, and game logic dilates roughly 2x
-against the tracer's 60K-step injection frames while the effect is active.
-The candle still breaks and the large heart still drops; Simon simply needs
-more injection frames to walk into it.
-
-The focused framebuffer must still show the Stage 1 playfield rather than the
-former white/stalled frame. The longer soak command is recorded in
-`docs/cv1-recovery-plan.md`.
-
-For a real-emulator check, run `docker/run_gpgx.sh out/cv1/sms.sms`. The
-launcher warns when the configured 8BitDo controller has no event device;
-`GPGX_REQUIRE_GAMEPAD=1` makes that condition fatal. Keyboard fallback is
-arrows, `Z`/`X`, and `Enter` for SMS Pause/NES Start. Stage setup remains slow:
-the first background-only frame is not gameplay, so wait until Simon appears.
+Run the host-only observer tests with
+`python3 -m unittest discover -s tools -p 'test_core*.py'`.

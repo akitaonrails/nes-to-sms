@@ -38,6 +38,23 @@ the historical full-traversal claim below is not current acceptance.
 Fixed-instruction input scripts may reach different states after scheduling
 changes; use game-tick anchored core routes for before/after acceptance.
 
+The longer indoor route exposed a second return-stack issue: validating
+guest return bytes after `PLA; PLA` reads memory an interrupt may legally
+reuse. The original 6502 path, with its real lag NMI injected before and
+after each pop, confirms that reuse is valid. The profile's `consume_at`
+boundary now validates live bytes and retires the owning software return
+before the first `PLA`; the original guest instructions remain unchanged.
+The final tail jump does not discard the frame again. Stale sequences,
+missing hooks and known entries that bypass the guard fail generation.
+
+Final real-core acceptance passes the unchanged first-door and indoor route:
+1,306 indoor ticks and at least 674 pixels of confirmed movement without a
+trap. The paired diagnostic observes the repaired ownership transfer and
+another 124 ticks/80 pixels afterward. Both 420-tick walking/heart callback
+logs remain byte-identical to the coherent rendering checkpoint, including
+pixel hashes and cadence. Reproduce these checks using
+[the acceptance guide](../profiles/cv1/acceptance/README.md).
+
 ## Completed course correction
 
 The earlier work stalled because mapper banks were treated as interchangeable
@@ -73,7 +90,11 @@ The executable synthetic UxROM fixture selects and dispatches all eight banks.
 Its bus-conflict and unsupported-store tests are part of
 `crates/cli/tests/synthetic_pipeline.rs`.
 
-## Current canonical result
+## Historical canonical result
+
+This section records the pre-coherent-renderer checkpoint. Its fixed-step
+trace endpoints and ROM hash are historical, not the current acceptance
+commands; use [the current routes](../profiles/cv1/acceptance/README.md).
 
 Generation reports 416 discovered fixed-view functions, 898 lifted routines,
 zero lift failures, one lower failure, and 80 strict unresolved traps. The one

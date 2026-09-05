@@ -94,7 +94,7 @@ pub mod runtime_symbols {
     pub const UNRESOLVED_JSR: &str = "rt_unresolved_jsr";
     pub const TRANSLATED_RTS: &str = "rt_translated_rts";
     pub const TRANSLATED_RETURN_ESCAPE: &str = "rt_translated_return_escape";
-    pub const TRANSLATED_RETURN_DISCARD_CONSUMED: &str = "rt_translated_return_discard_consumed";
+    pub const TRANSLATED_RETURN_CONSUME: &str = "rt_translated_return_consume";
     pub const BANKED_TAIL_DISPATCH: &str = "rt_banked_tail_dispatch";
     pub const BRK: &str = "rt_brk";
     pub const RTI: &str = "rt_rti";
@@ -4714,18 +4714,25 @@ pub fn lower_routine(
                             .to_string(),
                     });
                 }
-                // Some 6502 tail escapes discard their own JSR return bytes
-                // with PLA/PLA, then let a later RTS return through the caller
-                // below. Pop the equivalent translated frame, either supplying
-                // the original bytes or checking an already-consumed pair,
-                // before following the original JMP edge.
-                program.ld_bc_imm(*return_addr);
-                program.call(if *stack_bytes_already_consumed {
-                    TRANSLATED_RETURN_DISCARD_CONSUMED
-                } else {
-                    TRANSLATED_RETURN_ESCAPE
-                });
+                // Consumed mode transferred ownership before its PLA pair.
+                // Freed guest bytes may now contain a nested NMI's resume PC.
+                if !stack_bytes_already_consumed {
+                    program.ld_bc_imm(*return_addr);
+                    program.call(TRANSLATED_RETURN_ESCAPE);
+                }
                 program.translated_tail_jmp(target);
+            }
+
+            Op::ReturnEscapeConsume { return_addr } => {
+                if opts.profile.is_some_and(|p| p.native_calls()) {
+                    return Err(LowerError::UnsupportedMapperStore {
+                        pc: None,
+                        reason: "return-escape consumption is incompatible with native calls"
+                            .into(),
+                    });
+                }
+                program.ld_bc_imm(*return_addr);
+                program.call(TRANSLATED_RETURN_CONSUME);
             }
 
             Op::JmpIndirect { addr } => {
@@ -5129,7 +5136,7 @@ mod tests {
             "rt_unresolved_jsr_flash",
             TRANSLATED_RTS,
             TRANSLATED_RETURN_ESCAPE,
-            TRANSLATED_RETURN_DISCARD_CONSUMED,
+            TRANSLATED_RETURN_CONSUME,
             BANKED_TAIL_DISPATCH,
             "rt_translated_call_gate",
             "rt_translated_tail_gate",
@@ -6254,6 +6261,11 @@ runtime_label = "rt_replacement"
     #[test]
     fn already_consumed_return_escape_uses_guarded_discard_helper() {
         let build = lower_and_finish(vec![
+            Op::ReturnEscapeConsume {
+                return_addr: 0x8FFF,
+            },
+            Op::Pla,
+            Op::Pla,
             Op::ReturnEscape {
                 target: "escape_target".into(),
                 return_addr: 0x8FFF,
@@ -6262,12 +6274,15 @@ runtime_label = "rt_replacement"
             Op::Label("escape_target".into()),
         ]);
         assert!(build.asm.contains("ld bc,$8FFF"));
-        assert!(
+        assert!(build.asm.contains("call rt_translated_return_consume"));
+        assert!(!build.asm.contains("call rt_translated_return_escape\n"));
+        assert_eq!(
             build
                 .asm
-                .contains("call rt_translated_return_discard_consumed")
+                .matches("call rt_translated_return_consume")
+                .count(),
+            1
         );
-        assert!(!build.asm.contains("call rt_translated_return_escape\n"));
     }
 
     // -------------------------------------------------------------------

@@ -292,10 +292,15 @@ pub struct ReturnEscapeSite {
     /// JSR operand byte, before the RTS increment).
     pub return_addr: u16,
     /// The original code has already consumed a materialized return with
-    /// PLA/PLA. Discard only its translated continuation, checking both the
-    /// frame's ownership flag and the consumed bytes against `return_addr`.
+    /// PLA/PLA. Transfer ownership at `consume_at`, while both return bytes
+    /// are still live; the final JMP must not inspect freed stack storage.
     #[serde(default)]
     pub stack_bytes_already_consumed: bool,
+    /// First PLA of a consecutive PLA/PLA pair in the same straight-line
+    /// block as `caller`. Required for already-consumed mode, forbidden
+    /// otherwise. No known entry may bypass it into the remaining block.
+    #[serde(default)]
+    pub consume_at: Option<u16>,
     /// Physical switchable PRG bank containing this edge. Omit for NROM or a
     /// mapper-2 edge in the fixed `$C000-$FFFF` window.
     #[serde(default)]
@@ -551,6 +556,33 @@ fn validate(p: &Profile) -> Result<(), LoadError> {
     }
     let mut return_escape_callers = BTreeMap::new();
     for (idx, escape) in p.return_escapes.iter().enumerate() {
+        if escape.stack_bytes_already_consumed != escape.consume_at.is_some() {
+            return Err(LoadError::Validation(
+                "return_escape consume_at is required exactly when stack_bytes_already_consumed=true"
+                    .to_owned(),
+            ));
+        }
+        if let Some(start) = escape.consume_at {
+            if start < 0x8000
+                || start.checked_add(2).is_none_or(|end| end > escape.caller)
+                || (start < 0xc000) != (escape.caller < 0xc000)
+            {
+                return Err(LoadError::Validation(
+                    "return_escape consume_at must precede caller in the same PRG window"
+                        .to_owned(),
+                ));
+            }
+            if p.return_escapes[..idx].iter().any(|previous| {
+                previous.bank == escape.bank
+                    && previous
+                        .consume_at
+                        .is_some_and(|other| start <= previous.caller && other <= escape.caller)
+            }) {
+                return Err(LoadError::Validation(
+                    "overlapping return_escape consume ranges".to_owned(),
+                ));
+            }
+        }
         if let Some(prev_idx) = return_escape_callers.insert((escape.bank, escape.caller), idx) {
             return Err(LoadError::Validation(format!(
                 "duplicate return_escape caller ${:04X} in bank {:?}: entries #{} and #{}",
@@ -1254,8 +1286,10 @@ return_addr = 0xea79
                 .effective_runtime_defines()
                 .contains(&"CONSUMED_RETURN_ESCAPE".into())
         );
-        let consumed = load_from_str(&format!("{fixed}\nstack_bytes_already_consumed = true\n"))
-            .expect("already-consumed escape");
+        let consumed = load_from_str(&format!(
+            "{fixed}\nstack_bytes_already_consumed = true\nconsume_at = 0xE7C0\n"
+        ))
+        .expect("already-consumed escape");
         assert!(consumed.return_escapes[0].stack_bytes_already_consumed);
         assert_eq!(
             consumed.effective_runtime_defines(),
@@ -1301,6 +1335,41 @@ return_addr = 0x8fff
                 .expect_err("RAM return address")
                 .to_string()
                 .contains("return_addr must be in PRG ROM")
+        );
+    }
+
+    #[test]
+    fn consumed_escape_metadata_is_required_banked_and_nonoverlapping() {
+        let base = "[rom]\nname=\"x\"\nmapper=2\nprg_kib=128\nchr_kib=0\n\n[[return_escape]]\ncaller=0xC010\ntarget=0xC020\nreturn_addr=0xC100\n";
+        for suffix in [
+            "stack_bytes_already_consumed=true",
+            "consume_at=0xC000",
+            "stack_bytes_already_consumed=true\nconsume_at=0xBFFE",
+            "stack_bytes_already_consumed=true\nconsume_at=0xC00F",
+            "stack_bytes_already_consumed=true\nconsume_at=0x7FFF",
+        ] {
+            assert!(
+                load_from_str(&format!("{base}{suffix}")).is_err(),
+                "{suffix}"
+            );
+        }
+        let valid = format!("{base}stack_bytes_already_consumed=true\nconsume_at=0xC000\n");
+        load_from_str(&valid).unwrap();
+        let overlap = format!(
+            "{valid}\n[[return_escape]]\ncaller=0xC030\ntarget=0xC100\nreturn_addr=0xC100\nstack_bytes_already_consumed=true\nconsume_at=0xC010\n"
+        );
+        assert!(
+            load_from_str(&overlap)
+                .unwrap_err()
+                .to_string()
+                .contains("overlapping")
+        );
+        let banked = valid
+            .replace("0xC", "0x8")
+            .replace("caller=", "bank=3\ncaller=");
+        assert_eq!(
+            load_from_str(&banked).unwrap().return_escapes[0].bank,
+            Some(3)
         );
     }
 }

@@ -315,6 +315,16 @@ caller's JSR return bytes as stack data: it discards one `TR_RET` frame and
 materializes the corresponding two bytes on `$C100-$C1FF`. JMP indirect routes
 through the runtime `dispatch.s` table; profile data provides target facts.
 
+If those bytes were already materialized and the original path consumes them
+with `PLA; PLA`, `stack_bytes_already_consumed = true` additionally requires
+`consume_at`, the first PLA address. Validate the live guest bytes and owning
+software frame atomically there, retire that frame once, and preserve the
+original guest instructions. Never validate freed stack bytes at the later
+tail jump: an interrupt may legitimately reuse them. Generation rejects stale
+sequences, missing hook owners and known interior entries that bypass this
+ownership transfer. The optional `$C81F` counter observes that pre-PLA transfer,
+not completion of the subsequent guest path.
+
 **2.3 SMS runtime library finished.** All modules from the architecture
 table written and tested standalone.
 

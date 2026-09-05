@@ -984,13 +984,15 @@ target = 0xec60
 return_addr = 0xea79
 
 # Canonical NES reference: EE9F/EEA0 consumes E959's arranged E9E5 return,
-# then EEA4 bypasses E9E6 and continues at EA33/E92B. Do not consume the
-# same two guest stack bytes again when discarding its software frame.
+# then EEA4 bypasses E9E6 and continues at EA33/E92B. Validate/drop its
+# software frame before EE9F, while S+1/S+2 are live. A lag NMI may reuse
+# either freed slot after a PLA; the later EEA4 must not inspect them again.
 [[return_escape]]
 caller = 0xeea4
 target = 0xea33
 return_addr = 0xe9e5
 stack_bytes_already_consumed = true
+consume_at = 0xee9f
 
 [[function]]
 addr = 0xe9e5

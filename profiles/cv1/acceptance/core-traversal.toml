@@ -1,0 +1,80 @@
+# First door and indoor stair approach, not a full-stage/boss route.
+# Keep the separate 420-tick performance routes and their inputs frozen.
+version = 1
+ram_bytes = 8192
+initial_expected = { hearts = 5 }
+fields = { tick = "game_tick", trap = "trap", world = "player_world_x", camera = "camera_x", screen = "player_x" }
+
+[base]
+profile = "core-routes.toml"
+sha256 = "7b6cf3e7d6d315b097999b8ba57a71800cbf8649ab2f224a55e3accb60e6794e"
+runner_sha256 = "1ac9c67f866d910bfbfebfb57c4fea13add889e3cfb9068abe2e57e436ea1d02"
+route = "walk"
+
+[limits]
+physical_frames = 15000
+stall_frames = 300
+counter_delta = 8
+capture_every = 120
+
+[inputs]
+idle_ticks = 60
+held = ["right"]
+pulse = ["a"] # SMS button2 / NES B: whip, not jump
+pulse_start = 80
+pulse_period = 60
+pulse_duration = 6
+
+[[phases]]
+name = "street"
+allowed = { state = [5], substate = [6], area = [0] }
+
+[[phases]]
+name = "door0"
+allowed = { state = [10], substate = [0], area = [0] }
+minimum_advance = { player_world_x = 150 }
+
+[[phases]]
+name = "door1"
+allowed = { state = [10], substate = [1], area = [0] }
+
+[[phases]]
+name = "door2"
+# C593 increments area before C368/C373 replace state/substate.
+allowed = { state = [10], substate = [2], area = [0, 1] }
+
+[[phases]]
+name = "room_setup"
+# Physical samples may see 05/02 before 05/00, or setup03 before setup02.
+allowed = { state = [5], substate = [0, 1, 2, 3, 4, 5], area = [1] }
+
+[[phases]]
+name = "room"
+allowed = { state = [5], substate = [6], area = [1] }
+
+[reset]
+phase = "room_setup"
+expected = { state = 5, substate = 2, area = 1 }
+destination = 1 # Canonical C2CE/C2D0 reset, not a normal wrapping tick.
+count = 1
+
+[confirmation]
+# Reject isolated low/high-byte carry tears; retain unmodified CSV samples.
+neighbor_delta = 2
+position_tolerance = 2 # world ~= camera + screen X at producer sampling boundaries
+
+[diagnostic]
+field = "escape_successes"
+offset = 0x081f # DIAG_CONSUMED_ESCAPE only; normal run does not read this byte.
+initial = 0
+counter_delta = 8
+
+[completions.indoor]
+diagnostic = false
+minimum_ticks = 1306
+minimum_advance = 608 # Confirmed initial room world48 -> stair approach >=656.
+
+[completions.indoor_escape]
+diagnostic = true
+minimum_ticks = 120
+minimum_advance = 80 # From a confirmed post-hit anchor, not a torn hit sample.

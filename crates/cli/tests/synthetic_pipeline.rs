@@ -230,6 +230,101 @@ fn pipeline_runs_on_minimal_reset_only_rom() {
 }
 
 #[test]
+fn consumed_return_hook_cannot_be_bypassed_missing_or_stubbed() {
+    for case in [
+        "valid",
+        "root",
+        "vector",
+        "alias_target",
+        "alias_return",
+        "replacement",
+        "owner_stub",
+        "direct_jsr",
+        "direct_jmp",
+        "direct_branch",
+        "missing",
+        "lower_failure",
+    ] {
+        let work = tmp(&format!("consume_{case}"));
+        let mut code = vec![0xea; 0x1001];
+        code[..7].copy_from_slice(&[0x68, 0x68, 0xa9, 0x42, 0x4c, 0, 0x90]);
+        code[0x1000] = 0x60;
+        let (mut start, mut caller, mut nmi) = (0x8000u16, 0x8004u16, 0x8000u16);
+        let mut extra = String::new();
+        match case {
+            "root" => extra.push_str("\n[[function]]\naddr=0x8001\nname=\"Inside\"\n"),
+            "vector" => nmi = 0x8001,
+            "alias_target" | "alias_return" => {
+                extra.push_str(
+                    "\n[[label]]\naddr=0x8001\nname=\"Inside\"\n[[jump_engine]]\ncaller=0x8500\n",
+                );
+                extra.push_str(if case == "alias_target" {
+                    "targets=[\"Inside\"]\n"
+                } else {
+                    "targets=[\"L_9000\"]\nreturn_target=\"Inside\"\n"
+                });
+            }
+            "replacement" | "owner_stub" => extra.push_str(&format!(
+                "\n[[replacement]]\naddr={}\nruntime_label=\"rt_test_hook\"\nstub_body=true\n",
+                if case == "replacement" {
+                    0x8001
+                } else {
+                    0x8000
+                }
+            )),
+            "direct_jsr" | "direct_jmp" | "direct_branch" => {
+                nmi = 0x8030;
+                if case == "direct_branch" {
+                    code[0x30..0x33].copy_from_slice(&[0xd0, 0xcf, 0x60]);
+                } else {
+                    code[0x30..0x34].copy_from_slice(&[
+                        if case == "direct_jsr" { 0x20 } else { 0x4c },
+                        1,
+                        0x80,
+                        0x60,
+                    ]);
+                }
+            }
+            "missing" => {
+                code.copy_within(..7, 0x10);
+                code[0] = 0x60;
+                start += 0x10;
+                caller += 0x10;
+            }
+            "lower_failure" => {
+                code.copy_within(..7, 2);
+                code[..2].copy_from_slice(&[0x8b, 0x42]);
+                start += 2;
+                caller += 2;
+            }
+            _ => {}
+        }
+        let rom = work.join("input.nes");
+        let profile = work.join("profile.toml");
+        let out = work.join("out");
+        std::fs::write(&rom, build_nrom_rom(&code, nmi, 0x8000, 0x8000)).unwrap();
+        write_minimal_profile(&profile, 0x8000, nmi, 0x8000);
+        let mut metadata = std::fs::read_to_string(&profile).unwrap();
+        metadata.push_str(&format!("\n[[return_escape]]\ncaller={caller}\ntarget=0x9000\nreturn_addr=0x8fff\nstack_bytes_already_consumed=true\nconsume_at={start}\n{extra}"));
+        std::fs::write(&profile, metadata).unwrap();
+        let result = run_pipeline(nes_to_sms_args(&rom, &profile, &out, None));
+        if case == "valid" {
+            result.unwrap();
+            let assembly = std::fs::read_to_string(out.join("generated/translated.asm")).unwrap();
+            assert_eq!(
+                assembly
+                    .matches("call rt_translated_return_consume")
+                    .count(),
+                1
+            );
+        } else {
+            let error = result.expect_err(case);
+            assert!(error.contains("return_escape"), "{case}: {error}");
+        }
+    }
+}
+
+#[test]
 fn pipeline_rejects_mismatched_payload_before_generation() {
     let rom = build_nrom_rom(&[0x60], 0x8000, 0x8000, 0x8000);
     let work = tmp("payload-mismatch");

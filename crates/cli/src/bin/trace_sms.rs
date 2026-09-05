@@ -36,6 +36,114 @@ fn real_pacing() -> bool {
 fn irq_period() -> usize {
     if real_pacing() { 15_000 } else { IRQ_PERIOD }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FunctionalIrq {
+    Frame,
+    Line,
+}
+
+/// Explicit instruction-paced compatibility clock, NOT a physical beam model.
+/// Step0 starts line224; each period has262 coarse lines. R10 supplies one
+/// R10+1 active-line event per period, not the hardware's reload/underflow model.
+#[derive(Clone, Debug)]
+struct FunctionalVideo {
+    period: usize,
+    step: usize,
+    epochs: usize,
+    frame_pending: bool,
+    line_pending: bool,
+    line_at: Option<u128>,
+}
+
+impl FunctionalVideo {
+    fn new(period: usize) -> Self {
+        assert!(period >= 262);
+        Self {
+            period,
+            step: 0,
+            epochs: 0,
+            frame_pending: false,
+            line_pending: false,
+            line_at: None,
+        }
+    }
+
+    fn advance_to(&mut self, step: usize) {
+        assert!(step >= self.step, "functional video clock moved backwards");
+        let epoch = step / self.period;
+        if epoch > self.epochs {
+            self.frame_pending = true;
+            self.epochs = epoch;
+        }
+        if let Some(at) = self.line_at
+            && at <= step as u128
+        {
+            self.line_pending = true;
+            self.line_at =
+                Some(at + ((step as u128 - at) / self.period as u128 + 1) * self.period as u128);
+        }
+        self.step = step;
+    }
+
+    fn vcounter(&self) -> u8 {
+        let phase = (self.step % self.period) as u128 * 262 / self.period as u128;
+        let physical = (224 + phase) % 262;
+        if physical <= 234 {
+            physical as u8
+        } else {
+            (physical - 6) as u8
+        }
+    }
+
+    fn write_r10(&mut self, value: u8) {
+        let line = u16::from(value) + 1;
+        if line >= 224 {
+            self.line_at = None;
+            return;
+        } // Includes explicit FF park.
+        let offset = (u128::from(line) + 38) * self.period as u128;
+        let mut at = (self.step / self.period * self.period) as u128 + offset.div_ceil(262);
+        if at <= self.step as u128 {
+            at += self.period as u128;
+        }
+        self.line_at = Some(at);
+        // Rewriting/parking does not acknowledge an already pending HINT.
+    }
+
+    fn irq(&self, regs: &[u8; 16]) -> Option<FunctionalIrq> {
+        if self.frame_pending && regs[1] & 0x20 != 0 {
+            Some(FunctionalIrq::Frame)
+        } else if self.line_pending && regs[0] & 0x10 != 0 {
+            Some(FunctionalIrq::Line)
+        } else {
+            None
+        }
+    }
+
+    fn acknowledge(&mut self) -> u8 {
+        let status = if self.frame_pending { 0x80 } else { 0 };
+        self.frame_pending = false;
+        self.line_pending = false;
+        status
+    }
+
+    fn can_wake_halt(&self, cpu: &Cpu, regs: &[u8; 16], inject: bool) -> bool {
+        inject
+            && cpu.iff1
+            && (regs[1] & 0x20 != 0 || (regs[0] & 0x10 != 0 && self.line_at.is_some()))
+    }
+}
+
+fn parse_functional_video(value: Option<&str>) -> Result<(), String> {
+    match value {
+        Some("ntsc224") => Ok(()),
+        Some(other) => Err(format!(
+            "unsupported --functional-video mode: {other}; expected ntsc224"
+        )),
+        None => Err("--functional-video requires ntsc224".to_owned()),
+    }
+}
 const RT_PPU_WRITE_FALLBACK_ADDR: u16 = 0x0068;
 const D3XX_TILE_DIRTY_BITMAP_BYTES: usize = 240;
 const D3XX_ATTR_DIRTY_BITMAP_BYTES: usize = 16;
@@ -627,6 +735,7 @@ impl RuntimeMaterializerOffense {
 
 #[derive(Clone)]
 struct SmsBus {
+    functional_video: Option<FunctionalVideo>,
     rom: Vec<u8>,
     /// Current bank mapped into each slot. slot[0] = bank for $0000-$3FFF, etc.
     slot_bank: [u8; 3],
@@ -963,6 +1072,7 @@ impl SmsBus {
             io_entries: 0,
             vdp_status_reads: 0,
             vdp_status_override: None,
+            functional_video: None,
             display_enabled_edge: false,
             psg_writes: 0,
             psg_log: Vec::new(),
@@ -2012,6 +2122,10 @@ impl Bus for SmsBus {
             // VDP status / control port $BF — return VBlank flag bit toggling.
             0x81 => {
                 self.vdp_status_reads += 1;
+                if let Some(clock) = &mut self.functional_video {
+                    self.vdp_addr_latched = false;
+                    return clock.acknowledge();
+                }
                 if let Some(status) = self.vdp_status_override.take() {
                     self.vdp_addr_latched = false;
                     return status;
@@ -2032,7 +2146,10 @@ impl Bus for SmsBus {
             // admission). This permits both >=E0 and E0..EC polling loops;
             // it cannot establish a real VBlank deadline or video timing.
             // H-counter $7F remains the default FF response below.
-            0x40 => 0xE0,
+            0x40 => self
+                .functional_video
+                .as_ref()
+                .map_or(0xe0, FunctionalVideo::vcounter),
             // I/O port $DC/$DD (controllers) — all buttons released.
             0xC0 => {
                 self.controller_reads += 1;
@@ -2110,6 +2227,18 @@ impl Bus for SmsBus {
                             self.display_enabled_edge = true;
                         }
                         self.vdp_regs[reg as usize] = val;
+                        if let Some(clock) = &mut self.functional_video {
+                            if reg == 10 {
+                                clock.write_r10(val);
+                            }
+                            if reg == 0 && val & 0x10 != 0 && self.vdp_regs[10] < 223 {
+                                self.render_scroll_split = Some((
+                                    usize::from(self.vdp_regs[10]) + 1,
+                                    self.vdp_regs[8],
+                                    self.vdp_regs[9],
+                                ));
+                            }
+                        }
                         self.io_entries += 1;
                         if self.io_log.len() < 4096 {
                             self.io_log.push(format!("vdp r{reg} = ${val:02X}"));
@@ -2879,6 +3008,9 @@ fn main() {
         None => {
             eprintln!("usage: trace-sms <rom.sms> [--steps N] [--log-pcs]");
             eprintln!("                     [--game-frames N]");
+            eprintln!(
+                "                     [--functional-video ntsc224] (instruction-paced, not beam timing)"
+            );
             eprintln!("                     [--buttons a,b,start,up,down,left,right]");
             eprintln!("                     [--buttons-at-frame FRAME:buttons]");
             eprintln!("                     [--buttons-script path]");
@@ -2896,6 +3028,7 @@ fn main() {
     let mut target_game_frames: Option<usize> = None;
     let mut log_pcs = false;
     let mut inject_irq = true;
+    let mut functional_video = false;
     let mut controller_port_dc = 0xFF;
     let mut delayed_controller_port_dc: Option<u8> = None;
     // SMS PAUSE button presses (Z80 NMI to $0066) at these script frames.
@@ -2923,6 +3056,14 @@ fn main() {
             "--search-late-routes" => search_late_routes = true,
             "--search-end-routes" => search_end_routes = true,
             "--no-irq" => inject_irq = false,
+            "--functional-video" => {
+                i += 1;
+                if let Err(error) = parse_functional_video(args.get(i).map(String::as_str)) {
+                    eprintln!("{error}");
+                    std::process::exit(2);
+                }
+                functional_video = true;
+            }
             "--buttons" => {
                 i += 1;
                 let value = args.get(i).expect("--buttons value");
@@ -3004,6 +3145,11 @@ fn main() {
     button_events.sort_by_key(|(frame, _)| *frame);
     checkpoints.sort_by_key(|checkpoint| checkpoint.frame);
 
+    if functional_video && (search_late_routes || search_end_routes) {
+        eprintln!("--functional-video is unsupported with route-search loops");
+        std::process::exit(2);
+    }
+
     if search_late_routes {
         run_late_route_search(&rom_path, &button_events);
         return;
@@ -3050,6 +3196,13 @@ fn main() {
         .unwrap_or(200);
     let mut logged_ppu_writes = 0usize;
     let mut bus = SmsBus::new(rom, controller_port_dc);
+    if functional_video {
+        bus.functional_video = Some(FunctionalVideo::new(irq_period()));
+        eprintln!(
+            "FUNCTIONAL_VIDEO ntsc224: {} instruction/idle steps per synthetic epoch; not beam timing, gameplay ticks, or speed",
+            irq_period()
+        );
+    }
     if let Ok(spec) = std::env::var("SMS_WATCH_VRAM")
         && let Some((a, l)) = spec.split_once(':')
         && let (Ok(a), Ok(l)) = (
@@ -3186,6 +3339,9 @@ fn main() {
     let mut first_fall_snapshot: Option<FallSnapshot> = None;
 
     for step in 0..steps {
+        if let Some(clock) = &mut bus.functional_video {
+            clock.advance_to(step);
+        }
         bus.watch_step = step;
         stack_watermark.observe(cpu.sp);
         let pc = cpu.pc;
@@ -3405,19 +3561,30 @@ fn main() {
             xfer_ring.push(("ret", pc, to));
         }
 
-        if inject_irq
-            && step < next_irq_at
-            && line_irq_at.is_some_and(|at| step >= at)
-            && cpu.iff1
-            && cpu.ei_pending == 0
-        {
+        let functional_irq = bus
+            .functional_video
+            .as_ref()
+            .and_then(|clock| clock.irq(&bus.vdp_regs));
+        let line_due = if functional_video {
+            functional_irq == Some(FunctionalIrq::Line)
+        } else {
+            step < next_irq_at && line_irq_at.is_some_and(|at| step >= at)
+        };
+        let frame_due = if functional_video {
+            functional_irq == Some(FunctionalIrq::Frame)
+        } else {
+            step >= next_irq_at
+        };
+        if inject_irq && line_due && cpu.iff1 && cpu.ei_pending == 0 {
             // Simulate a VDP line interrupt. It shares the IM1 vector with the
             // frame interrupt, but the status byte has bit 7 clear, so the
             // runtime can distinguish it after reading $BF.
             cpu.sp = cpu.sp.wrapping_sub(2);
             bus.write(cpu.sp, (cpu.pc & 0xFF) as u8);
             bus.write(cpu.sp.wrapping_add(1), (cpu.pc >> 8) as u8);
-            bus.vdp_status_override = Some(0x00);
+            if !functional_video {
+                bus.vdp_status_override = Some(0x00);
+            }
             cpu.pc = 0x0038;
             if first_irq_handler_step.is_none() {
                 first_irq_handler_step = Some(step);
@@ -3431,7 +3598,7 @@ fn main() {
 
         // Right before injecting the next IRQ, snapshot the framebuffer
         // so we can see how the screen evolves frame by frame.
-        if inject_irq && step >= next_irq_at && cpu.iff1 && cpu.ei_pending == 0 {
+        if inject_irq && frame_due && cpu.iff1 && cpu.ei_pending == 0 {
             // Script frames count from SMB's NMI enable ($CB08 bit 7) — the
             // same convention frame-diff uses — so one recorded script
             // drives both harnesses identically regardless of how many
@@ -3663,7 +3830,7 @@ fn main() {
                 }
             }
         }
-        if inject_irq && step >= next_irq_at && cpu.iff1 && cpu.ei_pending == 0 {
+        if inject_irq && frame_due && cpu.iff1 && cpu.ei_pending == 0 {
             // Simulate a maskable interrupt: push PC, jump to $0038 (IM1).
             if interrupt_at_step.is_none() {
                 interrupt_at_step = Some(step);
@@ -3673,7 +3840,9 @@ fn main() {
             cpu.sp = cpu.sp.wrapping_sub(2);
             bus.write(cpu.sp, (cpu.pc & 0xFF) as u8);
             bus.write(cpu.sp.wrapping_add(1), (cpu.pc >> 8) as u8);
-            bus.vdp_status_override = Some(0x80);
+            if !functional_video {
+                bus.vdp_status_override = Some(0x80);
+            }
             cpu.pc = 0x0038;
             if first_irq_handler_step.is_none() {
                 first_irq_handler_step = Some(step);
@@ -3683,14 +3852,23 @@ fn main() {
             cpu.halted = false;
             irqs_fired += 1;
             irq_to_ei_start = Some(cpu.cycles);
-            next_irq_at = if real_pacing() {
-                step + irq_period()
-            } else {
-                next_irq_at.saturating_add(IRQ_PERIOD)
-            };
+            if !functional_video {
+                next_irq_at = if real_pacing() {
+                    step + irq_period()
+                } else {
+                    next_irq_at.saturating_add(IRQ_PERIOD)
+                };
+            }
         }
 
         if cpu.halted {
+            if bus
+                .functional_video
+                .as_ref()
+                .is_some_and(|clock| clock.can_wake_halt(&cpu, &bus.vdp_regs, inject_irq))
+            {
+                continue; // One deterministic idle step; no guest instruction.
+            }
             // halted but no IRQ pending — endless halt. Stop.
             break;
         }
@@ -3699,10 +3877,20 @@ fn main() {
         let profile_sample = pc_profile
             .as_ref()
             .map(|_| (pc_profile_address(&bus, cpu.pc), cpu.cycles));
-        bus.frame_int_pending = inject_irq && step >= next_irq_at;
+        if !functional_video {
+            bus.frame_int_pending = inject_irq && step >= next_irq_at;
+        }
         let materializer_render_before = current_render_state(&bus);
         let materializer_vdp_writes_before = bus.vdp_data_writes;
-        match cpu.step(&mut bus) {
+        let mut result = cpu.step(&mut bus);
+        if functional_video && matches!(result, Err(StepError::Halt)) && cpu.halted {
+            // Cpu::step reports the executed HALT before its usual EI-delay
+            // retirement. In this opt-in scheduler HALT is an instruction,
+            // followed by idle clock steps until an eligible IRQ arrives.
+            cpu.ei_pending = cpu.ei_pending.saturating_sub(1);
+            result = Ok(());
+        }
+        match result {
             Ok(()) => {
                 taken += 1;
                 if let (Some(map), Some((address, before))) = (&mut pc_profile, profile_sample) {
@@ -3742,9 +3930,14 @@ fn main() {
                     );
                     break;
                 }
-                if bus.vdp_regs[0] & 0x10 == 0 {
+                if !functional_video && bus.vdp_regs[0] & 0x10 == 0 {
                     line_irq_at = None;
-                } else if inject_irq && cpu.iff1 && cpu.ei_pending == 0 && line_irq_at.is_none() {
+                } else if !functional_video
+                    && inject_irq
+                    && cpu.iff1
+                    && cpu.ei_pending == 0
+                    && line_irq_at.is_none()
+                {
                     // R10 is loaded with one less than the target raster line.
                     // Convert that to a coarse instruction-step delay; this is
                     // not cycle-accurate, but it lets checkpoint rendering see
@@ -3936,6 +4129,12 @@ fn main() {
     println!("VDP control I/O entries: {}", bus.io_entries);
     println!("IRQs fired: {irqs_fired}");
     println!("Line IRQs fired: {line_irqs_fired}");
+    if let Some(clock) = &bus.functional_video {
+        println!(
+            "Functional video: ntsc224 synthetic_epochs={} scheduler_steps={} period={} delivered_frame_irqs={irqs_fired} delivered_line_irqs={line_irqs_fired}; NOT physical video/game ticks/speed",
+            clock.epochs, clock.step, clock.period
+        );
+    }
     println!(
         "Bank mapping: slot0={} slot1={} slot2={}",
         bus.slot_bank[0], bus.slot_bank[1], bus.slot_bank[2]
@@ -7246,6 +7445,190 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn functional_video_phase_is_stable_and_wraps_on_both_instruction_periods() {
+        for period in [15_000, 60_000] {
+            let mut clock = FunctionalVideo::new(period);
+            for (offset, want) in [
+                (0, 0xe0),
+                (1, 0xe1),
+                (10, 0xea),
+                (11, 0xe5),
+                (37, 0xff),
+                (38, 0),
+                (76, 38),
+                (77, 39),
+                (261, 223),
+            ] {
+                let step = (offset * period).div_ceil(262);
+                clock.advance_to(step);
+                assert_eq!(clock.vcounter(), want);
+                assert_eq!(clock.vcounter(), want, "a read must not advance time");
+            }
+            clock.advance_to(period);
+            assert_eq!(clock.vcounter(), 0xe0);
+            assert_eq!(clock.epochs, 1);
+            clock.advance_to(usize::MAX);
+            assert_eq!(clock.epochs, usize::MAX / period);
+        }
+    }
+
+    #[test]
+    fn functional_events_coalesce_until_status_ack_even_while_delivery_is_disabled() {
+        let mut clock = FunctionalVideo::new(60_000);
+        let mut regs = [0; 16];
+        clock.write_r10(38);
+        let first = clock.line_at.unwrap() as usize;
+        clock.advance_to(first - 1);
+        assert!(!clock.line_pending);
+        clock.advance_to(first);
+        assert_eq!(clock.vcounter(), 39);
+        assert!(clock.line_pending);
+        assert_eq!(clock.irq(&regs), None);
+        regs[0] = 0x10;
+        assert_eq!(clock.irq(&regs), Some(FunctionalIrq::Line));
+        assert_eq!(clock.acknowledge(), 0);
+        assert_eq!(clock.irq(&regs), None);
+        clock.advance_to(first);
+        assert!(!clock.line_pending, "no phantom repeat after BF");
+        clock.advance_to(3 * 60_000 + first);
+        regs[1] = 0x20;
+        assert_eq!(clock.epochs, 3);
+        assert!(clock.frame_pending && clock.line_pending);
+        assert_eq!(clock.irq(&regs), Some(FunctionalIrq::Frame));
+        assert_eq!(clock.acknowledge(), 0x80);
+        assert!(!clock.frame_pending && !clock.line_pending);
+        clock.advance_to(3 * 60_000 + first + 1);
+        assert_eq!(
+            clock.irq(&regs),
+            None,
+            "unserviced epochs must not queue IRQs"
+        );
+    }
+
+    #[test]
+    fn functional_line_rearm_and_park_do_not_ack_pending_edges() {
+        let mut clock = FunctionalVideo::new(15_000);
+        clock.write_r10(38);
+        let first = clock.line_at.unwrap() as usize;
+        clock.advance_to(first);
+        clock.write_r10(0xff);
+        assert!(clock.line_pending);
+        assert_eq!(clock.line_at, None);
+        clock.acknowledge();
+        clock.advance_to(30_000);
+        assert!(!clock.line_pending);
+        clock.write_r10(38);
+        let next = clock.line_at.unwrap() as usize;
+        assert!(next > clock.step);
+        clock.advance_to(next);
+        assert!(clock.line_pending);
+        clock.write_r10(38);
+        assert_eq!(clock.line_at, Some((next + 15_000) as u128));
+    }
+
+    #[test]
+    fn functional_bus_status_ack_closes_latch_without_legacy_overrides() {
+        let mut bus = SmsBus::new(vec![0; BANK_SIZE], 0xff);
+        let mut clock = FunctionalVideo::new(60_000);
+        clock.advance_to(60_000);
+        bus.functional_video = Some(clock);
+        bus.out_port(0xbf, 0x55);
+        assert!(bus.vdp_addr_latched);
+        assert_eq!(bus.in_port(0xbf), 0x80);
+        assert!(!bus.vdp_addr_latched);
+        bus.vdp_status_override = Some(0x80);
+        assert_eq!(
+            bus.in_port(0xbf),
+            0,
+            "new mode has no injection-time fake status"
+        );
+        assert_eq!(bus.in_port(0x7e), 0xe0);
+        assert_eq!(bus.in_port(0x7f), 0xff, "H-counter remains unsupported");
+        bus.out_port(0xbf, 38);
+        bus.out_port(0xbf, 0x8a);
+        assert!(bus.functional_video.as_ref().unwrap().line_at.is_some());
+    }
+
+    #[test]
+    fn functional_halt_waits_only_for_an_enabled_future_source() {
+        let mut clock = FunctionalVideo::new(60_000);
+        let mut cpu = Cpu::new();
+        cpu.halted = true;
+        let mut regs = [0; 16];
+        regs[1] = 0x20;
+        assert!(
+            !clock.can_wake_halt(&cpu, &regs, true),
+            "DI HALT is a hard stop"
+        );
+        cpu.iff1 = true;
+        assert!(clock.can_wake_halt(&cpu, &regs, true));
+        assert!(!clock.can_wake_halt(&cpu, &regs, false));
+        regs[1] = 0;
+        regs[0] = 0x10;
+        assert!(!clock.can_wake_halt(&cpu, &regs, true));
+        clock.write_r10(38);
+        assert!(clock.can_wake_halt(&cpu, &regs, true));
+        clock.write_r10(0xff);
+        assert!(!clock.can_wake_halt(&cpu, &regs, true));
+    }
+
+    #[test]
+    fn functional_mode_parser_rejects_missing_or_unsupported_modes() {
+        assert!(parse_functional_video(Some("ntsc224")).is_ok());
+        for value in [None, Some(""), Some("pal"), Some("random"), Some("ntsc192")] {
+            assert!(parse_functional_video(value).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT Docker-assembled coherent project"]
+    fn functional_clock_unblocks_actual_coherent_admission_without_changing_runtime() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let &(bank, target) = defs.get("rt_cv1_hud_try_chunk").unwrap();
+        assert_eq!(bank, 0);
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        for progressing in [false, true] {
+            let mut bus = SmsBus::new(rom.clone(), 0xff);
+            // Runtime presentation ABI only; no game's RAM or game logic.
+            bus.ram[0x0813] = 11; // valid, split, served
+            bus.ram[0x0802] = 0; // displayed, no explicit blank fence
+            if progressing {
+                bus.functional_video = Some(FunctionalVideo::new(15_000));
+            }
+            let mut admitted = false;
+            let mut cpu = Cpu::new();
+            for step in 0..15_000 {
+                if let Some(clock) = &mut bus.functional_video {
+                    clock.advance_to(step);
+                }
+                if cpu.pc == 0 || cpu.pc == 7 {
+                    cpu.pc = target;
+                    cpu.sp = 0xdff0;
+                    cpu.b = 27;
+                    bus.write(0xdff0, 7);
+                    bus.write(0xdff1, 0);
+                }
+                cpu.step(&mut bus).unwrap();
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                assert_eq!(bus.ram[0x0b1d], 0);
+                if cpu.pc == 7 && cpu.f & 1 == 0 {
+                    admitted = true;
+                    break;
+                }
+            }
+            assert_eq!(admitted, progressing);
+        }
+    }
 
     #[test]
     fn synthetic_vcounter_admits_bounded_vblank_polling_without_beam_claim() {

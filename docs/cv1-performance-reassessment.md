@@ -64,12 +64,49 @@ transaction; the guest's `$4016` strobe owns that reset. This is not a new
 implementation of the complete NES controller protocol.
 
 Normal ROM SHA-256:
-`52c294ebf60b5f2edb8cc628c988c7bb4ac049cc3c301dc0cc767abc41f24490`.
-Local evidence: `phase4-final-{walk,heart}` under
-`out/cv1-presentation.ZNyZAL/`. The freshly generated SMB artifact retains
+`61a6d2bf280a2f85b991f4e6915a2b9c0ff328b2507e0b7c24e427a95ac16064`.
+The final lifetime repair below retains **byte-identical callback CSVs**,
+including every pixel hash, state and frame interval, on both 420-tick routes.
+Local evidence: `phase5-final-{walk,heart}` and the preceding
+`phase4-final-{walk,heart}` under `out/cv1-presentation.ZNyZAL/`.
+The freshly generated SMB artifact retains
 SHA-256 `ac0d63bc0b39f2d2f03f2934974232da65dfb7a24a33db5e3f6de74062ccafc5`:
 unchanged RAM/VDP goldens, the World 1-1 clear and seven identical checkpoint
 images, and the real-core 300% smoke remain valid.
+
+## First door and indoor return-stack repair
+
+The unchanged long route exposed a later `$E5` trap indoors. After the game
+consumed a return with `PLA; PLA`, an interrupt could legally reuse those
+freed guest-stack bytes before the old helper validated them. Original NES
+execution with injected lag NMIs confirms the lifetime error. The profile
+now identifies the first PLA with `consume_at`; validation and the single
+software-frame retirement happen while the bytes are live, before either
+pop. The original guest instructions remain intact. Missing, stale, bypassed
+or replaced hooks fail generation.
+
+Both final actual-core 500% routes pass the original strict endpoints:
+
+- Normal: ordered first-door animation and room setup, then 1,306 indoor
+  game ticks; confirmed endpoint world X 723–724, at least 674 pixels beyond
+  its confirmed starting window, with no trap.
+- Diagnostic: 78 validated pre-PLA ownership transfers; after the first
+  observed transfer, another 124 ticks and 80 confirmed pixels without a trap.
+  This separately instrumented result is not a normal-ROM speed measurement.
+
+Actual assembled tests cover 50 interruptible instruction boundaries and
+reproduce the failure on the old ROM. The repaired helper adds 8 exact
+T-states, no native-stack word, and retains the `$DE40` floor. Its local
+interrupt-service bound, including HINT handling, is 844T versus a 2,052T
+allowance; the diagnostic is 874T. Existing graphics commit, IRQ-prefix and
+HUD bounds are unchanged. This does not establish universal indoor beam
+timing, stair ascent, a stage clear or boss support.
+
+Evidence: `phase5-{normal,diagnostic}-traversal-r2` under the same local
+artifact directory. [Acceptance commands](../profiles/cv1/acceptance/README.md)
+include the separate long routes and the opt-in
+[functional tracer](functional-video-trace.md), whose synthetic clock is
+explicitly not a performance oracle.
 
 The following sections retain historical checkpoint evidence and the original
 work order; their unresolved-status statements are not the current work queue.
@@ -316,7 +353,10 @@ hand-port speed, but require alias/stack proofs. UxROM itself does not forbid
 native far calls; CV1's return-address manipulation makes a blanket switch
 unsafe. CHR-RAM similarly rules out assuming all patterns are immutable.
 
-## Revised work order and acceptance gates
+## Original work order and acceptance gates
+
+This was the implementation plan. The delivery and measured limitations at
+the top of this document supersede it: the 60-tick/s target was not reached.
 
 1. **Establish timing evidence before optimizing.** Count physical frames,
    game ticks, lag intervals and presentation commits separately. Timestamp

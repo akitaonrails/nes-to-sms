@@ -294,12 +294,17 @@ pub enum Op {
     },
     /// Tail jump that first discards one translated-call continuation and
     /// either recreates the corresponding two 6502 JSR return bytes, or
-    /// verifies bytes already consumed by the guest. The latter leaves the
-    /// guest stack unchanged; both bypass the discarded continuation.
+    /// has already transferred ownership at ReturnEscapeConsume. The latter
+    /// is an ordinary tail JMP; it must not read now-free guest stack bytes.
     ReturnEscape {
         target: String,
         return_addr: u16,
         stack_bytes_already_consumed: bool,
+    },
+    /// Validate and discard an owning software continuation before the first
+    /// of its two guest PLAs, preserving all guest state and live stack bytes.
+    ReturnEscapeConsume {
+        return_addr: u16,
     },
     JmpIndirect {
         addr: u16,
@@ -468,6 +473,7 @@ pub struct ReturnEscapeSite {
     pub target: u16,
     pub return_addr: u16,
     pub stack_bytes_already_consumed: bool,
+    pub consume_at: Option<u16>,
 }
 
 impl JumpEngineSite {
@@ -1325,6 +1331,96 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
         }
     }
 
+    // An early software pop is safe only when every route through the
+    // consuming block enters before its first PLA. Matching bytes alone is
+    // insufficient: a cross-routine/dispatch entry could skip the transfer.
+    for site in opts
+        .return_escape_sites
+        .iter()
+        .filter(|site| site.stack_bytes_already_consumed)
+    {
+        let start = site.consume_at.ok_or_else(|| {
+            LiftError::Decode("consumed return_escape requires consume_at".into())
+        })?;
+        if !(start < opts.end && site.caller >= opts.start) {
+            continue;
+        }
+        let invalid = |reason: &str| {
+            LiftError::Decode(format!("return_escape consume_at ${start:04X}: {reason}"))
+        };
+        if start < opts.start
+            || site.caller >= opts.end
+            || start.checked_add(2).is_none_or(|p| p > site.caller)
+        {
+            return Err(invalid("consume block must belong to one lifted routine"));
+        }
+        if all_targets
+            .iter()
+            .any(|pc| *pc > start && *pc <= site.caller)
+            || opts.jump_engine_sites.iter().any(|engine| {
+                (start + 1..=site.caller).any(|pc| {
+                    let label = label_for_prefixed(pc, opts.window_label_prefix.as_deref());
+                    engine.targets.contains(&label) || engine.return_target.as_ref() == Some(&label)
+                })
+            })
+        {
+            return Err(invalid("alternate entry bypasses the first PLA"));
+        }
+        // Internal JSR targets are not branch labels in the normal lifter.
+        // Check them without changing default routine discovery/emission.
+        let mut scan = opts.start;
+        while scan < opts.end {
+            let insn = decode_at(prg, scan, cpu_to_prg_offset(scan).unwrap())
+                .map_err(|_| LiftError::Truncated { pc: scan })?;
+            if insn.mnemonic == Mnemonic::JSR
+                && let Operand::Addr(target) = insn.operand
+                && target > start
+                && target <= site.caller
+            {
+                return Err(invalid("JSR entry bypasses the first PLA"));
+            }
+            if let Some(engine) = opts.jump_engine_sites.iter().find(|s| s.caller == scan) {
+                scan = u16::try_from(engine.table_end().unwrap_or(usize::from(opts.end)))
+                    .map_err(|_| invalid("dispatch table exceeds lift range"))?;
+            } else {
+                scan = scan
+                    .checked_add(u16::from(insn.size))
+                    .ok_or_else(|| invalid("range wraps"))?;
+            }
+        }
+        let mut pc = start;
+        while pc <= site.caller {
+            let insn = decode_at(prg, pc, cpu_to_prg_offset(pc).unwrap())
+                .map_err(|_| LiftError::Truncated { pc })?;
+            if pc < start + 2 {
+                if insn.mnemonic != Mnemonic::PLA || insn.size != 1 {
+                    return Err(invalid("expected consecutive PLA/PLA"));
+                }
+            } else if pc == site.caller {
+                if insn.mnemonic != Mnemonic::JMP
+                    || insn.mode != AddrMode::Absolute
+                    || insn.operand != Operand::Addr(site.target)
+                {
+                    return Err(invalid("final JMP/target mismatch"));
+                }
+                break;
+            } else if !matches!(
+                insn.mnemonic,
+                Mnemonic::LDA | Mnemonic::LDX | Mnemonic::LDY | Mnemonic::NOP
+            ) {
+                // Deliberately narrow: other suffixes need an explicit proof
+                // before expanding this read-only, stack-neutral contract.
+                return Err(invalid("suffix supports only loads/NOP before the JMP"));
+            }
+            pc = pc
+                .checked_add(u16::from(insn.size))
+                .ok_or_else(|| invalid("range wraps"))?;
+            if pc > site.caller {
+                return Err(invalid("caller is not an instruction boundary"));
+            }
+        }
+    }
+
     let mut pc = opts.start;
     let mut lifted_end = opts.start;
     while pc < opts.end {
@@ -1349,6 +1445,16 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
             pc,
             text: format_instruction(&insn),
         });
+
+        if let Some(site) = opts
+            .return_escape_sites
+            .iter()
+            .find(|site| site.consume_at == Some(pc))
+        {
+            ops.push(Op::ReturnEscapeConsume {
+                return_addr: site.return_addr,
+            });
+        }
 
         // Lift
         let lifted = lift_insn(
@@ -1403,6 +1509,26 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
         pc = next_pc;
     }
 
+    for site in opts
+        .return_escape_sites
+        .iter()
+        .filter(|site| site.stack_bytes_already_consumed)
+    {
+        if site
+            .consume_at
+            .is_some_and(|start| start >= opts.start && start < opts.end)
+            && (!ops
+                .iter()
+                .any(|op| matches!(op, Op::Source { pc, .. } if Some(*pc) == site.consume_at))
+                || !ops
+                    .iter()
+                    .any(|op| matches!(op, Op::Source { pc, .. } if *pc == site.caller)))
+        {
+            return Err(LiftError::Decode(
+                "return_escape consuming block was not lifted".into(),
+            ));
+        }
+    }
     Ok(Routine {
         entry: opts.start,
         end: lifted_end,
@@ -1634,6 +1760,7 @@ mod tests {
                 target: 0xEC60,
                 return_addr: 0xEA79,
                 stack_bytes_already_consumed: false,
+                consume_at: None,
             }],
             window_label_prefix: None,
             extra_label_pcs: Vec::new(),
@@ -1649,13 +1776,9 @@ mod tests {
         consumed.return_escape_sites[0].stack_bytes_already_consumed = true;
         assert!(
             lift_range(&prg, &consumed)
-                .unwrap()
-                .ops
-                .contains(&Op::ReturnEscape {
-                    target: "L_EC60".into(),
-                    return_addr: 0xEA79,
-                    stack_bytes_already_consumed: true,
-                })
+                .unwrap_err()
+                .to_string()
+                .contains("consume_at")
         );
         let mut stale = opts;
         stale.return_escape_sites[0].target = 0xEC61;
@@ -1673,6 +1796,111 @@ mod tests {
             Op::Unsupported { reason, .. }
                 if reason.contains("return_escape caller is not an absolute JMP")
         )));
+    }
+
+    #[test]
+    fn consumed_escape_requires_exact_live_pair_and_single_entry_block() {
+        let code = [0x68, 0x68, 0xbd, 0x80, 0x03, 0x4c, 0x00, 0x90];
+        let prg = make_prg_at(0x8000, &code);
+        let opts = LiftOptions {
+            start: 0x8000,
+            end: 0x8008,
+            entry_name: "L_8000".into(),
+            return_escape_sites: vec![ReturnEscapeSite {
+                caller: 0x8005,
+                target: 0x9000,
+                return_addr: 0x8fff,
+                stack_bytes_already_consumed: true,
+                consume_at: Some(0x8000),
+            }],
+            ..LiftOptions::default()
+        };
+        let valid = lift_range(&prg, &opts).unwrap();
+        assert!(valid.ops.windows(2).any(|ops| matches!(
+            ops,
+            [
+                Op::ReturnEscapeConsume {
+                    return_addr: 0x8fff
+                },
+                Op::Pla
+            ]
+        )));
+        assert_eq!(
+            valid.ops.iter().filter(|op| matches!(op, Op::Pla)).count(),
+            2
+        );
+        for boundary in 0x8001..=0x8005 {
+            let mut alternate = opts.clone();
+            alternate.extra_label_pcs.push(boundary);
+            assert!(
+                lift_range(&prg, &alternate)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("entry")
+            );
+            let mut split = opts.clone();
+            split.start = boundary;
+            assert!(
+                lift_range(&prg, &split).is_err(),
+                "interior routine root {boundary:04x}"
+            );
+        }
+        for (index, byte) in [
+            (0, 0xea),
+            (1, 0x48),
+            (2, 0x9a),
+            (2, 0x20),
+            (2, 0xd0),
+            (2, 0x60),
+            (2, 0x8d),
+            (5, 0xea),
+            (6, 1),
+        ] {
+            let mut changed = prg.clone();
+            changed[index] = byte;
+            assert!(
+                lift_range(&changed, &opts).is_err(),
+                "stale {index}/{byte:02x}"
+            );
+        }
+        // Known internal branch, JMP, JSR and profiled dispatch entries all
+        // fail, even though their target's bytes remain a valid PLA suffix.
+        for prefix in [vec![0xd0, 1], vec![0x4c, 4, 0x80], vec![0x20, 4, 0x80]] {
+            let start = 0x8000 + prefix.len() as u16;
+            let mut body = prefix;
+            body.extend(code);
+            let mut prefixed = opts.clone();
+            prefixed.end = start + code.len() as u16;
+            prefixed.return_escape_sites[0].consume_at = Some(start);
+            prefixed.return_escape_sites[0].caller = start + 5;
+            assert!(lift_range(&make_prg_at(0x8000, &body), &prefixed).is_err());
+        }
+        let mut dispatch = opts.clone();
+        dispatch.jump_engine_sites.push(JumpEngineSite {
+            caller: 0x9000,
+            targets: vec!["L_8001".into()],
+            return_target: None,
+            tail_indices: vec![],
+            stack_return_bytes: 0,
+            target_entry_a: vec![],
+        });
+        assert!(lift_range(&prg, &dispatch).is_err());
+        // A valid pair after an unreachable terminator must not turn the
+        // eventual JMP into a silent no-pop escape.
+        let unreachable = make_prg_at(
+            0x7fff + 1,
+            &[0x60, 0x68, 0x68, 0xbd, 0x80, 3, 0x4c, 0, 0x90],
+        );
+        let mut missing = opts;
+        missing.end += 1;
+        missing.return_escape_sites[0].consume_at = Some(0x8001);
+        missing.return_escape_sites[0].caller += 1;
+        assert!(
+            lift_range(&unreachable, &missing)
+                .unwrap_err()
+                .to_string()
+                .contains("not lifted")
+        );
     }
 
     #[test]
