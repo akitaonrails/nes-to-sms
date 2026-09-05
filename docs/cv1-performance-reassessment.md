@@ -5,6 +5,11 @@ work order follow; implementation evidence is recorded below. Keep the recent
 sprite-palette and CHR-RAM materializer fixes; their static correctness and
 cost improvements do not establish smooth real-emulator motion.
 
+Next optimization work is scoped in
+[the clock-scaling findings and ranked experiments](cv1-next-performance-experiments.md).
+That follow-up keeps this delivered ROM unchanged and separates measurement
+gaps from proposed SMS/Z80-specific optimizations.
+
 ## Dagger follow-up
 
 The dagger freeze was a strict unresolved-code trap, not another rendering
