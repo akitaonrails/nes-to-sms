@@ -490,6 +490,7 @@ _ppu_w_ppudata:
 ; Clobbers A/BC/DE/HL.
 rt_ppudata_apply:
 .ifdef CV1_RUNTIME_HOOKS
+.ifndef CV1_COHERENT_BG
   ; A resumed busy game body can upload a scene directly, not only build its
   ; next stripe. Complete the older prepared SAT/scroll BEFORE any raw or VDP
   ; mutation. The port-only finisher preserves this caller's guard/mapping,
@@ -501,6 +502,7 @@ rt_ppudata_apply:
   call rt_cv1_finish_pending
   ld de, (CV1_FRAME_DATA_ADDR)
 _cv1_ppudata_unblocked:
+.endif
 .endif
   ld   a, d
   cp   $3f
@@ -518,6 +520,12 @@ _cv1_ppudata_unblocked:
   jp   nc, _ppudata_direct_attribute
 
 _ppudata_direct_nametable_tile:
+.ifdef CV1_COHERENT_BG
+  ; Prepared output owns no live source bytes: a busy body's later writes
+  ; belong to NEXT generation and cannot require the old blocking barrier.
+  ld a, ($cb18)
+  jp rt_cv1_bg_raw_write
+.else
   ; Window routing (E.5c): raw-store every tile write; only in-window
   ; columns reach the folded VRAM table (out-of-window columns are
   ; projected later when they scroll in). Preserves DE.
@@ -688,8 +696,13 @@ _ppudata_tile_paint:
   ld   a, ($cb18)
   call rt_write_mapped_bg_tile
   ret
+.endif
 
 _ppudata_pattern_write:
+.ifdef CV1_COHERENT_BG
+  ld a, ($cb18)
+  jp rt_cv1_bg_chr_write
+.else
 .ifndef NES_CHR_RAM
   ; CHR-ROM carts never write pattern space meaningfully — discard.
   jp   _ppudata_discard_direct
@@ -914,6 +927,7 @@ _ppw_done:
   pop  bc
   ret
 .endif
+.endif
 
 _ppudata_discard_direct:
   ; non-nametable PPU writes are ignored for now
@@ -953,6 +967,9 @@ _ppudata_direct_palette:
 
   ld   a, ($cb16)
   ld   b, a                  ; B = P
+.ifdef CV1_COHERENT_BG
+  jp rt_cv1_bg_palette_write
+.endif
   cp   $00
   jr   z, _pal_universal
   cp   $10
@@ -996,6 +1013,10 @@ _pal_universal:
   ret
 
 _ppudata_direct_attribute:
+.ifdef CV1_COHERENT_BG
+  ld a, ($cb18)
+  jp rt_cv1_bg_raw_write
+.else
   ; Attribute byte at $23C0/$27C0/$2BC0/$2FC0. Store to the raw attr shadow,
   ; then expand through the window-gated core below.
   ld   a, ($cb18)
@@ -1003,6 +1024,7 @@ _ppudata_direct_attribute:
   call rt_nt_write_attr_shadow ; preserves DE; current folded rendering unchanged
   call _apply_attr_core
   ret
+.endif
 
 ; ─── rt_apply_attr_byte ──────────────────────────────────────────────────────
 ; Apply one NES attribute byte to the folded window (window-gated).

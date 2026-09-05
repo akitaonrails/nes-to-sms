@@ -34,7 +34,7 @@
 ; Implementation strategy (v1):
 ;   rt_controller_latch  — called once per VBlank from irq_handler.
 ;                          Reads $DC, inverts (active-high), stores NES byte at $CB06.
-;                          Also resets the bit-read index at $CB07 to 0.
+;                          Leaves an in-progress serial read at $CB07 untouched.
 ;   rt_controller_strobe — called when translated code writes $4016.
 ;                          Resets $CB07 to 0 so the next read returns A.
 ;   rt_controller_read   — called for each $4016 read by translated SMB.
@@ -59,7 +59,7 @@
 
 ; ─── rt_controller_latch ──────────────────────────────────────────────────────
 ; Reads SMS port $DC, converts to NES button byte, stores at $CB06.
-; Resets the serial read counter at $CB07 to 0.
+; Only a translated $4016 strobe resets the serial read counter at $CB07.
 ; Called from irq_handler once per VBlank. irq_handler already preserves AF/BC;
 ; keep this helper stackless on the hot frame path.
 rt_controller_latch:
@@ -209,11 +209,11 @@ _latch_no_left:
   ld   c, a
 _latch_no_right:
 
-  ; Store NES button byte and reset serial index.
+  ; Refresh physical buttons without rewinding an interrupted $4016 read.
+  ; A slow translated polling loop can span physical VBlanks; restarting its
+  ; index here loses later bits (including Right) despite a held button.
   ld   a, c
   ld   ($cb06), a
-  xor  a
-  ld   ($cb07), a           ; reset bit-read index to 0
   ret
 
 ; ─── rt_controller_strobe ─────────────────────────────────────────────────────

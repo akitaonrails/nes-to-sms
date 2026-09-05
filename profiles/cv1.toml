@@ -31,7 +31,7 @@ reset = 0xc008
 irq   = 0xc0bf
 
 [translation]
-runtime_defines = ["CV1_RUNTIME_HOOKS"]
+runtime_defines = ["CV1_RUNTIME_HOOKS", "CV1_COHERENT_BG"]
 defer_sprite_registers = true
 
 # The full NMI finishes DMA/stripe/split setup through this routine before

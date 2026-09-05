@@ -101,7 +101,9 @@ impl Machine {
     }
 
     fn run_until(&mut self, cpu: &mut Cpu, stop: u16) {
-        for _ in 0..100_000 {
+        // A coherent cold scene is intentionally prepared before publication;
+        // its bounded chunks may total substantially more than one old IRQ.
+        for _ in 0..2_000_000 {
             if cpu.pc == stop {
                 return;
             }
@@ -120,6 +122,41 @@ impl Machine {
         let mut cpu = self.cpu(label, iff);
         self.run_until(&mut cpu, 7);
         cpu
+    }
+
+    fn coherent(&self) -> bool {
+        self.labels.contains_key("rt_cv1_bg_init")
+    }
+
+    fn initialize_coherent_source(&mut self) {
+        self.call("rt_cv1_bg_init", false);
+        self.ram[0xc900..0xca00].fill(0xff);
+        self.ram[0xca11] = 1;
+        self.ports.clear();
+        self.raw_writes.clear();
+    }
+
+    fn prepare_empty_coherent_packet(&mut self) {
+        // An empty BG packet plus the actual prepared hidden SAT is a valid
+        // consumer fixture. Do not fake READY without a prepared backend.
+        self.call("rt_cv1_sat_prepare", false);
+        self.ports.clear();
+        self.raw_writes.clear();
+    }
+
+    fn coherent_prepared_bytes(&self) -> Vec<u8> {
+        [
+            &self.sram[0x2900..0x3320], // frozen dirty, both metadata/index/pins
+            &self.sram[0x3360..0x33a0], // frozen CHR
+            &self.sram[0x33c0..0x33e7], // frozen CRAM and prepared controls
+            &self.sram[0x33e8..0x3466], // work/NT/HUD packet (not live dirty)
+            &self.sram[0x3500..0x3c80], // reverse owner/current or next metadata
+            &self.ram[PACKET..PACKET + 13],
+            &self.ram[0xc840..0xc900],
+            &self.ram[0xd400..0xd450],
+            &self.ram[0xd480..0xd4c0],
+        ]
+        .concat()
     }
 
     fn seed_ppu(&mut self, busy: u8, value: u8) {
@@ -230,6 +267,9 @@ fn replacement_matches_actual_translated_scroll_and_preserves_mapper_iff() {
             for control in [0x00, 0x81, 0xb0, 0xff] {
                 for sram_control in [0, 8] {
                     let mut original = Machine::assembled();
+                    if original.coherent() && busy == 0 {
+                        original.initialize_coherent_source();
+                    }
                     original.seed_ppu(busy, control);
                     original.ram[0xdffc] = sram_control;
                     let mut replacement = original.clone();
@@ -239,6 +279,15 @@ fn replacement_matches_actual_translated_scroll_and_preserves_mapper_iff() {
                     replacement.ram[0xcb14] = original_bank;
                     let stop = original.labels["rt_translated_rts"].1;
                     original.run_until(&mut cpu, stop);
+                    if replacement.coherent() && busy == 0 && sram_control != 0 {
+                        let mut hook = replacement.cpu("rt_cv1_scroll_publish", iff);
+                        let halt = replacement.labels["_cv1_present_halt"].1;
+                        replacement.run_until(&mut hook, halt);
+                        assert_eq!(replacement.ram[0xcb1d], 0xf8);
+                        assert_eq!((replacement.ram[READY], replacement.ram[PUBLISH]), (0, 0));
+                        assert!(replacement.ports.is_empty());
+                        continue;
+                    }
                     let hook = replacement.call("rt_cv1_scroll_publish", iff);
                     assert_eq!((hook.a, hook.d, hook.e), (cpu.a, cpu.d, cpu.e));
                     assert_eq!((hook.iff1, hook.iff2), (cpu.iff1, cpu.iff2));
@@ -259,11 +308,23 @@ fn replacement_matches_actual_translated_scroll_and_preserves_mapper_iff() {
                         };
                         assert_eq!(actual, original.ram[address], "field {address:04x}");
                     }
-                    assert_eq!(replacement.ports, original.ports);
-                    assert!(
-                        replacement.ports.is_empty(),
-                        "producer CTRL must defer physical sprite registers"
-                    );
+                    if !replacement.coherent() || busy != 0 {
+                        assert_eq!(replacement.ports, original.ports);
+                        assert!(
+                            replacement.ports.is_empty(),
+                            "producer CTRL must defer physical sprite registers"
+                        );
+                    } else {
+                        assert_ne!(
+                            replacement.ram[0xc802] & 1,
+                            0,
+                            "full publication owns completed SAT"
+                        );
+                        assert_eq!(
+                            replacement.sram[0x33e1], 0,
+                            "full publication owns completed BG"
+                        );
+                    }
                     assert_eq!(replacement.ram[READY], u8::from(busy == 0));
                     assert_eq!(replacement.ram[PUBLISH], u8::from(busy == 0));
                 }
@@ -276,6 +337,9 @@ fn replacement_matches_actual_translated_scroll_and_preserves_mapper_iff() {
 #[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
 fn lag_does_not_republish_and_consumption_preserves_newer_intent() {
     let mut m = Machine::assembled();
+    if m.coherent() {
+        m.initialize_coherent_source();
+    }
     m.seed_ppu(0, 0xb0);
     m.call("rt_cv1_scroll_publish", true);
     let packet = m.ram[PACKET..PACKET + 13].to_vec();
@@ -288,6 +352,14 @@ fn lag_does_not_republish_and_consumption_preserves_newer_intent() {
     m.ram[0xcb78] = 1;
     m.ram[0xca18] = 250;
     let live: Vec<_> = FIELDS.iter().map(|a| m.ram[*a]).collect();
+    if m.coherent() {
+        m.call("rt_cv1_frame_try_present", false);
+        assert_eq!((m.ram[READY], m.ram[CONSUME]), (0, 1));
+        assert_eq!(FIELDS.iter().map(|a| m.ram[*a]).collect::<Vec<_>>(), live);
+        m.call("rt_cv1_frame_try_present", false);
+        assert_eq!(m.ram[CONSUME], 1);
+        return;
+    }
     m.call("rt_cv1_frame_begin", false);
     assert_eq!(m.ram[READY], 0);
     assert_eq!(m.ram[CONSUME], 1);
@@ -344,6 +416,9 @@ fn suppressed_nested_prologue_and_epilogue_preserve_ppu_phase() {
 #[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
 fn actual_irq_consumes_ready_once_and_delivers_busy_lag_body() {
     let mut m = Machine::assembled();
+    if m.coherent() {
+        m.prepare_empty_coherent_packet();
+    }
     m.ram[0xcb28] = 1;
     m.ram[READY] = 1;
     // Empty rendering packet: exercise the actual begin/present/end path
@@ -607,8 +682,47 @@ fn every_partial_chr_write_marks_sprite_source_dirty_without_copy_through() {
 
 #[test]
 #[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
-fn actual_irq_blanks_before_scene_rebuild_and_commits_mask_off_hidden_sat() {
+fn scene_rebuild_is_blanked_before_reuse_and_irq_commits_hidden_sat() {
     let mut m = Machine::assembled();
+    if m.coherent() {
+        m.initialize_coherent_source();
+        m.seed_ppu(0, 0xb0);
+        m.ram[0xcb09] = 8; // BG enabled, sprites hidden despite nonempty OAM
+        m.ram[0xc900..0xca00].fill(0);
+        let mut cpu = m.cpu("rt_cv1_scroll_publish", false);
+        let reset = m.labels["rt_cv1_bg_prepare_blanked"].1;
+        m.run_until(&mut cpu, reset);
+        assert_eq!(
+            m.ports
+                .windows(2)
+                .rev()
+                .find_map(|p| (p[0].0 == 0xbf && p[1] == (0xbf, 0x81)).then_some(p[0].1)),
+            Some(0xb0) // the pre-capture DI fence disables the prior display mode
+        );
+        assert_ne!(m.ram[0xc802] & 2, 0);
+        assert_eq!(
+            m.ram[READY], 0,
+            "a destructive rebuild cannot publish early"
+        );
+        m.run_until(&mut cpu, 7);
+        assert_eq!(m.ram[READY], 1);
+        assert_eq!(&m.ram[0xc840..0xc880], &[0xe0; 64]);
+        m.ports.clear();
+        m.ram[0xcb28] = 1;
+        m.call("irq_handler", false);
+        let payload: Vec<_> = m
+            .ports
+            .iter()
+            .filter_map(|(p, v)| (*p == 0xbe).then_some(*v))
+            .collect();
+        assert_eq!(
+            &payload[payload.len() - 192..payload.len() - 128],
+            &[0xe0; 64]
+        );
+        assert_eq!(&payload[payload.len() - 128..], &[0; 128]);
+        assert_eq!((m.ram[READY], m.ram[CONSUME]), (0, 1));
+        return;
+    }
     m.ram[0xcb28] = 1;
     m.ram[READY] = 1;
     m.ram[PACKET] = 0xb0;
@@ -663,16 +777,32 @@ fn pending_from_actual_irq() -> Machine {
     m.ram[PACKET + 12] = 7;
     m.ram[0xc802] = 4; // initialized 8x16 cache, no mode-change blank
     m.ram[0xd468] = 1;
-    m.vcounters = vec![0xe0, 0x20]; // old BG wait admits; final try misses
+    if m.coherent() {
+        m.prepare_empty_coherent_packet();
+        m.vcounters = vec![0x20]; // coherent IRQ has exactly one early try
+    } else {
+        m.vcounters = vec![0xe0, 0x20]; // old BG wait admits; final try misses
+    }
     m.call("irq_handler", false);
-    assert_eq!((m.ram[PENDING], m.ram[READY], m.ram[CONSUME]), (1, 0, 1));
+    assert_eq!(
+        (m.ram[PENDING], m.ram[READY], m.ram[CONSUME]),
+        if m.coherent() { (1, 1, 0) } else { (1, 0, 1) }
+    );
     assert_eq!((m.ram[0xcb12], m.ram[0xcb20]), (2, 7));
     assert_eq!(m.ram[0xca12], 0);
     assert_eq!(
-        m.ram[0xca18], 10,
-        "unconsumed old count merges exactly once"
+        m.ram[0xca18],
+        if m.coherent() { 3 } else { 10 },
+        "coherent publication already transferred intent; fallback merges once"
     );
-    assert_eq!(&m.ram[PACKET + 9..PACKET + 13], &[0; 4]);
+    assert_eq!(
+        &m.ram[PACKET + 9..PACKET + 13],
+        if m.coherent() {
+            &[0xb2, 0, 0, 7]
+        } else {
+            &[0; 4]
+        }
+    );
     assert!(
         m.ports.iter().all(|p| p.0 == 0x7f),
         "late upload must not write video; physical audio still runs"
@@ -703,7 +833,10 @@ fn pending_retries_restore_live_intent_without_double_consumption_or_count() {
         assert_eq!(FIELDS.iter().map(|a| m.ram[*a]).collect::<Vec<_>>(), before);
         assert_eq!(&m.ram[0xd440..0xd450], pins);
         assert_eq!(&m.ram[PACKET..PACKET + 13], packet);
-        assert_eq!((m.ram[PENDING], m.ram[READY], m.ram[CONSUME]), (1, 0, 1));
+        assert_eq!(
+            (m.ram[PENDING], m.ram[READY], m.ram[CONSUME]),
+            if m.coherent() { (1, 1, 0) } else { (1, 0, 1) }
+        );
         assert_eq!(m.ram[0xca12], 0);
         assert!(m.ports.iter().all(|p| p.0 == 0x7f));
         m.ports.clear();
@@ -745,7 +878,10 @@ fn pending_blocks_new_full_producers_but_delivers_the_real_busy_lag() {
             m.vcounter_reads = 0;
             let packet = m.ram[PACKET..PACKET + 13].to_vec();
             m.call("irq_handler", false);
-            assert_eq!((m.ram[PENDING], m.ram[CONSUME], m.ram[PUBLISH]), (1, 1, 0));
+            assert_eq!(
+                (m.ram[PENDING], m.ram[CONSUME], m.ram[PUBLISH]),
+                if m.coherent() { (1, 0, 0) } else { (1, 1, 0) }
+            );
             assert_eq!(&m.ram[PACKET..PACKET + 13], packet);
             assert_eq!(m.ram[0xca11], depth);
             assert_eq!(m.ram[0xc01b], busy, "do not fake a NES busy flag");
@@ -760,7 +896,7 @@ fn pending_blocks_new_full_producers_but_delivers_the_real_busy_lag() {
 
 #[test]
 #[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
-fn pending_ppudata_barrier_precedes_all_raw_classes_and_preserves_guarded_guest_abi() {
+fn pending_ppudata_uses_the_selected_raw_writer_contract_and_preserves_guest_abi() {
     let pending = pending_from_actual_irq();
     for address in [0x0003u16, 0x2413, 0x27c1, 0x3f01] {
         for increment in [1, 32] {
@@ -782,12 +918,16 @@ fn pending_ppudata_barrier_precedes_all_raw_classes_and_preserves_guarded_guest_
                         m.ram[0xcb62] = 2;
                         let outer_guard = m.ram[0xca19..0xca1d].to_vec();
                         let mapping = (m.ram[0xdffc], m.ram[0xdfff], m.ram[0xcb62]);
+                        let prepared = m.coherent_prepared_bytes();
                         let mut cpu = m.cpu("rt_ppu_write", iff);
                         cpu.a = 0x21;
                         cpu.b = 7;
                         let sp = cpu.sp;
                         m.run_until(&mut cpu, 7);
-                        assert_eq!((m.ram[PENDING], m.ram[CONSUME]), (0, 1));
+                        assert_eq!(
+                            (m.ram[PENDING], m.ram[CONSUME]),
+                            if m.coherent() { (1, 0) } else { (0, 1) }
+                        );
                         assert_eq!(
                             (cpu.a, cpu.d, cpu.e, cpu.iff1, cpu.sp),
                             (0x21, 0x52, 0xa9, iff, sp + 2)
@@ -804,6 +944,26 @@ fn pending_ppudata_barrier_precedes_all_raw_classes_and_preserves_guarded_guest_
                             ((next >> 8) as u8, next as u8)
                         );
                         let payload: Vec<_> = m.ports.iter().filter(|p| p.0 == 0xbe).collect();
+                        if m.coherent() {
+                            assert!(
+                                m.ports.is_empty(),
+                                "raw-only PPUDATA cannot publish any old/new graphics"
+                            );
+                            assert_eq!(
+                                m.vcounter_reads, 0,
+                                "raw writes have no hidden commit wait"
+                            );
+                            assert_eq!(m.coherent_prepared_bytes(), prepared);
+                            if address < 0x2000 {
+                                assert_eq!(m.sram[0x800 + address as usize], 0x21);
+                                assert_eq!(m.ram[0xc801], 1);
+                            } else if address < 0x3f00 {
+                                assert_eq!(m.sram[address as usize & 0x7ff], 0x21);
+                            } else {
+                                assert_eq!(m.sram[0x33e7], 1);
+                            }
+                            continue;
+                        }
                         assert!(payload.len() >= 192);
                         assert!(payload[..64].iter().all(|p| p.1 == 0xe0));
                         assert!(payload[64..192].iter().all(|p| p.1 == 0));
@@ -836,7 +996,7 @@ fn pending_ppudata_barrier_precedes_all_raw_classes_and_preserves_guarded_guest_
 
 #[test]
 #[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
-fn barrier_has_eight_byte_headroom_from_actual_apply_entry_and_keeps_continuation() {
+fn pending_ppudata_keeps_apply_stack_floor_and_callless_continuation() {
     let pending = pending_from_actual_irq();
     for depth in [1, 2] {
         let mut m = pending.clone();
@@ -850,7 +1010,13 @@ fn barrier_has_eight_byte_headroom_from_actual_apply_entry_and_keeps_continuatio
         cpu.sp = 0xde48; // apply already owns its caller's return frame
         cpu.d = 0x24;
         cpu.e = 0x13;
-        let stop = m.labels["_cv1_ppudata_unblocked"].1;
+        let stop = if m.coherent() {
+            m.ram[0xde48] = 7;
+            m.ram[0xde49] = 0;
+            7
+        } else {
+            m.labels["_cv1_ppudata_unblocked"].1
+        };
         let mut min_sp = cpu.sp;
         for _ in 0..100_000 {
             min_sp = min_sp.min(cpu.sp);
@@ -860,11 +1026,18 @@ fn barrier_has_eight_byte_headroom_from_actual_apply_entry_and_keeps_continuatio
             cpu.step(&mut m).unwrap();
         }
         assert_eq!(cpu.pc, stop);
-        assert_eq!(
-            min_sp, 0xde40,
-            "budget from apply, not an isolated DFF0 helper"
-        );
-        assert_eq!(cpu.sp, 0xde48);
+        if m.coherent() {
+            assert!(min_sp >= 0xde40, "raw writer floor from actual apply entry");
+            assert_eq!(cpu.sp, 0xde4a);
+            assert_eq!((m.ram[PENDING], m.ram[CONSUME]), (1, 0));
+            assert!(m.ports.is_empty());
+        } else {
+            assert_eq!(
+                min_sp, 0xde40,
+                "budget from apply, not an isolated DFF0 helper"
+            );
+            assert_eq!(cpu.sp, 0xde48);
+        }
         assert_eq!((cpu.d, cpu.e), (0x24, 0x13));
         assert_eq!(&m.ram[0xd3fc..0xd400], &[0x34, 0x56, 1, 6]);
         assert_eq!(
@@ -889,7 +1062,51 @@ fn barrier_has_eight_byte_headroom_from_actual_apply_entry_and_keeps_continuatio
             (cpu.a, cpu.d, cpu.e, cpu.sp, cpu.iff1),
             (0x21, 0x52, 0xa9, sp, iff)
         );
-        assert_eq!(m.ram[PENDING], 0);
+        assert_eq!(m.ram[PENDING], u8::from(m.coherent()));
+    }
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn pending_oam_dma_reads_and_control_writes_cannot_mutate_prepared_output() {
+    let pending = pending_from_actual_irq();
+    for iff in [false, true] {
+        let mut m = pending.clone();
+        let prepared = m.coherent_prepared_bytes();
+        let counters = (m.ram[PENDING], m.ram[READY], m.ram[PUBLISH], m.ram[CONSUME]);
+        for (register, value) in [(0, 0x81), (1, 0x18), (3, 0xff), (4, 0x57)] {
+            let mut cpu = m.cpu("rt_ppu_write", iff);
+            cpu.a = value;
+            cpu.b = register;
+            m.run_until(&mut cpu, 7);
+            assert_eq!((cpu.a, cpu.d, cpu.e, cpu.iff1), (value, 0x52, 0xa9, iff));
+        }
+        assert_eq!((m.ram[0xc9ff], m.ram[0xcb0a]), (0x57, 0));
+        m.ram[0xcb0a] = 0xff;
+        let mut cpu = m.cpu("rt_ppu_read", iff);
+        cpu.b = 4;
+        m.run_until(&mut cpu, 7);
+        assert_eq!(cpu.a, 0x57, "OAM staging remains authoritative for reads");
+        for (i, byte) in m.ram[0xc200..0xc300].iter_mut().enumerate() {
+            *byte = (i as u8).wrapping_mul(37);
+        }
+        m.ram[0xcb0a] = 0xff;
+        let mut cpu = m.cpu("rt_oam_dma", iff);
+        cpu.a = 2;
+        m.run_until(&mut cpu, 7);
+        for i in 0..256 {
+            assert_eq!(
+                m.ram[0xc900 + ((i + 255) & 255)],
+                (i as u8).wrapping_mul(37)
+            );
+        }
+        assert_eq!(m.coherent_prepared_bytes(), prepared);
+        assert_eq!(
+            (m.ram[PENDING], m.ram[READY], m.ram[PUBLISH], m.ram[CONSUME]),
+            counters
+        );
+        assert!(m.ports.is_empty());
+        assert_eq!(m.vcounter_reads, 0);
     }
 }
 
@@ -901,7 +1118,12 @@ fn cv1_rejects_nonempty_dormant_vbuf_before_any_video_write() {
     m.ram[0xc800] = 1;
     m.ram[READY] = 1;
     let mut cpu = m.cpu("irq_handler", false);
-    let halt = m.labels["_cv1_vbuf_halt"].1;
+    let halt = m.labels[if m.coherent() {
+        "_cv1_present_halt"
+    } else {
+        "_cv1_vbuf_halt"
+    }]
+    .1;
     m.run_until(&mut cpu, halt);
     assert_eq!(
         m.ram[0xcb1d], 0xfa,
@@ -954,8 +1176,28 @@ fn step_commit_tstates(m: &mut Machine, cpu: &mut Cpu) -> u32 {
 
 #[test]
 #[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
-fn whole_pending_commit_including_scroll_finishes_inside_latest_admitted_blank() {
+fn whole_pending_commit_uses_its_bounded_admission_contract() {
     let pending = pending_from_actual_irq();
+    if pending.coherent() {
+        // The maximum32NT+CRAM+HUD+SAT deadline is executed in bg_commit.rs;
+        // this fixture verifies the new consumer does not use the dormant
+        // phase3 scroll/resume/barrier path at either side of its boundary.
+        for vc in [0xe3, 0xe4, 0x20] {
+            let mut m = pending.clone();
+            m.vcounters = vec![vc];
+            let prepared = m.coherent_prepared_bytes();
+            m.call("rt_cv1_frame_try_present", false);
+            if vc == 0xe3 {
+                assert_eq!((m.ram[PENDING], m.ram[READY], m.ram[CONSUME]), (0, 0, 1));
+                assert_eq!(m.ports.iter().filter(|p| p.0 == 0xbe).count(), 192);
+            } else {
+                assert_eq!((m.ram[PENDING], m.ram[READY], m.ram[CONSUME]), (1, 1, 0));
+                assert_eq!(m.coherent_prepared_bytes(), prepared);
+                assert!(m.ports.is_empty());
+            }
+        }
+        return;
+    }
     let mut maximum = 0;
     for entry in ["rt_cv1_try_finish_pending", "rt_cv1_finish_pending"] {
         for split_flags in 0..8 {
@@ -1027,7 +1269,17 @@ fn pending_mode_and_full_pool_fences_keep_prepared_pixels_and_pins_until_commit(
         if full_pool {
             m.ram[0xd440..0xd448].fill(0xff);
         }
-        m.vcounters = vec![0xe0, 0xe0, 0x20]; // BG wait, required blank, late final try
+        if m.coherent() {
+            m.ram[READY] = 0;
+            m.ram[0xcb08] = control;
+            m.ram[0xcb09] = 0x18;
+            m.call("rt_cv1_sat_prepare", false);
+            m.ram[READY] = 1;
+            m.vcounters = vec![0x20];
+            m.vcounter_reads = 0;
+        } else {
+            m.vcounters = vec![0xe0, 0xe0, 0x20]; // BG wait, required blank, late final try
+        }
         m.call("irq_handler", false);
         assert_eq!(m.ram[PENDING], 1);
         let blank_reg1 = 0xb0 | ((control & 0x20) >> 4);
@@ -1057,7 +1309,14 @@ fn pending_mode_and_full_pool_fences_keep_prepared_pixels_and_pins_until_commit(
         );
         m.vcounters.clear();
         m.vcounter_reads = 0;
-        m.call("rt_cv1_finish_pending", false);
+        m.call(
+            if m.coherent() {
+                "rt_cv1_frame_try_present"
+            } else {
+                "rt_cv1_finish_pending"
+            },
+            false,
+        );
         assert_eq!(m.ram[PENDING], 0);
         assert_eq!(&m.ram[0xd440..0xd448], &pins[8..]);
         assert_eq!(

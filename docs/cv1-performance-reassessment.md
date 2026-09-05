@@ -5,7 +5,76 @@ work order follow; implementation evidence is recorded below. Keep the recent
 sprite-palette and CHR-RAM materializer fixes; their static correctness and
 cost improvements do not establish smooth real-emulator motion.
 
-## Shared-sprite scheduling measurements
+## Coherent background and HUD delivery
+
+The CV1 profile now enables `CV1_COHERENT_BG`. Raw PPU writes accumulate
+intent; a bounded preparation pass builds nametable, palette, HUD and sprite
+output before publishing it together. Exact current/next tile ownership stops
+visible patterns from being recycled. Large scene changes explicitly blank
+and rebuild; ordinary entering columns do not require blanking.
+
+Matched 420-game-tick routes on the same GPGX core, NTSC-U, numeric overclock
+`500`, with frameskip disabled:
+
+| Build | Walking updates/s | Heart-route updates/s |
+| --- | ---: | ---: |
+| Previously installed handoff build | 19.0808 | 20.9730 |
+| Fastest intermediate, background/HUD faults retained | 21.9039 | 24.7712 |
+| Coherent background/HUD + bounded audio service | 19.2855 | 21.5107 |
+
+The coherent build takes 1,305/1,170 physical-frame intervals. This is a
+small improvement over the installed build, but a real speed cost against
+the fastest intermediate; it is **not** full speed. State/area/hearts match,
+walking positions differ by at most one pixel, and heart-route landmarks
+match exactly. Pickup occurs at tick 119 with 301 subsequent ticks. The
+longest physical-frame gap is 17, versus 7 in the fastest intermediate.
+
+Every captured gameplay callback after tick 60 has the expected fixed
+96×48 left-HUD region: zero outliers in 1,127 walking and 992 heart samples,
+and no entirely black/white frames. This is a targeted continuous check,
+not general NES pixel parity. Palette/priority limitations remain.
+
+Sparse background scanning and batches of eight hidden sprites reduce
+repeated scheduling work. Two larger alternatives were rejected on evidence:
+previous compact sprite positions predict too few expensive cache hits, and
+scene-transition game code can write raw graphics while unfinished preparation
+still reads them. Overlapping those operations without a new source-lifetime
+protocol would reintroduce mixed frames.
+
+The complete maximum graphics transaction uses 7,725 exact Z80 T-states;
+its latest allowed `$E3` admission leaves 7,752 at stock NTSC224 timing.
+These are executed-opcode bounds, not the tracer's approximate cycle count.
+The physical HUD split uses committed controls, including repeated frames.
+Audio now services the HUD between bounded sequencer stages while retaining
+audio state/PSG ordering, interrupt exclusion and the native-stack floor.
+Previously its uninterrupted IRQ tail could carry the split into the playfield.
+
+A separately instrumented real-core walking run passes at both 100% and
+500%: 14,636 observed stock-clock HUD services finish on lines 38–44, and
+1,284 overclocked services finish on line 38. Neither run has missing observed
+physical HUD epochs or detected active publication/slot-ownership violations.
+Two stock late-rearm counters occur during an explicitly blanked rebuild,
+without an active split. The diagnostic uses a 30-record packet limit to
+fund its instrumentation; normal output retains 32. These are bounded timing
+checks, not normal-ROM speed measurements or stock-speed playability claims.
+
+Shared IRQ protection now covers `$CB15/$CB18/$CB27` for NROM as well as
+UxROM. Physical controller polling no longer rewinds a partially read serial
+transaction; the guest's `$4016` strobe owns that reset. This is not a new
+implementation of the complete NES controller protocol.
+
+Normal ROM SHA-256:
+`52c294ebf60b5f2edb8cc628c988c7bb4ac049cc3c301dc0cc767abc41f24490`.
+Local evidence: `phase4-final-{walk,heart}` under
+`out/cv1-presentation.ZNyZAL/`. The freshly generated SMB artifact retains
+SHA-256 `ac0d63bc0b39f2d2f03f2934974232da65dfb7a24a33db5e3f6de74062ccafc5`:
+unchanged RAM/VDP goldens, the World 1-1 clear and seven identical checkpoint
+images, and the real-core 300% smoke remain valid.
+
+The following sections retain historical checkpoint evidence and the original
+work order; their unresolved-status statements are not the current work queue.
+
+## Historical shared-sprite scheduling measurements
 
 The next implementation uses shared `(tile, attr & $C3)` sprite slots with
 separate current/next pins, a prepared 192-byte SAT, and deferred sprite
@@ -117,7 +186,7 @@ anchored core route for matched heart acceptance. The long traversal still
 hits `$E2`/target `$0000` (also present in baseline), so deep-level playability
 remains unresolved.
 
-### Next implementation boundary
+### Original implementation sequence
 
 1. Replace CV1's per-OAM-index sprite-pair cache with shared keys and explicit
    current/next visible-slot pins. Actual walking samples contained only 25

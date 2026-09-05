@@ -1,6 +1,9 @@
 ; CV1's completed graphics prologue -> IRQ handoff. Opt-in only; the normal
-; NROM/SMB instruction stream is unchanged. This freezes control ownership,
-; NOT all graphics: direct PPU/CHR/CRAM writes still reach live VRAM.
+; NROM/SMB instruction stream is unchanged by these opt-in hooks. The phase3
+; fallback freezes controls only and still has direct PPU/CHR/CRAM writers.
+; CV1_COHERENT_BG instead prepares all BG/CRAM/HUD/SAT before READY: later raw
+; producer writes affect only next-generation source/dirty intent, never the
+; frozen visible payload. Its final consumer requires no control swap/barrier.
 ;
 ; CV1 does not use vbuf_push (that API is unfinished). Reserve $C820-$C83D
 ; from its dormant buffer; leave $C800 (vbuf_flush length) zero. $CA40-$CAFF
@@ -12,9 +15,10 @@
 ; Publication transfers pending intent to the packet; consumption restores
 ; newer live intent and merges anything the old packet did not consume.
 ; CA13/CB2A and the variant cache are committed presentation state: never swap.
-; A late prepared SAT retains only packet controls. New full producers wait,
-; while already-running logic may resume; its first PPUDATA write is a barrier.
-; C810 = pending commit; C811-C812 = DI-only PPUDATA address scratch.
+; New full producers wait until READY/PENDING retires. The phase3 fallback
+; serializes a resumed PPUDATA writer; the coherent path has no such wait.
+; C810=pending. C811/12 is phase3 PPUDATA address scratch, or coherent stable
+; guest-DE parking while pending=0 and the full prologue prepares its output.
 .ifdef CV1_RUNTIME_HOOKS
 .ifndef DEFER_SPRITE_REGISTERS
 .fail "CV1 presentation requires translation.defer_sprite_registers"
@@ -43,6 +47,24 @@ _cv1_hook_di:
   xor a
 _cv1_hook_iff:
   ld (CV1_FRAME_HOOK_IFF), a
+.ifdef CV1_COHERENT_BG
+  ld a, ($c01b)
+  or a
+  jr nz, _cv1_hook_ppu_begin  ; lag keeps the original guarded PPU ABI; no EI prep
+  call _cv1_prepare_context_check
+  ld a, (CV1_FRAME_READY)
+  ld hl, CV1_FRAME_PENDING
+  or (hl)
+  jp nz, _cv1_present_bad
+  ld (CV1_FRAME_DATA_ADDR), de
+  ld a, (CV1_FRAME_HOOK_IFF)
+  or a
+  call z, _cv1_prepare_blank
+  ld b, 17                  ; original guarded PPU ops3363T +512T glue
+  call _cv1_prepare_admit
+  ld de, (CV1_FRAME_DATA_ADDR)
+.endif
+_cv1_hook_ppu_begin:
   ld b, 2
   call rt_ppu_read
   ld a, ($c0fd)
@@ -58,6 +80,14 @@ _cv1_hook_iff:
   ld a, ($c01b)
   or a
   jr nz, _cv1_hook_flags
+.ifdef CV1_COHERENT_BG
+  ; Second mapping-closed chunk: original PPU operations have completed.
+  ; Native A is dead; guest shadowP and saved DE remain authoritative.
+  ld b, 16
+  call _cv1_prepare_admit
+  ld de, (CV1_FRAME_DATA_ADDR)
+.endif
+_cv1_hook_capture_begin:
   push de
   ld de, CV1_FRAME_PACKET
   call _cv1_frame_capture
@@ -68,6 +98,10 @@ _cv1_hook_iff:
   ld ($cb7f), a
   ld ($cb78), a
   ld ($ca18), a
+.ifdef CV1_COHERENT_BG
+  call rt_cv1_frame_prepare_all
+_cv1_hook_prepared:
+.endif
   ld a, (CV1_FRAME_PUBLISH_COUNT)
   inc a
   ld (CV1_FRAME_PUBLISH_COUNT), a
@@ -88,6 +122,204 @@ _cv1_hook_flags:
   ret z
   ei
   ret
+
+.ifdef CV1_COHERENT_BG
+; All safe EI points require these facts, proven once before the original
+; C11F hardware operations. The helpers restore this exact state per step.
+_cv1_prepare_context_check:
+  ld a, i
+  jp pe, _cv1_present_bad
+  ld a, ($d47f)
+  or a
+  jp nz, _cv1_present_bad
+  ld a, ($ca11)
+  cp 1
+  jp nz, _cv1_present_bad
+  ld a, ($fffc)
+  or a
+  jp nz, _cv1_present_bad
+  ld a, ($ffff)
+  ld b, a
+  ld a, ($cb62)
+  and NES_PRG_BANK_MASK
+  add a, NES_PRG_BANK_BASE
+  cp b
+  jp nz, _cv1_present_bad
+  ret
+
+; IRQ-origin consumer, called immediately after epoch bookkeeping and BEFORE
+; old HUD/input overhead. Prepared payloads no longer require swapping live
+; controls or blocking a PPUDATA producer. Every newer dirty bit remains live.
+; A=1 committed, A=0 no commit. Exact FFFC/FFFF/CB62/guard/IFF are preserved.
+rt_cv1_frame_try_present:
+  ld a, ($ca12)
+  or a
+  jr nz, _cv1_present_none
+  ld a, (CV1_FRAME_READY)
+  ld hl, CV1_FRAME_PENDING
+  or (hl)
+  jr z, _cv1_present_none
+  ld a, i
+  jp pe, _cv1_present_bad
+  ld a, ($d47f)
+  cp 3
+  jp nc, rt_ppu_guard_overflow
+  ld a, ($c800)
+  or a
+  jr nz, _cv1_present_vbuf
+  ld a, ($c802)
+  bit 0, a
+  jr z, _cv1_present_bad
+  ; The entire last-visible-OUT bound must fit the latest E3:34 full NTSC
+  ; stock lines=7752T. Tests execute every opcode, not emulator approximate
+  ; cycle counters, and include this sample/admission/caller path.
+  in a, ($7e)
+  sub $e0
+  cp 4
+  jr nc, _cv1_present_late
+  ld a, ($fffc)
+  push af
+  ld a, 8
+  ld ($fffc), a
+  call rt_cv1_bg_commit_admitted
+  ld hl, CV1_BG_HUD
+  call rt_cv1_hud_commit
+  pop af
+  ld ($fffc), a
+  ; SAT/reg1 is LAST: display enable never precedes new BG/CRAM/HUD controls.
+  call rt_cv1_sat_commit_admitted
+  xor a
+  ld (CV1_FRAME_READY), a
+  ld (CV1_FRAME_PENDING), a
+  ld a, (CV1_FRAME_CONSUME_COUNT)
+  inc a
+  ld (CV1_FRAME_CONSUME_COUNT), a
+  ld a, 1
+  ret
+_cv1_present_late:
+  ld a, 1
+  ld (CV1_FRAME_PENDING), a
+_cv1_present_none:
+  xor a
+  ret
+_cv1_present_vbuf:
+  ld a, $fa
+  jr _cv1_present_trap
+_cv1_present_bad:
+  ld a, $f8
+_cv1_present_trap:
+  ld ($cb1d), a
+  di
+_cv1_present_halt:
+  halt
+  jr _cv1_present_halt
+
+; Full C11F only: busy0 + CA11=1 blocks nested translated producers, while
+; committed HUD/input/audio can run between bounded, mapping-closed steps.
+rt_cv1_frame_prepare_all:
+  ld a, 1
+  ld ($ca12), a
+  call rt_raw_ciram_sram_enable
+  ld hl, CV1_FRAME_PACKET
+  ld de, CV1_BG_HUD
+  call rt_cv1_hud_prepare
+  call rt_raw_ciram_sram_disable
+  ; Preserve an intentionally-DI caller by fencing display off first. Normal
+  ; full NMIs entered with EI and use the bounded service points below.
+  ld a, (CV1_FRAME_HOOK_IFF)
+  or a
+  call z, _cv1_prepare_blank
+  call rt_cv1_bg_prepare_begin
+_cv1_prepare_bg:
+  call _cv1_prepare_service
+  call rt_cv1_bg_chunk_lines
+  call _cv1_prepare_admit_parked
+  call rt_cv1_bg_prepare_step
+  or a
+  jr z, _cv1_prepare_sprites
+  cp 2
+  jr nz, _cv1_prepare_bg
+  call _cv1_prepare_blank
+  call rt_cv1_bg_prepare_blanked
+  jr _cv1_prepare_bg
+_cv1_prepare_sprites:
+  call rt_cv1_sat_prepare_begin
+_cv1_prepare_sat:
+  call _cv1_prepare_service
+  call rt_cv1_sat_step_lines
+  call _cv1_prepare_admit_parked
+  call rt_cv1_sat_prepare_step
+  or a
+  jr z, _cv1_prepare_done
+  cp 2
+  jr nz, _cv1_prepare_sat
+  call _cv1_prepare_blank
+  jr _cv1_prepare_sat
+_cv1_prepare_done:
+  xor a
+  ld ($ca12), a
+  ret
+
+; B=max whole-step stock lines. No volatile converter state crosses here.
+; Restore guest DE before EI because IRQ entry mirrors it to CB00/01. Mapping
+; is currentPRG/SRAMoff/guard0, latch closed, and all cursors are persistent.
+_cv1_prepare_admit:
+  push bc
+  call _cv1_prepare_service
+  jr _cv1_prepare_admit_check
+; BG/SAT loops service BEFORE their read-only classification. This keeps the
+; classifier outside the preceding chunk's tail-to-next-IRQ latency budget;
+; the current chunk's clock begins at the predicate's following IN sample.
+_cv1_prepare_admit_parked:
+  push bc
+_cv1_prepare_admit_check:
+  ld a, ($c802)
+  bit 1, a
+  jr nz, _cv1_prepare_admitted
+  call rt_cv1_hud_try_chunk
+  jr nc, _cv1_prepare_admitted
+  pop bc
+  push bc
+  call _cv1_prepare_wait_irq
+  pop bc
+  jr _cv1_prepare_admit
+_cv1_prepare_admitted:
+  pop bc
+  ret
+_cv1_prepare_service:
+  ld a, (CV1_FRAME_HOOK_IFF)
+  or a
+  ret z
+  ld de, (CV1_FRAME_DATA_ADDR)
+  ei
+  nop
+  di
+  ret
+_cv1_prepare_wait_irq:
+  ld a, (CV1_FRAME_HOOK_IFF)
+  or a
+  jp z, rt_cv1_hud_poll_line
+  ld de, (CV1_FRAME_DATA_ADDR)
+  ei
+  ; A direct/no-split title has no HINT. HALT would wake only at VBlank,
+  ; which the chunk predicate rejects, and repeat forever. Poll with an IRQ
+  ; service opportunity so the beam can progress into an admissible phase.
+  nop
+  di
+  ret
+_cv1_prepare_blank:
+  ld a, ($c802)
+  bit 1, a
+  ret nz
+_cv1_prepare_blank_wait:
+  call _cv1_prepare_service
+  in a, ($7e)
+  sub $e0
+  cp 13
+  jp c, rt_cv1_sat_blank
+  call _cv1_prepare_wait_irq
+  jr _cv1_prepare_blank_wait
+.endif
 
 ; Private DI-only copier. DE=record destination; clobbers AF/BC/DE/HL.
 _cv1_frame_capture:

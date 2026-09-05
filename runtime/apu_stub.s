@@ -316,6 +316,11 @@ apu_frame_tick:
   ld   a, 4
   ld   (APU_FRAME_TMP), a
 _qf_loop:
+.ifdef CV1_COHERENT_BG
+  ; Audio remains DI: poll the committed HUD only where every register is
+  ; dead. All sequencer state is RAM-backed; no tick or PSG write is skipped.
+  call rt_cv1_hud_audio_poll
+.endif
   ld   a, (APU_SHADOW+$00)
   ld   d, a
   ; Inline _env_tick for pulse 1 (env-start bit 0). The call frame alone can
@@ -459,6 +464,9 @@ _qf_done:
   ld   a, 2
   ld   (APU_FRAME_TMP), a
 _hf_loop:
+.ifdef CV1_COHERENT_BG
+  call rt_cv1_hud_audio_poll
+.endif
   ld   a, (APU_SHADOW+$00)
   bit  5, a
   ld   hl, LEN_P1
@@ -475,8 +483,14 @@ _hf_loop:
   bit  5, a
   ld   hl, LEN_NOISE
   call z, _len_tick
+.ifdef CV1_COHERENT_BG
+  call rt_cv1_hud_audio_poll
+.endif
   ld   c, 0
   call _sweep_tick
+.ifdef CV1_COHERENT_BG
+  call rt_cv1_hud_audio_poll
+.endif
   ld   c, 1
   call _sweep_tick
   ld   hl, APU_FRAME_TMP
@@ -715,6 +729,9 @@ _st_pop_ret:
 ; ─── _psg_update ─────────────────────────────────────────────────────────────
 ; Computes each channel's PSG tone/attenuation and writes only changes.
 _psg_update:
+.ifdef CV1_COHERENT_BG
+  call rt_cv1_hud_audio_poll
+.endif
   ; ---- pulse 1 -> tone 0 ----
   ld   a, (APU_SHADOW+$15)
   bit  0, a
@@ -752,6 +769,9 @@ _pu_p1_off:
   call _psg_attn_off
 
 _pu_p2:
+.ifdef CV1_COHERENT_BG
+  call rt_cv1_hud_audio_poll
+.endif
   ; ---- pulse 2 -> tone 1 ----
   ld   a, (APU_SHADOW+$15)
   bit  1, a
@@ -789,6 +809,9 @@ _pu_p2_off:
   call _psg_attn_off
 
 _pu_tri:
+.ifdef CV1_COHERENT_BG
+  call rt_cv1_hud_audio_poll
+.endif
   ; ---- triangle -> tone 2 ----
   ld   a, (APU_SHADOW+$15)
   bit  2, a
@@ -831,6 +854,9 @@ _pu_tri_off:
   call _psg_attn_off
 
 _pu_noise:
+.ifdef CV1_COHERENT_BG
+  call rt_cv1_hud_audio_poll
+.endif
   ; ---- noise -> PSG white noise ----
   ld   a, (APU_SHADOW+$15)
   bit  3, a

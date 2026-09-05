@@ -150,6 +150,35 @@ commit/address scratch; `$C820-$C83D` holds frame handoff records and accounting
 Consult `frame_cv1.s` and `sat_cv1.s` before assigning unused bytes; this is
 profile-specific ownership, not a generic free/double-buffered vbuf allocation.
 
+With `CV1_COHERENT_BG`, `$C811-$C812` instead parks guest X/Y while the full
+graphics prologue prepares a packet; it cannot be reused while that packet is
+pending. `$C813-$C81E` holds committed HUD controls and physical-frame epochs.
+`$C81F` is reserved for an optional consumed-return diagnostic, not HUD state.
+The coherent backend owns cartridge SRAM `$A800-$BC7F` as follows:
+
+| SRAM | Owner |
+| --- | --- |
+| `$A800-$A8FF`, `$A900-$A9FF` | Live/frozen CIRAM dirty bitmaps |
+| `$AA00-$AD7F`, `$B900-$BC7F` | Two folded nametable slot shadows |
+| `$AD80-$B0FF` | Per-cell pending-record index |
+| `$B100-$B2FF`, `$B700-$B8FF` | Two sets of exact 16-bit slot refcounts |
+| `$B300-$B31F` | Pending slot pins |
+| `$B320-$B35F`, `$B360-$B39F` | Live/frozen CHR dirty bitmaps |
+| `$B3A0-$B3BF`, `$B3C0-$B3DF` | Live/frozen SMS palette |
+| `$B3E0-$B3FF` | Preparation state and cursors |
+| `$B400-$B45F` | Up to 32 three-byte nametable records |
+| `$B460-$B465`, `$B466-$B467` | Frozen HUD controls, live/frozen work flags |
+| `$B500-$B5FF`, `$B600-$B6FF` | Slot reverse base/key maps |
+
+Raw PPU writes update source data and live intent only. Preparation may write
+new pattern slots only when neither committed refcounts nor pending pins own
+them. It preserves NES OAM at `$C900-$C9FF`; the prepared SAT is separate.
+The IRQ publishes nametable, palette, HUD and SAT together in a bounded
+blanking interval. Oversized scene changes explicitly blank and rebuild;
+they never recycle displayed slots or silently truncate a packet. Safe
+preparation yield points restore guest registers and close mapper/VDP state.
+These allocations are CV1-specific; NROM retains its existing renderer.
+
 Full raw NES CIRAM source-of-truth needs 2 KiB (`$CC00-$D3FF` if stored in
 internal RAM), including 1920 tile bytes plus the 128 compact attribute bytes
 already mirrored at `$CB80-$CBFF`. That storage does not fit in current

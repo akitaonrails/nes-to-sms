@@ -17,22 +17,26 @@ trap-free soak. It is not a pixel-perfect, real-time, or full-game claim.
 
 ## Latest performance checkpoint (2026-09-05)
 
-Completed-prologue handoff and shared-sprite scheduling raise matched real-core
-walking throughput from **15.71 to 21.90 game updates/s at 500%**. The heart
-route reaches **24.77 updates/s**, completing pickup and another 301 game ticks.
-Maximum physical-frame gap is 7 (original walking baseline 28; intermediate
-handoff build 6). Fresh SMB output stays byte-identical to its accepted build.
-See [the reassessment and evidence](cv1-performance-reassessment.md#shared-sprite-scheduling-measurements).
+The coherent background/HUD build reaches **19.29 walking / 21.51 heart-route
+game updates/s at 500%**, completing pickup and another 301 ticks. It improves
+slightly over the previously installed handoff build (19.08/20.97), but remains
+slower than the fastest intermediate (21.90/24.77), which retained background
+and HUD faults. Maximum physical-frame gap is 17. Do not describe this as
+full speed or omit the coherence cost. See
+[the matched measurements](cv1-performance-reassessment.md#coherent-background-and-hud-delivery).
 
-The bridge also preserves the lowerer's interrupt-exposed `$CB18/$CB27` spills;
-without this, the faster schedule corrupts graphics-buffer terminators. These
-changes now bound SAT/register/scroll commits but do not yet stage background
-and palette writes or restore the HUD split. A separately proven consumed-return
-escape fixes the old deep-route stack imbalance; real-core evidence reaches
-the first door and 124 indoor game ticks, not a whole stage. The historical
-full-traversal claim below is not current acceptance. Fixed-instruction input
-scripts may reach different states after speed changes; use game-tick anchored
-core routes for before/after acceptance.
+Background, palette, HUD and SAT now share a bounded publication contract.
+Continuous fixed-HUD checks have zero outliers on both routes. Bounded audio
+service prevents the IRQ's sequencer work from running uninterrupted across
+the HUD deadline. Generic IRQ spill preservation and controller serial-index
+ownership are tested with actual assembled code. Fresh SMB output remains
+identical to the artifact that passed the full RAM/VDP/clear regression suite.
+
+The consumed-return escape separately repairs the old deep-route stack
+imbalance. First-door/indoor acceptance is distinct from whole-stage support;
+the historical full-traversal claim below is not current acceptance.
+Fixed-instruction input scripts may reach different states after scheduling
+changes; use game-tick anchored core routes for before/after acceptance.
 
 ## Completed course correction
 

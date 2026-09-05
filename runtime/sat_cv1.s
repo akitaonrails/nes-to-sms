@@ -3,7 +3,8 @@
 ; Commit entries need only DI, a closed VDP latch and a complete prepared SAT:
 ; fixed code/internal RAM/ports permit any valid guard depth or SRAM/bank map.
 ; All entries clobber AF/BC/DE/HL and preserve IFF and mapper/SRAM ownership.
-; Preparation never yields partial data. No IRQ/status-port read.
+; Stepped preparation returns only at complete, closed-latch/guard-0 boundaries;
+; the caller owns safe IRQ admission and must keep the source generation frozen.
 ;
 ; The existing 64 pair slots at $2000-$2FFF are shared by (tile, attr&C3).
 ; Current pins live until SAT commit; pass A pins ALL next hits before pass B
@@ -19,7 +20,7 @@
 .endif
 .define RUNTIME_HAS_SPRITE_REGISTER_COMMIT 1
 .define CV1_SAT_CHR_DIRTY $c801
-.define CV1_SAT_FLAGS $c802       ; bit0 ready, bit1 blanked, bit2 init, bit3 misses
+.define CV1_SAT_FLAGS $c802       ; low: ready1/blanked2/init4/misses8; high: phase
 .define CV1_SAT_REG1 $c803
 .define CV1_SAT_REG6 $c804
 .define CV1_SAT_COUNT $c805
@@ -37,14 +38,122 @@
 .define CV1_SAT_XT $c880
 .define CV1_SAT_CURRENT $d440
 .define CV1_SAT_NEXT $d448
+; Exact normal-build entry-to-RET maxima, measured on the assembled helpers.
+; Coordinator line budgets include512T for predicate/caller glue, rounded up;
+; hud_try_chunk separately reserves two lines before protected boundaries.
+.define CV1_SAT_INIT_MAX_T 9856
+.define CV1_SAT_A_MAX_T 5440
+.define CV1_SAT_B_MAX_T 29308
+.define CV1_SAT_INIT_LINES 46
+.define CV1_SAT_A_LINES 27
+.define CV1_SAT_B_LINES 131
+.define CV1_SAT_STABLE_INIT_LINES 23 ; clean4725T, same initialized mode
+.define CV1_SAT_DIRTY_INIT_LINES 30  ; same mode, CHR invalidation6146T
+.define CV1_SAT_HIDDEN_LINES 7       ; eight-hidden A1053T / B1003T +512T
 
 .section "sat_cv1" free
 
-; Public: freeze desired registers from the installed frame, then prepare.
+; Read-only scheduling classification, not preparation. B=stock line budget
+; including512T caller/admission allowance. AF/C/HL clobbered; DE/IFF/mapping
+; preserved. Source/OAM must stay frozen across the caller's service point.
+; No cache lookup, cursor/pin writes, ports or wait. Other states retain the
+; conservative exact INIT/A/B bounds above; an invalid index never reads OAM.
+rt_cv1_sat_step_lines:
+  ld a, (CV1_SAT_FLAGS)
+  and $f0
+  cp $20
+  jr z, _cv1_sat_lines_a
+  cp $30
+  jr z, _cv1_sat_lines_b
+  ld b, CV1_SAT_INIT_LINES
+  cp $10
+  ret nz
+  ld a, (CV1_SAT_FLAGS)
+  and 6
+  cp 4                       ; initialized and not explicitly blanked
+  ret nz
+  ld a, ($cb08)
+  bit 5, a
+  ld a, 1
+  jr nz, _cv1_sat_lines_mode
+  ld a, ($cb08)
+  and 8
+  rrca
+  rrca
+_cv1_sat_lines_mode:
+  ld c, a
+  ld a, (SAT_PAIR_MODE)
+  cp c
+  ret nz
+  ld b, CV1_SAT_STABLE_INIT_LINES
+  ld a, (CV1_SAT_CHR_DIRTY)
+  or a
+  ret z
+  ld b, CV1_SAT_DIRTY_INIT_LINES
+  ret
+_cv1_sat_lines_a:
+  ld b, CV1_SAT_A_LINES
+  jr _cv1_sat_lines_oam
+_cv1_sat_lines_b:
+  ld b, CV1_SAT_B_LINES
+_cv1_sat_lines_oam:
+  ld a, (CV1_SAT_OAM_INDEX)
+  cp 64
+  ret nc
+  add a, a
+  add a, a
+  ld l, a
+  ld h, $c9
+  ld a, (hl)
+  cp $cf
+  ret c
+  ld b, CV1_SAT_HIDDEN_LINES
+  ret
+
+; Public blocking compatibility wrapper. The C11F coordinator instead calls
+; begin + bounded step, scheduling safe service points between steps. A step
+; never waits for blank; A=2 requests an explicit admitted display-off fence.
 rt_cv1_sat_prepare:
-  ld hl, CV1_SAT_FLAGS
-  res 0, (hl)
+  call rt_cv1_sat_prepare_begin
+_cv1_sat_prepare_blocking:
+  call rt_cv1_sat_prepare_step
+  or a
+  ret z
+  cp 2
+  call z, rt_cv1_sat_blank
+  jr _cv1_sat_prepare_blocking
+
+; Begin only freezes desired mode/enable and marks initialization pending.
+rt_cv1_sat_prepare_begin:
+  ld a, (CV1_SAT_FLAGS)
+  and $0e
+  or $10
+  ld (CV1_SAT_FLAGS), a
   call _cv1_sat_controls
+  ret
+
+; One complete initialization or visible OAM operation, or up to eight
+; consecutive hidden entries. DI, frozen source,
+; guard0/current-PRG/SRAM-off/closed-latch on entry AND every normal return.
+; A=0 complete; A=1 more; A=2 blank before retry. No other return ABI.
+rt_cv1_sat_prepare_step:
+  ld a, (CV1_SAT_FLAGS)
+  and $f0
+  cp $10
+  jp z, _cv1_sat_step_init
+  cp $20
+  jp z, _cv1_sat_a_loop
+  cp $30
+  jp z, _cv1_sat_b_loop
+  or a
+  jp nz, _cv1_sat_bad
+  ld hl, CV1_SAT_FLAGS
+  bit 0, (hl)
+  jp z, _cv1_sat_bad
+  xor a
+  ret
+
+_cv1_sat_step_init:
   ; Mode identity: 1=8x16, 0=8x8/table0, 2=8x8/table1.
   ld a, ($cb08)
   bit 5, a
@@ -63,8 +172,13 @@ _cv1_sat_mode_known:
   cp b
   jr z, _cv1_sat_mode_ready
 _cv1_sat_mode_change:
+  ld hl, CV1_SAT_FLAGS
+  bit 1, (hl)
+  jr nz, _cv1_sat_mode_blanked
+  ld a, 2
+  ret
+_cv1_sat_mode_blanked:
   push bc
-  call rt_cv1_sat_blank
   call _cv1_sat_reset_cache
   pop bc
   ld a, b
@@ -108,11 +222,23 @@ _cv1_sat_pass_a:
   ld a, ($cb09)
   bit 4, a
   jp z, _cv1_sat_prepared       ; hidden SAT even when only BG is enabled
+  ld a, (CV1_SAT_FLAGS)
+  and $0f
+  or $20
+  ld (CV1_SAT_FLAGS), a
+  ld a, 1
+  ret
+_cv1_sat_a_hidden:
+  ld b, 8
+  call _cv1_sat_skip_hidden
+  jp c, _cv1_sat_a_finished
+  ld a, 1
+  ret
 _cv1_sat_a_loop:
   call _cv1_sat_oam
   ld a, (hl)
   cp $cf
-  jr nc, _cv1_sat_a_next
+  jr nc, _cv1_sat_a_hidden
   inc a
   ld b, a
   ld a, (CV1_SAT_COUNT)
@@ -150,8 +276,11 @@ _cv1_sat_a_next:
   inc (hl)
   ld a, (hl)
   cp 64
-  jp c, _cv1_sat_a_loop
+  jr nc, _cv1_sat_a_finished
+  ld a, 1
+  ret
 
+_cv1_sat_a_finished:
   ; Every hit already has complete Y/XT data and a next-generation pin.
   ; An all-hit frame needs neither allocation nor a second OAM traversal.
   ld hl, CV1_SAT_FLAGS
@@ -160,11 +289,23 @@ _cv1_sat_a_next:
   xor a
   ld (CV1_SAT_OAM_INDEX), a
   ld (CV1_SAT_COUNT), a
+  ld a, (CV1_SAT_FLAGS)
+  and $0f
+  or $30
+  ld (CV1_SAT_FLAGS), a
+  ld a, 1
+  ret
+_cv1_sat_b_hidden:
+  ld b, 8
+  call _cv1_sat_skip_hidden
+  jp c, _cv1_sat_prepared
+  ld a, 1
+  ret
 _cv1_sat_b_loop:
   call _cv1_sat_oam
   ld a, (hl)
   cp $cf
-  jp nc, _cv1_sat_b_next
+  jp nc, _cv1_sat_b_hidden
   call _cv1_sat_key
   call _cv1_sat_xt
   inc l
@@ -180,9 +321,12 @@ _cv1_sat_b_loop:
   ld hl, CV1_SAT_FLAGS
   bit 1, (hl)
   jp nz, _cv1_sat_bad
-  call rt_cv1_sat_blank
-  call _cv1_sat_reset_cache
-  jp _cv1_sat_pass_a
+  ld a, (hl)
+  and $0f
+  or $10                     ; retry all hits after caller's explicit fence
+  ld (hl), a
+  ld a, 2
+  ret
 _cv1_sat_b_build:
   ld (CV1_SAT_SLOT), a
   call _cv1_sat_pin
@@ -238,10 +382,41 @@ _cv1_sat_b_next:
   inc (hl)
   ld a, (hl)
   cp 64
-  jp c, _cv1_sat_b_loop
+  jr nc, _cv1_sat_prepared
+  ld a, 1
+  ret
 _cv1_sat_prepared:
-  ld hl, CV1_SAT_FLAGS
-  set 0, (hl)
+  ld a, (CV1_SAT_FLAGS)
+  and $0f
+  or 1
+  ld (CV1_SAT_FLAGS), a
+  xor a
+  ret
+
+; First current OAM entry is known hidden. B bounds the entire call to eight
+; skips. Stop BEFORE any visible entry; the cheap hidden admission must never
+; run lookup/conversion too. Carry=end of OAM; no count/payload/pin/source write.
+_cv1_sat_skip_hidden:
+  ld hl, CV1_SAT_OAM_INDEX
+  inc (hl)
+  ld a, (hl)
+  cp 64
+  jr nc, _cv1_sat_hidden_end
+  djnz _cv1_sat_hidden_probe
+  or a
+  ret
+_cv1_sat_hidden_probe:
+  add a, a
+  add a, a
+  ld l, a
+  ld h, $c9
+  ld a, (hl)
+  cp $cf
+  jr nc, _cv1_sat_skip_hidden
+  or a
+  ret
+_cv1_sat_hidden_end:
+  scf
   ret
 
 ; Private index/address helpers. _xt preserves B (the pending X coordinate).
@@ -452,6 +627,11 @@ rt_cv1_sat_commit:
   bit 0, (hl)
   jp z, _cv1_sat_bad
   call _cv1_sat_early_blank
+; Internal composition entry: caller already checked READY and admitted its
+; ENTIRE BG/CRAM/HUD/SAT burst. No second admission sample or wait. All visible
+; dependencies must precede this call: the final reg1 write may enable display.
+; Same DI/closed-latch, arbitrary valid mapping and carry-clear success ABI.
+rt_cv1_sat_commit_admitted:
 _cv1_sat_commit_admitted:
 .ifdef DIAG_CV1_SAT
   in a, ($7e)
@@ -499,7 +679,11 @@ _cv1_sat_commit_finished:
   ld bc, 8
   ldir
   xor a
+.ifndef CV1_COHERENT_BG
+  ; Coherent C11F capture already consumed old intent; a later producer's
+  ; pending enable belongs to its next generation, not this frozen SAT.
   ld ($cb2d), a
+.endif
   ld a, 4
   ld (CV1_SAT_FLAGS), a
   ret

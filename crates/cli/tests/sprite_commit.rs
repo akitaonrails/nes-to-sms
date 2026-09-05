@@ -318,6 +318,102 @@ fn duplicate_keys_and_oam_reorder_reuse_the_same_complete_pair() {
 
 #[test]
 #[ignore = "requires CV1_SPRITE_PROJECT assembled with Docker WLA-DX"]
+fn stepped_preparation_matches_blocking_payload_and_returns_with_closed_ownership() {
+    let mut stepped = Machine::new();
+    stepped.oam(&[[40, 3, 0x41, 20], [48, 3, 0x61, 28], [60, 8, 0x82, 50]]);
+    let mut blocking = stepped.clone();
+    blocking.call("rt_cv1_sat_prepare");
+    stepped.call("rt_cv1_sat_prepare_begin");
+    let mut calls = 0;
+    loop {
+        let reads = stepped.counter_reads;
+        let phase = stepped.ram[FLAGS] & 0xf0;
+        let index = stepped.ram[0xc806];
+        let mut next = usize::from(index) + 1;
+        if [0x20, 0x30].contains(&phase) && stepped.ram[0xc900 + usize::from(index) * 4] >= 0xcf {
+            while next < 64
+                && next < usize::from(index) + 8
+                && stepped.ram[0xc900 + next * 4] >= 0xcf
+            {
+                next += 1;
+            }
+        }
+        let result = stepped.call("rt_cv1_sat_prepare_step");
+        assert_eq!(stepped.counter_reads, reads, "bounded step must never wait");
+        assert!(stepped.latch.is_none());
+        calls += 1;
+        assert!(calls <= 132);
+        if [0x20, 0x30].contains(&phase) && result.a != 2 {
+            let expected = if next == 64 && stepped.ram[FLAGS] & 0xf0 == 0x30 {
+                0
+            } else {
+                next as u8
+            };
+            assert_eq!(stepped.ram[0xc806], expected, "bounded hidden batching");
+        }
+        match result.a {
+            0 => break,
+            1 => {}
+            2 => {
+                stepped.call("rt_cv1_sat_blank");
+            }
+            status => panic!("unexpected step status {status}"),
+        }
+    }
+    assert_eq!(&stepped.ram[0xc840..0xc900], &blocking.ram[0xc840..0xc900]);
+    assert_eq!(
+        &stepped.ram[CURRENT..NEXT + 8],
+        &blocking.ram[CURRENT..NEXT + 8]
+    );
+    assert_eq!(stepped.vram, blocking.vram);
+    assert_eq!(stepped.ram[FLAGS], blocking.ram[FLAGS]);
+    assert_eq!(stepped.ram[FLAGS] & 0xf0, 0);
+    stepped.call("rt_cv1_sat_commit");
+    stepped.call("rt_cv1_sat_prepare_begin");
+    // One initialization, three visible entries and eight hidden batches.
+    // Every call starts with fresh native registers, proving RAM-owned cursors.
+    for n in 0..12 {
+        let cpu = stepped.call("rt_cv1_sat_prepare_step");
+        assert_eq!(cpu.a, u8::from(n != 11));
+    }
+    assert_eq!(stepped.builds, 2);
+}
+
+#[test]
+#[ignore = "requires CV1_SPRITE_PROJECT assembled with Docker WLA-DX"]
+fn stepped_overflow_requests_external_blank_without_waiting_or_reusing_current_slots() {
+    let mut m = Machine::new();
+    let entries: Vec<_> = (0..64).map(|i| [40, i, 0, i]).collect();
+    m.oam(&entries);
+    m.present();
+    let old = m.displayed_patterns();
+    m.oam(&[[40, 128, 0, 20]]);
+    m.call("rt_cv1_sat_prepare_begin");
+    for _ in 0..10 {
+        assert_eq!(m.call("rt_cv1_sat_prepare_step").a, 1);
+    }
+    m.ports.clear();
+    let reads = m.counter_reads;
+    let result = m.call("rt_cv1_sat_prepare_step");
+    assert_eq!(result.a, 2);
+    assert!(m.ports.is_empty());
+    assert_eq!(m.counter_reads, reads);
+    assert_eq!(m.ram[FLAGS] & 0xf0, 0x10);
+    assert_eq!(m.regs[1], 0xf2);
+    m.assert_patterns_unchanged(&old);
+    m.call("rt_cv1_sat_blank");
+    for n in 0..19 {
+        let result = m.call("rt_cv1_sat_prepare_step");
+        assert_eq!(result.a, u8::from(n != 18));
+    }
+    assert_eq!(m.ram[FLAGS] & 0xf0, 0);
+    m.call("rt_cv1_sat_commit");
+    assert_eq!(m.regs[1], 0xf2);
+    assert_eq!(m.ram[CURRENT], 1);
+}
+
+#[test]
+#[ignore = "requires CV1_SPRITE_PROJECT assembled with Docker WLA-DX"]
 fn same_tile_different_attributes_remain_distinct_after_reordering() {
     let mut m = Machine::new();
     let mut entries: Vec<_> = (0..16)
@@ -358,6 +454,109 @@ fn lookup_reports_slot_and_carry_without_exposing_other_registers_as_an_abi() {
         let miss = m.call("_cv1_sat_lookup");
         assert_ne!(miss.f & 1, 0, "same tile, missing attr must set carry");
     }
+}
+
+#[test]
+#[ignore = "requires CV1_SPRITE_PROJECT assembled with Docker WLA-DX"]
+fn read_only_step_budgets_cover_stable_modes_hidden_entries_and_fallbacks() {
+    fn classify(m: &mut Machine, expected: u8) -> u64 {
+        let mut cpu = Cpu::new();
+        cpu.pc = m.labels["rt_cv1_sat_step_lines"].1;
+        cpu.sp = 0xde40;
+        (cpu.d, cpu.e) = (0x52, 0xa9);
+        m.ram[0xde40] = 7;
+        m.ram[0xde41] = 0;
+        let ram = m.ram.clone();
+        let mut t = 0;
+        for _ in 0..100 {
+            if cpu.pc == 7 {
+                assert_eq!(cpu.b, expected);
+                assert_eq!((cpu.d, cpu.e), (0x52, 0xa9));
+                assert_eq!(cpu.sp, 0xde42);
+                assert_eq!(m.ram, ram, "classification changed producer/cache state");
+                assert!(m.ports.is_empty());
+                assert!(m.writes.is_empty());
+                assert_eq!(m.counter_reads, 0);
+                return t;
+            }
+            assert!(!cpu.iff1 && !cpu.iff2);
+            assert!(cpu.sp >= 0xde40);
+            let pc = cpu.pc;
+            let sp = cpu.sp;
+            let opcode = m.read(pc);
+            cpu.step(m).unwrap();
+            // Exact executed classifier instructions, not Cpu.cycles.
+            t += match opcode {
+                0x3a => 13,
+                0x06 | 0x26 | 0x3e | 0xe6 | 0xfe => 7,
+                0x18 => 12,
+                0x20 | 0x28 | 0x30 | 0x38 => {
+                    if cpu.pc == pc + 2 {
+                        7
+                    } else {
+                        12
+                    }
+                }
+                0xc0 | 0xc8 | 0xd0 | 0xd8 => {
+                    if cpu.sp == sp {
+                        5
+                    } else {
+                        11
+                    }
+                }
+                0xc9 => 10,
+                0xcb => 8,
+                0x7e => 7,
+                0x0f | 0x4f | 0x6f | 0x87 | 0xb7 | 0xb9 => 4,
+                _ => panic!("unbudgeted classifier opcode {opcode:02x}"),
+            };
+        }
+        panic!("classifier did not return");
+    }
+    let base = Machine::new();
+    let mut max_t = 0;
+    for ctrl in 0u8..=255 {
+        for mode in [0, 1, 2] {
+            for flags in [0x10, 0x14, 0x16] {
+                for dirty in [0, 1] {
+                    let mut m = base.clone();
+                    m.ram[0xcb08] = ctrl;
+                    m.ram[0xd468] = mode;
+                    m.ram[FLAGS] = flags;
+                    m.ram[0xc801] = dirty;
+                    let expected_mode = if ctrl & 0x20 != 0 {
+                        1
+                    } else if ctrl & 8 != 0 {
+                        2
+                    } else {
+                        0
+                    };
+                    let expected = if flags != 0x14 || mode != expected_mode {
+                        46
+                    } else if dirty == 0 {
+                        23
+                    } else {
+                        30
+                    };
+                    max_t = max_t.max(classify(&mut m, expected));
+                }
+            }
+        }
+    }
+    for (phase, fallback) in [(0x20, 27), (0x30, 131)] {
+        for index in [0, 63, 64, 255] {
+            for y in 0u8..=255 {
+                let mut m = base.clone();
+                m.ram[FLAGS] = phase | 4;
+                m.ram[0xc806] = index;
+                m.ram[0xc900 + usize::from(index & 63) * 4] = y;
+                let expected = if index < 64 && y >= 0xcf { 7 } else { fallback };
+                max_t = max_t.max(classify(&mut m, expected));
+            }
+        }
+    }
+    assert!(max_t <= 256, "classifier used {max_t} exact T states");
+    eprintln!("SAT read-only budget classifier maximum {max_t} exact T states");
 }
 
 #[test]
@@ -478,13 +677,123 @@ fn all_hits_skip_second_pass_and_dirty_generation_resets_the_miss_flag() {
     m.ram[0xc801] = 1;
     m.sram[0x820] ^= 0xff;
     m.call("rt_cv1_sat_prepare");
-    assert_eq!(m.b_scan_entries, 64);
+    assert_eq!(m.b_scan_entries, 10); // two visible entries + eight hidden batches
     assert_eq!(m.ram[FLAGS] & 9, 9);
     assert_eq!(m.builds, 4);
     assert_ne!(m.ram[0xc881], 0xff);
     assert_ne!(m.ram[0xc883], 0xff);
     m.call("rt_cv1_sat_commit");
     assert_eq!(m.ram[FLAGS], 4);
+}
+
+#[test]
+#[ignore = "requires CV1_SPRITE_PROJECT assembled with Docker WLA-DX"]
+fn hidden_batches_stop_before_visible_work_and_have_exact_whole_step_bounds() {
+    let base = Machine::new();
+    let mut maximum = [0u64; 2];
+    for (kind, phase) in [0x20, 0x30].into_iter().enumerate() {
+        for index in 0..64usize {
+            for run in 1..=9 {
+                for misses in [0, 8] {
+                    for hidden_y in [0xcf, 0xff] {
+                        let mut m = base.clone();
+                        m.ram[FLAGS] = phase | 4 | misses;
+                        m.ram[0xc806] = index as u8;
+                        m.ram[0xc805] = 17;
+                        m.ram[0xc840..0xc900].fill(0x5a);
+                        m.ram[CURRENT..NEXT + 8].fill(0xa5);
+                        m.ram[0xc900 + index * 4] = hidden_y;
+                        if index + run < 64 {
+                            m.ram[0xc900 + (index + run) * 4] = 0xce;
+                        }
+                        let mut cpu = Cpu::new();
+                        cpu.pc = m.labels["rt_cv1_sat_prepare_step"].1;
+                        cpu.sp = 0xde42; // CALL skip-helper reaches the real DE40 floor.
+                        m.ram[0xde42] = 7;
+                        m.ram[0xde43] = 0;
+                        let before = m.ram.clone();
+                        let mut t = 0;
+                        for _ in 0..1000 {
+                            if cpu.pc == 7 {
+                                break;
+                            }
+                            assert!(!cpu.iff1 && !cpu.iff2);
+                            assert!(cpu.sp >= 0xde40);
+                            let pc = cpu.pc;
+                            let opcode = m.read(pc);
+                            let second = m.read(pc + 1);
+                            cpu.step(&mut m).unwrap();
+                            // Actual hidden-only path. Any lookup/converter or
+                            // unexpected instruction fails this narrow observer.
+                            t += match opcode {
+                                0x3a | 0x32 => 13,
+                                0x21 => 10,
+                                0x06 | 0x26 | 0x3e | 0xe6 | 0xfe | 0xf6 => 7,
+                                0x34 => 11,
+                                0x7e => 7,
+                                0x6f | 0x87 | 0xaf | 0xb7 | 0x37 => 4,
+                                0x18 => 12,
+                                0x10 => {
+                                    if cpu.b == 0 {
+                                        8
+                                    } else {
+                                        13
+                                    }
+                                }
+                                0x20 | 0x28 | 0x30 | 0x38 => {
+                                    if cpu.pc == pc + 2 {
+                                        7
+                                    } else {
+                                        12
+                                    }
+                                }
+                                0xc3 | 0xca | 0xda | 0xd2 => 10,
+                                0xcd => 17,
+                                0xc9 => 10,
+                                0xcb if second & 0xc0 == 0x40 && second & 7 == 6 => 12,
+                                _ => {
+                                    panic!("unbudgeted hidden-step opcode {opcode:02x} at {pc:04x}")
+                                }
+                            };
+                        }
+                        assert_eq!(cpu.pc, 7);
+                        assert_eq!(cpu.sp, 0xde44);
+                        let next = (index + run.min(8)).min(64);
+                        let restarts_b = next == 64 && phase == 0x20 && misses != 0;
+                        assert_eq!(m.ram[0xc806], if restarts_b { 0 } else { next as u8 });
+                        assert_eq!(m.ram[0xc805], if restarts_b { 0 } else { 17 });
+                        assert_eq!(cpu.a, u8::from(next != 64 || restarts_b));
+                        assert_eq!(
+                            m.ram[FLAGS] & 0xf0,
+                            if restarts_b {
+                                0x30
+                            } else if next == 64 {
+                                0
+                            } else {
+                                phase
+                            }
+                        );
+                        let mut expected = before;
+                        for field in [FLAGS, 0xc805, 0xc806] {
+                            expected[field] = m.ram[field];
+                        }
+                        assert_eq!(&m.ram[..0xde40], &expected[..0xde40]);
+                        assert!(m.ports.is_empty() && m.writes.is_empty());
+                        assert_eq!(m.counter_reads, 0);
+                        assert!(m.latch.is_none());
+                        maximum[kind] = maximum[kind].max(t);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(maximum, [1053, 1003]);
+    for cost in maximum {
+        assert!(
+            cost + 512 <= 7 * 228,
+            "whole hidden batch exceeds its admission"
+        );
+    }
 }
 
 #[test]
@@ -709,7 +1018,11 @@ fn admitted_commit_preserves_guarded_mappings_at_the_real_stack_floor() {
     let mut prepared = Machine::new();
     prepared.oam(&[[40, 2, 0, 20]]);
     prepared.call("rt_cv1_sat_prepare");
-    for entry in ["rt_cv1_sat_try_commit", "rt_cv1_sat_commit"] {
+    for entry in [
+        "rt_cv1_sat_try_commit",
+        "rt_cv1_sat_commit",
+        "rt_cv1_sat_commit_admitted",
+    ] {
         for depth in [0, 1, 2] {
             for sram_control in [0, 8] {
                 let mut m = prepared.clone();
@@ -719,10 +1032,18 @@ fn admitted_commit_preserves_guarded_mappings_at_the_real_stack_floor() {
                 m.ram[0xdffc] = sram_control;
                 m.ram[0xdfff] = 2;
                 m.ram[0xc801] = 1; // later CHR dirtiness is never consumed here
+                m.ram[0xcb2d] = 0xa5; // newer producer enable intent
                 m.ram[0xdd80..0xde40].fill(0x5a); // BGV_REFCNT, not stack space
                 m.stack_floor = 0xde40;
                 m.min_sp = 0xffff;
-                m.counters = vec![0xec, 0xed, 0xed];
+                let composed = entry == "rt_cv1_sat_commit_admitted";
+                // Internal composition trusts its caller's earlier admission:
+                // another sample here would either fail or spin forever.
+                m.counters = if composed {
+                    vec![0x20]
+                } else {
+                    vec![0xec, 0xed, 0xed]
+                };
                 m.counter_reads = 0;
                 m.ports.clear();
                 m.writes.clear();
@@ -730,7 +1051,7 @@ fn admitted_commit_preserves_guarded_mappings_at_the_real_stack_floor() {
                 let sram = m.sram.clone();
                 let mut cpu = Cpu::new();
                 cpu.pc = m.labels[entry].1;
-                // Blocking poll needs one call word. Try needs no extra word.
+                // Blocking poll needs one call word. Other entries need none.
                 cpu.sp = if entry == "rt_cv1_sat_commit" {
                     0xde42
                 } else {
@@ -745,12 +1066,25 @@ fn admitted_commit_preserves_guarded_mappings_at_the_real_stack_floor() {
                 assert_eq!(m.ram[0xd3ff], 3);
                 assert_eq!(m.sram, sram);
                 assert_eq!(m.ram[0xc801], 1);
+                assert_eq!(
+                    m.ram[0xcb2d],
+                    if m.labels.contains_key("rt_cv1_bg_init") {
+                        0xa5
+                    } else {
+                        0
+                    },
+                    "coherent commit must not consume newer producer intent"
+                );
                 assert!(m.ram[0xdd80..0xde40].iter().all(|b| *b == 0x5a));
                 assert_eq!(m.writes.len(), 192);
                 assert_eq!(m.ram[FLAGS], 4);
                 assert!(m.latch.is_none());
                 let diagnostic = m.rom[m.labels["_cv1_sat_commit_admitted"].1 as usize] == 0xdb;
-                assert_eq!(m.counter_reads, if diagnostic { 3 } else { 1 });
+                let admission_reads = usize::from(!composed);
+                assert_eq!(
+                    m.counter_reads,
+                    admission_reads + if diagnostic { 2 } else { 0 }
+                );
             }
         }
     }

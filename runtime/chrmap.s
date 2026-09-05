@@ -122,10 +122,16 @@ _gv_p3_zero:
   ; table value would persist (the flush damper sees no presented
   ; change and never re-projects). Before the first flush ($CA13=$FF)
   ; fall back to live PPUCTRL.
+.ifdef CV1_COHERENT_BG
+  ; The source generation is immutable during stepped preparation. Committed
+  ; CA13 stays unchanged until the matching NT words are published.
+  ld   a, (CV1_BG_TABLE)
+.else
   ld   a, ($ca13)
   cp   $ff
   jr   nz, _gvr_have_table
   ld   a, ($cb08)
+.endif
 _gvr_have_table:
   and  $10                   ; PPUCTRL bit 4 = BG table
   rrca

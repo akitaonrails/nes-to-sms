@@ -422,6 +422,11 @@ boot_main:
   xor a
   ld  ($d468), a            ; last SAT mode was 8x8
 .endif
+.ifdef CV1_COHERENT_BG
+  ; SRAM metadata and palette shadow match the boot assets before the first
+  ; producer write; no internal OAM or continuation storage is repurposed.
+  call rt_cv1_bg_init
+.endif
 
   ; 12. Enable display and frame interrupts (VDP reg 1).
   ;     %11110000: display on, frame INT enabled, M1=1 (224-line mode),
@@ -591,17 +596,17 @@ irq_handler:
   push hl
   push af
   push bc
-.ifdef CV1_RUNTIME_HOOKS
-  ; Stackless lowerings have interruptible live A spills: LDX/LDY uses
-  ; CB27; inline PPU stores use CB18 (including pre-DI and post-EI windows).
-  ; A nested translated NMI reuses both. Preserve them as ONE re-entrant
-  ; stack word, or a stripe terminator interrupted inside LDX becomes data.
-  ld  a, ($cb18)
+  ; All profiles have interruptible live A spills: banked dispatch uses
+  ; CB15 before DI, inline PPU stores use CB18, and stackless LDX/LDY uses
+  ; CB27. A translated NMI can reuse each. Two native words make the save
+  ; re-entrant; the second word's flags byte is padding, not live state.
+  ld  a, ($cb15)
   ld  b, a
-  ld  a, ($cb27)
+  ld  a, ($cb18)
   ld  c, a
   push bc
-.endif
+  ld  a, ($cb27)
+  push af
 .ifndef NES_PRG_BANK_BASE
   ; NROM fixed-high reads temporarily map data_prg_high inline. An IRQ may land
   ; between that map and its restore, so preserve the interrupted slot-2 bank
@@ -647,13 +652,13 @@ irq_handler:
   pop af
   ld  ($ffff), a
 .endif
-.ifdef CV1_RUNTIME_HOOKS
+  pop af
+  ld  ($cb27), a
   pop bc
   ld  a, b
-  ld  ($cb18), a
+  ld  ($cb15), a
   ld  a, c
-  ld  ($cb27), a
-.endif
+  ld  ($cb18), a
   pop bc
   pop af
   pop hl
@@ -663,6 +668,16 @@ _irq_runtime_ready:
   ld  a, ($d474)
   bit 7, a
   jp  z, _irq_line_scroll_split
+
+.ifdef CV1_COHERENT_BG
+  ; Physical epoch advances even when no new producer packet is ready. The
+  ; coherent consumer may commit first; otherwise it rearms the old HUD.
+  call rt_cv1_hud_epoch_begin
+  ; Already-built output can admit before old HUD rearm/controller overhead.
+  call rt_cv1_frame_try_present
+  or a
+  call z, rt_cv1_hud_rearm
+.endif
 
   ; Latch controller state before any translated code reads it.
   call rt_controller_latch
@@ -688,6 +703,11 @@ _irq_runtime_ready:
   out ($bf), a
 .endif
 
+.ifdef CV1_COHERENT_BG
+  ; The early consumer owns every visible write. Never enter legacy waits,
+  ; in-place projection or mutable control installation for this backend.
+  jp _present_skip_all
+.endif
   ; Present before delivering the next translated NMI. The CV1 opt-in
   ; requires a completed-prologue packet; the legacy path uses the latest
   ; available staging. Frozen control does NOT make direct $2007/CHR/CRAM
@@ -1035,6 +1055,16 @@ _irq_call_translated_nmi:
   or  a
   jp  z, _irq_skip_translated_nmi
 _cv1_pending_body_allowed:
+.ifdef CV1_COHERENT_BG
+  ; READY owns the double buffer even before its first deferred IRQ retry.
+  ld a, (CV1_FRAME_READY)
+  or a
+  jr z, _cv1_ready_body_allowed
+  ld a, ($c01b)
+  or a
+  jp z, _irq_skip_translated_nmi
+_cv1_ready_body_allowed:
+.endif
   ld  a, ($ca11)
   ; CV1 sets $1B only AFTER its DMA/stripe/split prologue. While that
   ; prologue (or the busy-clear/RTI epilogue) is interrupted, a second full
@@ -1175,6 +1205,14 @@ _irq_native_restore_bank:
 
 _irq_skip_translated_nmi:
 
+.ifdef CV1_COHERENT_BG
+  ; Entry status was consumed by the frame/line classification above. Audio
+  ; stays DI, so D474 can now collect any VINT acknowledged by its HUD polls.
+  ; The final pacing read must retain those edges even if its own status is0.
+  xor a
+  ld ($d474), a
+.endif
+
   ; APU frame sequencer + PSG write-back (envelopes, lengths, sweeps).
   call apu_frame_tick
 .ifdef DIAG_WILDJUMP
@@ -1200,7 +1238,13 @@ _irq_skip_translated_nmi:
   ; mode (whose swallowed line IRQ rendered the whole frame at the status-
   ; bar scroll) and direct mode — a fast blink between two scroll states
   ; (field report: 'interleaving frames from way behind/ahead').
+.ifdef CV1_COHERENT_BG
+  call rt_cv1_hud_tail_ack
+  ld hl, $d474
+  or (hl)                     ; audio polls may already have acknowledged VINT
+.else
   in  a, ($bf)
+.endif
   and $80
   jr  z, _pace_fit
   ld  a, 60
@@ -1226,13 +1270,13 @@ _pace_done:
   pop af
   ld  ($ffff), a            ; resume an interrupted inline fixed-high read
 .endif
-.ifdef CV1_RUNTIME_HOOKS
+  pop af
+  ld  ($cb27), a
   pop bc
   ld  a, b
-  ld  ($cb18), a
+  ld  ($cb15), a
   ld  a, c
-  ld  ($cb27), a
-.endif
+  ld  ($cb18), a
   pop bc
   pop af
   pop hl
@@ -1243,8 +1287,12 @@ _irq_line_scroll_split:
   ; Mid-frame line IRQ: switch from the pre/top scroll to the captured post-hit
   ; playfield scroll, then disable further line IRQs until the next frame IRQ
   ; explicitly schedules one.
+.ifdef CV1_COHERENT_BG
+  call rt_cv1_hud_line
+.else
   call _apply_post_scroll
   call _disable_line_irq
+.endif
 
   ld  a, ($cb00)
   ld  d, a
@@ -1256,13 +1304,13 @@ _irq_line_scroll_split:
   pop af
   ld  ($ffff), a
 .endif
-.ifdef CV1_RUNTIME_HOOKS
+  pop af
+  ld  ($cb27), a
   pop bc
   ld  a, b
-  ld  ($cb18), a
+  ld  ($cb15), a
   ld  a, c
-  ld  ($cb27), a
-.endif
+  ld  ($cb18), a
   pop bc
   pop af
   pop hl
