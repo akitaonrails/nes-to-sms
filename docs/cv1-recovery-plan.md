@@ -299,6 +299,56 @@ Limitation: a game that renders 8x8 sprites *after* having used 8x16 in an
 earlier scene would keep the copy-through disabled; no such NES title is known
 and CV1 is pure 8x16. Verify with the visual oracle if one appears.
 
+## Performance profile and the motion-refresh glitch (2026-09-04)
+
+Real-emulator symptom (screen recording, not a still screenshot which forces a
+full refresh): during motion the background tile-materialization does not finish
+each frame — parts of the screen show stale tiles ("CORE" for "SCORE", green-wall
+blue speckles that shift per frame, a "FROZEN AGE" banner bleeding in). Root
+cause is the **frame handler overrunning its budget**: when the NMI/presentation
+runs long, the screen is presented half-materialized, differently each frame.
+This is CV1-specific — SMB is CHR-ROM (tiles are permanent in VRAM), CV1 is
+CHR-RAM (tiles are re-materialized from the SRAM mirror).
+
+Per-frame cost measured on the heart route: median **1.5x** budget, average
+**1.9x**, p99 **6.1x** (365k cycles), max **69x** (screen transitions). SMB peaks
+at ~2x; CV1's heavy frames exceed even the 500% overclock cap, so no overclock
+setting fully fixes the glitch — the fix must reduce per-frame cost.
+
+`SMS_PC_PROFILE=1` hot-spot breakdown (heart route), by cost class:
+- **~16% sprite pair baking** (`_sat_pair_emit`/`_sat_pair_*`,
+  `_sat_build_pair_8x16`). Measured directly: CV1 does NOT shuffle OAM and the
+  per-OAM-entry pair cache works correctly (frames 2000→2001: 13 visible
+  sprites, 0 (tile,attr) changes → 0 rebuilds). The cost is **inherent
+  animation** — Simon's whip/walk, torch flames, and enemies genuinely change
+  tiles most frames, and each rebuild is 16 rows of per-pixel palette baking.
+  Only lever: cheaper per-row baking (hoist the constant v-flip/h-flip/palette
+  decisions out of the 16-row loop — est. ~4% total, verifiable by sprite-VRAM
+  byte comparison). A (tile,attr) pool would NOT help (builds ≈ distinct).
+- **~13% translated call/return continuation** (`_tr_cont_*`, `_tr_rts_*`).
+  Inherent to CV1's emulated-stack discipline + UxROM banked dispatch; SMB
+  avoids most of this with `stack_discipline="native"`, but CV1's cross-bank
+  calls need the far-call machinery regardless. `_tr_cont_66` etc. are also
+  partly just hot game code that follows a call site (not pure overhead).
+- **~11% mapper fixed-high reads** (`rt_read_prg_high{,_indexed}`,
+  `_rph_slot1_ei` 5.2%). Each `$C000-$FFFF` read maps `data_prg_high` into
+  slot 1, reads, restores, bracketed by DI/EI. **De-guarding is ruled out for
+  mapper 2**: the IRQ handler does not preserve slot 1 for UxROM (boot.s
+  comment), and this is the CV1 re-entrancy class that caused the historical
+  jp-$0000 reboot loop. A safe win here needs an IRQ-handler redesign that
+  saves/restores slot 1 — high risk, defer.
+- **~6% PPU status / sprite-0 handshake** (`_ppu_status_*`). Driven by CV1's
+  $2002 poll loop (game-controlled count); could shave the per-read synthesis.
+- Remainder: inherent translated game logic (`L_C030`, bank-0 `L_b0_*`).
+
+Conclusion: unlike SMB (which had a single ~50% win in native calls), CV1's cost
+is spread with no single big *safe* win. Smoothness needs a **campaign** of
+several 3-5% verified steps. Ranked by (impact x safety): sprite per-row baking
+hoist (safe, ~4%); PPU-status read slimming (moderate, ~3%); then the risky
+mapper-read de-guard (needs the slot-1 IRQ-save redesign, ~5%). Each step must
+pass the CV1 acceptance gates + sprite/VDP byte comparison and carry a
+regression check, per the SMB Phase-S discipline.
+
 ## Reproduce CV1 acceptance
 
 ```sh
