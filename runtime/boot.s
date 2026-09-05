@@ -40,6 +40,8 @@
 ;   $CB12        Synthetic sprite-0 phase for PPUSTATUS bit 6
 ;   $CB1A        Translated NMI has been enabled at least once
 ;   $CB28        Runtime-ready flag: 0 during boot; 1 once irq_handler may work
+;   $CA39        Sticky "8x16 sprites in use" latch (ppu.s): disables the 8x8
+;                base-sprite copy-through once the pair resolver owns $2000+
 ;   $CB29        Previous-frame overrun flag ($80 = overran; split suppressed)
 ;   $CB2A        Projected window start column; $CB2B/$CB2C projector scratch
 ;   $CB2D        Deferred VDP reg-1 latch (0 = none; see ppu.s reg1 sync)
@@ -398,6 +400,7 @@ boot_main:
   xor a
   ld  ($ca00), a            ; bg variant pool next-free slot = 0
   ld  ($ca07), a            ; bg variant ring has not wrapped yet
+  ld  ($ca39), a            ; 8x16-sprite-mode-seen latch (ppu.s) clear
   ld  hl, $dd80             ; ring-slot NT refcounts (chrmap.s BGV_REFCNT)
   ld  bc, $00c0             ; 192 entries for slots 64-255
   xor a

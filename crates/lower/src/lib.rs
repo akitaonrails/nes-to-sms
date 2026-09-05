@@ -42,6 +42,10 @@ pub mod sms_layout {
     pub const PENDING_VDP_REG1: u16 = 0xCB2D;
     pub const CHR_NT_REBUILD_DIRTY: u16 = 0xCB78;
     pub const CHR_VARIANT_FLUSH_PENDING: u16 = 0xCB7F;
+    /// Sticky "8x16 sprites in use" latch (see runtime/ppu.s $CA39): once set,
+    /// the 8x8 base-sprite copy-through disables itself so it cannot clobber
+    /// the 8x16 pair resolver's VRAM slots.
+    pub const SPRITE_8X16_SEEN: u16 = 0xCA39;
     pub const CHR_SCREEN_REBUILD_PENDING: u16 = 0xCA18;
 }
 
@@ -1047,6 +1051,22 @@ fn emit_ppu_ctrl_write_inline(p: &mut z80_emit::Program, chr_ram: bool) {
 
     p.ld_a_c();
     p.ld_abs_a(PPU_CTRL);
+
+    if chr_ram {
+        // Sticky 8x16 latch: once the game selects 8x16 sprites, the pair
+        // resolver owns the SMS $2000+ sprite region and the 8x8 base-sprite
+        // copy-through must disable itself (see runtime/ppu.s $CA39 and the
+        // $2007 pattern path). A is PPUCTRL here and must survive for the
+        // sprite-base logic below, so bracket the store with push/pop af.
+        let no_8x16_latch = p.fresh_label("ppu_ctrl_no_8x16_latch");
+        p.bit_a(5);
+        p.jr_z(&no_8x16_latch);
+        p.push_af();
+        p.ld_a_imm(1);
+        p.ld_abs_a(SPRITE_8X16_SEEN);
+        p.pop_af();
+        p.label(&no_8x16_latch);
+    }
 
     // Mirror NES PPUCTRL bit 3 into SMS VDP register 6 for 8x8 sprites. In
     // 8x16 mode the NES selects the pattern table per OAM tile bit, so the
@@ -2800,8 +2820,7 @@ fn match_cond_dec_loop(
         return None;
     }
     let beq = skip_source(ops, lda + 1);
-    if base == 0x0780 {
-    }
+    if base == 0x0780 {}
     let skip_lbl = match ops.get(beq)? {
         Op::BranchIf {
             cond: Cond::Zero,
@@ -5118,6 +5137,43 @@ mod tests {
         prog.org(0x0000);
         lower_routine(&mut prog, &routine, &LowerOptions::default()).expect("lower failed");
         prog.finish().unwrap()
+    }
+
+    fn ppu_ctrl_inline_asm(chr_ram: bool) -> String {
+        let mut prog = z80_emit::Program::new();
+        define_runtime_stubs(&mut prog);
+        prog.org(0x0000);
+        prog.section("test");
+        emit_ppu_ctrl_write_inline(&mut prog, chr_ram);
+        prog.finish().unwrap().asm
+    }
+
+    /// The inline STA $2000 path must latch the sticky "8x16 sprites in use"
+    /// flag ($CA39) for CHR-RAM builds. Without it, the 8x8 base-sprite
+    /// copy-through in the $2007 path keeps clobbering the 8x16 pair
+    /// resolver's VRAM slots (Castlevania medusa/enemy sprites rendered with
+    /// a corrupted per-row palette). Runtime _ppu_w_ctrl is bypassed by this
+    /// inline path, so the latch must live here too.
+    #[test]
+    fn chr_ram_ppu_ctrl_latches_8x16_sprite_mode() {
+        let asm = ppu_ctrl_inline_asm(true);
+        assert!(
+            asm.contains("ld ($ca39),a") || asm.contains("ld ($CA39),a"),
+            "CHR-RAM inline PPUCTRL must set the $CA39 8x16 latch; got:\n{asm}"
+        );
+        // The latch must be conditioned on PPUCTRL bit 5 (8x16 sprite size).
+        assert!(asm.contains("bit 5,a"), "latch must test PPUCTRL bit 5");
+    }
+
+    /// CHR-ROM builds (SMB) resolve sprites differently and must not carry the
+    /// CHR-RAM-only latch, so the shared runtime byte stays untouched.
+    #[test]
+    fn chr_rom_ppu_ctrl_has_no_8x16_latch() {
+        let asm = ppu_ctrl_inline_asm(false);
+        assert!(
+            !asm.contains("$ca39") && !asm.contains("$CA39"),
+            "CHR-ROM inline PPUCTRL must not touch the $CA39 latch; got:\n{asm}"
+        );
     }
 
     // -------------------------------------------------------------------

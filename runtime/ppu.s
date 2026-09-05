@@ -263,6 +263,24 @@ _pwc_no_tflip:
   ld   a, c
 .endif
   ld   ($cb08), a
+.ifdef NES_CHR_RAM
+  ; Sticky "8x16 sprites in use" flag ($CA39). Once a CHR-RAM game selects
+  ; 8x16 sprites, the per-OAM-entry pair resolver (sat.s _sat_resolve_8x16)
+  ; owns the whole $2000+ SMS sprite-pattern region and rebuilds each visible
+  ; pair from the SRAM CHR mirror. The 8x8 base-sprite copy-through in the
+  ; $2007 pattern path writes planar bytes into that same region and, during
+  ; the game's transient 8x8-mode setup uploads, clobbered resolver slots that
+  ; the pair cache then never rebuilt (medusa/enemy sprites rendered with a
+  ; corrupted per-row palette). Latch the mode here so the copy-through can
+  ; disable itself for the rest of the run; step 1 (SRAM mirror) still feeds
+  ; the resolver, so 8x16 loses nothing. Generic: any 8x16 CHR-RAM game.
+  bit  5, a
+  jr   z, _pwc_no_8x16_latch
+  ld   a, $01
+  ld   ($ca39), a
+  ld   a, ($cb08)
+_pwc_no_8x16_latch:
+.endif
   ; Mirror NES PPUCTRL bit 3 into SMS VDP register 6. The current CHR pack
   ; places NES sprite table 1 in SMS slots $000-$0FF and sprite table 0 in
   ; slots $100-$1FF, so table switches must also switch the SMS sprite base.
@@ -813,6 +831,12 @@ _ppw_no_inval:
   ; SAT resolver builds active pairs from the raw CHR mirror instead.
   ld   a, ($cb08)
   bit  5, a
+  jr   nz, _ppw_done
+  ; Once 8x16 has been selected, the pair resolver owns the sprite region;
+  ; skip the 8x8 copy-through permanently so it cannot clobber resolver slots
+  ; during a transient 8x8 PPUCTRL window (see _ppu_w_ctrl latch).
+  ld   a, ($ca39)
+  or   a
   jr   nz, _ppw_done
   ld   a, ($cb08)
   and  $08                   ; PPUCTRL bit 3

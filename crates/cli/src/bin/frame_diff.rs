@@ -588,14 +588,14 @@ const REF_PREROLL_CAP: usize = 2_000_000;
 /// RAM at the moment SMB first enables NMI ($2000 bit 7) — i.e. when
 /// Canonical NTSC NES master palette (Nestopia/Blargg), $00-$3F.
 const NES_PALETTE: [u32; 64] = [
-    0x545454, 0x001E74, 0x081090, 0x300088, 0x440064, 0x5C0030, 0x540400, 0x3C1800,
-    0x202A00, 0x083A00, 0x004000, 0x003C00, 0x00323C, 0x000000, 0x000000, 0x000000,
-    0x989698, 0x084CC4, 0x3032EC, 0x5C1EE4, 0x8814B0, 0xA01464, 0x982220, 0x783C00,
-    0x545A00, 0x287200, 0x087C00, 0x007628, 0x006678, 0x000000, 0x000000, 0x000000,
-    0xECEEEC, 0x4C9AEC, 0x787CEC, 0xB062EC, 0xE454EC, 0xEC58B4, 0xEC6A64, 0xD48820,
-    0xA0AA00, 0x74C400, 0x4CD020, 0x38CC6C, 0x38B4CC, 0x3C3C3C, 0x000000, 0x000000,
-    0xECEEEC, 0xA8CCEC, 0xBCBCEC, 0xD4B2EC, 0xECAEEC, 0xECAED4, 0xECB4B0, 0xE4C490,
-    0xCCD278, 0xB4DE78, 0xA8E290, 0x98E2B4, 0xA0D6E4, 0xA0A2A0, 0x000000, 0x000000,
+    0x545454, 0x001E74, 0x081090, 0x300088, 0x440064, 0x5C0030, 0x540400, 0x3C1800, 0x202A00,
+    0x083A00, 0x004000, 0x003C00, 0x00323C, 0x000000, 0x000000, 0x000000, 0x989698, 0x084CC4,
+    0x3032EC, 0x5C1EE4, 0x8814B0, 0xA01464, 0x982220, 0x783C00, 0x545A00, 0x287200, 0x087C00,
+    0x007628, 0x006678, 0x000000, 0x000000, 0x000000, 0xECEEEC, 0x4C9AEC, 0x787CEC, 0xB062EC,
+    0xE454EC, 0xEC58B4, 0xEC6A64, 0xD48820, 0xA0AA00, 0x74C400, 0x4CD020, 0x38CC6C, 0x38B4CC,
+    0x3C3C3C, 0x000000, 0x000000, 0xECEEEC, 0xA8CCEC, 0xBCBCEC, 0xD4B2EC, 0xECAEEC, 0xECAED4,
+    0xECB4B0, 0xE4C490, 0xCCD278, 0xB4DE78, 0xA8E290, 0x98E2B4, 0xA0D6E4, 0xA0A2A0, 0x000000,
+    0x000000,
 ];
 
 /// Render the NES reference's current display state to a PPM: background from
@@ -880,9 +880,8 @@ fn run_reference(
     // FD_NES_DUMP=dir:f1,f2,... — render the NES reference's ground-truth
     // framebuffer (from captured nametable/palette/OAM/scroll state) to
     // dir/ref_NNNNN.ppm at the listed frames.
-    let nes_dump: Option<(String, Vec<usize>)> = std::env::var("FD_NES_DUMP")
-        .ok()
-        .and_then(|spec| {
+    let nes_dump: Option<(String, Vec<usize>)> =
+        std::env::var("FD_NES_DUMP").ok().and_then(|spec| {
             let (dir, list) = spec.split_once(':')?;
             let frames_wanted = list
                 .split(',')
@@ -1008,11 +1007,8 @@ fn run_reference(
                 let path = format!("{dir}/ref_{frame:05}.ppm");
                 match render_nes_ppm(&bus, &path) {
                     Ok(()) => {
-                        let pal: Vec<String> = bus
-                            .palette_ram
-                            .iter()
-                            .map(|b| format!("{b:02X}"))
-                            .collect();
+                        let pal: Vec<String> =
+                            bus.palette_ram.iter().map(|b| format!("{b:02X}")).collect();
                         eprintln!(
                             "FD_NES_DUMP wrote {path} ctrl=${:02X} mask=${:02X} scrollx=${:02X} pal={}",
                             bus.ppu_ctrl,
@@ -1215,7 +1211,7 @@ impl z80_emu::Bus for SmsBus {
     }
     fn in_port(&mut self, port: u8) -> u8 {
         match port & 0xC1 {
-            0x80 => 0x00,         // VDP data port $BE
+            0x80 => 0x00, // VDP data port $BE
             0x81 => {
                 self.vdp_latch = None; // control reads reset the write latch
                 0xFF // VDP status — ack reads
@@ -1801,12 +1797,12 @@ fn run_subject(
         }
     }
     if let Some(path) = &vdp_dump {
-        let text: String = vdp_hashes
-            .iter()
-            .map(|h| format!("{h:016x}\n"))
-            .collect();
+        let text: String = vdp_hashes.iter().map(|h| format!("{h:016x}\n")).collect();
         let _ = std::fs::write(path, text);
-        eprintln!("  [vdp] dumped {} per-frame VRAM+CRAM hashes", vdp_hashes.len());
+        eprintln!(
+            "  [vdp] dumped {} per-frame VRAM+CRAM hashes",
+            vdp_hashes.len()
+        );
     }
     if let Some(golden) = &vdp_check {
         let mut mismatches = 0usize;
@@ -2187,10 +2183,29 @@ fn main() {
         if let Ok(f) = fs.parse::<usize>() {
             let dump = |label: &str, snap: &[u8; 0x800]| {
                 eprint!("  [sprites @{f}] {label}:");
-                for i in 0..64 {
+                for i in 0..256 {
                     eprint!(" {:02X}", snap[0x200 + i]);
                 }
                 eprintln!();
+                // Count distinct (tile, attr & 0xC3) among visible sprites
+                // (NES Y < 0xEF) — the sprite palette/flip variants a CHR-RAM
+                // build must generate this frame.
+                let mut variants = std::collections::BTreeSet::new();
+                for s in 0..64 {
+                    let y = snap[0x200 + s * 4];
+                    if y >= 0xEF {
+                        continue;
+                    }
+                    let tile = snap[0x200 + s * 4 + 1];
+                    let key = snap[0x200 + s * 4 + 2] & 0xC3;
+                    if key != 0 {
+                        variants.insert((tile, key));
+                    }
+                }
+                eprintln!(
+                    "  [sprites @{f}] {label}: {} distinct palette/flip variants needed",
+                    variants.len()
+                );
             };
             if f < ref_snaps.len() {
                 dump("ref ", &ref_snaps[f]);

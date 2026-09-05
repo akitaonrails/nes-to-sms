@@ -1456,8 +1456,12 @@ pub fn run(args: &Args) -> Result<String, Error> {
         let mut const_hits: BTreeMap<u16, u32> = BTreeMap::new();
         let mut zp_indexed: BTreeMap<u8, u32> = BTreeMap::new();
         let mut ind_ptrs: BTreeMap<u8, u32> = BTreeMap::new();
-        let ram_region =
-            |r: MemRegion| matches!(r, MemRegion::Ram | MemRegion::RamMirror | MemRegion::ZeroPage);
+        let ram_region = |r: MemRegion| {
+            matches!(
+                r,
+                MemRegion::Ram | MemRegion::RamMirror | MemRegion::ZeroPage
+            )
+        };
         for r in &routines {
             for op in &r.ops {
                 let acc: Option<(&AddrExpr, MemRegion)> = match op {

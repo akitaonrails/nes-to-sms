@@ -260,6 +260,45 @@ not). The acceptance routes press Start at frame 600 and never hit it.
 The canonical ROM SHA-256 after the traversal fixes is
 `d7492a91cba647914aab5a27b4ccb7fb0b2b72f2dac8efa4cb253d99897a5a84`.
 
+## Sprite palette: 8x16 pair vs. 8x8 copy-through VRAM collision
+
+The NES ground-truth frame oracle (`FD_NES_DUMP`, docs/visual-parity.md) run
+against CV1 exposed a sprite-palette corruption invisible to RAM parity: the
+Stage-1 medusa/enemy sprites near the HUD rendered as a garish yellow/white
+blob instead of the NES's small pink shapes. Diagnosis (all from the in-repo
+oracle, no external emulator):
+
+- The SMS OAM staging (`$C900`) carried the correct NES sub-palette attrs
+  (pal 3, `attr & $03`), so the game logic and OAM DMA were right.
+- The baked VRAM pattern for the affected pair slots had planes 2/3 that did
+  not follow the `mask = plane0|plane1` rule the pair resolver bakes — proof
+  a second writer was clobbering the resolver's output.
+- `SMS_WATCH_VRAM=<slot>` showed two writers to the same VRAM slot: the 8x16
+  pair resolver (`sat.s _sat_pair_emit`) wrote the full, correctly-baked tile,
+  then the 8x8 base-sprite copy-through in the `$2007` pattern path
+  (`ppu.s _ppw_no_inval` step 3) overwrote planes 0/1, leaving planes 2/3
+  from the resolver's older source — a mismatched, wrong-palette tile.
+
+Root cause: for CHR-RAM, both the per-OAM-entry 8x16 pair resolver and the 8x8
+base-sprite copy-through target the SMS `$2000+` sprite-pattern region. The
+copy-through is guarded by the *current* PPUCTRL bit 5, but CV1 uploads sprite
+CHR during transient 8x8-mode windows, so it ran and clobbered resolver slots
+the pair cache then never rebuilt.
+
+Fix (generic, CHR-RAM only): a sticky "8x16 sprites in use" latch at `$CA39`,
+set the first time PPUCTRL bit 5 is written high. Once latched, the 8x8
+copy-through disables itself permanently — the pair resolver owns the sprite
+region and reads its source from the SRAM CHR mirror (step 1), so 8x16 loses
+nothing. Because `STA $2000` is lowered inline (bypassing `_ppu_w_ctrl`), the
+latch lives in BOTH `runtime/ppu.s` and the lowerer's inline emitter
+(`emit_ppu_ctrl_write_inline`, `crates/lower/src/lib.rs`); unit tests
+`chr_ram_ppu_ctrl_latches_8x16_sprite_mode` /
+`chr_rom_ppu_ctrl_has_no_8x16_latch` guard the emitter. SMB (CHR-ROM) is
+unaffected — the latch is CHR-RAM-gated and SMB stays RAM+VDP byte-exact.
+Limitation: a game that renders 8x8 sprites *after* having used 8x16 in an
+earlier scene would keep the copy-through disabled; no such NES title is known
+and CV1 is pure 8x16. Verify with the visual oracle if one appears.
+
 ## Reproduce CV1 acceptance
 
 ```sh

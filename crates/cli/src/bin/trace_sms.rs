@@ -7046,14 +7046,14 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
         let (base_reg8, reg9) = if let Some((split_line, top_reg8, top_reg9)) =
             bus.render_scroll_split.or(bus.render_scroll_split_latched)
         {
-                if screen_y < split_line {
-                    (top_reg8 as usize, top_reg9 as usize)
-                } else {
-                    (bus.vdp_regs[8] as usize, bus.vdp_regs[9] as usize)
-                }
+            if screen_y < split_line {
+                (top_reg8 as usize, top_reg9 as usize)
             } else {
                 (bus.vdp_regs[8] as usize, bus.vdp_regs[9] as usize)
-            };
+            }
+        } else {
+            (bus.vdp_regs[8] as usize, bus.vdp_regs[9] as usize)
+        };
         let lock_top = bus.vdp_regs[0] & 0x40 != 0;
         let reg8 = if lock_top && screen_y < 16 {
             0
