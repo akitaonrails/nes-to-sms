@@ -1,0 +1,63 @@
+# Real-core routes. Addresses are offsets into libretro SYSTEM_RAM ($C000 base).
+# Inputs use libretro RetroPad names: A = SMS button 2 / NES B (whip),
+# B = SMS button 1 / NES A (jump), Start = SMS Pause / NES Start.
+# All gameplay input transitions are relative to $001A increments, not host time.
+[ram]
+state = 0x0018
+substate = 0x0019
+game_tick = 0x001a
+game_busy = 0x001b
+hearts = 0x0071
+input_held = 0x00f7
+oam_x = 0x0203
+present_guard = 0x0a12
+irq = 0x0b04
+input_latch = 0x0b06
+scroll_x = 0x0b0c
+trap = 0x0b1d
+window = 0x0b2a
+
+[core_options]
+genesis_plus_gx_overclock = "500"
+genesis_plus_gx_region_detect = "ntsc-u"
+genesis_plus_gx_frameskip = "disabled"
+
+[boot]
+title_state = [1, 1]
+stage_state = [5, 6]
+title_settle_frames = 120
+
+[limits]
+boot_frames = 8000
+stall_frames = 300
+
+[routes.walk]
+ticks = 420
+events = [
+  { tick = 0, buttons = [] },
+  { tick = 60, buttons = ["right"] },
+]
+
+[routes.heart]
+ticks = 420
+observe_min = { hearts = 10 }
+events = [
+  { tick = 0, buttons = [] },
+  { tick = 60, buttons = ["right"] },
+  { tick = 80, buttons = ["right", "a"] },
+  { tick = 86, buttons = ["right"] },
+  { tick = 140, buttons = ["right", "a"] },
+  { tick = 144, buttons = ["right"] },
+  { tick = 180, buttons = ["right", "a"] },
+  { tick = 184, buttons = ["right"] },
+  { tick = 220, buttons = ["right", "a"] },
+  { tick = 224, buttons = ["right"] },
+  { tick = 260, buttons = ["right", "a"] },
+  { tick = 264, buttons = ["right"] },
+  { tick = 300, buttons = ["right", "a"] },
+  { tick = 304, buttons = ["right"] },
+  { tick = 340, buttons = ["right", "a"] },
+  { tick = 344, buttons = ["right"] },
+  { tick = 380, buttons = ["right", "a"] },
+  { tick = 384, buttons = ["right"] },
+]

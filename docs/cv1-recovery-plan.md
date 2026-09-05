@@ -205,6 +205,12 @@ is `2fb3780aa38f601dbff48fb798b335c51609b9800d8a2af2efa11bc3db2ecdcd`.
 
 ## Deep Stage-1 traversal
 
+Current-baseline correction (2026-09-05, `2123ef8`): replaying the documented
+570M-step route traps with marker `$E2`, target `$0000`, at step 441,957,549
+in NES bank 6. This predates the frame-handoff work. The historical success
+below is not a current regression pass; retain the strict trap check while
+investigating. Shorter stage/heart acceptance still passes.
+
 The long traversal route (`profiles/cv1/acceptance/stage1-traverse-v2.sms.buttons`,
 Start at frame 600, hold Right with periodic jump/whip pulses plus Up-hold
 windows at the page-13 stairs) runs the full 570M-step budget (9,495 frame
@@ -351,7 +357,14 @@ regression check, per the SMB Phase-S discipline.
 
 ## Materializer single-pass attribute resolution (2026-09-05)
 
-First materializer-campaign step, and it fixes the motion glitch directly.
+**Reassessment:** the real-core test in
+[CV1 performance reassessment](cv1-performance-reassessment.md) measures only
+about 18 gameplay ticks/s at 500% and identifies a timing blind spot in the
+trace evidence. The fix below improves attribute correctness and the measured
+IRQ-to-EI interval; it does not establish that motion glitches are solved.
+Use that reassessment's work order for performance/presentation follow-up.
+
+First materializer-campaign step, addressing one scroll-edge attribute defect.
 `_nt_project_col` (runtime/ntmap.s) used to materialize each entering column in
 **two passes**: `_npc_row` wrote the 24 tiles resolving each variant against the
 *old* folded sub-palette state, then `_npc_attr` re-applied the 8 governing
@@ -387,6 +400,36 @@ caught the ungated regression); CV1 acceptance + the scroll frame-cost
 distribution catch CHR-RAM breakage.
 
 ## Reproduce CV1 acceptance
+
+### Real-core gameplay timing
+
+Use actual GPGX video frames and profile-owned game-tick input routes when
+comparing speed. This does not use the instruction-paced trace clock:
+
+```sh
+docker run --rm --network none --user "$(id -u):$(id -g)" \
+  --entrypoint python3 -v "$PWD:/work" -w /work nes-to-sms-retroarch \
+  tools/core_route.py out/emulator-host/genesis_plus_gx_libretro.so \
+  out/cv1/sms.sms profiles/cv1/acceptance/core-routes.toml \
+  heart out/cv1/core-heart-before --capture-every 1
+```
+
+Use `walk` in place of `heart` and a new output directory for each run.
+The profile requests 500% overclock; invalid/unqueried options, traps, stalled
+game ticks, missing heart collection, or incomplete routes fail the command.
+Outputs include provenance, physical-frame CSV, gameplay update rate and PPM
+captures. Frame hashes are observations, not a built-in visual-parity oracle;
+check movement/scroll and the captured sequence as well as throughput.
+
+Baseline `2123ef8`, core `a7985a9`, 420 game ticks per route: walk takes
+1,602 physical intervals (15.7101 updates/s, worst lag 28 frames); heart takes
+1,205 (20.8859 updates/s, worst lag 6 frames), collecting the large heart.
+Compare within the same route: whip animation changes how much scrolling work
+is performed. Continuous and stride-10 heart capture produce identical CSVs.
+
+Runner tests: `python3 -m unittest discover -s tools -p test_core_route.py`.
+
+### Instruction-paced functional checks
 
 ```sh
 cargo run --release -p nes_to_sms --bin nes-to-sms -- \

@@ -20,10 +20,9 @@ const CART_RAM_SIZE: usize = 0x8000;
 const RAM_SIZE: usize = 0x2000;
 const IRQ_PERIOD: usize = 60_000;
 
-/// SMS_REAL_PACING=1: hostile, hardware-honest pacing — ~15K
-/// instructions per frame (≈59,736 T-states at ~4 T/instruction),
-/// boolean pending semantics (missed frame INTs don't queue), and
-/// $FF-initialized RAM. Reproduces real-emulator stalls in-harness.
+/// SMS_REAL_PACING=1: instruction-paced stress mode — 15K instructions
+/// between IRQs, boolean pending semantics (missed INTs don't queue), and
+/// $FF-initialized RAM. This is not a cycle-accurate video frame clock.
 fn real_pacing() -> bool {
     std::env::var("SMS_REAL_PACING").is_ok()
 }
@@ -1725,6 +1724,114 @@ fn load_wla_symbol_defs(path: &Path) -> HashMap<String, (u8, u16)> {
     symbols
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PcProfileCost {
+    instructions: u64,
+    approx_cycles: u64,
+}
+
+type PcProfile = HashMap<(Option<u8>, u16), PcProfileCost>;
+
+fn pc_profile_address(bus: &SmsBus, pc: u16) -> (Option<u8>, u16) {
+    let bank = match pc {
+        0x0000..=0x03FF => Some(0),
+        0x0400..=0x3FFF => Some(bus.slot_bank[0]),
+        0x4000..=0x7FFF => Some(bus.slot_bank[1]),
+        0x8000..=0xBFFF if bus.slot2_cart_ram_offset(pc).is_none() => Some(bus.slot_bank[2]),
+        _ => None,
+    };
+    (bank, pc)
+}
+
+fn record_pc_profile_step(
+    profile: &mut PcProfile,
+    address: (Option<u8>, u16),
+    cycles_before: u64,
+    cycles_after: u64,
+) {
+    let cost = profile.entry(address).or_default();
+    cost.instructions += 1;
+    cost.approx_cycles += cycles_after.saturating_sub(cycles_before);
+}
+
+/// Attribute completed instructions to their nearest preceding symbol in the
+/// same ROM bank. These are exclusive PC ranges, not inclusive call costs;
+/// continuation labels can contain game logic as well as call machinery.
+fn format_pc_profile(profile: &PcProfile, mut symbols: Vec<(u8, u16, String)>) -> String {
+    use std::fmt::Write;
+
+    symbols.sort();
+    let total_cycles: u64 = profile.values().map(|cost| cost.approx_cycles).sum();
+    let total_instructions: u64 = profile.values().map(|cost| cost.instructions).sum();
+    let mut per_symbol: HashMap<String, PcProfileCost> = HashMap::new();
+    for (&(bank, pc), cost) in profile {
+        let name = match bank {
+            Some(bank) => symbols[..symbols.partition_point(|(b, a, _)| (*b, *a) <= (bank, pc))]
+                .last()
+                .filter(|(b, _, _)| *b == bank)
+                .map(|(b, a, name)| format!("{b:02X}:{a:04X} {name}"))
+                .unwrap_or_else(|| format!("{bank:02X}:{pc:04X}?")),
+            None => format!("non-ROM:{pc:04X}?"),
+        };
+        let row = per_symbol.entry(name).or_default();
+        row.instructions += cost.instructions;
+        row.approx_cycles += cost.approx_cycles;
+    }
+    let mut rows: Vec<_> = per_symbol.into_iter().collect();
+    rows.sort_by(|(a_name, a), (b_name, b)| {
+        b.approx_cycles
+            .cmp(&a.approx_cycles)
+            .then_with(|| a_name.cmp(b_name))
+    });
+    let mut report = format!(
+        "pc_profile: {total_instructions} completed instructions; {total_cycles} approx_cycles; top PC ranges by approx_cycles:\n\
+         pc_profile_scope: exclusive nearest-symbol attribution; not inclusive function/call overhead; CPU opcode costs are approximate; not scanline timing\n\
+           cycle_share  approx_cycles  instructions  symbol\n"
+    );
+    for (name, cost) in rows.iter().take(40) {
+        let share = if total_cycles == 0 {
+            0.0
+        } else {
+            cost.approx_cycles as f64 * 100.0 / total_cycles as f64
+        };
+        writeln!(
+            report,
+            "  {:9.2}%  {:>13}  {:>12}  {}",
+            share, cost.approx_cycles, cost.instructions, name
+        )
+        .unwrap();
+    }
+    report
+}
+
+fn format_irq_to_ei_cost(costs: &[u64]) -> Option<String> {
+    if costs.is_empty() {
+        return None;
+    }
+    // A full NTSC frame is only a reference, NOT the shorter VRAM upload
+    // window. The IRQ-to-EI interval normally excludes translated game logic.
+    const FRAME_BUDGET_CYCLES: u64 = 59_736;
+    let mut sorted = costs.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let pct = |p: usize| sorted[(n - 1) * p / 100];
+    let avg = sorted.iter().sum::<u64>() / n as u64;
+    let over = sorted.iter().filter(|&&c| c > FRAME_BUDGET_CYCLES).count();
+    Some(format!(
+        "irq_to_ei_cost approx_cycles: intervals={n} min={} p50={} avg={avg} p90={} p99={} max={}\n\
+         irq_to_ei_scope: injected frame IRQ to first interrupt-enabled instruction boundary; not total gameplay-frame cost; not a VBlank upload deadline\n\
+         irq_to_ei_budget_comparison: full_ntsc_frame_cycles={FRAME_BUDGET_CYCLES} intervals_above_full_frame={over} ({:.1}%) worst_interval={:.2}x avg={:.2}x",
+        sorted[0],
+        pct(50),
+        pct(90),
+        pct(99),
+        sorted[n - 1],
+        over as f64 * 100.0 / n as f64,
+        sorted[n - 1] as f64 / FRAME_BUDGET_CYCLES as f64,
+        avg as f64 / FRAME_BUDGET_CYCLES as f64,
+    ))
+}
+
 fn detect_expected_mirroring(asm_path: &Path) -> ExpectedMirroring {
     let Ok(text) = std::fs::read_to_string(asm_path) else {
         return ExpectedMirroring::Unknown;
@@ -3004,7 +3111,7 @@ fn main() {
     // Each entry: (kind, from_pc, to_pc). Kind is "call", "ret", or "jp".
     let mut xfer_ring: Vec<(&'static str, u16, u16)> = Vec::with_capacity(256);
 
-    // Inject an IRQ every 60k steps (roughly one "frame" of Z80 work).
+    // Synthetic instruction-count IRQ cadence, not a hardware video clock.
     let mut next_irq_at = irq_period();
     let mut line_irq_at: Option<usize> = None;
     let mut min_native_sp: u16 = 0xFFFF;
@@ -3017,17 +3124,16 @@ fn main() {
     let mut bgv_worst: (usize, usize, String) = (0, 0, String::new());
     let mut irqs_fired = 0usize;
     let mut line_irqs_fired = 0usize;
-    // SMS_PC_PROFILE=1: per-(bank,pc) execution histogram, folded by
-    // the ROM's .sym symbols at exit — the optimizer's hot-spot oracle.
-    let mut pc_profile: Option<std::collections::HashMap<(u8, u16), u64>> =
-        std::env::var("SMS_PC_PROFILE")
-            .is_ok()
-            .then(Default::default);
-    // Per-frame handler cost: approx cycles from frame-IRQ injection until
-    // IFF1 re-enables (the translated NMI's `ei` path). Line-IRQ handler
-    // cost is not attributed here. Used to budget against real SMS timing.
-    let mut frame_cost_start: Option<u64> = None;
-    let mut frame_costs: Vec<u64> = Vec::new();
+    // SMS_PC_PROFILE=1: completed instructions and approximate CPU cycle
+    // deltas per-(bank,pc), folded by the ROM's .sym symbols at exit.
+    let mut pc_profile: Option<PcProfile> = std::env::var("SMS_PC_PROFILE")
+        .is_ok()
+        .then(Default::default);
+    // Presentation/IRQ-to-EI interval only: boot.s normally enables IRQs
+    // BEFORE calling translated_nmi. This does not measure game-frame cost.
+    // Line IRQs do not start samples; IRQ scheduling remains instruction-based.
+    let mut irq_to_ei_start: Option<u64> = None;
+    let mut irq_to_ei_costs: Vec<u64> = Vec::new();
     let mut next_button_event = 0usize;
     let mut next_checkpoint = 0usize;
     // Frame at which SMB first enabled NMI; scripts count from here.
@@ -3564,7 +3670,7 @@ fn main() {
             cpu.iff2 = false;
             cpu.halted = false;
             irqs_fired += 1;
-            frame_cost_start = Some(cpu.cycles);
+            irq_to_ei_start = Some(cpu.cycles);
             next_irq_at = if real_pacing() {
                 step + irq_period()
             } else {
@@ -3576,26 +3682,26 @@ fn main() {
             // halted but no IRQ pending — endless halt. Stop.
             break;
         }
-        if let Some(map) = pc_profile.as_mut() {
-            let bank = match pc {
-                0x0000..=0x3FFF => 0u8,
-                0x4000..=0x7FFF => bus.slot_bank[1],
-                _ => bus.slot_bank[2],
-            };
-            *map.entry((bank, pc)).or_insert(0u64) += 1;
-        }
+        // Capture AFTER IRQ redirection, BEFORE the instruction can switch
+        // banks. Do no address lookup when profiling is disabled.
+        let profile_sample = pc_profile
+            .as_ref()
+            .map(|_| (pc_profile_address(&bus, cpu.pc), cpu.cycles));
         bus.frame_int_pending = inject_irq && step >= next_irq_at;
         let materializer_render_before = current_render_state(&bus);
         let materializer_vdp_writes_before = bus.vdp_data_writes;
         match cpu.step(&mut bus) {
             Ok(()) => {
                 taken += 1;
-                if let Some(start) = frame_cost_start
+                if let (Some(map), Some((address, before))) = (&mut pc_profile, profile_sample) {
+                    record_pc_profile_step(map, address, before, cpu.cycles);
+                }
+                if let Some(start) = irq_to_ei_start
                     && cpu.iff1
                     && cpu.ei_pending == 0
                 {
-                    frame_costs.push(cpu.cycles.saturating_sub(start));
-                    frame_cost_start = None;
+                    irq_to_ei_costs.push(cpu.cycles.saturating_sub(start));
+                    irq_to_ei_start = None;
                     if stop_after_frame_handler {
                         break;
                     }
@@ -3705,83 +3811,15 @@ fn main() {
     if let Some(at) = interrupt_at_step {
         println!("injected IRQ at step {at}");
     }
-    if !frame_costs.is_empty() {
-        // NTSC SMS: 59,736 T-states per frame. A handler that exceeds the
-        // full frame budget cannot keep 60 fps on real hardware/Mednafen.
-        const FRAME_BUDGET_CYCLES: u64 = 59_736;
-        let mut sorted = frame_costs.clone();
-        sorted.sort_unstable();
-        let n = sorted.len();
-        let pct = |p: usize| sorted[(n - 1) * p / 100];
-        let avg = sorted.iter().sum::<u64>() / n as u64;
-        let over: usize = sorted.iter().filter(|&&c| c > FRAME_BUDGET_CYCLES).count();
-        let worst_ratio = *sorted.last().unwrap() as f64 / FRAME_BUDGET_CYCLES as f64;
-        println!(
-            "frame_handler_cost approx_cycles: frames={} min={} p50={} avg={} p90={} p99={} max={}",
-            n,
-            sorted[0],
-            pct(50),
-            avg,
-            pct(90),
-            pct(99),
-            sorted[n - 1]
-        );
-        if let Some(map) = pc_profile {
-            let sym_path = rom_path.with_extension("sym");
-            let mut syms: Vec<(u8, u16, String)> = Vec::new();
-            if let Ok(text) = std::fs::read_to_string(&sym_path) {
-                let mut in_labels = false;
-                for line in text.lines() {
-                    let t = line.trim();
-                    if t.starts_with('[') {
-                        in_labels = t == "[labels]";
-                        continue;
-                    }
-                    if !in_labels || t.is_empty() || t.starts_with(';') {
-                        continue;
-                    }
-                    if let Some((ba, name)) = t.split_once(' ')
-                        && let Some((b, a)) = ba.split_once(':')
-                        && let (Ok(b), Ok(a)) =
-                            (u8::from_str_radix(b, 16), u16::from_str_radix(a, 16))
-                    {
-                        syms.push((b, a, name.to_string()));
-                    }
-                }
-                syms.sort();
-            }
-            let total: u64 = map.values().sum();
-            let mut per_sym: std::collections::HashMap<String, u64> = Default::default();
-            for (&(bank, pc), &n) in &map {
-                let name = syms
-                    .iter()
-                    .rev()
-                    .find(|(b, a, _)| *b == bank && *a <= pc)
-                    .map(|(_, _, s)| s.clone())
-                    .unwrap_or_else(|| format!("{bank:02X}:{pc:04X}?"));
-                *per_sym.entry(name).or_insert(0) += n;
-            }
-            let mut rows: Vec<(String, u64)> = per_sym.into_iter().collect();
-            rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-            eprintln!("pc_profile: {total} sampled instructions; top symbols:");
-            for (name, n) in rows.iter().take(40) {
-                eprintln!(
-                    "  {:6.2}%  {:>12}  {}",
-                    *n as f64 * 100.0 / total as f64,
-                    n,
-                    name
-                );
-            }
-        }
-
-        println!(
-            "frame_budget: budget={} over_budget_frames={} ({:.1}%) worst_frame={:.2}x avg={:.2}x",
-            FRAME_BUDGET_CYCLES,
-            over,
-            over as f64 * 100.0 / n as f64,
-            worst_ratio,
-            avg as f64 / FRAME_BUDGET_CYCLES as f64
-        );
+    if let Some(report) = format_irq_to_ei_cost(&irq_to_ei_costs) {
+        println!("{report}");
+    }
+    if let Some(map) = pc_profile {
+        let symbols = load_wla_symbol_defs(&rom_path.with_extension("sym"))
+            .into_iter()
+            .map(|(name, (bank, pc))| (bank, pc, name))
+            .collect();
+        eprint!("{}", format_pc_profile(&map, symbols));
     }
     println!("\nMilestones:");
     print_milestone("entered translated slot-1 code", first_translated_step);
@@ -7192,6 +7230,107 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pc_profile_ranks_cycle_cost_not_instruction_hits() {
+        let mut rom = vec![0; BANK_SIZE];
+        rom[1..4].copy_from_slice(&[0x2A, 0x34, 0x12]); // LD HL,($1234): 16 cycles.
+        let mut bus = SmsBus::new(rom, 0xFF);
+        let mut cpu = Cpu::new();
+        let mut profile = PcProfile::new();
+        for pc in [0, 0, 1] {
+            cpu.pc = pc;
+            let address = pc_profile_address(&bus, cpu.pc);
+            let before = cpu.cycles;
+            cpu.step(&mut bus).unwrap();
+            record_pc_profile_step(&mut profile, address, before, cpu.cycles);
+        }
+        assert_eq!(
+            profile[&(Some(0), 0)],
+            PcProfileCost {
+                instructions: 2,
+                approx_cycles: 10, // The emulator's opcode approximation charges 5 per NOP.
+            }
+        );
+        assert_eq!(
+            profile.values().map(|cost| cost.approx_cycles).sum::<u64>(),
+            cpu.cycles
+        );
+        let report = format_pc_profile(&profile, vec![(0, 0, "nop".into()), (0, 1, "load".into())]);
+        assert!(report.contains("3 completed instructions; 26 approx_cycles"));
+        let first_row: Vec<_> = report.lines().nth(3).unwrap().split_whitespace().collect();
+        assert_eq!(first_row, ["61.54%", "16", "1", "00:0001", "load"]);
+        assert!(report.contains("not inclusive function/call overhead"));
+        assert!(report.contains("not scanline timing"));
+    }
+
+    #[test]
+    fn pc_profile_uses_instruction_fetch_bank_before_mapper_write() {
+        let mut rom = vec![0; BANK_SIZE * 3];
+        rom[BANK_SIZE..BANK_SIZE + 3].copy_from_slice(&[0x32, 0xFE, 0xFF]);
+        let mut bus = SmsBus::new(rom, 0xFF);
+        let mut cpu = Cpu::new();
+        let mut profile = PcProfile::new();
+        cpu.pc = 0x4000;
+        cpu.a = 2;
+        let address = pc_profile_address(&bus, cpu.pc);
+        let before = cpu.cycles;
+        cpu.step(&mut bus).unwrap(); // LD ($FFFE),A changes the executing bank.
+        record_pc_profile_step(&mut profile, address, before, cpu.cycles);
+        assert_eq!(bus.slot_bank[1], 2);
+        assert_eq!(profile[&(Some(1), 0x4000)].instructions, 1);
+        assert!(!profile.contains_key(&(Some(2), 0x4000)));
+
+        bus.slot_bank[0] = 2;
+        assert_eq!(pc_profile_address(&bus, 0x0038), (Some(0), 0x0038));
+        assert_eq!(pc_profile_address(&bus, 0x0400), (Some(2), 0x0400));
+        assert_eq!(pc_profile_address(&bus, 0x8000), (Some(2), 0x8000));
+        bus.write(0xFFFC, 0x08);
+        assert_eq!(pc_profile_address(&bus, 0x8000), (None, 0x8000));
+        assert_eq!(pc_profile_address(&bus, 0xC000), (None, 0xC000));
+    }
+
+    #[test]
+    fn pc_profile_symbol_ranges_do_not_cross_banks_or_hide_unknown_code() {
+        let cost = PcProfileCost {
+            instructions: 1,
+            approx_cycles: 4,
+        };
+        let profile = PcProfile::from([
+            ((Some(0), 0x4000), cost),
+            ((Some(1), 0x4000), cost),
+            ((Some(2), 0x4000), cost),
+            ((None, 0xC000), cost),
+        ]);
+        let report = format_pc_profile(
+            &profile,
+            vec![
+                (1, 0x4000, "same_name".into()),
+                (0, 0x4000, "same_name".into()),
+            ],
+        );
+        assert!(report.contains("00:4000 same_name"));
+        assert!(report.contains("01:4000 same_name"));
+        assert!(report.contains("02:4000?"));
+        assert!(report.contains("non-ROM:C000?"));
+        let empty = format_pc_profile(&PcProfile::new(), Vec::new());
+        assert!(empty.contains("0 completed instructions; 0 approx_cycles"));
+        assert!(!empty.contains("NaN"));
+    }
+
+    #[test]
+    fn irq_to_ei_report_does_not_claim_game_frame_or_vblank_cost() {
+        assert_eq!(format_irq_to_ei_cost(&[]), None);
+        let report = format_irq_to_ei_cost(&[119_472, 0, 59_736]).unwrap();
+        assert!(
+            report
+                .starts_with("irq_to_ei_cost approx_cycles: intervals=3 min=0 p50=59736 avg=59736")
+        );
+        assert!(report.contains("not total gameplay-frame cost"));
+        assert!(report.contains("not a VBlank upload deadline"));
+        assert!(report.contains("intervals_above_full_frame=1 (33.3%)"));
+        assert!(report.contains("worst_interval=2.00x avg=1.00x"));
+    }
 
     #[test]
     fn recoverable_rts_fallback_is_not_a_hard_runtime_trap() {
