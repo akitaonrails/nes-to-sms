@@ -11,6 +11,7 @@ const READY: usize = 0xc820;
 const PACKET: usize = 0xc821;
 const PUBLISH: usize = 0xc83c;
 const CONSUME: usize = 0xc83d;
+const PENDING: usize = 0xc810;
 const FIELDS: [usize; 13] = [
     0xcb08, 0xcb09, 0xcb0c, 0xcb0d, 0xcb20, 0xcb21, 0xcb22, 0xcb23, 0xcb24, 0xcb2d, 0xcb7f, 0xcb78,
     0xca18,
@@ -24,6 +25,9 @@ struct Machine {
     labels: HashMap<String, (u8, u16)>,
     ports: Vec<(u8, u8)>,
     vdp_status: u8,
+    vcounters: Vec<u8>,
+    vcounter_reads: usize,
+    raw_writes: Vec<(u16, u8, usize)>,
 }
 
 impl Machine {
@@ -66,6 +70,9 @@ impl Machine {
             labels,
             ports: Vec::new(),
             vdp_status: 0x80,
+            vcounters: Vec::new(),
+            vcounter_reads: 0,
+            raw_writes: Vec::new(),
         };
         result.ram[0xdffd] = 0;
         result.ram[0xdffe] = 1;
@@ -184,13 +191,31 @@ impl Bus for Machine {
     }
     fn write(&mut self, addr: u16, value: u8) {
         if addr >= 0xc000 {
-            self.ram[0xc000 + (addr as usize & 0x1fff)] = value;
+            let physical = 0xc000 + (addr as usize & 0x1fff);
+            if (0xcb80..=0xcbff).contains(&physical) {
+                self.raw_writes
+                    .push((physical as u16, value, self.ports.len()));
+            }
+            self.ram[physical] = value;
         } else if addr >= 0x8000 && self.ram[0xdffc] & 8 != 0 {
+            self.raw_writes.push((addr, value, self.ports.len()));
             self.sram[addr as usize - 0x8000] = value;
         }
     }
     fn in_port(&mut self, port: u8) -> u8 {
-        if port == 0xbf { self.vdp_status } else { 0xff }
+        match port {
+            0xbf => self.vdp_status,
+            0x7e => {
+                let value = self
+                    .vcounters
+                    .get(self.vcounter_reads)
+                    .copied()
+                    .unwrap_or(0xe0);
+                self.vcounter_reads += 1;
+                value
+            }
+            _ => 0xff,
+        }
     }
     fn out_port(&mut self, port: u8, value: u8) {
         self.ports.push((port, value));
@@ -235,6 +260,10 @@ fn replacement_matches_actual_translated_scroll_and_preserves_mapper_iff() {
                         assert_eq!(actual, original.ram[address], "field {address:04x}");
                     }
                     assert_eq!(replacement.ports, original.ports);
+                    assert!(
+                        replacement.ports.is_empty(),
+                        "producer CTRL must defer physical sprite registers"
+                    );
                     assert_eq!(replacement.ram[READY], u8::from(busy == 0));
                     assert_eq!(replacement.ram[PUBLISH], u8::from(busy == 0));
                 }
@@ -550,4 +579,497 @@ fn spill_pair_is_reentrant_and_balanced_on_all_irq_exits() {
     assert_eq!((m.ram[0xcb18], m.ram[0xcb27]), (0x5a, 0xa5));
     assert_eq!(m.ram[0xca11], 1);
     assert_eq!(cpu.sp, 0xdff6);
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn every_partial_chr_write_marks_sprite_source_dirty_without_copy_through() {
+    let mut m = Machine::assembled();
+    m.seed_ppu(1, 0); // actual 8x8, before the sticky 8x16 latch
+    m.ram[0xcb08] = 0;
+    m.ram[0xca13] = 0xff; // before first BG presentation: no live BG variant
+    for n in 0..300 {
+        m.ram[0xcb0f] = 0;
+        m.ram[0xcb10] = 3; // partial row, not the conventional final tile byte
+        let mut cpu = m.cpu("rt_ppu_write", true);
+        cpu.b = 7;
+        cpu.a = n as u8;
+        m.run_until(&mut cpu, 7);
+        assert_eq!(m.sram[0x803], n as u8, "raw CHR stays authoritative");
+        assert_eq!(m.ram[0xc801], 1, "sticky dirty must not wrap at write {n}");
+        assert_eq!((cpu.a, cpu.d, cpu.e, cpu.iff1), (n as u8, 0x52, 0xa9, true));
+        assert!(
+            m.ports.is_empty(),
+            "raw sprite updates must not alter displayed pattern slots"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn actual_irq_blanks_before_scene_rebuild_and_commits_mask_off_hidden_sat() {
+    let mut m = Machine::assembled();
+    m.ram[0xcb28] = 1;
+    m.ram[READY] = 1;
+    m.ram[PACKET] = 0xb0;
+    m.ram[PACKET + 1] = 0x18;
+    m.ram[PACKET + 12] = 0x40; // frozen large rendering-off screen upload
+    let mut cpu = m.cpu("irq_handler", false);
+    let destructive_rebuild = m.labels["rt_bg_reset_variant_cache"].1;
+    m.run_until(&mut cpu, destructive_rebuild);
+    let last_reg1 = m
+        .ports
+        .windows(2)
+        .rev()
+        .find_map(|pair| (pair[0].0 == 0xbf && pair[1] == (0xbf, 0x81)).then_some(pair[0].1));
+    assert_eq!(
+        last_reg1,
+        Some(0xb2),
+        "display must stay off before reclaiming visible BG slots; hidden sprite preparation may follow the blank write"
+    );
+    assert_ne!(m.ram[0xc802] & 2, 0, "SAT backend owns the blanking fence");
+
+    let mut m = Machine::assembled();
+    m.ram[0xcb28] = 1;
+    m.ram[READY] = 1;
+    m.ram[PACKET] = 0xb0;
+    m.ram[PACKET + 1] = 8; // BG enabled, NES sprites disabled
+    // Zero OAM would otherwise produce64 visible sprites; the real bridge
+    // must invoke the prepared backend instead of retaining the old SAT.
+    m.call("irq_handler", false);
+    let payload: Vec<_> = m
+        .ports
+        .iter()
+        .filter_map(|(port, value)| (*port == 0xbe).then_some(*value))
+        .collect();
+    assert_eq!(payload.len(), 192);
+    assert_eq!(&payload[..64], &[0xe0; 64]);
+    assert_eq!(&payload[64..], &[0; 128]);
+    assert_eq!(m.ram[CONSUME], 1);
+}
+
+fn pending_from_actual_irq() -> Machine {
+    let mut m = Machine::assembled();
+    m.ram[0xcb28] = 1;
+    m.ram[0xcb1a] = 1;
+    m.ram[0xcb08] = 0xb8;
+    m.ram[0xcb12] = 2;
+    m.ram[0xcb20] = 7;
+    m.ram[0xca18] = 3;
+    m.ram[READY] = 1;
+    m.ram[PACKET] = 0xb0;
+    m.ram[PACKET + 1] = 0; // keep an unconsumed rendering-off count
+    m.ram[PACKET + 9] = 0xb2;
+    m.ram[PACKET + 12] = 7;
+    m.ram[0xc802] = 4; // initialized 8x16 cache, no mode-change blank
+    m.ram[0xd468] = 1;
+    m.vcounters = vec![0xe0, 0x20]; // old BG wait admits; final try misses
+    m.call("irq_handler", false);
+    assert_eq!((m.ram[PENDING], m.ram[READY], m.ram[CONSUME]), (1, 0, 1));
+    assert_eq!((m.ram[0xcb12], m.ram[0xcb20]), (2, 7));
+    assert_eq!(m.ram[0xca12], 0);
+    assert_eq!(
+        m.ram[0xca18], 10,
+        "unconsumed old count merges exactly once"
+    );
+    assert_eq!(&m.ram[PACKET + 9..PACKET + 13], &[0; 4]);
+    assert!(
+        m.ports.iter().all(|p| p.0 == 0x7f),
+        "late upload must not write video; physical audio still runs"
+    );
+    m.ports.clear();
+    m.vcounters.clear();
+    m.vcounter_reads = 0;
+    m
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn pending_retries_restore_live_intent_without_double_consumption_or_count() {
+    let mut m = pending_from_actual_irq();
+    let packet = m.ram[PACKET..PACKET + 13].to_vec();
+    m.ram[0xcb2d] = 0xf2;
+    m.ram[0xcb7f] = 0x40;
+    m.ram[0xcb78] = 3;
+    m.ram[0xca18] = 21;
+    m.ram[0xc801] = 1;
+    for _ in 0..3 {
+        let before: Vec<_> = FIELDS.iter().map(|address| m.ram[*address]).collect();
+        let pins = m.ram[0xd440..0xd450].to_vec();
+        m.vcounters = vec![0x20, 0xe0];
+        m.vcounter_reads = 0;
+        m.call("irq_handler", false);
+        assert_eq!(m.vcounter_reads, 1, "failed IRQ try must not spin");
+        assert_eq!(FIELDS.iter().map(|a| m.ram[*a]).collect::<Vec<_>>(), before);
+        assert_eq!(&m.ram[0xd440..0xd450], pins);
+        assert_eq!(&m.ram[PACKET..PACKET + 13], packet);
+        assert_eq!((m.ram[PENDING], m.ram[READY], m.ram[CONSUME]), (1, 0, 1));
+        assert_eq!(m.ram[0xca12], 0);
+        assert!(m.ports.iter().all(|p| p.0 == 0x7f));
+        m.ports.clear();
+    }
+    // Keep the next full producer disabled after the successful commit so
+    // this test ends at the IRQ boundary, not inside new translated work.
+    m.ram[0xcb08] = 0;
+    m.ram[0xcb1a] = 0;
+    m.vcounters.clear();
+    m.vcounter_reads = 0;
+    m.call("irq_handler", false);
+    assert_eq!((m.ram[PENDING], m.ram[READY], m.ram[CONSUME]), (0, 0, 1));
+    assert_eq!(
+        (m.ram[0xcb2d], m.ram[0xcb7f], m.ram[0xcb78], m.ram[0xca18]),
+        (0xf2, 0x40, 3, 21)
+    );
+    assert_eq!(m.ram[0xc801], 1, "commit cannot consume future CHR writes");
+    assert_eq!(m.ports.iter().filter(|p| p.0 == 0xbe).count(), 192);
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn pending_blocks_new_full_producers_but_delivers_the_real_busy_lag() {
+    let pending = pending_from_actual_irq();
+    for busy in [0, 1] {
+        for depth in [0, 1] {
+            let mut m = pending.clone();
+            m.ram[0xc01b] = busy;
+            m.ram[0xca11] = depth;
+            m.ram[0xc07f] = 1; // real lag, skip shared audio
+            m.ram[0xc0fe] = 0x1e;
+            m.ram[0xc0ff] = 0xb0;
+            m.ram[0xcb02] = 0xf0;
+            m.ram[0xcb76] = 0;
+            m.ram[0xcb77] = 0xd3;
+            m.ram[0xd47d] = 0xc0;
+            m.ram[0xd47e] = 0xd4;
+            m.vcounters = vec![0x20];
+            m.vcounter_reads = 0;
+            let packet = m.ram[PACKET..PACKET + 13].to_vec();
+            m.call("irq_handler", false);
+            assert_eq!((m.ram[PENDING], m.ram[CONSUME], m.ram[PUBLISH]), (1, 1, 0));
+            assert_eq!(&m.ram[PACKET..PACKET + 13], packet);
+            assert_eq!(m.ram[0xca11], depth);
+            assert_eq!(m.ram[0xc01b], busy, "do not fake a NES busy flag");
+            if busy == 0 {
+                assert_eq!((m.ram[0xcb12], m.ram[0xcb20]), (2, 7));
+            } else {
+                assert_eq!(m.ram[0xcb09], 0x1e, "translated C0C0 lag executed");
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn pending_ppudata_barrier_precedes_all_raw_classes_and_preserves_guarded_guest_abi() {
+    let pending = pending_from_actual_irq();
+    for address in [0x0003u16, 0x2413, 0x27c1, 0x3f01] {
+        for increment in [1, 32] {
+            for iff in [false, true] {
+                for outer_depth in [0, 1] {
+                    for sram_control in [0, 8] {
+                        let mut m = pending.clone();
+                        m.ram[0xcb08] = if increment == 32 { 4 } else { 0 };
+                        m.ram[0xcb09] = 0;
+                        m.ram[0xcb0f] = (address >> 8) as u8;
+                        m.ram[0xcb10] = address as u8;
+                        m.ram[0xcb03] = 0x7d;
+                        m.ram[0xca13] = 0xff; // no live BG variants in this fixture
+                        m.ram[0xd47f] = outer_depth;
+                        m.ram[0xca19..0xca20].copy_from_slice(&[1, 8, 2, 2, 0, 0, 3]);
+                        m.ram[0xd3ff] = 3;
+                        m.ram[0xdffc] = sram_control;
+                        m.ram[0xdfff] = m.labels["data_prg_bank_2"].0;
+                        m.ram[0xcb62] = 2;
+                        let outer_guard = m.ram[0xca19..0xca1d].to_vec();
+                        let mapping = (m.ram[0xdffc], m.ram[0xdfff], m.ram[0xcb62]);
+                        let mut cpu = m.cpu("rt_ppu_write", iff);
+                        cpu.a = 0x21;
+                        cpu.b = 7;
+                        let sp = cpu.sp;
+                        m.run_until(&mut cpu, 7);
+                        assert_eq!((m.ram[PENDING], m.ram[CONSUME]), (0, 1));
+                        assert_eq!(
+                            (cpu.a, cpu.d, cpu.e, cpu.iff1, cpu.sp),
+                            (0x21, 0x52, 0xa9, iff, sp + 2)
+                        );
+                        assert_eq!(m.ram[0xcb03], 0x7d);
+                        assert_eq!(m.ram[0xd47f], outer_depth);
+                        assert_eq!((m.ram[0xdffc], m.ram[0xdfff], m.ram[0xcb62]), mapping);
+                        if outer_depth == 1 {
+                            assert_eq!(&m.ram[0xca19..0xca1d], outer_guard);
+                        }
+                        let next = address + increment;
+                        assert_eq!(
+                            (m.ram[0xcb0f], m.ram[0xcb10]),
+                            ((next >> 8) as u8, next as u8)
+                        );
+                        let payload: Vec<_> = m.ports.iter().filter(|p| p.0 == 0xbe).collect();
+                        assert!(payload.len() >= 192);
+                        assert!(payload[..64].iter().all(|p| p.1 == 0xe0));
+                        assert!(payload[64..192].iter().all(|p| p.1 == 0));
+                        if address < 0x3f00 {
+                            let first = m.raw_writes.first().unwrap_or_else(|| {
+                                panic!("raw source byte must be stored at {address:04x}")
+                            });
+                            assert_eq!(first.1, 0x21);
+                            assert_eq!(
+                                m.ports[..first.2].iter().filter(|p| p.0 == 0xbe).count(),
+                                192,
+                                "source write cannot precede the old complete SAT"
+                            );
+                        } else {
+                            assert_eq!(
+                                payload.len(),
+                                193,
+                                "palette write follows the complete old SAT"
+                            );
+                        }
+                        if address < 0x2000 {
+                            assert_eq!(m.ram[0xc801], 1, "new CHR write becomes next dirty intent");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn barrier_has_eight_byte_headroom_from_actual_apply_entry_and_keeps_continuation() {
+    let pending = pending_from_actual_irq();
+    for depth in [1, 2] {
+        let mut m = pending.clone();
+        m.ram[0xd47f] = depth;
+        m.ram[0xcb18] = 0x21;
+        m.ram[0xcb1e] = 0x52;
+        m.ram[0xcb1f] = 0xa9;
+        m.ram[0xd3fc..0xd400].copy_from_slice(&[0x34, 0x56, 1, 6]);
+        m.ram[0xdd80..0xde40].fill(0x5a);
+        let mut cpu = m.cpu("rt_ppudata_apply", false);
+        cpu.sp = 0xde48; // apply already owns its caller's return frame
+        cpu.d = 0x24;
+        cpu.e = 0x13;
+        let stop = m.labels["_cv1_ppudata_unblocked"].1;
+        let mut min_sp = cpu.sp;
+        for _ in 0..100_000 {
+            min_sp = min_sp.min(cpu.sp);
+            if cpu.pc == stop {
+                break;
+            }
+            cpu.step(&mut m).unwrap();
+        }
+        assert_eq!(cpu.pc, stop);
+        assert_eq!(
+            min_sp, 0xde40,
+            "budget from apply, not an isolated DFF0 helper"
+        );
+        assert_eq!(cpu.sp, 0xde48);
+        assert_eq!((cpu.d, cpu.e), (0x24, 0x13));
+        assert_eq!(&m.ram[0xd3fc..0xd400], &[0x34, 0x56, 1, 6]);
+        assert_eq!(
+            (m.ram[0xcb18], m.ram[0xcb1e], m.ram[0xcb1f]),
+            (0x21, 0x52, 0xa9)
+        );
+        assert!(m.ram[0xdd80..0xde40].iter().all(|b| *b == 0x5a));
+    }
+
+    for iff in [false, true] {
+        let mut m = pending.clone();
+        m.ram[0xcb0f] = 0x3f;
+        m.ram[0xcb10] = 1;
+        let mut cpu = m.cpu("rt_ppu_write_cont", iff);
+        cpu.a = 0x21;
+        cpu.b = 7;
+        cpu.h = 0;
+        cpu.l = 7;
+        let sp = cpu.sp;
+        m.run_until(&mut cpu, 7);
+        assert_eq!(
+            (cpu.a, cpu.d, cpu.e, cpu.sp, cpu.iff1),
+            (0x21, 0x52, 0xa9, sp, iff)
+        );
+        assert_eq!(m.ram[PENDING], 0);
+    }
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn cv1_rejects_nonempty_dormant_vbuf_before_any_video_write() {
+    let mut m = Machine::assembled();
+    m.ram[0xcb28] = 1;
+    m.ram[0xc800] = 1;
+    m.ram[READY] = 1;
+    let mut cpu = m.cpu("irq_handler", false);
+    let halt = m.labels["_cv1_vbuf_halt"].1;
+    m.run_until(&mut cpu, halt);
+    assert_eq!(
+        m.ram[0xcb1d], 0xfa,
+        "FA means CV1 dormant vbuf became active"
+    );
+    assert!(m.ports.is_empty());
+}
+
+// Exact Z80 timing for the deliberately small admitted SAT/scroll path.
+// Cpu.cycles is approximate (notably OUTI), so reject unknown opcodes here.
+fn step_commit_tstates(m: &mut Machine, cpu: &mut Cpu) -> u32 {
+    let pc = cpu.pc;
+    let op = m.read(pc);
+    let second = m.read(pc + 1);
+    cpu.step(m).unwrap();
+    match op {
+        0xd3 | 0xdb => 11,
+        0x32 | 0x3a => 13,
+        0x01 | 0x11 | 0x21 => 10,
+        0x3e | 0xd6 | 0xe6 | 0xf6 | 0xfe => 7,
+        0xaf | 0xb7 => 4,
+        0x40..=0x7f if op != 0x76 && op & 7 != 6 && (op >> 3) & 7 != 6 => 4,
+        0x18 => 12,
+        0x20 | 0x28 | 0x30 | 0x38 => {
+            if cpu.pc == pc + 2 {
+                7
+            } else {
+                12
+            }
+        }
+        0xc3 | 0xc2 | 0xca | 0xd2 | 0xda | 0xe2 | 0xea | 0xf2 | 0xfa => 10,
+        0xcd => 17,
+        0xc9 => 10,
+        0xcb if (0x40..0x80).contains(&second) && second & 7 != 6 => 8,
+        0xed => match second {
+            0xa3 => 16,
+            0xb0 => {
+                if cpu.pc == pc {
+                    21
+                } else {
+                    16
+                }
+            }
+            0x44 => 8,
+            _ => panic!("unbudgeted ED {second:02x} at {pc:04x}"),
+        },
+        _ => panic!("unbudgeted commit opcode {op:02x} at {pc:04x}"),
+    }
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn whole_pending_commit_including_scroll_finishes_inside_latest_admitted_blank() {
+    let pending = pending_from_actual_irq();
+    let mut maximum = 0;
+    for entry in ["rt_cv1_try_finish_pending", "rt_cv1_finish_pending"] {
+        for split_flags in 0..8 {
+            for overrun in [0, 1] {
+                let mut m = pending.clone();
+                m.ram[PACKET + 4] = split_flags;
+                m.ram[PACKET + 5..PACKET + 9].copy_from_slice(&[0x10, 0, 0x91, 0x18]);
+                m.ram[0xcb29] = overrun;
+                m.vcounters = vec![0xec, 0xed]; // latest valid admission, then later blank
+                m.vcounter_reads = 0;
+                let mut cpu = m.cpu(entry, false);
+                let sample = if entry == "rt_cv1_try_finish_pending" {
+                    m.labels["_cv1_sat_try_sample"].1
+                } else {
+                    m.labels["_cv1_sat_early_blank"].1
+                };
+                m.run_until(&mut cpu, sample);
+                let end = m.labels["rt_cv1_frame_end"].1;
+                let mut cycles = 0;
+                let mut last_visible = 0;
+                for _ in 0..1000 {
+                    if cpu.pc == end {
+                        break;
+                    }
+                    let before = m.ports.len();
+                    cycles += step_commit_tstates(&mut m, &mut cpu);
+                    if m.ports[before..].iter().any(|p| p.0 == 0xbe || p.0 == 0xbf) {
+                        last_visible = cycles;
+                    }
+                }
+                assert_eq!(cpu.pc, end);
+                assert_eq!(m.ram[PENDING], 0);
+                assert_eq!(
+                    m.vcounter_reads, 2,
+                    "one admission plus scroll's VCounter read"
+                );
+                assert_eq!(m.ports.iter().filter(|p| p.0 == 0xbe).count(), 192);
+                assert!(
+                    last_visible <= 4096,
+                    "whole commit is {last_visible}T: {entry}/{split_flags}/{overrun}"
+                );
+                assert!(
+                    last_visible < 19 * 228,
+                    "latest EC leaves19 full stock scanlines"
+                );
+                maximum = maximum.max(last_visible);
+            }
+        }
+    }
+    eprintln!(
+        "whole_pending_commit_last_visible_max_tstates={maximum} stock_remaining_after_latest_EC=4332"
+    );
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn pending_mode_and_full_pool_fences_keep_prepared_pixels_and_pins_until_commit() {
+    for (control, old_mode, full_pool) in [(0x00u8, 1, false), (0xb0, 0, false), (0xb0, 1, true)] {
+        let mut m = Machine::assembled();
+        m.ram[0xcb28] = 1;
+        m.ram[READY] = 1;
+        m.ram[PACKET] = control;
+        m.ram[PACKET + 1] = 0x18;
+        m.ram[0xc802] = 4;
+        m.ram[0xd468] = old_mode;
+        m.ram[0xc900..0xca00].fill(0xff);
+        m.ram[0xc900..0xc904].copy_from_slice(&[40, 2, 0, 20]);
+        m.ram[0xd480..0xd4c0].fill(0xff);
+        if full_pool {
+            m.ram[0xd440..0xd448].fill(0xff);
+        }
+        m.vcounters = vec![0xe0, 0xe0, 0x20]; // BG wait, required blank, late final try
+        m.call("irq_handler", false);
+        assert_eq!(m.ram[PENDING], 1);
+        let blank_reg1 = 0xb0 | ((control & 0x20) >> 4);
+        assert_eq!(
+            m.ports
+                .windows(2)
+                .rev()
+                .find_map(|p| { (p[0].0 == 0xbf && p[1] == (0xbf, 0x81)).then_some(p[0].1) }),
+            Some(blank_reg1)
+        );
+        let staged = m.ram[0xc840..0xc900].to_vec();
+        let pins = m.ram[0xd440..0xd450].to_vec();
+        let keys = m.ram[0xd400..0xd440].to_vec();
+        let attrs = m.ram[0xd480..0xd4c0].to_vec();
+        let prepared_writes = m.ports.iter().filter(|p| p.0 == 0xbe).count();
+        assert_eq!(prepared_writes, if control & 0x20 == 0 { 32 } else { 64 });
+        m.vcounters = vec![0x20];
+        m.vcounter_reads = 0;
+        m.call("irq_handler", false);
+        assert_eq!(&m.ram[0xc840..0xc900], staged);
+        assert_eq!(&m.ram[0xd440..0xd450], pins);
+        assert_eq!(&m.ram[0xd400..0xd440], keys);
+        assert_eq!(&m.ram[0xd480..0xd4c0], attrs);
+        assert_eq!(
+            m.ports.iter().filter(|p| p.0 == 0xbe).count(),
+            prepared_writes
+        );
+        m.vcounters.clear();
+        m.vcounter_reads = 0;
+        m.call("rt_cv1_finish_pending", false);
+        assert_eq!(m.ram[PENDING], 0);
+        assert_eq!(&m.ram[0xd440..0xd448], &pins[8..]);
+        assert_eq!(
+            m.ports.iter().filter(|p| p.0 == 0xbe).count(),
+            prepared_writes + 192
+        );
+        assert_eq!(
+            m.ports
+                .windows(2)
+                .rev()
+                .find_map(|p| { (p[0].0 == 0xbf && p[1] == (0xbf, 0x81)).then_some(p[0].1) }),
+            Some(blank_reg1 | 0x40)
+        );
+    }
 }

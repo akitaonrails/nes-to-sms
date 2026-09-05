@@ -281,6 +281,7 @@ _pwc_no_tflip:
   ld   a, ($cb08)
 _pwc_no_8x16_latch:
 .endif
+.ifndef DEFER_SPRITE_REGISTERS
   ; Mirror NES PPUCTRL bit 3 into SMS VDP register 6. The current CHR pack
   ; places NES sprite table 1 in SMS slots $000-$0FF and sprite table 0 in
   ; slots $100-$1FF, so table switches must also switch the SMS sprite base.
@@ -299,6 +300,9 @@ _ppu_sprite_base_set:
   out  ($bf), a
   ld   a, $86                ; register-write command for VDP reg 6
   out  ($bf), a
+.endif
+  ; Prepared sprite backends retain the current physical base until their
+  ; bounded SAT commit. Guest CTRL and deferred reg1 intent still change now.
   jp   _ppu_sync_vdp_reg1
 
 _ppu_w_mask:
@@ -485,6 +489,19 @@ _ppu_w_ppudata:
 ; above and by rt_smb_flush_vram_buffer's stripe loop (hooks_smb.s).
 ; Clobbers A/BC/DE/HL.
 rt_ppudata_apply:
+.ifdef CV1_RUNTIME_HOOKS
+  ; A resumed busy game body can upload a scene directly, not only build its
+  ; next stripe. Complete the older prepared SAT/scroll BEFORE any raw or VDP
+  ; mutation. The port-only finisher preserves this caller's guard/mapping,
+  ; CB18 value, saved guest DE and callless continuation. No PPU re-entry.
+  ld a, (CV1_FRAME_PENDING)
+  or a
+  jr z, _cv1_ppudata_unblocked
+  ld (CV1_FRAME_DATA_ADDR), de
+  call rt_cv1_finish_pending
+  ld de, (CV1_FRAME_DATA_ADDR)
+_cv1_ppudata_unblocked:
+.endif
   ld   a, d
   cp   $3f
   jp   z, _ppudata_direct_palette
@@ -701,6 +718,12 @@ _ppudata_pattern_write:
   ld   a, ($cb13)
   ld   (hl), a
   call rt_raw_ciram_sram_disable
+.ifdef CV1_RUNTIME_HOOKS
+  ; Every raw byte counts, including partial tiles. Prepare consumes this
+  ; sticky intent under DI; an incrementing epoch could wrap back to valid.
+  ld   a, 1
+  ld   ($c801), a            ; CV1 prepared-SAT CHR dirty contract
+.endif
   ; --- 2. BG variant coherence: base = ((D:E) >> 4) & $FF ---
   ; Table-aware: only refresh when this upload's table is the PRESENTED
   ; table ($CA13). Uploads to the other table (sprite-animation refreshes,
@@ -826,6 +849,10 @@ _ppw_inval_go:
   ld   (hl), a
 .endif
 _ppw_no_inval:
+  ; Both prepared sprite sizes read raw CHR into owned, undisplayed cache
+  ; slots. Legacy copy-through would mutate an old displayed 8x8 frame even
+  ; before the sticky first-8x16 latch is set.
+.ifndef CV1_RUNTIME_HOOKS
   ; --- 3. sprite copy-through when this write's table is the sprite table ---
   ; In 8x16 mode each OAM tile's low bit selects the NES pattern table. The
   ; SAT resolver builds active pairs from the raw CHR mirror instead.
@@ -880,6 +907,7 @@ _ppw_no_inval:
   out  ($bf), a
   ld   a, ($cb13)
   out  ($be), a
+.endif
 _ppw_done:
   pop  hl
   pop  de

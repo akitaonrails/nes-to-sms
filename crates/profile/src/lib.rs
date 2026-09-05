@@ -82,6 +82,13 @@ pub struct Translation {
     /// game-specific hooks file such as `SMB_RUNTIME_HOOKS`).
     #[serde(default)]
     pub runtime_defines: Vec<String>,
+    /// Leave physical sprite base/size changes to a prepared SAT commit.
+    /// The runtime must advertise RUNTIME_HAS_SPRITE_REGISTER_COMMIT; project
+    /// assembly fails if that capability is absent. Guest PPU shadows and
+    /// deferred reg1 intent still update normally. Default preserves legacy
+    /// immediate register-6 writes.
+    #[serde(default)]
+    pub defer_sprite_registers: bool,
     /// JSR/RTS discipline. `software` (default) routes every translated
     /// call through the runtime continuation stack — correct for any 6502
     /// stack usage. `native` asserts strict LIFO JSR/RTS pairing (no code
@@ -284,6 +291,11 @@ pub struct ReturnEscapeSite {
     /// Return PC as stored by the original 6502 JSR (the address of the final
     /// JSR operand byte, before the RTS increment).
     pub return_addr: u16,
+    /// The original code has already consumed a materialized return with
+    /// PLA/PLA. Discard only its translated continuation, checking both the
+    /// frame's ownership flag and the consumed bytes against `return_addr`.
+    #[serde(default)]
+    pub stack_bytes_already_consumed: bool,
     /// Physical switchable PRG bank containing this edge. Omit for NROM or a
     /// mapper-2 edge in the fixed `$C000-$FFFF` window.
     #[serde(default)]
@@ -397,6 +409,26 @@ pub fn load_from_path(path: impl AsRef<Path>) -> Result<Profile, LoadError> {
 }
 
 fn validate(p: &Profile) -> Result<(), LoadError> {
+    if p.translation
+        .runtime_defines
+        .iter()
+        .any(|name| name == "CONSUMED_RETURN_ESCAPE")
+    {
+        return Err(LoadError::Validation(
+            "CONSUMED_RETURN_ESCAPE is reserved: use return_escape.stack_bytes_already_consumed"
+                .into(),
+        ));
+    }
+    if p.translation.runtime_defines.iter().any(|name| {
+        matches!(
+            name.as_str(),
+            "DEFER_SPRITE_REGISTERS" | "RUNTIME_HAS_SPRITE_REGISTER_COMMIT"
+        )
+    }) {
+        return Err(LoadError::Validation(
+            "sprite commit defines are reserved: use translation.defer_sprite_registers; the runtime must provide its capability".into(),
+        ));
+    }
     if p.render.top_tile_remap_rows > 28 {
         return Err(LoadError::Validation(
             "render.top_tile_remap_rows must be in 0..=28".into(),
@@ -749,6 +781,22 @@ impl Profile {
         self.translation.stack_discipline == StackDiscipline::Native
     }
 
+    /// Keep runtime assembly policy synchronized with inline hardware lowering.
+    pub fn effective_runtime_defines(&self) -> Vec<String> {
+        let mut defines = self.translation.runtime_defines.clone();
+        if self.translation.defer_sprite_registers {
+            defines.push("DEFER_SPRITE_REGISTERS".into());
+        }
+        if self
+            .return_escapes
+            .iter()
+            .any(|site| site.stack_bytes_already_consumed)
+        {
+            defines.push("CONSUMED_RETURN_ESCAPE".into());
+        }
+        defines
+    }
+
     pub fn replacement_for(&self, addr: u16) -> Option<&Replacement> {
         self.replacements.iter().find(|r| r.addr == addr)
     }
@@ -830,6 +878,32 @@ dest = 0x100
         let roots = p.function_roots();
         assert!(roots.contains(&0x8000));
         assert!(roots.contains(&0xb1d4));
+    }
+
+    #[test]
+    fn deferred_sprite_policy_defaults_off_and_emits_runtime_contract() {
+        let normal = load_from_str(SAMPLE).unwrap();
+        assert!(!normal.translation.defer_sprite_registers);
+        assert!(normal.effective_runtime_defines().is_empty());
+        let deferred = load_from_str(&format!(
+            "{SAMPLE}\n[translation]\ndefer_sprite_registers = true\nruntime_defines = [\"TEST_BACKEND\"]\n"
+        )).unwrap();
+        assert_eq!(
+            deferred.effective_runtime_defines(),
+            ["TEST_BACKEND", "DEFER_SPRITE_REGISTERS"]
+        );
+        for reserved in [
+            "DEFER_SPRITE_REGISTERS",
+            "RUNTIME_HAS_SPRITE_REGISTER_COMMIT",
+        ] {
+            assert!(
+                load_from_str(&format!(
+                    "{SAMPLE}\n[translation]\nruntime_defines = [\"{reserved}\"]\n"
+                ))
+                .is_err(),
+                "must not forge capability or desynchronize lowering"
+            );
+        }
     }
 
     #[test]
@@ -1174,6 +1248,19 @@ return_addr = 0xea79
             .expect("qualified lookup");
         assert_eq!(escape.target, 0xEC60);
         assert_eq!(escape.return_addr, 0xEA79);
+        assert!(!escape.stack_bytes_already_consumed);
+        assert!(
+            !profile
+                .effective_runtime_defines()
+                .contains(&"CONSUMED_RETURN_ESCAPE".into())
+        );
+        let consumed = load_from_str(&format!("{fixed}\nstack_bytes_already_consumed = true\n"))
+            .expect("already-consumed escape");
+        assert!(consumed.return_escapes[0].stack_bytes_already_consumed);
+        assert_eq!(
+            consumed.effective_runtime_defines(),
+            ["CONSUMED_RETURN_ESCAPE"]
+        );
 
         let window = fixed.replace("caller = 0xe7d0", "caller = 0x87d0");
         let err = load_from_str(&window).expect_err("window escape requires bank");

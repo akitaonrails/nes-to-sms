@@ -511,6 +511,22 @@ _tr_rts_underflow:
 ; with BC equal to the original 6502 JSR-pushed return PC. Pop one TR_RET frame,
 ; push BCH then BCL using 6502 stack order, and return with A and DE preserved.
 ; Invalid/empty translated stacks fail closed with marker $E5.
+.ifdef CONSUMED_RETURN_ESCAPE
+; BC is the expected return already consumed by guest PLA/PLA. Bit 7 in
+; the guarded IFF scratch selects discard-only; no guest stack synthesis.
+rt_translated_return_discard_consumed:
+  push af
+  ld   a, i
+  di
+  jp   po, _tr_consumed_was_disabled
+  ld   a, $81
+  jr   _tr_consumed_save_mode
+_tr_consumed_was_disabled:
+  ld   a, $80
+_tr_consumed_save_mode:
+  ld   ($d471), a
+  jr   _tr_escape_find_frame
+.endif
 rt_translated_return_escape:
   push af
   ld   a, i                  ; P/V = prior IFF2
@@ -564,6 +580,11 @@ _tr_escape_check_seg1:
 _tr_escape_bridge:
   ld   hl, $d3f8
 _tr_escape_pop_frame:
+.ifdef CONSUMED_RETURN_ESCAPE
+  ld   a, ($d471)
+  bit  7, a
+  jp   nz, _tr_escape_discard_consumed
+.endif
   ld   (TR_RET_PTR), hl       ; publish the discarded frame
 
   ld   a, ($cb02)            ; old 6502 S
@@ -575,7 +596,11 @@ _tr_escape_pop_frame:
   sub  $02
   ld   ($cb02), a
 
+_tr_escape_restore_iff:
   ld   a, ($d471)
+.ifdef CONSUMED_RETURN_ESCAPE
+  and  $01
+.endif
   or   a
   jr   z, _tr_escape_return_disabled
   pop  af
@@ -588,6 +613,34 @@ _tr_escape_underflow:
   ld   a, $e5
   ld   ($cb1d), a
   jp   rt_unresolved_jsr_flash
+
+.ifdef CONSUMED_RETURN_ESCAPE
+_tr_escape_discard_consumed:
+  ; Validate ownership before publishing the pop. Ordinary software JSR
+  ; frames do not own any emulated return bytes and must not take this path.
+  inc  hl
+  inc  hl
+  inc  hl
+  bit  6, (hl)
+  jp   z, _tr_escape_underflow
+  dec  hl
+  dec  hl
+  dec  hl
+  push hl
+  ld   a, ($cb02)
+  ld   l, a
+  ld   h, $c1
+  ld   a, (hl)              ; consumed high byte remains at current S
+  cp   b
+  jp   nz, _tr_escape_underflow
+  dec  l                    ; guest stack page wraps independently
+  ld   a, (hl)
+  cp   c
+  jp   nz, _tr_escape_underflow
+  pop  hl
+  ld   (TR_RET_PTR), hl
+  jp   _tr_escape_restore_iff
+.endif
 
 ; ─── rt_far_jmp ───────────────────────────────────────────────────────────────
 ; Bank-aware cross-bank JMP. Translated `JMP L_XXXX` becomes:

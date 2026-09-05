@@ -149,6 +149,8 @@ _oam_dma_done:
 ;   Entry: A = scratch index (0..15), B = attr key ($03 pal, $40 H, $80 V),
 ;          C = source sprite tile (relative, 0..166).
 ;   Writes 32 bytes to VRAM at $3500 + index*32.
+;   CV1's private shared-cache caller instead supplies CV1_SAT_SLOT and
+;   writes $2000 + slot*64; A's legacy scratch index is ignored there.
 ;   Clobbers AF, BC, DE, HL. Restores the current PRG window in slot 2.
 ;   Locked-only private leaf; see the proven presentation chain above. Do not
 ;   add a guard/wrapper here, because it would deepen the stack-sensitive path.
@@ -199,8 +201,13 @@ do_sprite_variant:
   ld   (SAT_VARIANT_SRC), hl
 .endif
 
-  ; dest VRAM = $3500 + index*32
+  ; CV1's shared dynamic cache owns $2000 + slot*64 in both sprite sizes.
+  ; Its 8x8 path uses this exact converter, not stale base copy-through.
+  ; Other profiles retain the original 16-slot variant destination.
   pop  af                    ; scratch index
+.ifdef CV1_RUNTIME_HOOKS
+  ld   a, (CV1_SAT_SLOT)
+.endif
   ld   l, a
   ld   h, $00
   add  hl, hl
@@ -208,7 +215,12 @@ do_sprite_variant:
   add  hl, hl
   add  hl, hl
   add  hl, hl                ; index * 32
+.ifdef CV1_RUNTIME_HOOKS
+  add  hl, hl
+  ld   de, $2000
+.else
   ld   de, $3500
+.endif
   add  hl, de
   ld   a, l
   out  ($bf), a
@@ -396,6 +408,9 @@ _vgs_hit:
 ; Build one NES 8x16 sprite pair in the SMS $2000 sprite-pattern region.
 ; Entry: A = NES OAM tile byte, B = attr ($03 palette, $40 H, $80 V),
 ;        C = even destination SMS tile (2 * OAM entry index).
+.ifdef CV1_RUNTIME_HOOKS
+rt_sat_build_pair_8x16:
+.endif
 _sat_build_pair_8x16:
   ld   (SAT_VARIANT_TILE), a
   ld   a, b

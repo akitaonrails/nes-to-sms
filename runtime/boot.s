@@ -87,6 +87,9 @@
 .define RT_PRG_HIGH_BAD_ADDRESS $F7
 .define RT_PRESENT_SLOT2_BAD    $F8
 .define RT_BTD_SLOT2_BAD        $F9
+.ifdef CV1_RUNTIME_HOOKS
+.define RT_CV1_VBUF_ACTIVE      $FA   ; dormant C800 header must stay zero
+.endif
 
 .bank 0 slot 0
 .org $0000
@@ -700,6 +703,20 @@ _irq_runtime_ready:
   or  a
   jp  nz, _present_skip_all
 .ifdef CV1_RUNTIME_HOOKS
+  ; C801-C8FF belongs to prepared graphics, never the legacy vbuf parser.
+  ld  a, ($c800)
+  or  a
+  jp  nz, _cv1_vbuf_bad
+  ; A prepared generation has priority over any later READY packet. Retrying
+  ; final ports does not rebuild BG/SAT or wait for another global VBlank.
+  ld  a, (CV1_FRAME_PENDING)
+  or  a
+  jr  z, _cv1_no_pending_commit
+  ld  a, 1
+  ld  ($ca12), a
+  call rt_cv1_try_finish_pending
+  jp  _present_skip_all
+_cv1_no_pending_commit:
   ; An IRQ during a slow producer is not a new completed graphics frame.
   ; In particular, do not burn another VBlank wait resolving the same OAM.
   ld  a, (CV1_FRAME_READY)
@@ -766,6 +783,11 @@ _present_wait_vblank:
 .ifndef DIAG_NO_PROJECTION
   ; A complete screen build replaces every visible cell. Reclaim variant slots
   ; owned by the previous scene before projecting the new working set.
+.ifdef CV1_RUNTIME_HOOKS
+  ; The new scene must remain hidden during a destructive BG rebuild. The
+  ; frozen SAT commit alone restores its requested display enable afterward.
+  call rt_cv1_sat_blank
+.endif
   call rt_bg_reset_variant_cache
   call rt_nt_materialize_window
 .endif
@@ -773,6 +795,7 @@ _present_no_screen_rebuild:
 .endif
   ; Apply a deferred PPUMASK-driven VDP reg-1 write (see ppu.s): display
   ; enable changes only ever land here, inside VBlank.
+.ifndef CV1_RUNTIME_HOOKS
   ld  a, ($cb2d)
   or  a
   jr  z, _present_no_reg1
@@ -785,6 +808,7 @@ _present_no_screen_rebuild:
   ld  ($ca34), a
 .endif
 _present_no_reg1:
+.endif
 .ifdef NES_CHR_RAM
   ; Deferred variant-cache flush (BG table switched; see ppu.s).
   ld  a, ($cb7f)
@@ -829,9 +853,15 @@ _present_no_fcflush:
 .endif
 _present_band_clean:
 .endif
+.ifdef CV1_RUNTIME_HOOKS
+  ; Always prepare, including sprites-disabled MASK: SMS has no independent
+  ; sprite enable, so an explicit hidden SAT must replace the old one.
+  call rt_cv1_sat_prepare
+.else
   ld  a, ($cb09)             ; PPUMASK
   bit 4, a                   ; sprites enabled?
   call nz, rt_sat_upload
+.endif
 .ifdef DIAG_WILDJUMP
   ld  a, $04
   ld  ($ca34), a
@@ -850,10 +880,23 @@ _irq_proj_live:
   ld  c, a
 _irq_proj_go:
   call rt_nt_project_scroll
+.ifdef CV1_RUNTIME_HOOKS
+  ; All destructive BG preparation precedes the bounded SAT/base/size commit.
+  ; Its local early-blank admission does not assume the older global wait
+  ; survived the intervening BG work.
+  call rt_cv1_sat_try_commit
+  jr  nc, _cv1_committed_now
+  call rt_cv1_frame_suspend
+  xor a
+  ld ($ca12), a
+  jp _present_skip_all
+_cv1_committed_now:
+.endif
   call _apply_frame_scroll
-  call vbuf_flush
 .ifdef CV1_RUNTIME_HOOKS
   call rt_cv1_frame_end
+.else
+  call vbuf_flush
 .endif
   xor a
   ld  ($ca12), a            ; presentation complete (re-entrancy guard clear)
@@ -866,6 +909,49 @@ _present_slot2_bad:
 _present_slot2_halt:
   halt
   jr  _present_slot2_halt
+
+.ifdef CV1_RUNTIME_HOOKS
+; Final commit is internal-RAM/fixed-bank/port-only. Unlike preparation, it
+; preserves any valid slot2 guard depth and SRAM/PRG mapping, including an
+; interrupted PPUDATA writer's depth1/2. Every try restores live control.
+rt_cv1_try_finish_pending:
+  call _cv1_pending_resume_checked
+  call rt_cv1_sat_try_commit
+  jr c, _cv1_pending_restore
+  jr _cv1_pending_committed
+
+; Explicit writer barrier: block here if necessary, before its first raw byte.
+rt_cv1_finish_pending:
+  call _cv1_pending_resume_checked
+  call rt_cv1_sat_commit
+_cv1_pending_committed:
+  call _apply_frame_scroll
+  xor a
+  ld (CV1_FRAME_PENDING), a
+_cv1_pending_restore:
+  xor a
+  ld ($ca12), a
+  jp rt_cv1_frame_end
+
+_cv1_pending_resume_checked:
+  ld a, i
+  jp pe, _present_slot2_bad
+  ld a, ($d47f)
+  cp 3
+  jp nc, rt_ppu_guard_overflow
+  ld a, ($c800)
+  or a
+  jp nz, _cv1_vbuf_bad
+  jp rt_cv1_frame_resume
+
+_cv1_vbuf_bad:
+  di
+  ld a, RT_CV1_VBUF_ACTIVE
+  ld ($cb1d), a
+_cv1_vbuf_halt:
+  halt
+  jr _cv1_vbuf_halt
+.endif
 
 _present_skip_all:
 .ifndef CV1_RUNTIME_HOOKS
@@ -940,6 +1026,16 @@ _irq_call_translated_nmi:
   cp  2
   jp  nc, _irq_skip_translated_nmi
 .ifdef CV1_RUNTIME_HOOKS
+  ; Pending output backpressures a NEW full producer, not an already-running
+  ; busy game body or its valid lag NMI. Do this before CB12/CB20 phase resets.
+  ld  a, (CV1_FRAME_PENDING)
+  or  a
+  jr  z, _cv1_pending_body_allowed
+  ld  a, ($c01b)
+  or  a
+  jp  z, _irq_skip_translated_nmi
+_cv1_pending_body_allowed:
+  ld  a, ($ca11)
   ; CV1 sets $1B only AFTER its DMA/stripe/split prologue. While that
   ; prologue (or the busy-clear/RTI epilogue) is interrupted, a second full
   ; handler would consume partial producer state. Only its real busy lag

@@ -120,37 +120,56 @@ across games.
 $C000-$C0FF   NES zero page mirror
 $C100-$C1FF   Emulated 6502 stack page
 $C200-$C7FF   NES RAM mirror ($0200-$07FF)
-$C800-$C8FF   VRAM update buffer (size TBD; double-buffered)
-$C900-$CAFF   Sprite attribute staging (192 bytes: 64 sprites * 3)
+$C800-$C8FF   Legacy vbuf; CV1 instead reserves it for frame/SAT state below
+$C900-$C9FF   NES-format OAM staging (64 entries: Y, tile, attr, X)
+$CA00-$CAFF   BG/runtime state, including BG reverse map at $CA40-$CAFF
 $CB00-$CBFF   Translated runtime state (frame counter, shadow flags, etc.)
 $CC00-$D2FF   Folded SMS per-cell subpalette shadow (temporary)
-$D300-$D3FF   Clean dirty-metadata reserve: 240 tile bits + 16 attr bits
+$D300-$D3FB   Software translated-call continuation frames (segment 0)
+$D3FC-$D3FF   PPU continuation/mode and nested slot-2 guard state
+$D400-$D4BF   Sprite cache/resolution, IRQ and runtime scratch
+$D4C0-$D4FF   Far slot-1 bank/continuation stack
+$D500-$D5FF   Software translated-call continuation frames (segment 1)
 $D600-$D9FF   BG variant cache
 $DA00-$DD7F   BG base-slot shadow
-$DD80-$DFFD   Native Z80 stack headroom / no-go for persistent shadows
+$DD80-$DE3F   BG variant ring-slot nametable refcounts (192 bytes)
+$DE40-$DFFB   Native Z80 stack headroom / no-go for persistent shadows
+$DFFC-$DFFF   RAM aliases of Sega mapper registers ($FFFC-$FFFF)
 ```
 
-The Z80 SP lives at `$DFFE` and grows down. Native Z80 stack and emulated
-6502 stack are separate.
+The runtime initializes Z80 SP to `$DFFC`; pushes pre-decrement below the
+mapper aliases. Native Z80 stack and emulated 6502 stack are separate.
+`chrmap.s::BGV_REFCNT` already occupies `$DD80-$DE3F`; this is an existing
+allocation, not a new reservation. Native SP must not cross below `$DE40`.
+
+Under CV1's runtime opt-in, `$C800` remains zero (vbuf is dormant).
+`$C801-$C80F` holds sprite state/optional diagnostics; `$C810-$C812` is pending
+commit/address scratch; `$C820-$C83D` holds frame handoff records and accounting;
+`$C83E-$C83F` is optional timing diagnostics. Prepared SAT is `$C840-$C87F`
+(64 Y bytes) plus `$C880-$C8FF` (128 X/tile bytes), separate from NES OAM.
+Consult `frame_cv1.s` and `sat_cv1.s` before assigning unused bytes; this is
+profile-specific ownership, not a generic free/double-buffered vbuf allocation.
 
 Full raw NES CIRAM source-of-truth needs 2 KiB (`$CC00-$D3FF` if stored in
 internal RAM), including 1920 tile bytes plus the 128 compact attribute bytes
 already mirrored at `$CB80-$CBFF`. That storage does not fit in current
 internal RAM without reclaiming existing folded rendering shadows. The eventual
 internal-RAM candidate remains `$CC00-$D3FF`, but it is blocked until folded-S /
-BG-shadow dependencies are replaced. For v1, raw CIRAM storage is allowed to
+BG-shadow dependencies and software-continuation/guard ownership are replaced.
+For v1, raw CIRAM storage is allowed to
 use a generic external/cartridge-RAM backend instead of making internal-RAM
 reclaim a prerequisite. This keeps the pipeline generic while breaking the
 current deadlock: first prove raw-CIRAM parity in a separate storage backend,
 then materialize from it, and only later optimize storage back into internal RAM
 if needed.
 
-The retired `$D300-$D3FF` block is trace-clean and large enough for dirty
-metadata only: `$D300-$D3EF` can hold a 1920-bit raw tile dirty bitmap, while
-`$D3F0-$D3FF` can hold a 128-bit raw attribute dirty bitmap. It is not a raw
-tile source. `$DD80-$DFFD` is reserved for stack headroom even when traces show
-unused space; folded-visible repaint is skipped because it does not establish
-raw CIRAM as source-of-truth.
+The historical `$D300-$D3FF` dirty-bitmap proposal is not globally available:
+software-stack profiles use its continuation frames, and PPU/guard state owns
+the final four bytes. A trace from a native-stack profile cannot authorize
+reusing it across profiles. `$DE40-$DFFB` remains reserved for native-stack
+headroom even when a route leaves space unused. Any future internal CIRAM or
+dirty-metadata allocation must explicitly retire or relocate the existing
+owners; a folded-visible repaint is not itself a raw-CIRAM source of truth.
 
 ### SMS ROM bank plan
 

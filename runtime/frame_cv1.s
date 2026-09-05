@@ -12,8 +12,16 @@
 ; Publication transfers pending intent to the packet; consumption restores
 ; newer live intent and merges anything the old packet did not consume.
 ; CA13/CB2A and the variant cache are committed presentation state: never swap.
+; A late prepared SAT retains only packet controls. New full producers wait,
+; while already-running logic may resume; its first PPUDATA write is a barrier.
+; C810 = pending commit; C811-C812 = DI-only PPUDATA address scratch.
 .ifdef CV1_RUNTIME_HOOKS
+.ifndef DEFER_SPRITE_REGISTERS
+.fail "CV1 presentation requires translation.defer_sprite_registers"
+.endif
 .define CV1_FRAME_READY $c820
+.define CV1_FRAME_PENDING $c810
+.define CV1_FRAME_DATA_ADDR $c811
 .define CV1_FRAME_PACKET $c821
 .define CV1_FRAME_LIVE_SAVE $c82e
 .define CV1_FRAME_HOOK_IFF $c83b
@@ -124,13 +132,33 @@ _cv1_install_byte:
 rt_cv1_frame_begin:
   xor a
   ld (CV1_FRAME_READY), a
-  ld de, CV1_FRAME_LIVE_SAVE
-  call _cv1_frame_capture
-  ld de, CV1_FRAME_PACKET
-  call _cv1_frame_install
   ld a, (CV1_FRAME_CONSUME_COUNT)
   inc a
   ld (CV1_FRAME_CONSUME_COUNT), a
+  ; Fall through: retries share the copier but never consume READY again.
+rt_cv1_frame_resume:
+  ld de, CV1_FRAME_LIVE_SAVE
+  call _cv1_frame_capture
+  ld de, CV1_FRAME_PACKET
+  jp _cv1_frame_install
+
+; Preparation finished but its final bounded commit was late. The prepared
+; SAT owns old reg1; transfer all remaining dirty intent to live ONCE, not on
+; every future retry (an unconsumed CA18 count would otherwise be added again).
+; Retain only frozen controls; resume installs zero pending-intent fields.
+rt_cv1_frame_suspend:
+  ld de, CV1_FRAME_PACKET
+  call _cv1_frame_capture
+  ld hl, CV1_FRAME_PACKET + 9
+  ld bc, 4
+  xor a
+  call mem_fill
+  xor a
+  ld ($cb2d), a
+  call rt_cv1_frame_end
+  ; Publish only after live control is restored; caller still owns DI.
+  ld a, 1
+  ld (CV1_FRAME_PENDING), a
   ret
 
 ; No translated producer ran during presentation (DI). Preserve newer pending

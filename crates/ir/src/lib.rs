@@ -293,12 +293,13 @@ pub enum Op {
         target: String,
     },
     /// Tail jump that first discards one translated-call continuation and
-    /// recreates the corresponding two 6502 JSR return bytes. The destination
-    /// is expected to consume those bytes as stack data before returning
-    /// through the next caller.
+    /// either recreates the corresponding two 6502 JSR return bytes, or
+    /// verifies bytes already consumed by the guest. The latter leaves the
+    /// guest stack unchanged; both bypass the discarded continuation.
     ReturnEscape {
         target: String,
         return_addr: u16,
+        stack_bytes_already_consumed: bool,
     },
     JmpIndirect {
         addr: u16,
@@ -466,6 +467,7 @@ pub struct ReturnEscapeSite {
     pub caller: u16,
     pub target: u16,
     pub return_addr: u16,
+    pub stack_bytes_already_consumed: bool,
 }
 
 impl JumpEngineSite {
@@ -839,6 +841,7 @@ fn lift_insn(
                         return vec![Op::ReturnEscape {
                             target: lbl,
                             return_addr: site.return_addr,
+                            stack_bytes_already_consumed: site.stack_bytes_already_consumed,
                         }];
                     }
                     return vec![Op::Jmp { target: lbl }];
@@ -1630,6 +1633,7 @@ mod tests {
                 caller: 0xE7D0,
                 target: 0xEC60,
                 return_addr: 0xEA79,
+                stack_bytes_already_consumed: false,
             }],
             window_label_prefix: None,
             extra_label_pcs: Vec::new(),
@@ -1638,8 +1642,21 @@ mod tests {
         assert!(routine.ops.contains(&Op::ReturnEscape {
             target: "L_EC60".to_string(),
             return_addr: 0xEA79,
+            stack_bytes_already_consumed: false,
         }));
 
+        let mut consumed = opts.clone();
+        consumed.return_escape_sites[0].stack_bytes_already_consumed = true;
+        assert!(
+            lift_range(&prg, &consumed)
+                .unwrap()
+                .ops
+                .contains(&Op::ReturnEscape {
+                    target: "L_EC60".into(),
+                    return_addr: 0xEA79,
+                    stack_bytes_already_consumed: true,
+                })
+        );
         let mut stale = opts;
         stale.return_escape_sites[0].target = 0xEC61;
         let routine = lift_range(&prg, &stale).expect("stale fact becomes unsupported IR");

@@ -17,19 +17,22 @@ trap-free soak. It is not a pixel-perfect, real-time, or full-game claim.
 
 ## Latest performance checkpoint (2026-09-05)
 
-The CV1 completed-prologue handoff raises matched real-core walking throughput
-from **15.71 to 19.08 game updates/s at 500%**, with worst lag falling from
-28 to 6 physical frames. Heart pickup and the following 301 game ticks pass;
-its route remains about 20.97 updates/s. SMB output stays byte-identical and
-passes actual-core walking at 300%. See
-[the reassessment and evidence](cv1-performance-reassessment.md#implementation-checkpoint-completed-prologue-handoff).
+Completed-prologue handoff and shared-sprite scheduling raise matched real-core
+walking throughput from **15.71 to 21.90 game updates/s at 500%**. The heart
+route reaches **24.77 updates/s**, completing pickup and another 301 game ticks.
+Maximum physical-frame gap is 7 (original walking baseline 28; intermediate
+handoff build 6). Fresh SMB output stays byte-identical to its accepted build.
+See [the reassessment and evidence](cv1-performance-reassessment.md#shared-sprite-scheduling-measurements).
 
 The bridge also preserves the lowerer's interrupt-exposed `$CB18/$CB27` spills;
 without this, the faster schedule corrupts graphics-buffer terminators. These
-changes do not finish bounded graphics uploads or restore the HUD split.
-The deep traversal still traps; the historical full-traversal claim below is
-not a current pass. Fixed-instruction input scripts may now reach different
-states, so use the game-tick anchored core routes for before/after acceptance.
+changes now bound SAT/register/scroll commits but do not yet stage background
+and palette writes or restore the HUD split. A separately proven consumed-return
+escape fixes the old deep-route stack imbalance; real-core evidence reaches
+the first door and 124 indoor game ticks, not a whole stage. The historical
+full-traversal claim below is not current acceptance. Fixed-instruction input
+scripts may reach different states after speed changes; use game-tick anchored
+core routes for before/after acceptance.
 
 ## Completed course correction
 

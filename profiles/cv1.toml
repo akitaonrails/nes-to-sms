@@ -32,6 +32,7 @@ irq   = 0xc0bf
 
 [translation]
 runtime_defines = ["CV1_RUNTIME_HOOKS"]
+defer_sprite_registers = true
 
 # The full NMI finishes DMA/stripe/split setup through this routine before
 # setting busy $1B. Lag callers keep the PPU semantics but do not publish.
@@ -981,6 +982,15 @@ target_entry_a = [
 caller = 0xe7d0
 target = 0xec60
 return_addr = 0xea79
+
+# Canonical NES reference: EE9F/EEA0 consumes E959's arranged E9E5 return,
+# then EEA4 bypasses E9E6 and continues at EA33/E92B. Do not consume the
+# same two guest stack bytes again when discarding its software frame.
+[[return_escape]]
+caller = 0xeea4
+target = 0xea33
+return_addr = 0xe9e5
+stack_bytes_already_consumed = true
 
 [[function]]
 addr = 0xe9e5

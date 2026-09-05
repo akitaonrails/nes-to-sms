@@ -19,6 +19,13 @@ const BANK_SIZE: usize = 0x4000;
 const CART_RAM_SIZE: usize = 0x8000;
 const RAM_SIZE: usize = 0x2000;
 const IRQ_PERIOD: usize = 60_000;
+// Existing runtime allocation: chrmap.s BGV_REFCNT owns $DD80-$DE3F.
+// Native pushes must stay above it; this is not newly allocated metadata.
+const NATIVE_STACK_FLOOR: u16 = 0xDE40;
+
+fn native_stack_guard_failed(enabled: bool, sp: u16) -> bool {
+    enabled && sp < NATIVE_STACK_FLOOR
+}
 
 /// SMS_REAL_PACING=1: instruction-paced stress mode — 15K instructions
 /// between IRQs, boolean pending semantics (missed INTs don't queue), and
@@ -2020,8 +2027,12 @@ impl Bus for SmsBus {
                 self.vdp_addr_latched = false;
                 vblank
             }
-            // V counter $7E / H counter $7F.
-            0x40 => 0xFF,
+            // Synthetic functional pacing has no beam model. Report the
+            // START of 224-line VBlank, not FF (too late for bounded upload
+            // admission). This permits both >=E0 and E0..EC polling loops;
+            // it cannot establish a real VBlank deadline or video timing.
+            // H-counter $7F remains the default FF response below.
+            0x40 => 0xE0,
             // I/O port $DC/$DD (controllers) — all buttons released.
             0xC0 => {
                 self.controller_reads += 1;
@@ -3171,6 +3182,7 @@ fn main() {
     let abort_bad_sp = std::env::var("SMS_ABORT_BAD_SP")
         .ok()
         .is_some_and(|v| v != "0");
+    let mut native_stack_aborted = false;
     let mut first_fall_snapshot: Option<FallSnapshot> = None;
 
     for step in 0..steps {
@@ -3720,9 +3732,10 @@ fn main() {
                 if cpu.sp >= 0xC000 && cpu.sp < min_native_sp {
                     min_native_sp = cpu.sp;
                 }
-                if abort_bad_sp && cpu.sp < 0xDD80 {
+                if native_stack_guard_failed(abort_bad_sp, cpu.sp) {
+                    native_stack_aborted = true;
                     eprintln!(
-                        "SMS_ABORT_BAD_SP: step={step} pc=${pc:04X} op=${op:02X} sp_after=${:04X} ret_after=${:04X} bank1=${:02X}",
+                        "SMS_ABORT_BAD_SP: step={step} pc=${pc:04X} op=${op:02X} sp_after=${:04X} floor=${NATIVE_STACK_FLOOR:04X} ret_after=${:04X} bank1=${:02X}",
                         cpu.sp,
                         bus.read(cpu.sp) as u16 | ((bus.read(cpu.sp.wrapping_add(1)) as u16) << 8),
                         bus.slot_bank[1]
@@ -4640,7 +4653,10 @@ fn main() {
         }
     }
 
-    let mut acceptance_failed = false;
+    let mut acceptance_failed = native_stack_aborted;
+    if native_stack_aborted {
+        eprintln!("EXPECT FAIL: native stack crossed runtime metadata floor");
+    }
     if checkpoint_dump_failed {
         eprintln!("EXPECT FAIL: one or more checkpoint artifacts failed to write");
         acceptance_failed = true;
@@ -5979,7 +5995,7 @@ fn format_nt_raw_shadow_parity(bus: &SmsBus) -> String {
 }
 
 fn format_raw_ciram_storage_decision() -> &'static str {
-    "raw_ciram_storage=blocked reason=no_internal_ram_without_reclaim required_tile_bytes=1920 attr_bytes_existing=128 candidate=$CC00-$D3FF blocked_by=folded_s_reclaim_required stack_candidate=$DD80-$DFFD:no_go"
+    "raw_ciram_storage=blocked reason=no_internal_ram_without_reclaim required_tile_bytes=1920 attr_bytes_existing=128 candidate=$CC00-$D3FF blocked_by=folded_s_reclaim_required stack_candidate=$DE40-$DFFB:no_go"
 }
 
 fn format_raw_ciram_backend(bus: &SmsBus) -> String {
@@ -7232,6 +7248,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn synthetic_vcounter_admits_bounded_vblank_polling_without_beam_claim() {
+        let mut bus = SmsBus::new(Vec::new(), 0xFF);
+        for _ in 0..4 {
+            let v = bus.in_port(0x7e);
+            assert_eq!(v, 0xe0); // fixed synthetic start-of-blank, never a clock
+            assert!(v >= 0xe0); // legacy presentation/split guard
+            assert!(v.wrapping_sub(0xe0) < 13); // bounded SAT admission
+        }
+        assert_eq!(bus.in_port(0x7f), 0xff);
+    }
+
+    #[test]
+    fn native_stack_guard_rejects_existing_bg_refcounts_but_accepts_floor() {
+        assert_eq!(NATIVE_STACK_FLOOR, 0xDD80 + 192);
+        for sp in [0, 0xDD7F, 0xDD80, 0xDE3F] {
+            assert!(native_stack_guard_failed(true, sp), "SP=${sp:04X}");
+            assert!(!native_stack_guard_failed(false, sp));
+        }
+        for sp in [0xDE40, 0xDE41, 0xDFFB, 0xDFFC] {
+            assert!(!native_stack_guard_failed(true, sp), "SP=${sp:04X}");
+        }
+    }
+
+    #[test]
     fn pc_profile_ranks_cycle_cost_not_instruction_hits() {
         let mut rom = vec![0; BANK_SIZE];
         rom[1..4].copy_from_slice(&[0x2A, 0x34, 0x12]); // LD HL,($1234): 16 cycles.
@@ -8385,7 +8425,7 @@ mod tests {
     fn raw_ciram_storage_decision_reports_blocked_reclaim_requirement() {
         assert_eq!(
             format_raw_ciram_storage_decision(),
-            "raw_ciram_storage=blocked reason=no_internal_ram_without_reclaim required_tile_bytes=1920 attr_bytes_existing=128 candidate=$CC00-$D3FF blocked_by=folded_s_reclaim_required stack_candidate=$DD80-$DFFD:no_go"
+            "raw_ciram_storage=blocked reason=no_internal_ram_without_reclaim required_tile_bytes=1920 attr_bytes_existing=128 candidate=$CC00-$D3FF blocked_by=folded_s_reclaim_required stack_candidate=$DE40-$DFFB:no_go"
         );
     }
 

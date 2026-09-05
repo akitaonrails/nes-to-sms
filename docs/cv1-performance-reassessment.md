@@ -5,6 +5,56 @@ work order follow; implementation evidence is recorded below. Keep the recent
 sprite-palette and CHR-RAM materializer fixes; their static correctness and
 cost improvements do not establish smooth real-emulator motion.
 
+## Shared-sprite scheduling measurements
+
+The next implementation uses shared `(tile, attr & $C3)` sprite slots with
+separate current/next pins, a prepared 192-byte SAT, and deferred sprite
+register writes. Partial CHR writes invalidate keys without recycling displayed
+slots. A late commit retains its packet and returns; subsequent `$2007` writes
+must first finish that packet, preserving graphics order. New full NMIs cannot
+overwrite a pending packet, while valid lag/input/audio work remains enabled.
+
+Matched 420-tick routes at the same GPGX `a7985a9`, NTSC-U, overclock `500`:
+
+| Route | Handoff updates/s | Shared-sprite updates/s | Change |
+| --- | ---: | ---: | ---: |
+| Walking | 19.0808 | 21.9039 | +14.8% |
+| Walking + whip/heart | 20.9730 | 24.7712 | +18.1% |
+
+These isolated sprite measurements use ROM SHA-256
+`e4e2e7dabf6e236dd9953f6095221eb346f64ef9f6cceba68f6201af858fad5c`.
+The integrated current-profile build
+`3737e02afcfc53a9dab887acaeccf6718950a0e2619c20a45d3a7ddfd46797df`
+passes both routes with identical per-physical-frame state and pixel hashes.
+The freshly regenerated SMB ROM remains byte-identical to its baseline.
+State/area/hearts match; position differences stay within one pixel. Pickup
+occurs at tick 119 with 301 subsequent ticks. Maximum physical-frame gap is 7
+versus 6 in the handoff checkpoint: the mean improves, not every worst case.
+Earlier scheduling/lookup candidates were rejected because actual cadence
+regressed despite lower helper instruction costs.
+
+Assembled execution bounds the full admitted SAT/scroll/register wrapper at
+3,921 real Z80 T-states. Its latest permitted `$EC` counter value leaves
+4,332 T-states at stock NTSC224 timing. This is not the tracer's approximate
+cycle count. Actual-core sprite diagnostics at 100/500 stayed in blanking;
+the 100 run covers boot, not matched gameplay. Direct background/CRAM writes
+and the scrolling HUD remain separate work, so this is not tear-free output.
+
+Continuous callback review found no recurrence of the prior narrow sky stripe:
+0/813 walking and 0/875 heart samples; no completely black/white gameplay
+callbacks after tick 60 (1008/875 checked). These targeted checks do not imply
+pixel-perfect NES parity. Evidence: local `phase3-p9-{walk,heart}` directories
+under `out/cv1-presentation.ZNyZAL/`.
+
+The deep-route stack error also has a confirmed independent cause: NES
+`$EE9F/$EEA0` consumes a materialized return, then the translated RTS used to
+consume it again. A profile-declared already-consumed escape validates the
+ownership and original bytes before retiring the software continuation.
+Canonical 6502 and actual assembled-code tests establish the repair; the
+original build fails the same test. A separate real-core probe completes the
+first door and 124 indoor game ticks. Neither that probe nor a trap-free
+instruction-timed outdoor soak establishes full-stage completion.
+
 ## Implementation checkpoint: completed-prologue handoff
 
 The opt-in CV1 bridge now publishes its scroll/control context after the full

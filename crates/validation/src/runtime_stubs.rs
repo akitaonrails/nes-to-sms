@@ -35,6 +35,7 @@ pub const REQUIRED_HELPERS: &[&str] = &[
     "rt_indirect_jmp",
     "rt_translated_rts",
     "rt_translated_return_escape",
+    "rt_translated_return_discard_consumed",
     "rt_translated_call_gate",
     "rt_translated_tail_gate",
     "rt_unresolved_jsr",
@@ -189,6 +190,18 @@ fn emit_translated_rts(p: &mut Program) {
 }
 
 fn emit_translated_return_escape(p: &mut Program) {
+    p.label("rt_translated_return_discard_consumed");
+    p.push_af();
+    p.ld_a_i();
+    p.di();
+    p.jp_po("_validation_tr_consumed_was_disabled");
+    p.ld_a_imm(0x81);
+    p.jr("_validation_tr_consumed_save_mode");
+    p.label("_validation_tr_consumed_was_disabled");
+    p.ld_a_imm(0x80);
+    p.label("_validation_tr_consumed_save_mode");
+    p.ld_abs_a(0xD471);
+    p.jr("_validation_tr_escape_find_frame");
     p.label("rt_translated_return_escape");
     p.push_af();
     p.ld_a_i();
@@ -242,6 +255,9 @@ fn emit_translated_return_escape(p: &mut Program) {
     p.label("_validation_tr_escape_bridge");
     p.ld_hl_imm(0xD3F8);
     p.label("_validation_tr_escape_pop_frame");
+    p.ld_a_abs(0xD471);
+    p.bit_a(7);
+    p.jp_nz("_validation_tr_escape_discard_consumed");
     p.ld_abs_hl(0xCB76);
     p.ld_a_abs(SHADOW_S);
     p.ld_l_a();
@@ -251,7 +267,9 @@ fn emit_translated_return_escape(p: &mut Program) {
     p.ld_hl_ptr_c();
     p.sub_imm(2);
     p.ld_abs_a(SHADOW_S);
+    p.label("_validation_tr_escape_restore_iff");
     p.ld_a_abs(0xD471);
+    p.and_imm(1);
     p.or_a();
     p.jr_z("_validation_tr_escape_return_disabled");
     p.pop_af();
@@ -264,6 +282,30 @@ fn emit_translated_return_escape(p: &mut Program) {
     p.ld_a_imm(0xE5);
     p.ld_abs_a(0xCB1D);
     p.halt();
+    p.label("_validation_tr_escape_discard_consumed");
+    p.inc_hl();
+    p.inc_hl();
+    p.inc_hl();
+    p.ld_a_hl_ptr();
+    p.bit_a(6);
+    p.jp_z("_validation_tr_escape_underflow");
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.push_hl();
+    p.ld_a_abs(SHADOW_S);
+    p.ld_l_a();
+    p.ld_h_imm(0xC1);
+    p.ld_a_hl_ptr();
+    p.cp_b();
+    p.jp_nz("_validation_tr_escape_underflow");
+    p.dec_l();
+    p.ld_a_hl_ptr();
+    p.cp_c();
+    p.jp_nz("_validation_tr_escape_underflow");
+    p.pop_hl();
+    p.ld_abs_hl(0xCB76);
+    p.jp("_validation_tr_escape_restore_iff");
 }
 
 fn emit_ret_stub(p: &mut Program, name: &str) {

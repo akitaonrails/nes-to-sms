@@ -94,6 +94,7 @@ pub mod runtime_symbols {
     pub const UNRESOLVED_JSR: &str = "rt_unresolved_jsr";
     pub const TRANSLATED_RTS: &str = "rt_translated_rts";
     pub const TRANSLATED_RETURN_ESCAPE: &str = "rt_translated_return_escape";
+    pub const TRANSLATED_RETURN_DISCARD_CONSUMED: &str = "rt_translated_return_discard_consumed";
     pub const BANKED_TAIL_DISPATCH: &str = "rt_banked_tail_dispatch";
     pub const BRK: &str = "rt_brk";
     pub const RTI: &str = "rt_rti";
@@ -998,7 +999,13 @@ fn emit_ppu_scroll_write_inline(p: &mut z80_emit::Program) {
 /// exit. DE is preserved because this inline path never touches it; BC/HL and
 /// native flags are scratch. The VDP register-6 control-port pair keeps the
 /// same DI/EI guard as `rt_ppu_write` without adding a native call frame.
-fn emit_ppu_ctrl_write_inline(p: &mut z80_emit::Program, chr_ram: bool) {
+/// A profile with a prepared-SAT runtime can defer that physical pair while
+/// retaining the same guest shadows, dirty intent, registers and IFF behavior.
+fn emit_ppu_ctrl_write_inline(
+    p: &mut z80_emit::Program,
+    chr_ram: bool,
+    defer_sprite_registers: bool,
+) {
     use sms_layout::*;
 
     let was_disabled = p.fresh_label("ppu_ctrl_was_disabled");
@@ -1071,19 +1078,21 @@ fn emit_ppu_ctrl_write_inline(p: &mut z80_emit::Program, chr_ram: bool) {
     // Mirror NES PPUCTRL bit 3 into SMS VDP register 6 for 8x8 sprites. In
     // 8x16 mode the NES selects the pattern table per OAM tile bit, so the
     // CHR-RAM SAT resolver uses its pair cache at the SMS $2000 base.
-    p.bit_a(5);
-    p.jr_nz(&sprite_base_2000);
-    p.bit_a(3);
-    p.jr_nz(&sprite_base_0000);
-    p.label(&sprite_base_2000);
-    p.ld_a_imm(0xff);
-    p.jr(&sprite_base_set);
-    p.label(&sprite_base_0000);
-    p.ld_a_imm(0xfb);
-    p.label(&sprite_base_set);
-    p.out_a(0xbf);
-    p.ld_a_imm(0x86);
-    p.out_a(0xbf);
+    if !defer_sprite_registers {
+        p.bit_a(5);
+        p.jr_nz(&sprite_base_2000);
+        p.bit_a(3);
+        p.jr_nz(&sprite_base_0000);
+        p.label(&sprite_base_2000);
+        p.ld_a_imm(0xff);
+        p.jr(&sprite_base_set);
+        p.label(&sprite_base_0000);
+        p.ld_a_imm(0xfb);
+        p.label(&sprite_base_set);
+        p.out_a(0xbf);
+        p.ld_a_imm(0x86);
+        p.out_a(0xbf);
+    }
 
     emit_ppu_reg1_latch_inline(p, &display_done, &sprite_done);
 
@@ -4695,6 +4704,7 @@ pub fn lower_routine(
             Op::ReturnEscape {
                 target,
                 return_addr,
+                stack_bytes_already_consumed,
             } => {
                 if opts.profile.is_some_and(|p| p.native_calls()) {
                     return Err(LowerError::UnsupportedMapperStore {
@@ -4706,11 +4716,15 @@ pub fn lower_routine(
                 }
                 // Some 6502 tail escapes discard their own JSR return bytes
                 // with PLA/PLA, then let a later RTS return through the caller
-                // below. Pop the equivalent translated frame and materialize
-                // those two bytes on the emulated stack before following the
-                // original JMP edge.
+                // below. Pop the equivalent translated frame, either supplying
+                // the original bytes or checking an already-consumed pair,
+                // before following the original JMP edge.
                 program.ld_bc_imm(*return_addr);
-                program.call(TRANSLATED_RETURN_ESCAPE);
+                program.call(if *stack_bytes_already_consumed {
+                    TRANSLATED_RETURN_DISCARD_CONSUMED
+                } else {
+                    TRANSLATED_RETURN_ESCAPE
+                });
                 program.translated_tail_jmp(target);
             }
 
@@ -4843,7 +4857,10 @@ pub fn lower_routine(
                 match *reg {
                     0 => {
                         let chr_ram = opts.profile.map(|p| p.rom.chr_kib == 0).unwrap_or(false);
-                        emit_ppu_ctrl_write_inline(program, chr_ram);
+                        let deferred = opts
+                            .profile
+                            .is_some_and(|p| p.translation.defer_sprite_registers);
+                        emit_ppu_ctrl_write_inline(program, chr_ram, deferred);
                     }
                     1 => {
                         let chr_ram = opts.profile.map(|p| p.rom.chr_kib == 0).unwrap_or(false);
@@ -5112,6 +5129,7 @@ mod tests {
             "rt_unresolved_jsr_flash",
             TRANSLATED_RTS,
             TRANSLATED_RETURN_ESCAPE,
+            TRANSLATED_RETURN_DISCARD_CONSUMED,
             BANKED_TAIL_DISPATCH,
             "rt_translated_call_gate",
             "rt_translated_tail_gate",
@@ -5144,7 +5162,7 @@ mod tests {
         define_runtime_stubs(&mut prog);
         prog.org(0x0000);
         prog.section("test");
-        emit_ppu_ctrl_write_inline(&mut prog, chr_ram);
+        emit_ppu_ctrl_write_inline(&mut prog, chr_ram, false);
         prog.finish().unwrap().asm
     }
 
@@ -6223,6 +6241,7 @@ runtime_label = "rt_replacement"
             Op::ReturnEscape {
                 target: "escape_target".to_string(),
                 return_addr: 0xEA79,
+                stack_bytes_already_consumed: false,
             },
             Op::Label("escape_target".to_string()),
         ]);
@@ -6230,6 +6249,25 @@ runtime_label = "rt_replacement"
         assert!(build.asm.contains("call rt_translated_return_escape"));
         assert!(build.asm.contains("ld bc,escape_target"));
         assert!(build.asm.contains("jp rt_translated_tail_gate"));
+    }
+
+    #[test]
+    fn already_consumed_return_escape_uses_guarded_discard_helper() {
+        let build = lower_and_finish(vec![
+            Op::ReturnEscape {
+                target: "escape_target".into(),
+                return_addr: 0x8FFF,
+                stack_bytes_already_consumed: true,
+            },
+            Op::Label("escape_target".into()),
+        ]);
+        assert!(build.asm.contains("ld bc,$8FFF"));
+        assert!(
+            build
+                .asm
+                .contains("call rt_translated_return_discard_consumed")
+        );
+        assert!(!build.asm.contains("call rt_translated_return_escape\n"));
     }
 
     // -------------------------------------------------------------------

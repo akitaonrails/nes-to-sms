@@ -426,6 +426,18 @@ fn sms_asm_content(
     for def in &cfg.runtime_defines {
         mapper_define.push_str(&format!("\n.define {def} 1"));
     }
+    // A code-generation policy may suppress immediate hardware effects only
+    // if the selected runtime supplies their eventual commit. Check AFTER
+    // its includes so an absent backend cannot produce a silently broken ROM.
+    let capability_check = if cfg
+        .runtime_defines
+        .iter()
+        .any(|name| name == "DEFER_SPRITE_REGISTERS")
+    {
+        ".ifndef RUNTIME_HAS_SPRITE_REGISTER_COMMIT\n.fail \"deferred sprite registers require a runtime SAT commit backend\"\n.endif\n"
+    } else {
+        ""
+    };
     if cfg.chr_ram_bg_identity {
         mapper_define.push_str("\n.define PROFILE_CHR_RAM_BG_IDENTITY 1");
     }
@@ -485,7 +497,7 @@ fn sms_asm_content(
          {raw_ciram_define}\n\
          \n\
          ; Pull in runtime + generated translation.\n\
-         {runtime_includes}.include \"generated/translated.asm\"\n\
+         {runtime_includes}{capability_check}.include \"generated/translated.asm\"\n\
          \n\
          ; ── Data blobs ───────────────────────────────────────────────────\n\
          ; Assets are pinned to slot 2. Mapper builds pack the small blobs\n\
@@ -853,6 +865,57 @@ mod tests {
 
         fs::remove_dir_all(&out).unwrap();
         fs::remove_dir_all(&rt_src).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires WLA-DX inside Docker; run cargo test -p sms_project deferred_sprite_capability -- --ignored"]
+    fn deferred_sprite_capability_is_checked_by_the_assembler() {
+        for deferred in [false, true] {
+            for capability in [false, true] {
+                let root = unique_dir("sms_sprite_capability");
+                let runtime = root.join("source");
+                let project = root.join("project");
+                fs::create_dir_all(&runtime).unwrap();
+                fs::write(
+                    runtime.join("backend.s"),
+                    if capability {
+                        ".define RUNTIME_HAS_SPRITE_REGISTER_COMMIT 1\n"
+                    } else {
+                        "; backend has no prepared sprite commit\n"
+                    },
+                )
+                .unwrap();
+                let mut cfg = minimal_cfg();
+                if deferred {
+                    cfg.runtime_defines.push("DEFER_SPRITE_REGISTERS".into());
+                }
+                emit_project(
+                    &project,
+                    &minimal_build(),
+                    &minimal_assets(),
+                    &cfg,
+                    Some(&runtime),
+                )
+                .unwrap();
+                let result = std::process::Command::new("make")
+                    .current_dir(&project)
+                    .output()
+                    .expect("run this explicit test inside the Docker WLA-DX toolchain");
+                assert_eq!(
+                    result.status.success(),
+                    !deferred || capability,
+                    "deferred={deferred}, capability={capability}: {}{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                if deferred && !capability {
+                    assert!(String::from_utf8_lossy(&result.stderr).contains(
+                        "deferred sprite registers require a runtime SAT commit backend"
+                    ));
+                }
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
     }
 
     // ── 2. emit_assets_only produces only generated/ and data/ ───────────────

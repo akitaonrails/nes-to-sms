@@ -647,6 +647,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             caller: site.caller,
             target: site.target,
             return_addr: site.return_addr,
+            stack_bytes_already_consumed: site.stack_bytes_already_consumed,
         })
         .collect();
 
@@ -754,6 +755,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     caller: site.caller,
                     target: site.target,
                     return_addr: site.return_addr,
+                    stack_bytes_already_consumed: site.stack_bytes_already_consumed,
                 })
                 .collect();
             // Interior-alias pass (mirrors the main funcs' two-pass):
@@ -1439,7 +1441,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
         top_tile_remap_to: prof.render.top_tile_remap_to,
         chr_ram_bg_identity: prof.render.chr_ram_bg_identity,
         native_calls: prof.native_calls(),
-        runtime_defines: prof.translation.runtime_defines.clone(),
+        runtime_defines: prof.effective_runtime_defines(),
     };
     sms_project::emit_project(&args.out, &build, &project_assets, &cfg, runtime_dir)?;
 
@@ -2100,6 +2102,7 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_rts_dispatch",
     "rt_translated_rts",
     "rt_translated_return_escape",
+    "rt_translated_return_discard_consumed",
     "rt_translated_call_gate",
     "rt_translated_tail_gate",
     "rt_far_tail",
