@@ -5,6 +5,27 @@ work order follow; implementation evidence is recorded below. Keep the recent
 sprite-palette and CHR-RAM materializer fixes; their static correctness and
 cost improvements do not establish smooth real-emulator motion.
 
+## Dagger follow-up
+
+The dagger freeze was a strict unresolved-code trap, not another rendering
+stall. Original `$DBA4: BEQ $DB8D` reaches a shared projectile initializer;
+adding that verified discovery root to the CV1 profile resolves the path.
+No runtime, renderer or generic engine code changed.
+
+At 500%, the same 420-tick routes now measure 19.256 walking and 21.529
+heart-route updates/s (1,307/1,169 physical intervals; maximum gap still 17).
+These are essentially the previous cadence, not a speed optimization.
+Fixed-HUD checks report zero outliers in 1,126/988 callbacks, with no whole
+blank frames or recurrence of the checked outdoor stripe. The freshly built
+SMB ROM remains byte-identical to its accepted regression artifact.
+
+Real-input dagger tests complete 1,306 indoor ticks after entering the room.
+A repeated-throw variant spends hearts on three throws, including airborne
+throws, and continues to world X 745 without trapping. Original-ROM oracle
+tests cover the initializer's initial/active branches and discovery ownership.
+Local evidence: `out/cv1-dagger.SuwNRt/`; current normal ROM SHA-256:
+`9b236c7772cafa3c3a9a766ddfed5cb7f611c8bd03ce9074c5d56badc87e695d`.
+
 ## Coherent background and HUD delivery
 
 The CV1 profile now enables `CV1_COHERENT_BG`. Raw PPU writes accumulate
@@ -63,7 +84,7 @@ UxROM. Physical controller polling no longer rewinds a partially read serial
 transaction; the guest's `$4016` strobe owns that reset. This is not a new
 implementation of the complete NES controller protocol.
 
-Normal ROM SHA-256:
+Pre-dagger checkpoint ROM SHA-256:
 `61a6d2bf280a2f85b991f4e6915a2b9c0ff328b2507e0b7c24e427a95ac16064`.
 The final lifetime repair below retains **byte-identical callback CSVs**,
 including every pixel hash, state and frame interval, on both 420-tick routes.

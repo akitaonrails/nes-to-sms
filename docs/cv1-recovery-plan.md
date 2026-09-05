@@ -17,7 +17,7 @@ trap-free soak. It is not a pixel-perfect, real-time, or full-game claim.
 
 ## Latest performance checkpoint (2026-09-05)
 
-The coherent background/HUD build reaches **19.29 walking / 21.51 heart-route
+The coherent background/HUD build reaches **19.26 walking / 21.53 heart-route
 game updates/s at 500%**, completing pickup and another 301 ticks. It improves
 slightly over the previously installed handoff build (19.08/20.97), but remains
 slower than the fastest intermediate (21.90/24.77), which retained background
@@ -54,6 +54,15 @@ another 124 ticks/80 pixels afterward. Both 420-tick walking/heart callback
 logs remain byte-identical to the coherent rendering checkpoint, including
 pixel hashes and cadence. Reproduce these checks using
 [the acceptance guide](../profiles/cv1/acceptance/README.md).
+
+The subsequent dagger fix adds the verified shared initializer `$DB8D` to
+the CV1 profile: the weapon dispatcher branches there from `$DBA4`, but an
+external conditional branch alone does not create a discovery root. The old
+build trapped `$E1` immediately after spending a heart. The corrected build
+passes single and repeated/airborne throws, then completes 1,306 indoor ticks.
+This profile-only change retains the renderer and stack repairs. Its updated
+420-tick measurements above supersede the preceding byte-identical checkpoint;
+SMB output remains byte-identical.
 
 ## Completed course correction
 

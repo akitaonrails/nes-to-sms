@@ -58,6 +58,14 @@ name = "func_C368"
 addr = 0xde04
 name = "func_DE04"
 
+# Fixed-bank dagger initializer. Original $DBA4 BEQ targets $DB8D when
+# $0584,X is zero; the shared tail initializes $046C,X then enters $EC72,
+# or continues through $EE48 for an active projectile. External conditional
+# branches are not discovery roots, so this valid code needs an explicit root.
+[[function]]
+addr = 0xdb8d
+name = "func_DB8D"
+
 # CV1 master task jump engine (JSR $CA6D at $C1F1; table at $C1F4).
 [[jump_engine]]
 caller = 0xc1f1

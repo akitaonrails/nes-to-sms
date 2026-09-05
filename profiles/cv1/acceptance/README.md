@@ -16,6 +16,17 @@ The launcher warns if its configured gamepad is absent;
 `GPGX_REQUIRE_GAMEPAD=1` makes that fatal. Wait for Simon to appear: a
 background-only setup frame is not gameplay. Stock speed is not playable.
 
+With the dagger equipped and hearts available, press Up + attack (SMS button
+2) to throw it. Regression testing covers both grounded and airborne throws,
+heart expenditure and continued indoor movement. The original-code/discovery
+check is reproducible separately:
+
+```sh
+cargo test -p nes_to_sms --test cv1_dagger
+CV1_DAGGER_NES=/path/to/input.nes cargo test -p nes_to_sms \
+  --test cv1_dagger -- --ignored
+```
+
 ## Matched walking and heart routes
 
 `core-routes.toml` is the frozen 420-game-tick comparison contract. The runner

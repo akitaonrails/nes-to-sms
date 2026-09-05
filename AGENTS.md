@@ -316,6 +316,35 @@ The Z80 SP lives at `$DFFE` and grows down. Native Z80 stack and emulated
   Use it intentionally, not on every edit.
 - Unresolved translated labels trap by default. Only enable
   `--debug-unresolved-stubs` for short visual experiments.
+- **RetroArch config location (cost hours if missed):** the bundled
+  `out/emulator-host/RetroArch-Linux-x86_64/RetroArch-Linux-x86_64.AppImage`
+  prints "Setting $HOME to …AppImage.home" at startup, but it does **not**
+  read its config from that portable home — it reads and writes
+  `~/.config/retroarch/retroarch.cfg` (the user's real home) plus per-core
+  options in `~/.config/retroarch/config/Genesis Plus GX/Genesis Plus GX.opt`.
+  Editing anything under `…AppImage.home/.config/retroarch/` has no effect.
+  For the 8BitDo Ultimate 2 (and any pad RetroArch reports "… not
+  configured"): set `input_autodetect_enable = "false"` and
+  `config_save_on_exit = "false"` in the real cfg and bind
+  `input_player1_*_btn` explicitly (udev button order for that pad:
+  b=0 a=1 y=2 x=3 l=4 r=5 select=6 start=7 l3=9 r3=10, D-pad = hat
+  `h0up/h0down/h0left/h0right`); `evtest /dev/input/event24` confirms the
+  pad emits events. Overclock lives in the per-core `.opt`
+  (`~/.config/retroarch/config/Genesis Plus GX/Genesis Plus GX.opt`, since
+  `game_specific_options=true`/`global_core_options=false`) as
+  `genesis_plus_gx_overclock = "NNN"` — a **bare number, NO `%`** (steps
+  100/125/…/500). A value with `%` (e.g. `"250%"`) is silently rejected and
+  reset to default `"100"` on the next exit, so it never applies — which looks
+  exactly like "overclock does nothing." Confirm a value took by a load→exit
+  cycle: if the `.opt` still holds it, it's valid; if it reverted to `"100"`,
+  the format was wrong. Core options save on exit independently of
+  `config_save_on_exit`, so edit the `.opt` only while RetroArch is stopped.
+  SMB needs ~2.07x worst-case, so `"300"` is smooth. Stop RetroArch
+  (`pkill -f RetroArch-Linux` / `pkill -f genesis_plus_gx_libretro`) before
+  editing; launch with Bash `run_in_background: true` (the AppImage wrapper
+  re-execs and detaches, so plain `&`/`nohup`/`setsid` redirects lose the
+  process and its log, and `pgrep -f RetroArch-Linux` matches your own shell
+  command — grep `[g]enesis_plus_gx_libretro` instead).
 
 ## License
 
