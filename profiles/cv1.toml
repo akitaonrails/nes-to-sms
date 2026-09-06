@@ -74,6 +74,13 @@ name = "func_DE04"
 addr = 0xdb8d
 name = "func_DB8D"
 
+# Returning projectile: original $DC84 branches here in actor state 3.
+# Preserve the acceleration tail and its $DC5C movement exit; an external
+# conditional branch alone does not make either one a discovery root.
+[[function]]
+addr = 0xdc37
+name = "func_DC37"
+
 # CV1 master task jump engine (JSR $CA6D at $C1F1; table at $C1F4).
 [[jump_engine]]
 caller = 0xc1f1
@@ -999,6 +1006,24 @@ caller = 0xe7d0
 target = 0xec60
 return_addr = 0xea79
 
+# Projectile cleanup bypasses the object dispatcher's arranged E9E5 return.
+# These edges retain its live guest bytes for EC6D/EC6E but drop the software
+# continuation. Ordinary returns from the same object must still use E9E6.
+[[return_escape]]
+caller = 0xdb08
+target = 0xec60
+return_addr = 0xe9e5
+
+[[return_escape]]
+caller = 0xdb4c
+target = 0xec60
+return_addr = 0xe9e5
+
+[[return_escape]]
+caller = 0xdc34
+target = 0xec60
+return_addr = 0xe9e5
+
 # Canonical NES reference: EE9F/EEA0 consumes E959's arranged E9E5 return,
 # then EEA4 bypasses E9E6 and continues at EA33/E92B. Validate/drop its
 # software frame before EE9F, while S+1/S+2 are live. A lag NMI may reuse
@@ -1020,6 +1045,20 @@ calls = [
     { caller = 0xcefa, target = 0x934c },
     { caller = 0xc604, target = 0x934c },
     { caller = 0xc61a, target = 0x934c },
+]
+
+# Weapon allocation failure: DA90 finds all allowed slots occupied, or DA7B
+# rejects a five-heart cost. DA9D/DA9E discard that helper's real JSR return
+# and RTS bypasses the spawning caller. Preserve each of the six live words.
+[[return_consume]]
+at = 0xda9d
+calls = [
+    { caller = 0xda72, target = 0xda90 },
+    { caller = 0xdaa3, target = 0xda90 },
+    { caller = 0xdaac, target = 0xda90 },
+    { caller = 0xdab5, target = 0xda90 },
+    { caller = 0xdae9, target = 0xda90 },
+    { caller = 0xdaec, target = 0xda7b },
 ]
 
 # Fixed F552 tail-jumps here when area28 == 2. This is a real interior

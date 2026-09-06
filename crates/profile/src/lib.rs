@@ -967,12 +967,9 @@ impl Profile {
         if self.translation.defer_sprite_registers {
             defines.push("DEFER_SPRITE_REGISTERS".into());
         }
-        if self
-            .return_escapes
-            .iter()
-            .any(|site| site.stack_bytes_already_consumed)
-            || !self.return_consumes.is_empty()
-        {
+        // Even an escape before its PLA pair can own an already arranged
+        // dispatcher return. It needs the live-byte validation path too.
+        if !self.return_escapes.is_empty() || !self.return_consumes.is_empty() {
             defines.push("CONSUMED_RETURN_ESCAPE".into());
         }
         if !self.return_consumes.is_empty() {
@@ -1434,7 +1431,7 @@ return_addr = 0xea79
         assert_eq!(escape.return_addr, 0xEA79);
         assert!(!escape.stack_bytes_already_consumed);
         assert!(
-            !profile
+            profile
                 .effective_runtime_defines()
                 .contains(&"CONSUMED_RETURN_ESCAPE".into())
         );

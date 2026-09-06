@@ -45,14 +45,55 @@ fn step_to(bus: &mut impl Bus, cpu: &mut Cpu, stop: u16) -> u16 {
 }
 
 fn stub() -> (FlatBus, u16) {
+    helper_stub("rt_translated_return_consume")
+}
+
+fn helper_stub(helper: &str) -> (FlatBus, u16) {
     let mut program = z80_emit::Program::new();
     program.org(0);
-    program.call("rt_translated_return_consume");
+    program.call(helper);
     program.halt();
     validation::emit_runtime_helpers(&mut program);
     let mut bus = FlatBus::new();
     bus.load(0, &program.finish().unwrap().bytes);
     (bus, 3)
+}
+
+#[test]
+fn escape_reuses_materialized_bytes_and_rejects_mismatch_before_publication() {
+    for (ptr, frame) in [(0xd304, 0xd300), (0xd500, 0xd3f8), (0xd600, 0xd5fc)] {
+        for s in [0u8, 1, 0xf4, 0xff] {
+            for iff in [false, true] {
+                for corrupt in [false, true] {
+                    let (mut bus, stop) = helper_stub("rt_translated_return_escape");
+                    seed(&mut bus, ptr, frame, s);
+                    if corrupt {
+                        bus.mem[0xc100 + s.wrapping_add(1) as usize] ^= 1;
+                    }
+                    let stack = bus.mem[0xc100..0xc200].to_vec();
+                    let mut cpu = cpu_at(0, iff);
+                    step_to(&mut bus, &mut cpu, stop);
+                    assert_eq!(
+                        bus.mem[0xcb02], s,
+                        "must not push duplicate arranged return"
+                    );
+                    assert_eq!(&bus.mem[0xc100..0xc200], stack);
+                    assert_eq!(
+                        &bus.mem[0xcb76..0xcb78],
+                        &(if corrupt { ptr } else { frame }).to_le_bytes()
+                    );
+                    assert_eq!(bus.mem[0xcb1d], if corrupt { 0xe5 } else { 0 });
+                    if !corrupt {
+                        assert_eq!(
+                            (cpu.pc, cpu.a, cpu.f, cpu.d, cpu.e),
+                            (stop, 0x69, 0xa5, 7, 0xf9)
+                        );
+                        assert_eq!((cpu.sp, cpu.iff1, cpu.iff2), (0xdfe0, iff, iff));
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -609,6 +650,148 @@ fn seed_upper_call(caller: u16) -> (Assembled, Cpu) {
     cpu.a = 0;
     cpu.f = 0;
     (machine, cpu)
+}
+
+#[test]
+#[ignore = "requires CV1_ESCAPE_PROJECT with weapon-capacity return annotations"]
+fn weapon_capacity_escapes_preserve_live_returns_at_legal_irq_boundaries() {
+    let mut checked = 0;
+    for caller in [0xda72u16, 0xdaa3, 0xdaac, 0xdab5, 0xdae9, 0xdaec] {
+        for limit in [0u8, 1, 2] {
+            let (mut baseline, mut cpu) = seed_upper_call(caller);
+            baseline.bus.mem[0xc064] = limit;
+            baseline.bus.mem[0xc434 + 20..0xc434 + 23].fill(0x17);
+            baseline.bus.mem[0xc071] = limit;
+            let mut snapshots = Vec::new();
+            for _ in 0..10_000 {
+                if cpu.pc == 0xcfff {
+                    break;
+                }
+                assert_eq!(baseline.bus.mem[0xcb1d], 0);
+                if cpu.iff1 && cpu.ei_pending == 0 {
+                    snapshots.push((cpu, baseline.bus.mem.to_vec()));
+                }
+                cpu.step(&mut baseline).unwrap();
+            }
+            assert_eq!(cpu.pc, 0xcfff);
+            assert_eq!(baseline.bus.mem[0xcb02], 0xfd);
+            assert_eq!(&baseline.bus.mem[0xcb76..0xcb78], &0xd300u16.to_le_bytes());
+            let expected = cpu;
+            for (mut cpu, memory) in snapshots {
+                let mut machine = Assembled::new();
+                machine.bus.mem.copy_from_slice(&memory);
+                machine.interrupt(&mut cpu);
+                for _ in 0..10_000 {
+                    if cpu.pc == 0xcfff {
+                        break;
+                    }
+                    assert_eq!(machine.bus.mem[0xcb1d], 0, "caller={caller:04x}");
+                    assert!(cpu.sp >= 0xde40);
+                    cpu.step(&mut machine).unwrap();
+                }
+                assert_eq!(
+                    (cpu.pc, cpu.sp, cpu.a, cpu.d, cpu.e),
+                    (expected.pc, expected.sp, expected.a, expected.d, expected.e)
+                );
+                assert_eq!(machine.bus.mem[0xcb03], baseline.bus.mem[0xcb03]);
+                assert_eq!(machine.bus.mem[0xcb02], 0xfd);
+                assert_eq!(&machine.bus.mem[0xcb76..0xcb78], &0xd300u16.to_le_bytes());
+                checked += 1;
+            }
+        }
+    }
+    eprintln!("weapon capacity IRQ boundaries={checked}");
+    assert!(checked > 1000);
+}
+
+#[test]
+#[ignore = "requires CV1_ESCAPE_PROJECT with projectile cleanup annotations"]
+fn projectile_cleanup_preserves_arranged_returns_at_legal_irq_boundaries() {
+    let mut checked = 0;
+    for selector in [1u8, 6, 7] {
+        let mut baseline = Assembled::new();
+        baseline.seed_canonical_path();
+        let mut cpu = baseline.enter("L_DBA1", true);
+        cpu.d = 20;
+        cpu.e = 0;
+        baseline.bus.mem[0xc049] = 0;
+        baseline.bus.mem[0xc584 + 20] = selector;
+        baseline.bus.mem[0xc46c + 20] = if selector == 1 { 4 } else { 1 };
+        baseline.bus.mem[0xc568 + 20] = 1;
+        baseline.bus.mem[0xc434 + 20] = 0x17;
+        let stop = baseline.symbols["L_E92B"].1;
+        let mut snapshots = Vec::new();
+        for _ in 0..5000 {
+            if cpu.pc == stop {
+                break;
+            }
+            assert_eq!(baseline.bus.mem[0xcb1d], 0);
+            if cpu.iff1 && cpu.ei_pending == 0 {
+                snapshots.push((cpu, baseline.bus.mem.to_vec()));
+            }
+            cpu.step(&mut baseline).unwrap();
+        }
+        assert_eq!((cpu.pc, cpu.a, cpu.d), (stop, 0xe9, 20));
+        assert_eq!(baseline.bus.mem[0xcb02], 0xf4);
+        assert_eq!(&baseline.bus.mem[0xcb76..0xcb78], &0xd304u16.to_le_bytes());
+        assert_eq!(baseline.bus.mem[0xc448], 0);
+        let expected = cpu;
+        for (mut cpu, memory) in snapshots {
+            let mut machine = Assembled::new();
+            machine.bus.mem.copy_from_slice(&memory);
+            machine.interrupt(&mut cpu);
+            step_to(&mut machine, &mut cpu, stop);
+            assert_eq!(machine.bus.mem[0xcb1d], 0);
+            assert_eq!(
+                (cpu.pc, cpu.sp, cpu.a, cpu.d, cpu.e),
+                (expected.pc, expected.sp, expected.a, expected.d, expected.e)
+            );
+            assert_eq!(machine.bus.mem[0xcb03], baseline.bus.mem[0xcb03]);
+            assert_eq!(machine.bus.mem[0xcb02], 0xf4);
+            assert_eq!(&machine.bus.mem[0xcb76..0xcb78], &0xd304u16.to_le_bytes());
+            assert_eq!(machine.bus.mem[0xc448], 0);
+            checked += 1;
+        }
+    }
+    eprintln!("projectile cleanup IRQ boundaries={checked}");
+    assert!(checked > 300);
+}
+
+#[test]
+#[ignore = "requires CV1_ESCAPE_PROJECT with weapon-capacity return annotations"]
+fn successful_weapon_allocation_returns_to_its_caller_without_consuming_the_outer_frame() {
+    for caller in [0xda72u16, 0xdaa3, 0xdaac, 0xdab5, 0xdae9, 0xdaec] {
+        for first_free in [20u8, 21, 22] {
+            let (mut machine, mut cpu) = seed_upper_call(caller);
+            machine.bus.mem[0xc064] = 2;
+            machine.bus.mem[0xc448..0xc44b].fill(0x17);
+            machine.bus.mem[0xc434 + first_free as usize] = 0;
+            machine.bus.mem[0xc071] = 10;
+            let target = machine.symbols[if caller == 0xdaec { "L_DA7B" } else { "L_DA90" }];
+            for _ in 0..1000 {
+                if (machine.bus.mem[0xfffe], cpu.pc) == target {
+                    break;
+                }
+                cpu.step(&mut machine).unwrap();
+            }
+            assert_eq!((machine.bus.mem[0xfffe], cpu.pc), target);
+            assert_eq!(machine.bus.mem[0xcb02], 0xfb);
+            let stop = u16::from_le_bytes([machine.bus.mem[0xd305], machine.bus.mem[0xd306]]);
+            let bank = machine.bus.mem[0xd307] & 0x3f;
+            step_to(&mut machine, &mut cpu, stop);
+            assert_eq!((machine.bus.mem[0xfffe], cpu.pc), (bank, stop));
+            assert_eq!(machine.bus.mem[0xcb1d], 0);
+            assert_eq!(machine.bus.mem[0xcb02], 0xfd);
+            assert_eq!(&machine.bus.mem[0xcb76..0xcb78], &0xd304u16.to_le_bytes());
+            if caller == 0xdaec {
+                assert_eq!(machine.bus.mem[0xc071], 5);
+            } else {
+                assert_eq!(cpu.d, first_free);
+                assert_eq!(machine.bus.mem[0xc04e], first_free);
+                assert_eq!(machine.bus.mem[0xc071], 10);
+            }
+        }
+    }
 }
 
 fn find_unique_code(machine: &Assembled, bytes: &[u8]) -> (u8, u16) {

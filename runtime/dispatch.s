@@ -509,7 +509,9 @@ _tr_rts_underflow:
 ; stack data before returning through the caller below it. Translated JSRs keep
 ; continuations in TR_RET rather than at $C100+S, so the escape edge calls here
 ; with BC equal to the original 6502 JSR-pushed return PC. Pop one TR_RET frame,
-; push BCH then BCL using 6502 stack order, and return with A and DE preserved.
+; materialize BCH/BCL only when that frame does not already own guest bytes.
+; Arranged returns are validated and retained for the callee's PLA pair.
+; Return with A and DE preserved.
 ; Invalid/empty translated stacks fail closed with marker $E5.
 .ifdef CONSUMED_RETURN_ESCAPE
 ; BC is the expected return still LIVE above guest S, immediately before a
@@ -603,6 +605,16 @@ _tr_escape_pop_frame:
 .ifdef CONSUMED_RETURN_ESCAPE
   ld   a, ($d471)
   bit  7, a
+  jp   nz, _tr_escape_discard_consumed
+  ; A dispatcher may already own a live arranged return. Dropping its
+  ; software continuation must not push a duplicate onto the guest stack.
+  inc  hl
+  inc  hl
+  inc  hl
+  bit  6, (hl)
+  dec  hl
+  dec  hl
+  dec  hl
   jp   nz, _tr_escape_discard_consumed
 .endif
   ld   (TR_RET_PTR), hl       ; publish the discarded frame

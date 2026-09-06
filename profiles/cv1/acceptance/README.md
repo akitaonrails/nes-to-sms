@@ -29,6 +29,14 @@ CV1_DAGGER_NES=/path/to/input.nes cargo test -p nes_to_sms \
 
 ## Matched walking and heart routes
 
+Weapon-slot exhaustion and cross catch/expiry have additional source-oracle,
+assembled interrupt-boundary and controlled actual-core coverage. See
+[`cv1-weapon-freeze-2026-09-06.md`](../../../docs/cv1-weapon-freeze-2026-09-06.md)
+for before/after results, commands and fixture limitations. Interactive testing
+should include repeated throws while a projectile remains active, cross catches,
+and continued movement after hearts run out. Start a fresh game after updating
+the ROM; old emulator states retain the previous translated stack layout.
+
 The accepted sprite-zero handshake correction measures 26.22/29.26 walking/
 heart updates per second at numeric `500`; this is still below normal NES
 speed. Its original-code and assembled protocol checks can be rerun with:

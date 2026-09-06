@@ -271,6 +271,15 @@ fn emit_translated_return_escape(p: &mut Program) {
     p.ld_a_abs(0xD471);
     p.bit_a(7);
     p.jp_nz("_validation_tr_escape_discard_consumed");
+    p.inc_hl();
+    p.inc_hl();
+    p.inc_hl();
+    p.ld_a_hl_ptr();
+    p.bit_a(6);
+    p.dec_hl();
+    p.dec_hl();
+    p.dec_hl();
+    p.jp_nz("_validation_tr_escape_discard_consumed");
     p.ld_abs_hl(0xCB76);
     p.label("_validation_tr_escape_materialize");
     p.ld_a_abs(SHADOW_S);
