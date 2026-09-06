@@ -1010,6 +1010,24 @@ return_addr = 0xe9e5
 stack_bytes_already_consumed = true
 consume_at = 0xee9f
 
+# The upper-exit path discards the containing ordinary JSR934C return before
+# setting state8 and returning through the next caller. Original oracle checks
+# all three callers, including no-input paths: the live words differ.
+[[return_consume]]
+at = 0x9397
+bank = 6
+calls = [
+    { caller = 0xcefa, target = 0x934c },
+    { caller = 0xc604, target = 0x934c },
+    { caller = 0xc61a, target = 0x934c },
+]
+
+# Fixed F552 tail-jumps here when area28 == 2. This is a real interior
+# entry in the bank6 room-setup body, not an inferred recovery target.
+[[bank_entry]]
+bank = 6
+addr = 0x80e7
+
 [[function]]
 addr = 0xe9e5
 name = "func_E9E5"

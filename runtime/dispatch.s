@@ -529,6 +529,24 @@ _tr_consumed_save_mode:
   ld   ($d471), a
   jr   _tr_escape_find_frame
 .endif
+.ifdef MATERIALIZED_CALL_RETURNS
+; Ordinary profiled JSR: expose its actual caller+2 bytes before the callee
+; can inspect/discard them. No software owner is popped here. The caller
+; subsequently allocates its existing bit40 continuation frame. IRQs can use
+; only guest stack below the atomically published S; live return bytes remain.
+rt_translated_call_materialize:
+  push af
+  ld   a, i
+  di
+  jp   po, _tr_materialize_disabled
+  ld   a, $01
+  jr   _tr_materialize_mode
+_tr_materialize_disabled:
+  xor  a
+_tr_materialize_mode:
+  ld   ($d471), a
+  jp   _tr_escape_materialize
+.endif
 rt_translated_return_escape:
   push af
   ld   a, i                  ; P/V = prior IFF2
@@ -588,7 +606,7 @@ _tr_escape_pop_frame:
   jp   nz, _tr_escape_discard_consumed
 .endif
   ld   (TR_RET_PTR), hl       ; publish the discarded frame
-
+_tr_escape_materialize:
   ld   a, ($cb02)            ; old 6502 S
   ld   l, a
   ld   h, $c1

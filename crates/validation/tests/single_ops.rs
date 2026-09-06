@@ -19,6 +19,8 @@ fn lift(prg: &[u8], at: u16, len: u16, name: &str) -> ir::Routine {
             end: at + len,
             entry_name: name.into(),
             jump_engine_sites: Vec::new(),
+            return_consume_sites: Vec::new(),
+            materialized_call_sites: Vec::new(),
             return_escape_sites: Vec::new(),
             extra_label_pcs: Vec::new(),
         },

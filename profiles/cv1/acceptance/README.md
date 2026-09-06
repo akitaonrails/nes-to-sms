@@ -117,6 +117,34 @@ not a new frozen acceptance route or proof of completing the room/stage.
 The historical `ENEMY` HUD label is present throughout ordinary gameplay;
 its presence does not establish a boss encounter.
 
+## Second stair, upper exit and next-room play
+
+The separate `core-upper-exit.toml` contract extends the unchanged 1,306-tick
+indoor route from boot. It backtracks to the first staircase, climbs both
+stairs, crosses the upper exit, then requires next-room gameplay for at least
+120 updates and 40 pixels of movement. Repeated callbacks without advancing
+game ticks cannot confirm completion.
+
+```sh
+docker run --rm --network none --user "$(id -u):$(id -g)" \
+  --entrypoint python3 -v "$PWD:/work" -w /work nes-to-sms-retroarch \
+  tools/core_upper_exit.py out/emulator-host/genesis_plus_gx_libretro.so \
+  out/cv1/sms.sms profiles/cv1/acceptance/core-upper-exit.toml \
+  out/cv1/acceptance/upper-exit
+```
+
+The observer rejects traps, death, stalls, unexpected states and counter
+discontinuities. One source-verified counter reset is required during the
+upper-exit transition; it earns no elapsed-tick credit. Merely changing area
+or displaying `STAGE 02` is insufficient. This route does not prove a boss
+fight or complete-stage fidelity.
+
+Use a fresh output directory. Logs retain hashes, effective core options,
+every video callback and transition screenshots, including failure evidence.
+Runs never load emulator states or alter guest RAM. Screenshots are not
+restorable states; GPGX serialization alone omits cartridge SRAM, so it is
+not a valid substitute for the from-boot route.
+
 ## Canonical NES reference inputs
 
 `stage1-smoke.buttons` and `heart-smoke.buttons` record reference-NES input

@@ -1,0 +1,109 @@
+# Input-only second-stair/upper-exit route from boot; not stage/boss coverage.
+version = 1
+observations = { actor_mode = 0x046c, health = 0x0045 }
+fields = { tick = "game_tick", trap = "trap", world = "player_world_x", camera = "camera_x", screen = "player_x" }
+alive = { health = { minimum = 1, maximum = 127 } }
+fatal = { actor_mode = [8], state = [6] }
+confirmation = { samples = 3, position_tolerance = 2 }
+
+[prefix]
+profile = "core-traversal.toml"
+sha256 = "8f8d603dc399ff22c781b8d9dbf166785c9e014c8ad483a609bc6f9030ae0cfe"
+runner_sha256 = "19cd5ca34e20dde2190d4e71b114908207add5aa2a3ddba3ce65af83e00d5ac1"
+mode = "indoor"
+
+[limits]
+physical_frames = 24000
+extra_ticks = 3200
+stall_frames = 300
+counter_delta = 8
+capture_every = 120
+wall_seconds = 300
+
+[reset]
+# Fixed C3F2/C3F4 writes1A=1 during state8/substate1; C3F8→C365 then
+# increments19. The reset can be sampled before or after that final store.
+phase = "transition"
+previous = { state = 8, substate = 1, area = 1 }
+current = { state = 8, substate = [1, 2], area = 1 }
+destination = 1
+count = 1
+
+[[phases]]
+name = "backtrack"
+held = ["left"]
+pulse = ["a"]
+pulse_period = 60
+pulse_duration = 6
+allowed = { state = [5], substate = [6], area = [1] }
+finish = { player_world_x = { maximum = 600 } }
+minimum_ticks = 0
+maximum_ticks = 300
+
+[[phases]]
+name = "first-climb"
+held = ["up", "right"]
+allowed = { state = [5], substate = [6], area = [1] }
+seen = { actor_mode = 4 }
+# Begin defended walking at the actual upper platform, not after an arbitrary
+# further450 ticks of stair input. The original actor transition proves ascent.
+finish = { actor_mode = 0, player_y = { maximum = 112 } }
+minimum_ticks = 1
+maximum_ticks = 460
+
+[[phases]]
+name = "approach"
+held = ["right"]
+pulse = ["a"]
+pulse_period = 60
+pulse_duration = 6
+allowed = { state = [5], substate = [6], area = [1] }
+finish = { player_world_x = { minimum = 1286 } }
+minimum_ticks = 0
+# The observed stair top is world751,113px before the old450-tick endpoint.
+# Reallocate its unused movement budget here; global bounds stay unchanged.
+maximum_ticks = 1150
+
+[[phases]]
+name = "second-climb"
+held = ["up", "right"]
+allowed = { state = [5], substate = [6], area = [1] }
+# Bank6 9C60 sets actor4; a real ascent must precede upper-platform actor0.
+seen = { actor_mode = 4 }
+finish = { actor_mode = 0, player_y = { maximum = 112 } }
+minimum_ticks = 1
+maximum_ticks = 450
+
+[[phases]]
+name = "upper-exit"
+held = ["right"]
+pulse = ["a"]
+pulse_period = 60
+pulse_duration = 6
+# 9399 clears19 before93A2 writes18=8, so05/00 may be sampled briefly.
+allowed = { state = [5, 8], substate = [0, 6], area = [1] }
+finish = { state = 8, substate = 0, actor_mode = 0, player_world_x = { minimum = 1514, maximum = 1518 }, player_y = 96 }
+minimum_ticks = 1
+maximum_ticks = 450
+
+[[phases]]
+name = "transition"
+held = []
+allowed = { state = [8, 5], area = [1, 2] }
+# Fixed C455/C45A increments28 for right exit; C994/C9A2 clears actor;
+# C46B..C471 writes state05/06. Neither area change alone nor08 passes.
+finish = { state = 5, substate = 6, area = 2, actor_mode = 0 }
+minimum_ticks = 0
+maximum_ticks = 600
+
+[[phases]]
+name = "next-room-play"
+held = ["right"]
+pulse = ["a"]
+pulse_period = 45
+pulse_duration = 6
+allowed = { state = [5], substate = [6], area = [2] }
+finish = { actor_mode = 0 }
+minimum_ticks = 120
+maximum_ticks = 240
+minimum_advance = 40

@@ -26,9 +26,37 @@ See [the measured correction and verification](cv1-performance-reassessment.md#m
 
 Walking, heart pickup, repeated daggers and first-stair continuation pass;
 continuous HUD/known-stripe checks remain clean, and rebuilt SMB is unchanged.
-This is not full speed or full-stage completion. A deliberate second-stair
-route exposes a pre-existing upper-exit return-stack failure on both old and
-optimized builds; it remains separate from this accepted performance change.
+This is not full speed or full-stage completion. The separate upper-exit
+repair below preserves these gains: 26.19/29.26 updates/s at 500%, with
+walking at 250% unchanged at 12.39 updates/s.
+
+### Upper exit and playable next room
+
+The original bank-6 `$9397/$9398` PLA pair discards the actual return of
+one of three ordinary callers (`$CEFA`, `$C604`, `$C61A`). Previously those
+bytes were absent from the guest stack, leaving the software continuation
+unbalanced and eventually trapping on target `$0000`. The profile-driven
+[`return_consume` contract](return-escape-contract.md) materializes the real
+caller return, then retires ownership before the unchanged PLA pair. Normal
+returns still clean up their own bytes; branched suffixes remain original code.
+
+The next room exposed a separate missing bank-6 `$80E7` interior entry,
+reached by the original area-2 jump at `$F552`. Only that source-proven entry
+was added. Neither repair weakens unresolved-target traps.
+
+The [from-boot upper-exit route](../profiles/cv1/acceptance/README.md#second-stair-upper-exit-and-next-room-play)
+now requires both ascents, the transition and continued next-room control.
+It passes 122 next-room updates and 56 pixels of movement, alive and trap-free.
+The original transition explicitly resets its counter; the observer accepts
+exactly one qualifying discontinuity and gives it no elapsed-tick credit.
+Ordinary wraps and increments cannot masquerade as that reset.
+
+Focused checks cover all three original callers, normal returns, live-byte
+ownership, stack wrapping and 588 legal assembled IRQ boundaries. The worst
+helper/interrupted-instruction/HUD-service interval is 844T against a 2,052T
+allowance. Walking, hearts, repeated daggers, stair/death/respawn soak and
+continuous HUD/known-stripe checks pass; SMB output remains byte-identical.
+This establishes the tested next room, not a boss fight or complete game.
 
 ### Earlier coherent-renderer and return-stack checkpoint
 

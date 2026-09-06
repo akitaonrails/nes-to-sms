@@ -1113,10 +1113,29 @@ impl Program {
     /// $D300-$D3FB. This never uses the native Z80 call/ret stack and never
     /// routes through `rt_far_gate_cont`.
     pub fn translated_call(&mut self, label: &str) {
+        self.translated_call_inner(label, None);
+    }
+
+    /// A declared ordinary JSR whose real guest return may be consumed as data.
+    /// Runtime RTS already retires bit40-owned guest bytes on normal return.
+    pub fn translated_materialized_call(&mut self, label: &str, return_addr: u16) {
+        self.translated_call_inner(label, Some(return_addr));
+    }
+
+    fn translated_call_inner(&mut self, label: &str, return_addr: Option<u16>) {
         let cont = self.fresh_label("tr_cont");
         let overflow = self.fresh_label("tr_call_overflow");
 
-        self.emit_translated_call_frame(&cont, &overflow, None, 0);
+        if let Some(addr) = return_addr {
+            self.ld_bc_imm(addr);
+            self.call("rt_translated_call_materialize");
+        }
+        self.emit_translated_call_frame(
+            &cont,
+            &overflow,
+            None,
+            if return_addr.is_some() { 0x40 } else { 0 },
+        );
         if self.label_section.get(label) == Some(&self.current) {
             self.ld_a_hl_ptr();
             self.jp(label);

@@ -136,7 +136,10 @@ pub fn classify_routine(routine: &Routine) -> Option<String> {
                 // is validated end-to-end in trace_sms, not per-routine.
                 return Some("jump engine dispatch".into());
             }
-            Op::ReturnEscape { .. } => {
+            Op::ReturnEscape { .. }
+            | Op::ReturnEscapeConsume { .. }
+            | Op::ReturnConsume { .. }
+            | Op::MaterializedJsr { .. } => {
                 // The isolated harness has no caller continuation frame to
                 // discard. Exercise this profile edge end-to-end instead.
                 return Some("translated return escape".into());

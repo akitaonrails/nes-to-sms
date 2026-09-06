@@ -95,6 +95,7 @@ pub mod runtime_symbols {
     pub const TRANSLATED_RTS: &str = "rt_translated_rts";
     pub const TRANSLATED_RETURN_ESCAPE: &str = "rt_translated_return_escape";
     pub const TRANSLATED_RETURN_CONSUME: &str = "rt_translated_return_consume";
+    pub const TRANSLATED_CALL_MATERIALIZE: &str = "rt_translated_call_materialize";
     pub const BANKED_TAIL_DISPATCH: &str = "rt_banked_tail_dispatch";
     pub const BRK: &str = "rt_brk";
     pub const RTI: &str = "rt_rti";
@@ -1779,6 +1780,7 @@ fn is_flag_boundary(op: &ir::Op) -> bool {
         Op::Rts
             | Op::Rti
             | Op::Jsr { .. }
+            | Op::MaterializedJsr { .. }
             | Op::JsrUnknown { .. }
             | Op::JumpEngineCall { .. }
             | Op::Jmp { .. }
@@ -1809,6 +1811,7 @@ pub fn routine_incoming_flag_reads(ops: &[ir::Op]) -> u8 {
         if matches!(
             op,
             Op::Jsr { .. }
+                | Op::MaterializedJsr { .. }
                 | Op::JsrUnknown { .. }
                 | Op::JumpEngineCall { .. }
                 | Op::JmpIndirect { .. }
@@ -1827,6 +1830,7 @@ pub fn routine_incoming_flag_reads(ops: &[ir::Op]) -> u8 {
                 | Op::ReturnEscape { .. }
                 | Op::JmpIndirect { .. }
                 | Op::Jsr { .. }
+                | Op::MaterializedJsr { .. }
                 | Op::JsrUnknown { .. }
                 | Op::JumpEngineCall { .. }
                 | Op::Rts
@@ -1888,7 +1892,8 @@ fn nz_shadow_live_after(
         // a downstream shadow reader / flag-return convention → live.
         if is_flag_boundary(op) {
             match op {
-                Op::Jsr { target } if callee_flag_reads(target, reads) & (F_N | F_Z) == 0 => {}
+                Op::Jsr { target } | Op::MaterializedJsr { target, .. }
+                    if callee_flag_reads(target, reads) & (F_N | F_Z) == 0 => {}
                 _ => return true,
             }
         }
@@ -1925,7 +1930,7 @@ fn flags_live_after(
         match op {
             // A direct call is transparent if the callee reads none of the
             // pending flags: execution returns and continues past it.
-            Op::Jsr { target } => {
+            Op::Jsr { target } | Op::MaterializedJsr { target, .. } => {
                 if callee_flag_reads(target, reads) & pending != 0 {
                     return true;
                 }
@@ -4735,6 +4740,54 @@ pub fn lower_routine(
                 program.call(TRANSLATED_RETURN_CONSUME);
             }
 
+            Op::ReturnConsume { return_addrs } => {
+                if return_addrs.is_empty() || opts.profile.is_some_and(|p| p.native_calls()) {
+                    return Err(LowerError::UnsupportedMapperStore {
+                        pc: None, reason: "return consumption requires software calls and expected return addresses".into(),
+                    });
+                }
+                let valid = program.fresh_label("consume_live_valid");
+                program.push_af();
+                program.ld_a_abs(0xCB02);
+                program.inc_a();
+                program.ld_l_a();
+                program.ld_h_imm(0xC1);
+                program.ld_c_hl_ptr();
+                program.inc_l();
+                program.ld_b_hl_ptr();
+                for addr in return_addrs {
+                    let next = program.fresh_label("consume_live_next");
+                    program.ld_a_b();
+                    program.cp_imm((addr >> 8) as u8);
+                    program.jr_nz(&next);
+                    program.ld_a_c();
+                    program.cp_imm(*addr as u8);
+                    program.jp_z(&valid);
+                    program.label(&next);
+                }
+                program.pop_af();
+                program.ld_a_imm(0xE5);
+                program.ld_abs_a(0xCB1D);
+                program.jp("rt_unresolved_jsr_flash");
+                program.label(&valid);
+                program.pop_af();
+                program.call(TRANSLATED_RETURN_CONSUME);
+            }
+
+            Op::MaterializedJsr {
+                target,
+                return_addr,
+            } => {
+                if target.starts_with("rt_") || opts.profile.is_some_and(|p| p.native_calls()) {
+                    return Err(LowerError::UnsupportedMapperStore {
+                        pc: None,
+                        reason: "materialized JSR requires a translated software-call target"
+                            .into(),
+                    });
+                }
+                program.translated_materialized_call(target, *return_addr);
+            }
+
             Op::JmpIndirect { addr } => {
                 program.ld_hl_imm(*addr);
                 program.jp(INDIRECT_JMP);
@@ -5137,6 +5190,7 @@ mod tests {
             TRANSLATED_RTS,
             TRANSLATED_RETURN_ESCAPE,
             TRANSLATED_RETURN_CONSUME,
+            TRANSLATED_CALL_MATERIALIZE,
             BANKED_TAIL_DISPATCH,
             "rt_translated_call_gate",
             "rt_translated_tail_gate",
@@ -6256,6 +6310,47 @@ runtime_label = "rt_replacement"
         assert!(build.asm.contains("call rt_translated_return_escape"));
         assert!(build.asm.contains("ld bc,escape_target"));
         assert!(build.asm.contains("jp rt_translated_tail_gate"));
+    }
+
+    #[test]
+    fn return_pair_contract_rejects_empty_native_and_runtime_call_targets() {
+        let native = profile::load_from_str("[rom]\nname=\"test\"\nmapper=0\nprg_kib=32\nchr_kib=8\n[translation]\nstack_discipline=\"native\"\n").unwrap();
+        for (op, prof) in [
+            (
+                Op::ReturnConsume {
+                    return_addrs: vec![],
+                },
+                None,
+            ),
+            (
+                Op::ReturnConsume {
+                    return_addrs: vec![0x8002],
+                },
+                Some(&native),
+            ),
+            (
+                Op::MaterializedJsr {
+                    target: "L_8100".into(),
+                    return_addr: 0x8002,
+                },
+                Some(&native),
+            ),
+            (
+                Op::MaterializedJsr {
+                    target: "rt_test".into(),
+                    return_addr: 0x8002,
+                },
+                None,
+            ),
+        ] {
+            let routine = make_routine("pair", vec![op]);
+            let mut program = z80_emit::Program::new();
+            let opts = LowerOptions {
+                profile: prof,
+                ..LowerOptions::default()
+            };
+            assert!(lower_routine(&mut program, &routine, &opts).is_err());
+        }
     }
 
     #[test]

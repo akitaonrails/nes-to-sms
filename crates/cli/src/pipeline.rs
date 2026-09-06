@@ -252,7 +252,44 @@ fn check_consume_entries(
             )));
         }
     }
+    for site in &prof.return_consumes {
+        if let Some(&(bank, addr)) = entries.iter().find(|(bank, addr)| {
+            *addr == site.at + 1
+                && (*addr >= 0xc000 || prof.rom.mapper == 0 || bank.is_none() || *bank == site.bank)
+        }) {
+            return Err(Error::Diagnostic(format!(
+                "return_consume ${:04X} has second-PLA bypass entry ${addr:04X} in bank {bank:?}",
+                site.at
+            )));
+        }
+    }
     Ok(())
+}
+
+fn return_consume_sites(prof: &profile::Profile, bank: Option<u8>) -> Vec<ir::ReturnConsumeSite> {
+    prof.return_consumes
+        .iter()
+        .filter(|s| s.bank == bank)
+        .map(|s| ir::ReturnConsumeSite {
+            at: s.at,
+            return_addrs: s.calls.iter().map(|call| call.caller + 2).collect(),
+        })
+        .collect()
+}
+
+fn materialized_call_sites(
+    prof: &profile::Profile,
+    bank: Option<u8>,
+) -> Vec<ir::MaterializedCallSite> {
+    prof.return_consumes
+        .iter()
+        .flat_map(|s| &s.calls)
+        .filter(|s| s.bank == bank)
+        .map(|s| ir::MaterializedCallSite {
+            caller: s.caller,
+            target: s.target,
+        })
+        .collect()
 }
 
 /// Re-run discovery until every decoded internal branch label is owned by a
@@ -737,6 +774,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
             entry_name: f.name.clone(),
             jump_engine_sites: jump_engine_sites.clone(),
             return_escape_sites: return_escape_sites.clone(),
+            return_consume_sites: return_consume_sites(&prof, None),
+            materialized_call_sites: materialized_call_sites(&prof, None),
             window_label_prefix: None,
             extra_label_pcs: Vec::new(),
         };
@@ -851,6 +890,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     entry_name: String::new(),
                     jump_engine_sites: bank_jump_engine_sites.clone(),
                     return_escape_sites: bank_return_escape_sites.clone(),
+                    return_consume_sites: return_consume_sites(&prof, Some(bank)),
+                    materialized_call_sites: materialized_call_sites(&prof, Some(bank)),
                     window_label_prefix: (f.addr < 0xC000).then(|| prefix.clone()),
                     extra_label_pcs: Vec::new(),
                 };
@@ -884,6 +925,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     },
                     jump_engine_sites: bank_jump_engine_sites.clone(),
                     return_escape_sites: bank_return_escape_sites.clone(),
+                    return_consume_sites: return_consume_sites(&prof, Some(bank)),
+                    materialized_call_sites: materialized_call_sites(&prof, Some(bank)),
                     window_label_prefix: in_window.then(|| prefix.clone()),
                     extra_label_pcs: extras,
                 };
@@ -936,6 +979,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
             entry_name: f.name.clone(),
             jump_engine_sites: jump_engine_sites.clone(),
             return_escape_sites: return_escape_sites.clone(),
+            return_consume_sites: return_consume_sites(&prof, None),
+            materialized_call_sites: materialized_call_sites(&prof, None),
             window_label_prefix: None,
             extra_label_pcs: extras,
         };
@@ -1041,6 +1086,70 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
     }
 
+    // Standalone pairs have no artificial terminal edge: only the second PLA
+    // cannot be entered directly. Calls and pairs must survive the complete
+    // pipeline, never silently disappear into unsupported/replacement stubs.
+    for site in &prof.return_consumes {
+        let facts = std::iter::once((site.bank, site.at, None)).chain(
+            site.calls
+                .iter()
+                .map(|call| (call.bank, call.caller, Some(call.target))),
+        );
+        for (bank, pc, call_target) in facts {
+            let owners: Vec<_> = routines
+                .iter()
+                .filter(|routine| {
+                    let identity = profile_target_identity(&routine.name).and_then(|(b, _)| b);
+                    identity == bank
+                        && routine.ops.windows(2).any(|ops| {
+                            matches!(&ops[0], ir::Op::Source { pc: source, .. } if *source == pc)
+                                && match (&ops[1], call_target) {
+                                    (ir::Op::ReturnConsume { return_addrs }, None) => {
+                                        *return_addrs
+                                            == site
+                                                .calls
+                                                .iter()
+                                                .map(|c| c.caller + 2)
+                                                .collect::<Vec<_>>()
+                                    }
+                                    (
+                                        ir::Op::MaterializedJsr {
+                                            target,
+                                            return_addr,
+                                        },
+                                        Some(expected),
+                                    ) => {
+                                        *return_addr == pc + 2
+                                            && profile_target_identity(target)
+                                                .is_some_and(|(_, addr)| addr == expected)
+                                    }
+                                    _ => false,
+                                }
+                        })
+                })
+                .collect();
+            if owners.len() != 1 {
+                return Err(Error::Diagnostic(format!(
+                    "return_consume site ${pc:04X} in bank {bank:?} must have one fully lifted owner; found {}. {}",
+                    owners.len(),
+                    lift_failures.join("; ")
+                )));
+            }
+            let owner = owners[0];
+            if prof.replacement_for(owner.entry).is_some()
+                || prof.replacements.iter().any(|r| {
+                    r.addr >= pc && r.addr <= pc + if call_target.is_some() { 2 } else { 1 }
+                })
+            {
+                return Err(Error::Diagnostic(format!(
+                    "return_consume owner {} cannot be replaced",
+                    owner.name
+                )));
+            }
+            consume_owners.insert(owner.name.clone());
+        }
+    }
+
     // Global interior-label dedup: overlapping fixed-region translations
     // (main vs bank-view discoveries) can each emit an interior label for
     // the same NES pc. The translations cover IDENTICAL bytes, so any
@@ -1096,7 +1205,10 @@ pub fn run(args: &Args) -> Result<String, Error> {
             }
             for op in r.ops.iter_mut() {
                 match op {
-                    Op::Jsr { target } | Op::Jmp { target } | Op::ReturnEscape { target, .. } => {
+                    Op::Jsr { target }
+                    | Op::MaterializedJsr { target, .. }
+                    | Op::Jmp { target }
+                    | Op::ReturnEscape { target, .. } => {
                         if let Some(new) = map.get(target) {
                             *target = new.clone();
                         }
@@ -1293,7 +1405,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             emit_translated_routine(program, defined_labels, lower_failures, r, &opts)?;
             if consume_owners.contains(&r.name) && lower_failures.len() != before {
                 return Err(Error::Diagnostic(format!(
-                    "return_escape consuming owner {} failed lowering: {}",
+                    "return_escape/return_consume consuming owner {} failed lowering: {}",
                     r.name,
                     lower_failures[before..].join("; ")
                 )));
@@ -2259,6 +2371,7 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_translated_rts",
     "rt_translated_return_escape",
     "rt_translated_return_consume",
+    "rt_translated_call_materialize",
     "rt_translated_call_gate",
     "rt_translated_tail_gate",
     "rt_far_tail",

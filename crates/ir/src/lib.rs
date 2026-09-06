@@ -306,11 +306,19 @@ pub enum Op {
     ReturnEscapeConsume {
         return_addr: u16,
     },
+    /// Retire one materialized ordinary-call owner before unchanged PLA/PLA.
+    ReturnConsume {
+        return_addrs: Vec<u16>,
+    },
     JmpIndirect {
         addr: u16,
     },
     Jsr {
         target: String,
+    },
+    MaterializedJsr {
+        target: String,
+        return_addr: u16,
     },
     JsrUnknown {
         addr: u16,
@@ -443,6 +451,8 @@ pub struct LiftOptions {
     pub jump_engine_sites: Vec<JumpEngineSite>,
     /// Profile-qualified tail edges that escape one translated call frame.
     pub return_escape_sites: Vec<ReturnEscapeSite>,
+    pub return_consume_sites: Vec<ReturnConsumeSite>,
+    pub materialized_call_sites: Vec<MaterializedCallSite>,
     /// Banked-window lifting (mapper plan M1): when set (e.g. "b0_"),
     /// every label generated for an address inside $8000-$BFFF becomes
     /// `L_b0_XXXX` — the routine's identity is (bank, addr). Fixed-bank
@@ -476,6 +486,18 @@ pub struct ReturnEscapeSite {
     pub consume_at: Option<u16>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReturnConsumeSite {
+    pub at: u16,
+    pub return_addrs: Vec<u16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaterializedCallSite {
+    pub caller: u16,
+    pub target: u16,
+}
+
 impl JumpEngineSite {
     fn table_start(&self) -> usize {
         usize::from(self.caller) + 3
@@ -502,6 +524,8 @@ impl Default for LiftOptions {
             end: 0,
             entry_name: String::new(),
             jump_engine_sites: Vec::new(),
+            return_consume_sites: Vec::new(),
+            materialized_call_sites: Vec::new(),
             return_escape_sites: Vec::new(),
             window_label_prefix: None,
             extra_label_pcs: Vec::new(),
@@ -556,7 +580,8 @@ pub fn mark_rts_dispatch(ops: &mut [Op]) -> usize {
             | Op::BranchIf { .. }
             | Op::Jmp { .. }
             | Op::ReturnEscape { .. }
-            | Op::Jsr { .. } => unmatched = 0,
+            | Op::Jsr { .. }
+            | Op::MaterializedJsr { .. } => unmatched = 0,
             Op::Rts => {
                 if unmatched >= 2 {
                     *op = Op::RtsDispatch;
@@ -893,6 +918,12 @@ fn lift_insn(
                     }];
                 }
                 let lbl = record_target(target, branch_labels, external_calls);
+                if let Some(site) = opts.materialized_call_sites.iter().find(|s| s.caller == pc) {
+                    return vec![Op::MaterializedJsr {
+                        target: lbl,
+                        return_addr: site.caller + 2,
+                    }];
+                }
                 return vec![Op::Jsr { target: lbl }];
             }
         }
@@ -1331,6 +1362,80 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
         }
     }
 
+    for site in &opts.materialized_call_sites {
+        if site.caller >= opts.start && site.caller < opts.end {
+            let insn = decode_at(prg, site.caller, cpu_to_prg_offset(site.caller).unwrap())
+                .map_err(|_| LiftError::Truncated { pc: site.caller })?;
+            if insn.mnemonic != Mnemonic::JSR
+                || insn.operand != Operand::Addr(site.target)
+                || site.caller.checked_add(3).is_none_or(|end| end > opts.end)
+            {
+                return Err(LiftError::Decode(format!(
+                    "materialized call ${:04X}: expected complete JSR/target",
+                    site.caller
+                )));
+            }
+        }
+    }
+    for site in &opts.return_consume_sites {
+        let last = site
+            .at
+            .checked_add(1)
+            .ok_or_else(|| LiftError::Decode("return_consume pair wraps".into()))?;
+        if site.at >= opts.end || last < opts.start {
+            continue;
+        }
+        if site.at < opts.start
+            || last >= opts.end
+            || site.return_addrs.is_empty()
+            || all_targets.contains(&last)
+        {
+            return Err(LiftError::Decode(format!(
+                "return_consume ${:04X}: incomplete pair or bypass entry",
+                site.at
+            )));
+        }
+        for pc in [site.at, last] {
+            let insn = decode_at(prg, pc, cpu_to_prg_offset(pc).unwrap())
+                .map_err(|_| LiftError::Truncated { pc })?;
+            if insn.mnemonic != Mnemonic::PLA || insn.size != 1 {
+                return Err(LiftError::Decode(format!(
+                    "return_consume ${:04X}: expected PLA/PLA",
+                    site.at
+                )));
+            }
+        }
+        let label = label_for_prefixed(last, opts.window_label_prefix.as_deref());
+        if opts.jump_engine_sites.iter().any(|engine| {
+            engine.targets.contains(&label) || engine.return_target.as_ref() == Some(&label)
+        }) {
+            return Err(LiftError::Decode(format!(
+                "return_consume ${:04X}: dispatch bypasses first PLA",
+                site.at
+            )));
+        }
+        // JSR destinations do not normally become intra-routine labels.
+        // Inspect them without changing default discovery or generated bytes.
+        let mut scan = opts.start;
+        while scan < opts.end {
+            let insn = decode_at(prg, scan, cpu_to_prg_offset(scan).unwrap())
+                .map_err(|_| LiftError::Truncated { pc: scan })?;
+            if insn.mnemonic == Mnemonic::JSR && insn.operand == Operand::Addr(last) {
+                return Err(LiftError::Decode(format!(
+                    "return_consume ${:04X}: JSR bypasses first PLA",
+                    site.at
+                )));
+            }
+            scan = if let Some(engine) = opts.jump_engine_sites.iter().find(|s| s.caller == scan) {
+                u16::try_from(engine.table_end().unwrap_or(usize::from(opts.end)))
+                    .map_err(|_| LiftError::Decode("return_consume dispatch range wraps".into()))?
+            } else {
+                scan.checked_add(u16::from(insn.size))
+                    .ok_or_else(|| LiftError::Decode("return_consume range wraps".into()))?
+            };
+        }
+    }
+
     // An early software pop is safe only when every route through the
     // consuming block enters before its first PLA. Matching bytes alone is
     // insufficient: a cross-routine/dispatch entry could skip the transfer.
@@ -1455,6 +1560,11 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
                 return_addr: site.return_addr,
             });
         }
+        if let Some(site) = opts.return_consume_sites.iter().find(|site| site.at == pc) {
+            ops.push(Op::ReturnConsume {
+                return_addrs: site.return_addrs.clone(),
+            });
+        }
 
         // Lift
         let lifted = lift_insn(
@@ -1569,12 +1679,80 @@ mod tests {
             entry_name: format!("L_{cpu_start:04X}"),
             extra_label_pcs: Vec::new(),
             jump_engine_sites: Vec::new(),
+            return_consume_sites: Vec::new(),
+            materialized_call_sites: Vec::new(),
             return_escape_sites: Vec::new(),
         };
         lift_range(&prg, &opts).expect("lift failed")
     }
 
     // ------ classify_addr tests ------
+
+    #[test]
+    fn materialized_calls_and_adjacent_consumption_preserve_original_control_flow() {
+        let prg = make_prg_at(0x8000, &[0x20, 0, 0x81, 0x60]);
+        let mut opts = LiftOptions {
+            start: 0x8000,
+            end: 0x8004,
+            materialized_call_sites: vec![MaterializedCallSite {
+                caller: 0x8000,
+                target: 0x8100,
+            }],
+            ..LiftOptions::default()
+        };
+        let call = lift_range(&prg, &opts).unwrap();
+        assert!(call.ops.iter().any(|op| matches!(op, Op::MaterializedJsr { target, return_addr: 0x8002 } if target == "L_8100")));
+        opts.materialized_call_sites[0].target = 0x8200;
+        assert!(lift_range(&prg, &opts).is_err());
+        opts.materialized_call_sites[0].target = 0x8100;
+        opts.end = 0x8002;
+        assert!(lift_range(&prg, &opts).is_err());
+
+        let code = [0x68, 0x68, 0xa9, 0, 0xd0, 2, 0xa9, 1, 0x60];
+        let prg = make_prg_at(0x8100, &code);
+        let mut opts = LiftOptions {
+            start: 0x8100,
+            end: 0x8109,
+            return_consume_sites: vec![ReturnConsumeSite {
+                at: 0x8100,
+                return_addrs: vec![0x8002],
+            }],
+            ..LiftOptions::default()
+        };
+        let pair = lift_range(&prg, &opts).unwrap();
+        assert_eq!(
+            pair.ops
+                .iter()
+                .filter(|op| matches!(op, Op::ReturnConsume { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            pair.ops.iter().filter(|op| matches!(op, Op::Pla)).count(),
+            2
+        );
+        assert!(pair.ops.iter().any(|op| matches!(op, Op::BranchIf { .. })));
+        assert!(pair.ops.iter().any(|op| matches!(op, Op::Rts)));
+        assert!(
+            !pair
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::ReturnEscape { .. }))
+        );
+        opts.extra_label_pcs = vec![0x8102]; // A suffix entry still returns normally.
+        assert!(lift_range(&prg, &opts).is_ok());
+        opts.extra_label_pcs = vec![0x8101];
+        assert!(lift_range(&prg, &opts).is_err());
+        opts.extra_label_pcs.clear();
+        let mut bad = prg.clone();
+        bad[0x106..0x109].copy_from_slice(&[0x20, 1, 0x81]);
+        assert!(lift_range(&bad, &opts).is_err());
+        bad = prg.clone();
+        bad[0x101] = 0xea;
+        assert!(lift_range(&bad, &opts).is_err());
+        opts.start = 0x8101;
+        assert!(lift_range(&prg, &opts).is_err());
+    }
 
     #[test]
     fn classify_zero_page() {
@@ -1755,6 +1933,8 @@ mod tests {
             end: 0xE7D3,
             entry_name: "L_E7D0".to_string(),
             jump_engine_sites: Vec::new(),
+            return_consume_sites: Vec::new(),
+            materialized_call_sites: Vec::new(),
             return_escape_sites: vec![ReturnEscapeSite {
                 caller: 0xE7D0,
                 target: 0xEC60,
@@ -1806,6 +1986,8 @@ mod tests {
             start: 0x8000,
             end: 0x8008,
             entry_name: "L_8000".into(),
+            return_consume_sites: Vec::new(),
+            materialized_call_sites: Vec::new(),
             return_escape_sites: vec![ReturnEscapeSite {
                 caller: 0x8005,
                 target: 0x9000,
@@ -1919,6 +2101,8 @@ mod tests {
             end: 0xAEFE,
             entry_name: "L_AEF9".to_string(),
             jump_engine_sites: Vec::new(),
+            return_consume_sites: Vec::new(),
+            materialized_call_sites: Vec::new(),
             return_escape_sites: Vec::new(),
             extra_label_pcs: Vec::new(),
         };
@@ -1958,6 +2142,8 @@ mod tests {
                     stack_return_bytes: 0,
                     target_entry_a: Vec::new(),
                 }],
+                return_consume_sites: Vec::new(),
+                materialized_call_sites: Vec::new(),
                 return_escape_sites: Vec::new(),
                 window_label_prefix: None,
                 extra_label_pcs: Vec::new(),
@@ -2001,6 +2187,8 @@ mod tests {
                     stack_return_bytes: 0,
                     target_entry_a: Vec::new(),
                 }],
+                return_consume_sites: Vec::new(),
+                materialized_call_sites: Vec::new(),
                 return_escape_sites: Vec::new(),
                 window_label_prefix: None,
                 extra_label_pcs: Vec::new(),
@@ -2047,6 +2235,8 @@ mod tests {
                 end: 0xE3EC,
                 entry_name: "L_E3E9".into(),
                 jump_engine_sites: Vec::new(),
+                return_consume_sites: Vec::new(),
+                materialized_call_sites: Vec::new(),
                 return_escape_sites: Vec::new(),
                 extra_label_pcs: Vec::new(),
             },
@@ -2191,6 +2381,8 @@ mod tests {
             end: 0x8000,
             entry_name: "test".to_string(),
             jump_engine_sites: Vec::new(),
+            return_consume_sites: Vec::new(),
+            materialized_call_sites: Vec::new(),
             return_escape_sites: Vec::new(),
             extra_label_pcs: Vec::new(),
         };
@@ -2206,6 +2398,8 @@ mod tests {
             end: 0x8000,
             entry_name: "test".to_string(),
             jump_engine_sites: Vec::new(),
+            return_consume_sites: Vec::new(),
+            materialized_call_sites: Vec::new(),
             return_escape_sites: Vec::new(),
             extra_label_pcs: Vec::new(),
         };

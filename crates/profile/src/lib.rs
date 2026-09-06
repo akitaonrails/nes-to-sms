@@ -45,6 +45,11 @@ pub struct Profile {
     /// need an explicit bridge back to the emulated 6502 stack.
     #[serde(default, rename = "return_escape")]
     pub return_escapes: Vec<ReturnEscapeSite>,
+    /// Adjacent PLA pairs that discard one declared ordinary call's return.
+    /// Those calls materialize their real return bytes; ownership is retired
+    /// before the first PLA, independently of subsequent branches or RTS.
+    #[serde(default, rename = "return_consume")]
+    pub return_consumes: Vec<ReturnConsumeSite>,
     /// Controller mapping policy. SMS pads have two buttons; NES has
     /// four. `heuristic` (default) keeps the SMB behavior: a
     /// title-mode RAM discriminator flips buttons between
@@ -94,7 +99,8 @@ pub struct Translation {
     /// stack usage. `native` asserts strict LIFO JSR/RTS pairing (no code
     /// consumes JSR return bytes outside declared `[[jump_engine]]` sites)
     /// and lowers calls to native Z80 CALL/RET with a slot-0 far shim for
-    /// cross-bank targets. Requires mapper 0 and no `[[return_escape]]`.
+    /// cross-bank targets. Requires mapper 0 and no `[[return_escape]]` or
+    /// `[[return_consume]]` annotations.
     #[serde(default)]
     pub stack_discipline: StackDiscipline,
 }
@@ -307,6 +313,32 @@ pub struct ReturnEscapeSite {
     pub bank: Option<u8>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Transfer a materialized call's ownership before an adjacent PLA/PLA pair.
+/// Entry immediately after both PLAs is permitted; entry at the second PLA
+/// bypasses ownership transfer and must be rejected by ROM/pipeline validation.
+pub struct ReturnConsumeSite {
+    /// Original PC of the first PLA; the suffix remains ordinary guest code.
+    pub at: u16,
+    /// Physical bank of the pair, omitted for fixed-window or NROM code.
+    #[serde(default)]
+    pub bank: Option<u8>,
+    pub calls: Vec<MaterializedCallSite>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// An ordinary JSR whose true caller+2 return must live on the guest stack.
+pub struct MaterializedCallSite {
+    pub caller: u16,
+    /// Expected original JSR operand, checked against the ROM by the lifter.
+    pub target: u16,
+    /// Physical caller bank, not the target's live mapper context.
+    #[serde(default)]
+    pub bank: Option<u8>,
+}
+
 impl JumpEngineSite {
     /// Start of the inline little-endian target table that immediately
     /// follows the three-byte `JSR` instruction.
@@ -414,14 +446,14 @@ pub fn load_from_path(path: impl AsRef<Path>) -> Result<Profile, LoadError> {
 }
 
 fn validate(p: &Profile) -> Result<(), LoadError> {
-    if p.translation
-        .runtime_defines
-        .iter()
-        .any(|name| name == "CONSUMED_RETURN_ESCAPE")
-    {
+    if p.translation.runtime_defines.iter().any(|name| {
+        matches!(
+            name.as_str(),
+            "CONSUMED_RETURN_ESCAPE" | "MATERIALIZED_CALL_RETURNS"
+        )
+    }) {
         return Err(LoadError::Validation(
-            "CONSUMED_RETURN_ESCAPE is reserved: use return_escape.stack_bytes_already_consumed"
-                .into(),
+            "return ownership defines are reserved: use return_escape or return_consume".into(),
         ));
     }
     if p.translation.runtime_defines.iter().any(|name| {
@@ -611,6 +643,7 @@ fn validate(p: &Profile) -> Result<(), LoadError> {
             )));
         }
     }
+    validate_return_consumes(p)?;
     let mut used_chr_slots = [false; 448];
     for r in &p.chr_packs {
         if r.table > 1 {
@@ -641,6 +674,104 @@ fn validate(p: &Profile) -> Result<(), LoadError> {
                 )));
             }
             *used = true;
+        }
+    }
+    Ok(())
+}
+
+fn validate_return_consumes(p: &Profile) -> Result<(), LoadError> {
+    let invalid = |message: &str| LoadError::Validation(format!("return_consume: {message}"));
+    if !p.return_consumes.is_empty() && p.native_calls() {
+        return Err(invalid("requires software calls"));
+    }
+    let mut pairs = Vec::new();
+    let mut calls = BTreeMap::new();
+    let check_bank = |pc: u16, bank: Option<u8>| -> Result<(), LoadError> {
+        if pc < 0x8000 {
+            return Err(invalid("address must be in PRG ROM"));
+        }
+        if p.rom.mapper == 2 {
+            if (pc < 0xc000) != bank.is_some()
+                || bank.is_some_and(|b| u32::from(b) >= p.rom.prg_kib / 16)
+            {
+                return Err(invalid("physical bank/window mismatch"));
+            }
+        } else if bank.is_some() {
+            return Err(invalid("bank-qualified sites require mapper 2"));
+        }
+        Ok(())
+    };
+    for site in &p.return_consumes {
+        check_bank(site.at, site.bank)?;
+        let last = site
+            .at
+            .checked_add(1)
+            .ok_or_else(|| invalid("PLA pair wraps"))?;
+        if (site.at < 0xc000) != (last < 0xc000) || site.calls.is_empty() {
+            return Err(invalid("pair crosses PRG window or has no calls"));
+        }
+        if pairs
+            .iter()
+            .any(|&(bank, start, end)| bank == site.bank && site.at <= end && start <= last)
+            || p.return_escapes.iter().any(|s| {
+                s.bank == site.bank
+                    && s.consume_at.unwrap_or(s.caller) <= last
+                    && u32::from(s.caller) + 2 >= u32::from(site.at)
+            })
+            || p.jump_engines.iter().any(|s| {
+                s.bank == site.bank
+                    && s.caller <= last
+                    && s.table_end().is_some_and(|end| usize::from(site.at) < end)
+            })
+            || p.replacements
+                .iter()
+                .any(|s| (site.at..=last).contains(&s.addr))
+        {
+            return Err(invalid("overlapping/replaced consumption pair"));
+        }
+        pairs.push((site.bank, site.at, last));
+        let mut returns = std::collections::BTreeSet::new();
+        for call in &site.calls {
+            check_bank(call.caller, call.bank)?;
+            let end = call
+                .caller
+                .checked_add(2)
+                .ok_or_else(|| invalid("JSR wraps"))?;
+            if (call.caller < 0xc000) != (end < 0xc000) || call.target < 0x8000 {
+                return Err(invalid("JSR crosses PRG window or target is not PRG"));
+            }
+            if calls
+                .iter()
+                .any(|(&(bank, pc), &last)| bank == call.bank && call.caller <= last && pc <= end)
+                || calls.insert((call.bank, call.caller), end).is_some()
+                || !returns.insert(end)
+                || p.jump_engines.iter().any(|s| {
+                    s.bank == call.bank
+                        && s.caller <= end
+                        && s.table_end()
+                            .is_some_and(|last| usize::from(call.caller) < last)
+                })
+                || p.return_escapes.iter().any(|s| {
+                    s.bank == call.bank
+                        && s.consume_at.unwrap_or(s.caller) <= end
+                        && u32::from(s.caller) + 2 >= u32::from(call.caller)
+                })
+                || p.replacement_for(call.target).is_some()
+                || p.replacements
+                    .iter()
+                    .any(|s| (call.caller..=end).contains(&s.addr))
+            {
+                return Err(invalid("duplicate/conflicting materialized call"));
+            }
+        }
+    }
+    for site in &p.return_consumes {
+        for call in &site.calls {
+            if pairs.iter().any(|&(bank, start, end)| {
+                bank == call.bank && call.caller <= end && start <= call.caller + 2
+            }) {
+                return Err(invalid("materialized call overlaps a consumption pair"));
+            }
         }
     }
     Ok(())
@@ -807,6 +938,23 @@ impl Profile {
             .find(|site| site.caller == caller && site.bank == bank)
     }
 
+    pub fn return_consume_at(&self, at: u16, bank: Option<u8>) -> Option<&ReturnConsumeSite> {
+        self.return_consumes
+            .iter()
+            .find(|site| site.at == at && site.bank == bank)
+    }
+
+    pub fn materialized_call_at(
+        &self,
+        caller: u16,
+        bank: Option<u8>,
+    ) -> Option<&MaterializedCallSite> {
+        self.return_consumes
+            .iter()
+            .flat_map(|site| &site.calls)
+            .find(|call| call.caller == caller && call.bank == bank)
+    }
+
     /// True when the profile certifies native Z80 CALL/RET lowering
     /// (see `Translation::stack_discipline`).
     pub fn native_calls(&self) -> bool {
@@ -823,8 +971,12 @@ impl Profile {
             .return_escapes
             .iter()
             .any(|site| site.stack_bytes_already_consumed)
+            || !self.return_consumes.is_empty()
         {
             defines.push("CONSUMED_RETURN_ESCAPE".into());
+        }
+        if !self.return_consumes.is_empty() {
+            defines.push("MATERIALIZED_CALL_RETURNS".into());
         }
         defines
     }
@@ -1371,5 +1523,171 @@ return_addr = 0x8fff
             load_from_str(&banked).unwrap().return_escapes[0].bank,
             Some(3)
         );
+    }
+
+    const CONSUME_HEADER: &str = "[rom]\nname='test'\nmapper=2\nprg_kib=128\nchr_kib=0\n";
+    const CONSUME_SITE: &str = "[[return_consume]]\nat=0x8100\nbank=3\ncalls=[{caller=0xC100,target=0x9000},{caller=0x8300,target=0xC200,bank=4}]\n";
+
+    #[test]
+    fn ordinary_return_metadata_is_opt_in_and_preserves_physical_identity() {
+        let default = load_from_str(CONSUME_HEADER).unwrap();
+        assert!(default.return_consumes.is_empty());
+        assert!(default.effective_runtime_defines().is_empty());
+        let profile = load_from_str(&format!("{CONSUME_HEADER}{CONSUME_SITE}")).unwrap();
+        assert_eq!(
+            profile
+                .return_consume_at(0x8100, Some(3))
+                .unwrap()
+                .calls
+                .len(),
+            2
+        );
+        assert!(profile.return_consume_at(0x8100, Some(4)).is_none());
+        assert!(profile.return_consume_at(0x8100, None).is_none());
+        assert_eq!(
+            profile
+                .materialized_call_at(0x8300, Some(4))
+                .unwrap()
+                .target,
+            0xc200
+        );
+        assert!(profile.materialized_call_at(0x8300, Some(3)).is_none());
+        assert_eq!(
+            profile.materialized_call_at(0xc100, None).unwrap().target,
+            0x9000
+        );
+        assert_eq!(
+            profile.effective_runtime_defines(),
+            ["CONSUMED_RETURN_ESCAPE", "MATERIALIZED_CALL_RETURNS"]
+        );
+        let both = format!(
+            "{CONSUME_HEADER}{CONSUME_SITE}\n[[return_escape]]\ncaller=0xE004\ntarget=0xE100\nreturn_addr=0xE200\nconsume_at=0xE000\nstack_bytes_already_consumed=true\n"
+        );
+        assert_eq!(
+            load_from_str(&both).unwrap().effective_runtime_defines(),
+            profile.effective_runtime_defines()
+        );
+        // Same switchable address in a different bank is a different pair.
+        let other_bank = format!(
+            "{CONSUME_HEADER}{CONSUME_SITE}\n[[return_consume]]\nat=0x8100\nbank=4\ncalls=[{{caller=0xC300,target=0x9000}}]\n"
+        );
+        assert_eq!(load_from_str(&other_bank).unwrap().return_consumes.len(), 2);
+    }
+
+    #[test]
+    fn ordinary_return_metadata_rejects_bad_banks_windows_and_wrapping() {
+        let valid = load_from_str(&format!("{CONSUME_HEADER}{CONSUME_SITE}")).unwrap();
+        for case in 0..13 {
+            let mut profile = valid.clone();
+            let site = &mut profile.return_consumes[0];
+            match case {
+                0 => site.at = 0x7fff,
+                1 => site.at = 0xbfff,
+                2 => {
+                    site.at = 0xffff;
+                    site.bank = None;
+                }
+                3 => site.bank = None,
+                4 => site.bank = Some(8),
+                5 => site.at = 0xc000,
+                6 => site.calls[0].caller = 0x7fff,
+                7 => {
+                    site.calls[0].caller = 0xbffe;
+                    site.calls[0].bank = Some(1);
+                }
+                8 => site.calls[0].caller = 0xfffe,
+                9 => site.calls[0].target = 0x7fff,
+                10 => site.calls[0].bank = Some(1),
+                11 => site.calls[1].bank = None,
+                12 => site.calls[1].bank = Some(8),
+                _ => unreachable!(),
+            }
+            assert!(validate(&profile).is_err(), "case {case}");
+        }
+        let nrom = format!(
+            "{}[[return_consume]]\nat=0x8100\ncalls=[{{caller=0xC100,target=0x9000}}]\n",
+            CONSUME_HEADER.replace("mapper=2", "mapper=0")
+        );
+        load_from_str(&nrom).unwrap();
+        assert!(load_from_str(&nrom.replace("at=0x8100", "at=0x8100\nbank=0")).is_err());
+        let native = nrom.replace(
+            "[[return_consume]]",
+            "[translation]\nstack_discipline='native'\n[[return_consume]]",
+        );
+        assert!(
+            load_from_str(&native)
+                .unwrap_err()
+                .to_string()
+                .contains("software calls")
+        );
+    }
+
+    #[test]
+    fn ordinary_return_metadata_rejects_duplicates_and_competing_annotations() {
+        let valid = load_from_str(&format!("{CONSUME_HEADER}{CONSUME_SITE}")).unwrap();
+        for case in 0..5 {
+            let mut profile = valid.clone();
+            match case {
+                0 => profile.return_consumes[0].calls.clear(),
+                1 => {
+                    let call = profile.return_consumes[0].calls[0].clone();
+                    profile.return_consumes[0].calls.push(call);
+                }
+                2 => {
+                    let pair = profile.return_consumes[0].clone();
+                    profile.return_consumes.push(pair);
+                }
+                3 => {
+                    profile.return_consumes[0].calls[0] = MaterializedCallSite {
+                        caller: 0x8101,
+                        target: 0x9000,
+                        bank: Some(3),
+                    }
+                }
+                4 => profile.return_consumes[0].calls.push(MaterializedCallSite {
+                    caller: 0xc102,
+                    target: 0x9000,
+                    bank: None,
+                }),
+                _ => unreachable!(),
+            }
+            assert!(validate(&profile).is_err(), "case {case}");
+        }
+        for extra in [
+            "[[return_consume]]\nat=0x8500\nbank=3\ncalls=[{caller=0xC100,target=0x9000}]",
+            "[[replacement]]\naddr=0x8101\nruntime_label='rt_test'",
+            "[[replacement]]\naddr=0xC101\nruntime_label='rt_test'",
+            "[[replacement]]\naddr=0x9000\nruntime_label='rt_test'",
+            "[[jump_engine]]\ncaller=0xC100\ntargets=['L_C200']",
+            "[[jump_engine]]\ncaller=0x80FE\nbank=3\ntargets=['L_C200']",
+            "[[return_escape]]\ncaller=0xC100\ntarget=0xC200\nreturn_addr=0xC300",
+            "[[return_escape]]\ncaller=0x80FE\nbank=3\ntarget=0xC200\nreturn_addr=0xC300",
+            "[[return_escape]]\ncaller=0x8104\nbank=3\ntarget=0xC200\nreturn_addr=0xC300\nconsume_at=0x80FF\nstack_bytes_already_consumed=true",
+        ] {
+            assert!(
+                load_from_str(&format!("{CONSUME_HEADER}{CONSUME_SITE}\n{extra}")).is_err(),
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_return_metadata_rejects_unknown_fields_and_manual_defines() {
+        for site in [
+            CONSUME_SITE.replace("at=", "address="),
+            CONSUME_SITE.replace("target=0x9000", "destination=0x9000"),
+            CONSUME_SITE.replace("calls=", "call="),
+        ] {
+            assert!(load_from_str(&format!("{CONSUME_HEADER}{site}")).is_err());
+        }
+        for define in ["CONSUMED_RETURN_ESCAPE", "MATERIALIZED_CALL_RETURNS"] {
+            let text = format!("{CONSUME_HEADER}\n[translation]\nruntime_defines=['{define}']");
+            assert!(
+                load_from_str(&text)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("reserved")
+            );
+        }
     }
 }

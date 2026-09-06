@@ -325,6 +325,14 @@ sequences, missing hook owners and known interior entries that bypass this
 ownership transfer. The optional `$C81F` counter observes that pre-PLA transfer,
 not completion of the subsequent guest path.
 
+For an ordinary JSR whose return is consumed by a PLA pair before a branched
+or RTS-ended suffix, `[[return_consume]]` explicitly lists the call sites.
+Those calls materialize their actual return bytes and mark the existing
+software continuation as owner; normal RTS cleans them up, while the pair
+validates and retires ownership before the original PLAs. No terminal jump
+is fabricated. See [the return contract](return-escape-contract.md) for
+bank identity, fail-closed entry checks and required contextual tests.
+
 **2.3 SMS runtime library finished.** All modules from the architecture
 table written and tested standalone.
 

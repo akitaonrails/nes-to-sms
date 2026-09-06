@@ -325,6 +325,113 @@ fn consumed_return_hook_cannot_be_bypassed_missing_or_stubbed() {
 }
 
 #[test]
+fn materialized_return_pair_requires_complete_unreplaced_calls_and_no_bypass() {
+    for case in [
+        "valid",
+        "root",
+        "vector",
+        "alias_target",
+        "alias_return",
+        "replacement",
+        "owner_stub",
+        "call_stub",
+        "direct_jsr",
+        "direct_jmp",
+        "direct_branch",
+        "missing_pair",
+        "missing_call",
+        "wrong_call",
+        "wrong_target",
+        "wrong_pair",
+        "lower_failure",
+    ] {
+        let work = tmp(&format!("return_pair_{case}"));
+        let mut code = vec![0xea; 0x201];
+        code[..4].copy_from_slice(&[0x20, 0, 0x81, 0x60]);
+        // No fabricated endpoint: both branched suffix paths end in RTS.
+        code[0x100..0x10a].copy_from_slice(&[0x68, 0x68, 0xa9, 0, 0xf0, 2, 0xa9, 1, 0x60, 0x60]);
+        code[0x200] = 0x60;
+        let mut extra = String::new();
+        let mut nmi = 0x8000;
+        let mut pair = 0x8100;
+        let mut call = 0x8000;
+        match case {
+            "root" => extra.push_str("\n[[function]]\naddr=0x8101\nname=\"Inside\"\n"),
+            "vector" => nmi = 0x8101,
+            "alias_target" | "alias_return" => {
+                extra.push_str(
+                    "\n[[label]]\naddr=0x8101\nname=\"Inside\"\n[[jump_engine]]\ncaller=0x8500\n",
+                );
+                extra.push_str(if case == "alias_target" {
+                    "targets=[\"Inside\"]\n"
+                } else {
+                    "targets=[\"L_8200\"]\nreturn_target=\"Inside\"\n"
+                });
+            }
+            "replacement" | "owner_stub" | "call_stub" => extra.push_str(&format!(
+                "\n[[replacement]]\naddr={}\nruntime_label=\"rt_test_hook\"\nstub_body=true\n",
+                match case {
+                    "replacement" => 0x8101,
+                    "owner_stub" => 0x8100,
+                    _ => 0x8000,
+                }
+            )),
+            "direct_jsr" | "direct_jmp" | "direct_branch" => {
+                nmi = 0x8120;
+                if case == "direct_branch" {
+                    code[0x120..0x123].copy_from_slice(&[0xd0, 0xdf, 0x60]);
+                } else {
+                    code[0x120..0x124].copy_from_slice(&[
+                        if case == "direct_jsr" { 0x20 } else { 0x4c },
+                        1,
+                        0x81,
+                        0x60,
+                    ]);
+                }
+            }
+            "missing_pair" => pair = 0x8180,
+            "missing_call" => call = 0x8180,
+            "wrong_call" => code[0] = 0x4c,
+            "wrong_target" => code[2] = 0x82,
+            "wrong_pair" => code[0x101] = 0xea,
+            "lower_failure" => {
+                code[0x100..0x10a].copy_within(..8, 2);
+                code[0x100..0x102].copy_from_slice(&[0x8b, 0x42]);
+                pair += 2;
+            }
+            _ => {}
+        }
+        let rom = work.join("input.nes");
+        let profile = work.join("profile.toml");
+        let out = work.join("out");
+        std::fs::write(&rom, build_nrom_rom(&code, nmi, 0x8000, 0x8000)).unwrap();
+        write_minimal_profile(&profile, 0x8000, nmi, 0x8000);
+        let mut metadata = std::fs::read_to_string(&profile).unwrap();
+        metadata.push_str(&format!(
+            "\n[[return_consume]]\nat={pair}\ncalls=[{{caller={call},target=0x8100}}]\n{extra}"
+        ));
+        std::fs::write(&profile, metadata).unwrap();
+        let result = run_pipeline(nes_to_sms_args(&rom, &profile, &out, None));
+        if case == "valid" {
+            result.unwrap();
+            let asm = std::fs::read_to_string(out.join("generated/translated.asm")).unwrap();
+            assert_eq!(asm.matches("call rt_translated_return_consume").count(), 1);
+            assert_eq!(
+                asm.matches("call rt_translated_call_materialize").count(),
+                1
+            );
+            assert!(asm.contains("ld bc,$8002"));
+        } else {
+            let error = result.expect_err(case);
+            assert!(
+                error.contains("return_consume") || error.contains("materialized"),
+                "{case}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn pipeline_rejects_mismatched_payload_before_generation() {
     let rom = build_nrom_rom(&[0x60], 0x8000, 0x8000, 0x8000);
     let work = tmp("payload-mismatch");

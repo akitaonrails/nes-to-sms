@@ -108,6 +108,193 @@ fn stub_rejects_malformed_frames_and_mismatched_live_bytes() {
     }
 }
 
+#[test]
+fn materialized_same_section_call_cleans_up_normally_with_both_iff_states() {
+    let mut program = z80_emit::Program::new();
+    program.org(0);
+    program.jp("entry");
+    program.label("callee");
+    program.jp("rt_translated_rts");
+    program.label("entry");
+    program.translated_materialized_call("callee", 0x8123);
+    program.ld_abs_a(0xc000);
+    program.halt();
+    program.label("rt_unresolved_jsr_flash");
+    program.jp("rt_unresolved_jsr");
+    validation::emit_runtime_helpers(&mut program);
+    let build = program.finish().unwrap();
+    let stop = build
+        .bytes
+        .windows(4)
+        .position(|b| b == [0x32, 0, 0xc0, 0x76])
+        .unwrap() as u16
+        + 3;
+    for iff in [false, true] {
+        for s in [0u8, 1, 0xf4, 0xff] {
+            let mut bus = FlatBus::new();
+            bus.load(0, &build.bytes);
+            bus.mem[0xcb76..0xcb78].copy_from_slice(&0xd304u16.to_le_bytes());
+            bus.mem[0xcb02] = s;
+            bus.mem[0xcb03] = 0xa5;
+            let mut cpu = cpu_at(0, iff);
+            step_to(&mut bus, &mut cpu, stop);
+            assert_eq!(cpu.pc, stop);
+            assert_eq!(bus.mem[0xcb1d], 0);
+            assert_eq!(bus.mem[0xcb02], s);
+            assert_eq!(&bus.mem[0xcb76..0xcb78], &0xd304u16.to_le_bytes());
+            assert_eq!(
+                (cpu.a, cpu.d, cpu.e, bus.mem[0xcb03]),
+                (0x69, 7, 0xf9, 0xa5)
+            );
+            assert_eq!((cpu.iff1, cpu.iff2, cpu.sp), (iff, iff, 0xdfe0));
+        }
+    }
+}
+
+#[test]
+fn new_return_contract_reports_caller_context_validation_skips() {
+    for (code, calls, consumes) in [
+        (
+            vec![0x20, 0, 0x81, 0x60],
+            vec![ir::MaterializedCallSite {
+                caller: 0x8000,
+                target: 0x8100,
+            }],
+            vec![],
+        ),
+        (
+            vec![0x68, 0x68, 0x60],
+            vec![],
+            vec![ir::ReturnConsumeSite {
+                at: 0x8000,
+                return_addrs: vec![0x8102],
+            }],
+        ),
+    ] {
+        let mut prg = vec![0; 0x8000];
+        prg[..code.len()].copy_from_slice(&code);
+        let opts = ir::LiftOptions {
+            start: 0x8000,
+            end: 0x8000 + code.len() as u16,
+            materialized_call_sites: calls,
+            return_consume_sites: consumes,
+            ..ir::LiftOptions::default()
+        };
+        let routine = ir::lift_range(&prg, &opts).unwrap();
+        assert_eq!(
+            validation::classify_routine(&routine).as_deref(),
+            Some("translated return escape")
+        );
+    }
+}
+
+// Opcode timing only; z80_emu remains the sole Z80 semantics implementation.
+fn exact_helper_step(machine: &mut Assembled, cpu: &mut Cpu) -> u32 {
+    let op = machine.read(cpu.pc);
+    let arg = machine.read(cpu.pc + 1);
+    let cost = match op {
+        0xf5 | 0xe5 => 11,
+        0xf1 | 0xe1 => 10,
+        0xf3 | 0xfb | 0x7c | 0x7d | 0x6f | 0x2c | 0x2d | 0xb7 | 0xb8 | 0xb9 | 0x3c | 0xaf => 4,
+        0x23 | 0x2b => 6,
+        0x3e | 0x26 | 0xfe | 0xe6 | 0xd6 => 7,
+        0x3a | 0x32 => 13,
+        0x2a | 0x22 => 16,
+        0x21 => 10,
+        0x7e | 0x70 | 0x71 => 7,
+        0xc3 | 0xc2 | 0xca | 0xda | 0xd2 | 0xe2 | 0xc9 => 10,
+        0x18 => 12,
+        0x20 => {
+            if cpu.f & 0x40 == 0 {
+                12
+            } else {
+                7
+            }
+        }
+        0x28 => {
+            if cpu.f & 0x40 != 0 {
+                12
+            } else {
+                7
+            }
+        }
+        0xed => {
+            assert_eq!(arg, 0x57);
+            9
+        }
+        0xcb => match arg {
+            0x7f => 8,
+            0x76 => 12,
+            _ => panic!("unknown CB {arg:02x}"),
+        },
+        _ => panic!("unbudgeted helper opcode {op:02x} at {:04x}", cpu.pc),
+    };
+    cpu.step(machine).unwrap();
+    cost
+}
+
+#[test]
+#[ignore = "requires a Docker-assembled CV1_ESCAPE_PROJECT"]
+fn materialize_and_consume_masked_intervals_fit_the_committed_hint_deadline() {
+    for helper in [
+        "rt_translated_call_materialize",
+        "rt_translated_return_consume",
+    ] {
+        let mut maximum = (0, 0);
+        for (ptr, frame) in [
+            (0xd304, 0xd300),
+            (0xd500, 0xd3f8),
+            (0xd504, 0xd500),
+            (0xd600, 0xd5fc),
+        ] {
+            for s in [0, 1, 0xf4, 0xfd, 0xfe, 0xff] {
+                for iff in [false, true] {
+                    let mut machine = Assembled::new();
+                    seed(&mut machine.bus, ptr, frame, s);
+                    let mut cpu = machine.enter(helper, iff);
+                    machine.seed_mapping(8);
+                    cpu.sp = if helper.ends_with("materialize") {
+                        0xde42
+                    } else {
+                        0xde44
+                    };
+                    machine.bus.mem[cpu.sp as usize] = 7;
+                    let mut total = 0;
+                    let mut di_at = None;
+                    while cpu.pc != 7 {
+                        if machine.read(cpu.pc) == 0xf3 {
+                            di_at = Some(total);
+                        }
+                        assert!(cpu.sp >= 0xde40);
+                        total += exact_helper_step(&mut machine, &mut cpu);
+                        assert!(total < 600);
+                    }
+                    assert_eq!((cpu.iff1, cpu.iff2), (iff, iff));
+                    maximum.0 = maximum.0.max(total);
+                    if iff {
+                        maximum.1 = maximum.1.max(total - di_at.unwrap());
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "{helper}: full={}T DI-through-eligible-RET={}T",
+            maximum.0, maximum.1
+        );
+        // Accepted physical HINT IRQ vector→last visible R8 is 348T;
+        // include the existing worst interrupted-instruction allowance23T.
+        assert!(maximum.1 + 23 + 348 < 2052);
+        assert_eq!(
+            maximum,
+            if helper.ends_with("consume") {
+                (493, 473)
+            } else {
+                (193, 173)
+            }
+        );
+    }
+}
+
 struct Assembled {
     rom: Vec<u8>,
     bus: FlatBus,
@@ -250,7 +437,10 @@ impl Assembled {
                 // An IRQ in that legal interval restores the published bank;
                 // its next resumed instruction writes that same bank again.
                 if bank != shadow_bank {
-                    let (gate_bank, gate) = self.symbols["rt_translated_tail_gate"];
+                    let (gate_bank, gate) = [("rt_translated_tail_gate", 0), ("rt_translated_call_gate", 0), ("rt_far_gate", 17), ("_tr_rts_bank_ready", 0)]
+                        .into_iter().map(|(name, offset)| { let (bank, pc) = self.symbols[name]; (bank, pc + offset) })
+                        .find(|(bank, gate)| *bank == 0 && resume == gate + 3)
+                        .unwrap_or_else(|| panic!("unexpected mapper interval resume={resume:04x} old={bank:02x} published={shadow_bank:02x} A={a:02x}"));
                     assert_eq!((gate_bank, resume), (0, gate + 3));
                     assert_eq!(
                         &self.rom[gate as usize..gate as usize + 6],
@@ -302,6 +492,317 @@ impl Bus for Assembled {
             _ => 0xff,
         }
     }
+}
+
+#[test]
+#[ignore = "requires a Docker-assembled CV1_ESCAPE_PROJECT with materialized calls"]
+fn materialized_call_helper_matches_stub_and_preserves_stack_ownership() {
+    let mut program = z80_emit::Program::new();
+    program.org(0);
+    program.call("rt_translated_call_materialize");
+    program.halt();
+    validation::emit_runtime_helpers(&mut program);
+    let stub = program.finish().unwrap().bytes;
+    for s in [0u8, 1, 2, 0xf4, 0xff] {
+        for return_addr in [0xcefc_u16, 0xc606, 0xc61c] {
+            for iff in [false, true] {
+                for sram in [0, 8] {
+                    let mut machine = Assembled::new();
+                    let mut cpu = machine.enter("rt_translated_call_materialize", iff);
+                    let mapping = machine.seed_mapping(sram);
+                    cpu.b = (return_addr >> 8) as u8;
+                    cpu.c = return_addr as u8;
+                    cpu.sp = 0xde42;
+                    machine.bus.mem[0xde42] = 7;
+                    machine.bus.mem[0xcb02] = s;
+                    machine.bus.mem[0xcb03] = 0xa5;
+                    machine.bus.mem[0xcb76..0xcb78].copy_from_slice(&0xd308u16.to_le_bytes());
+                    machine.bus.mem[0xc100..0xc200].fill(0x5a);
+                    machine.bus.mem[0xdd80..0xde40].fill(0xa6);
+                    let mut stub_bus = FlatBus::new();
+                    stub_bus.load(0, &stub);
+                    stub_bus.mem[0xc000..].copy_from_slice(&machine.bus.mem[0xc000..]);
+                    let mut stub_cpu = cpu;
+                    stub_cpu.pc = 0;
+                    stub_cpu.sp = 0xde44;
+                    step_to(&mut stub_bus, &mut stub_cpu, 3);
+                    assert_eq!(step_to(&mut machine, &mut cpu, 7), 0xde40);
+                    assert_eq!(cpu.pc, 7);
+                    assert_eq!(machine.mapping(), mapping);
+                    assert_eq!(&machine.bus.mem[0xcb76..0xcb78], &0xd308u16.to_le_bytes());
+                    assert_eq!(machine.bus.mem[0xcb02], s.wrapping_sub(2));
+                    assert_eq!(
+                        machine.bus.mem[0xc100 + s as usize],
+                        (return_addr >> 8) as u8
+                    );
+                    assert_eq!(
+                        machine.bus.mem[0xc100 + s.wrapping_sub(1) as usize],
+                        return_addr as u8
+                    );
+                    assert_eq!(
+                        &machine.bus.mem[0xc100..0xc200],
+                        &stub_bus.mem[0xc100..0xc200]
+                    );
+                    assert_eq!((cpu.a, cpu.f, cpu.d, cpu.e), (0x69, 0xa5, 7, 0xf9));
+                    assert_eq!((cpu.iff1, cpu.iff2, cpu.sp), (iff, iff, 0xde44));
+                    assert_eq!(
+                        (stub_cpu.a, stub_cpu.f, stub_cpu.d, stub_cpu.e),
+                        (cpu.a, cpu.f, cpu.d, cpu.e)
+                    );
+                    assert_eq!(machine.bus.mem[0xcb03], 0xa5);
+                    assert!(machine.bus.mem[0xdd80..0xde40].iter().all(|v| *v == 0xa6));
+                    assert_eq!(machine.bus.mem[0xc81f], 0);
+                }
+            }
+        }
+    }
+}
+
+fn seed_upper_call(caller: u16) -> (Assembled, Cpu) {
+    let mut machine = Assembled::new();
+    machine.seed_canonical_path();
+    let helper = machine.symbols["rt_translated_call_materialize"].1;
+    let ret = caller + 2;
+    let (bank, pc) = find_unique_code(
+        &machine,
+        &[
+            0x01,
+            ret as u8,
+            (ret >> 8) as u8,
+            0xcd,
+            helper as u8,
+            (helper >> 8) as u8,
+        ],
+    );
+    machine.bus.mem[0xfffe] = bank;
+    machine.bus.mem[0xcb14] = bank;
+    let mut cpu = cpu_at(pc, true);
+    cpu.d = 0;
+    cpu.e = 0;
+    machine.bus.mem[0xc000..0xc800].fill(0);
+    for (addr, value) in [
+        (0xc028, 1),
+        (0xc03f, 96),
+        (0xc38c, 236),
+        (0xc042, 1),
+        (0xc045, 64),
+        (0xc018, 5),
+        (0xc019, 6),
+        (0xc01b, 1),
+        (0xc07f, 1),
+        (0xc0fe, 0x1e),
+        (0xc0ff, 0xb0),
+        (0xcb02, 0xfd),
+        (0xcb03, 0x24),
+        (0xcb00, 0),
+        (0xcb01, 0),
+        (0xcb62, 6),
+    ] {
+        machine.bus.mem[addr] = value;
+    }
+    machine.bus.mem[0xffff] = machine.symbols["data_prg_bank_6"].0;
+    machine.bus.mem[0xcb76..0xcb78].copy_from_slice(&0xd304u16.to_le_bytes());
+    // Outer software return stops in fixed RAM. The guest counterpart remains
+    // unmaterialized; the inner ordinary call alone owns guest return bytes.
+    machine.bus.mem[0xd301..0xd303].copy_from_slice(&0xcfff_u16.to_le_bytes());
+    machine.bus.mem[0xd303] = 0;
+    cpu.a = 0;
+    cpu.f = 0;
+    (machine, cpu)
+}
+
+fn find_unique_code(machine: &Assembled, bytes: &[u8]) -> (u8, u16) {
+    let sites: Vec<_> = machine
+        .rom
+        .windows(bytes.len())
+        .enumerate()
+        .filter_map(|(at, window)| (window == bytes).then_some(at))
+        .collect();
+    assert_eq!(
+        sites.len(),
+        1,
+        "expected one actual emitted contract boundary"
+    );
+    let at = sites[0];
+    (
+        (at / 0x4000) as u8,
+        if at < 0x4000 {
+            at as u16
+        } else {
+            (at % 0x4000 + 0x4000) as u16
+        },
+    )
+}
+
+#[test]
+#[ignore = "requires a Docker-assembled CV1_ESCAPE_PROJECT with materialized calls"]
+fn upper_exit_normal_return_retires_only_its_materialized_guest_bytes() {
+    // Actual CV1 game-body calls use enabled IRQs. The existing dynamic PRG
+    // dispatcher uses its caller's CB7E policy, not arbitrary entry IFF. The
+    // generic same-section test and both helpers separately cover IFF=0/1.
+    for caller in [0xcefa, 0xc604, 0xc61a] {
+        for iff in [true] {
+            let (mut machine, mut cpu) = seed_upper_call(caller);
+            cpu.iff1 = iff;
+            cpu.iff2 = iff;
+            machine.bus.mem[0xc38c] = 128;
+            let first = machine.symbols["L_b6_934C"];
+            for _ in 0..1000 {
+                if (machine.bus.mem[0xfffe], cpu.pc) == first {
+                    break;
+                }
+                cpu.step(&mut machine).unwrap();
+            }
+            assert_eq!((machine.bus.mem[0xfffe], cpu.pc), first);
+            assert_eq!(machine.bus.mem[0xcb02], 0xfb);
+            assert_eq!(machine.bus.mem[0xd307] & 0x40, 0x40);
+            let stop = u16::from_le_bytes([machine.bus.mem[0xd305], machine.bus.mem[0xd306]]);
+            let bank = machine.bus.mem[0xd307] & 0x3f;
+            for _ in 0..40_000 {
+                if (machine.bus.mem[0xfffe], cpu.pc) == (bank, stop) {
+                    break;
+                }
+                assert_eq!(machine.bus.mem[0xcb1d], 0);
+                cpu.step(&mut machine).unwrap();
+            }
+            assert_eq!((machine.bus.mem[0xfffe], cpu.pc), (bank, stop));
+            assert_eq!(machine.bus.mem[0xcb02], 0xfd);
+            assert_eq!(&machine.bus.mem[0xcb76..0xcb78], &0xd304u16.to_le_bytes());
+            assert_eq!(machine.bus.mem[0xc81f], 0);
+            assert_eq!((cpu.iff1, cpu.iff2), (iff, iff));
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a Docker-assembled CV1_ESCAPE_PROJECT with materialized calls"]
+fn upper_exit_live_return_set_fails_closed_before_guest_pops() {
+    for ret in [0xcefc_u16, 0xc606, 0xc61c, 0xcefd, 0xc605, 0xe9e5] {
+        for owned in [false, true] {
+            for iff in [false, true] {
+                let mut machine = Assembled::new();
+                let (bank, pc) = find_unique_code(
+                    &machine,
+                    &[
+                        0xf5, 0x3a, 0x02, 0xcb, 0x3c, 0x6f, 0x26, 0xc1, 0x4e, 0x2c, 0x46, 0x78,
+                        0xfe, 0xce,
+                    ],
+                );
+                machine.seed_mapping(8);
+                machine.bus.mem[0xfffe] = bank;
+                machine.bus.mem[0xcb14] = bank;
+                let mapping = machine.mapping();
+                seed(&mut machine.bus, 0xd308, 0xd304, 0xfb);
+                machine.bus.mem[0xd307] = bank | if owned { 0x40 } else { 0 };
+                machine.bus.mem[0xc1fc..0xc1fe].copy_from_slice(&ret.to_le_bytes());
+                let mut cpu = cpu_at(pc, iff);
+                cpu.sp = 0xde46; // wrapper CALL plus consume's saved AF/HL reaches DE40
+                let mut minimum = cpu.sp;
+                for _ in 0..1000 {
+                    minimum = minimum.min(cpu.sp);
+                    if machine.bus.mem[0xcb1d] != 0 || machine.bus.mem[0xcb02] == 0xfd {
+                        break;
+                    }
+                    cpu.step(&mut machine).unwrap();
+                }
+                assert!(minimum >= 0xde40);
+                assert_eq!(machine.mapping(), mapping);
+                assert_eq!((cpu.d, cpu.e), (7, 0xf9));
+                if owned && [0xcefc, 0xc606, 0xc61c].contains(&ret) {
+                    assert_eq!(machine.bus.mem[0xcb1d], 0);
+                    assert_eq!(machine.bus.mem[0xcb02], 0xfd);
+                    assert_eq!(&machine.bus.mem[0xcb76..0xcb78], &0xd304u16.to_le_bytes());
+                    assert_eq!((cpu.iff1, cpu.iff2), (iff, iff));
+                } else {
+                    assert_eq!(machine.bus.mem[0xcb1d], 0xe5);
+                    assert_eq!(machine.bus.mem[0xcb02], 0xfb);
+                    assert_eq!(&machine.bus.mem[0xcb76..0xcb78], &0xd308u16.to_le_bytes());
+                    assert_eq!(machine.bus.mem[0xc81f], 0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a Docker-assembled CV1_ESCAPE_PROJECT with materialized calls"]
+fn upper_exit_real_calls_and_live_pair_survive_every_legal_irq_boundary() {
+    let mut checked = 0;
+    for caller in [0xcefa, 0xc604, 0xc61a] {
+        let (mut baseline, mut cpu) = seed_upper_call(caller);
+        let (consume_bank, consume) = find_unique_code(
+            &baseline,
+            &[
+                0xf5, 0x3a, 0x02, 0xcb, 0x3c, 0x6f, 0x26, 0xc1, 0x4e, 0x2c, 0x46, 0x78, 0xfe, 0xce,
+            ],
+        );
+        let first_callee = baseline.symbols["L_b6_934C"].1;
+        let mut snapshots = Vec::new();
+        let mut at_call = true;
+        let mut in_pair = false;
+        for _ in 0..40_000 {
+            if cpu.pc == 0xcfff {
+                break;
+            }
+            if cpu.pc == first_callee {
+                at_call = false;
+            }
+            if cpu.pc == consume && baseline.bus.mem[0xfffe] == consume_bank {
+                in_pair = true;
+            }
+            if (at_call || in_pair) && cpu.iff1 && cpu.ei_pending == 0 {
+                snapshots.push((cpu, baseline.bus.mem.to_vec()));
+            }
+            assert_eq!(
+                baseline.bus.mem[0xcb1d], 0,
+                "caller={caller:04x} pc={:04x}",
+                cpu.pc
+            );
+            cpu.step(&mut baseline).unwrap();
+        }
+        assert_eq!(cpu.pc, 0xcfff);
+        assert_eq!(
+            (
+                baseline.bus.mem[0xcb02],
+                baseline.bus.mem[0xc018],
+                baseline.bus.mem[0xc019]
+            ),
+            (0xfd, 8, 0)
+        );
+        assert_eq!(&baseline.bus.mem[0xcb76..0xcb78], &0xd300u16.to_le_bytes());
+        let expected_sp = cpu.sp;
+        assert!(snapshots.len() > 30);
+        for (mut cpu, memory) in snapshots {
+            let mut machine = Assembled::new();
+            machine.bus.mem.copy_from_slice(&memory);
+            machine.interrupt(&mut cpu);
+            for _ in 0..40_000 {
+                if cpu.pc == 0xcfff {
+                    break;
+                }
+                assert_eq!(
+                    machine.bus.mem[0xcb1d], 0,
+                    "IRQ caller={caller:04x} pc={:04x}",
+                    cpu.pc
+                );
+                assert!(cpu.sp >= 0xde40);
+                cpu.step(&mut machine).unwrap();
+            }
+            assert_eq!(cpu.pc, 0xcfff);
+            assert_eq!(
+                (
+                    machine.bus.mem[0xcb02],
+                    machine.bus.mem[0xc018],
+                    machine.bus.mem[0xc019]
+                ),
+                (0xfd, 8, 0)
+            );
+            assert_eq!(&machine.bus.mem[0xcb76..0xcb78], &0xd300u16.to_le_bytes());
+            assert_eq!(cpu.sp, expected_sp);
+            checked += 1;
+        }
+    }
+    eprintln!("upper-exit actual call/pair legal IRQ boundaries checked={checked}");
 }
 
 #[test]
