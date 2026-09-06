@@ -12,6 +12,18 @@ re-order, add, remove. Do not throw it away and replace it with a
 different list; the document's value is in being the durable record of
 what we decided to do next and why.
 
+## Current CV1 performance follow-up (2026-09-06)
+
+The mapper-2 weapon-return correctness checkpoint is `b9fc51f`; SMB remains
+a mandatory regression target. The new [2× performance research and ordered
+experiments](cv1-double-performance-research.md#ordered-implementation-experiments)
+define the next performance work: close hot-region measurement, prove one
+cost-aware lowering rule, optimize the measured sprite producer, then expand
+to register/flag-retaining regions and stack-safe calls. Preserve the current
+ROM until each candidate passes the documented semantic, rendering, gameplay
+and timing gates. The research is complete; the proposed optimizations are
+not implemented or credited as speed gains.
+
 ## Definition of done
 
 A `sms.sms` produced by this pipeline satisfies all of:

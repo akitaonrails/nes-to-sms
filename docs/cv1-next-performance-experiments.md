@@ -1,5 +1,11 @@
 # CV1: next performance experiments
 
+Current follow-up (2026-09-06):
+[research toward twice the gameplay throughput](cv1-double-performance-research.md)
+profiles the committed weapon-fixed ROM, quantifies the original sprite
+producer and call costs, and supplies the next ordered experiments and gates.
+Use that ranking; the measurements below describe earlier builds.
+
 ## Actual-core follow-up: sprite-zero timeout amplification
 
 The first candidate below is now implemented and independently accepted:
