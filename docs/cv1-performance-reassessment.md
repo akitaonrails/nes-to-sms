@@ -10,6 +10,36 @@ Next optimization work is scoped in
 That follow-up keeps this delivered ROM unchanged and separates measurement
 gaps from proposed SMS/Z80-specific optimizations.
 
+## First-stair follow-up
+
+Extended real-input testing exposed two more missing bank-6 branch targets:
+`$9ECB` for stair collision handling and `$971D` for approach-timeout reset.
+Two verified profile roots resolve those strict `$E2` traps; no runtime or
+generic analyzer code changed. The first one-root candidate reached the
+second trap and was not accepted as completed stair support.
+
+The final candidate climbs from Y192 to Y96 in original stair actor mode 4,
+returns to mode 0, and moves across the upper platform. It runs 2,500 game
+ticks beyond the frozen indoor endpoint without trapping, including a later
+death and respawn. This is exploratory ascent coverage, not a frozen full-stage
+route, a boss encounter or a stage clear. Audio callbacks continue, but that
+alone is not a sound-engine or musical-fidelity oracle.
+
+The walking, heart and repeated-dagger callback CSVs are all byte-identical
+to their dagger-fixed baselines. Cadence therefore remains 19.256/21.529
+updates/s at 500%; this is a correctness repair, not a speed improvement.
+Both source/profile tests pass, including 2,560 original-6502 oracle vectors.
+Workspace tests, formatting and Clippy pass (existing warnings remain).
+Fresh SMB output retains its accepted hash and regression evidence.
+
+Evidence: `out/cv1-coverage.npbnxF/ASSESSMENT.md`, `stair-fixed-r2/` and
+`final-{walk,heart,dagger}/`. Rebuilt ROM SHA-256:
+`70283c950f1f5edc2a386bdb7a8ebc3a14ea9ad74513096374b0ca780554bf22`.
+WLA assembly used explicit `TZ=America/Sao_Paulo`: its SDSC date/checksum
+otherwise change across UTC midnight, even with identical runtime code.
+The [acceptance guide](../profiles/cv1/acceptance/README.md#first-indoor-stair-ascent)
+records source tests and interactive checking instructions.
+
 ## Dagger follow-up
 
 The dagger freeze was a strict unresolved-code trap, not another rendering
@@ -28,7 +58,7 @@ Real-input dagger tests complete 1,306 indoor ticks after entering the room.
 A repeated-throw variant spends hearts on three throws, including airborne
 throws, and continues to world X 745 without trapping. Original-ROM oracle
 tests cover the initializer's initial/active branches and discovery ownership.
-Local evidence: `out/cv1-dagger.SuwNRt/`; current normal ROM SHA-256:
+Local evidence: `out/cv1-dagger.SuwNRt/`; pre-stair ROM SHA-256:
 `9b236c7772cafa3c3a9a766ddfed5cb7f611c8bd03ce9074c5d56badc87e695d`.
 
 ## Coherent background and HUD delivery

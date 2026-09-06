@@ -64,6 +64,15 @@ This profile-only change retains the renderer and stack repairs. Its updated
 420-tick measurements above supersede the preceding byte-identical checkpoint;
 SMB output remains byte-identical.
 
+The first staircase subsequently exposed two more strict `$E2` traps at
+original bank-6 branch targets `$9ECB` and `$971D`. Their profile roots now
+permit ascent from Y192 to Y96, return to normal actor control and movement
+on the upper platform. A real-input extension runs 2,500 further ticks without
+a trap, including later death/respawn; it does not establish a stage clear or
+boss support. Walking, heart and repeated-dagger callback logs remain
+byte-identical to their pre-stair baselines. See the latest
+[first-stair evidence](cv1-performance-reassessment.md#first-stair-follow-up).
+
 ## Completed course correction
 
 The earlier work stalled because mapper banks were treated as interchangeable

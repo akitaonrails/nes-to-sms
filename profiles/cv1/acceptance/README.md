@@ -85,6 +85,29 @@ Both modes record hashes, core options, raw callback observations, transition
 captures and `summary.json`. A passed route covers the first indoor stair
 approach, not a stage clear or boss.
 
+## First indoor stair ascent
+
+Original-code tests cover the two bank-6 conditional-branch tails reached
+while entering the first staircase (`$9ECB` collision tail and `$971D`
+approach timeout). Run the profile check normally, or include canonical-ROM
+oracle/discovery checks:
+
+```sh
+cargo test -p nes_to_sms --test cv1_stairs
+CV1_STAIRS_NES=/path/to/input.nes cargo test -p nes_to_sms \
+  --test cv1_stairs -- --ignored
+```
+
+For interactive checking, approach the staircase from its lower-left end
+and hold Up + Right. An input-only actual-core extension of the unchanged
+indoor route verifies stair actor mode 4, ascent from Y192 to Y96, return
+to normal actor mode 0, and movement along the upper platform. The extension
+totals 2,500 ticks beyond the original indoor endpoint without a
+trap, including a later death and respawn. This is exploratory coverage,
+not a new frozen acceptance route or proof of completing the room/stage.
+The historical `ENEMY` HUD label is present throughout ordinary gameplay;
+its presence does not establish a boss encounter.
+
 ## Canonical NES reference inputs
 
 `stage1-smoke.buttons` and `heart-smoke.buttons` record reference-NES input

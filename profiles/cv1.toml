@@ -1340,6 +1340,12 @@ addr = 0x9605
 bank = 6
 addr = 0x962d
 
+# Stair-approach countdown $9726 DEC $04DC; $9729 BMI targets this
+# shared JMP $9605 reset tail when its signed countdown expires.
+[[bank_entry]]
+bank = 6
+addr = 0x971d
+
 [[bank_entry]]
 bank = 6
 addr = 0x9c43
@@ -1367,6 +1373,13 @@ addr = 0x9e2b
 [[bank_entry]]
 bank = 6
 addr = 0x9e3c
+
+# Original $9ED3/$9ED7 branch here for stair modes $046C=6/4.
+# This shared JMP $9F56 clears the horizontal-collision bit; external
+# conditional targets need explicit roots, including this banked entry.
+[[bank_entry]]
+bank = 6
+addr = 0x9ecb
 
 [[bank_entry]]
 bank = 6
