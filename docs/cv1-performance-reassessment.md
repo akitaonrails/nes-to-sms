@@ -10,6 +10,63 @@ Next optimization work is scoped in
 That follow-up keeps this delivered ROM unchanged and separates measurement
 gaps from proposed SMS/Z80-specific optimizations.
 
+## Measured sprite-zero wait correction
+
+The actual-core profiler identified a synthetic PPU handshake error: the
+NMI acknowledgement and pre-split setup consumed the simulated clear state
+before CV1's clear-wait loop started. Every invocation then performed 255
+status reads and timed out, including repeated lag-handler invocations.
+
+A CV1-only replacement of `$F868` preserves its status/scroll/control writes,
+then rearms the clear observation when rendering is enabled. The original
+clear/hit loops, rendering-off timeout and externally targeted `$F87C` return
+remain translated. SMS HINT still owns the physical HUD split; no game logic,
+input/audio ticks or generic PPU/SMB behavior is removed.
+
+Unchanged installed core, numeric overclock settings and frozen 420-tick inputs:
+
+| Route / clock | Before updates/s | Accepted updates/s | Improvement |
+| --- | ---: | ---: | ---: |
+| Walk / 500 | 19.2560 | 26.2162 | 36.15% |
+| Heart / 500 | 21.5291 | 29.2646 | 35.93% |
+| Walk / 250 | 5.0235 | 12.3917 | 146.68% |
+
+State, area and hearts match exactly; position landmarks differ by at most
+one pixel, and pickup remains tick 119. At 500%, mean post-tick-60 physical
+gaps fall from 3.125/2.742 to 2.286/2.008 frames for walk/heart; their maxima
+fall from five to four. The whole-route maximum nonadvancing streak remains
+17 during startup. This is a substantial improvement, **not full NES speed**.
+
+Instrumented walking remains callback-identical to normal execution. First-wait
+iterations fall from 256 to one per invocation; complete-update nominal CPU
+cost falls from 976,409T to 714,530T (26.82%). This explains the gain without
+using frontend FPS or treating all interrupt context as overhead.
+
+Continuous 500% checks find zero fixed-HUD outliers in 824/724 callbacks,
+zero known-sky-stripe occurrences and no wholly black/white gameplay frames.
+Repeated airborne/ground dagger throws complete 1,306 indoor ticks; the first
+stair route again reaches the upper platform and continues 2,500 extra ticks
+without trapping. These are targeted regression checks, not full-stage or
+NES pixel-parity claims.
+
+Original-6502 tests cover all 256 control bytes with three flag patterns and
+19,200 banked executions of the intervening HUD/sound paths. Assembled tests
+compare the retained original routine, PPU side effects, loop endpoints,
+interrupt boundaries and native stack. The longest new masked interval is
+911T; adding the existing 348T HINT service stays below its 2,052T allowance.
+A temporary observational core measures minimum SP `$DFA0` walking and `$DF9C`
+on repeated daggers, the latter 348 bytes above `$DE40`; both complete CSVs
+match normal execution. Existing HUD/SAT tests pass and freshly rebuilt SMB
+remains byte-identical to its accepted artifact.
+
+Accepted SHA-256:
+`0b5a7b51d350d5022a3325d151f58acd0ef9aa43edd8b902bc8a7e0c1a2d6cea`.
+Evidence: `out/cv1-poll-rearm-r1/`,
+`out/cv1-min-sp.TbcCLv/ASSESSMENT.md`, and the
+[profiling workflow](core-profiling.md). Independent acceptance review passed
+on its first attempt. The canonical test ROM is rebuilt only from this
+accepted source and checked byte-for-byte against the measured candidate.
+
 ## First-stair follow-up
 
 Extended real-input testing exposed two more missing bank-6 branch targets:

@@ -34,6 +34,45 @@
 
 .section "frame_cv1" free
 
+.ifdef CV1_COHERENT_BG
+; Original F868: STATUS, scroll0/0, CTRL FF&FE. Its status read can consume
+; the synthetic clear edge before F8C7 waits for it. Physical HUD splitting
+; belongs to SMS HINT; rearm the clear observation AFTER the original pair,
+; leaving both original wait loops (including rendering-off timeouts) intact.
+; Native CALL/RET ABI; DE, shadow flags except final N/Z, mapper and IFF stay
+; unchanged. Guarded PPU calls provide their existing short service boundaries;
+; do not turn this entire routine into one long DI interval.
+rt_cv1_split_prepare:
+  ld b, 2
+  call rt_ppu_read
+  xor a
+  ld b, 5
+  call rt_ppu_write
+  xor a
+  ld b, 5
+  call rt_ppu_write
+  ld a, ($c0ff)
+  and $fe
+  ld b, 0
+  call rt_ppu_write
+  ld a, ($cb09)
+  and $18
+  jr z, _cv1_split_flags
+  ld a, 1
+  ld ($cb12), a
+_cv1_split_flags:
+  ld a, ($c0ff)
+  and $fe
+  ld l, a
+  ld h, $3e
+  ld a, ($cb03)
+  and $7d
+  or (hl)
+  ld ($cb03), a
+  ld a, l
+  ret
+.endif
+
 ; Existing profile replacement ABI: native CALL/RET, D/E = NES X/Y.
 ; Original C11F: read STATUS; scroll FD,FC; CTRL FF. The status value is dead;
 ; final A and shadow N/Z come from FF. All other shadow flags and D/E survive.

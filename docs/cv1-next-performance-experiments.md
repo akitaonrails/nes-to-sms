@@ -2,6 +2,12 @@
 
 ## Actual-core follow-up: sprite-zero timeout amplification
 
+The first candidate below is now implemented and independently accepted:
+[26.22/29.26 updates/s at 500%](cv1-performance-reassessment.md#measured-sprite-zero-wait-correction),
+about 36% faster with the tested graphics/gameplay regressions preserved.
+The baseline measurements below explain its selection; they are not current
+post-optimization costs.
+
 The isolated [actual-core profiler](core-profiling.md) now measures 360
 complete update intervals on the stair-fixed CV1 build. Stock and instrumented
 cores produce identical callback/state CSVs on walk/heart at numeric `500` and

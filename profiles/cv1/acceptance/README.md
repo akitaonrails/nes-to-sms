@@ -29,6 +29,15 @@ CV1_DAGGER_NES=/path/to/input.nes cargo test -p nes_to_sms \
 
 ## Matched walking and heart routes
 
+The accepted sprite-zero handshake correction measures 26.22/29.26 walking/
+heart updates per second at numeric `500`; this is still below normal NES
+speed. Its original-code and assembled protocol checks can be rerun with:
+
+```sh
+CV1_SPLIT_NES=/path/to/input.nes cargo test -p nes_to_sms --test cv1_split -- --ignored
+CV1_HANDOFF_PROJECT=out/cv1 cargo test -p nes_to_sms --test frame_handoff split_ -- --include-ignored
+```
+
 `core-routes.toml` is the frozen 420-game-tick comparison contract. The runner
 boots through real input, captures actual libretro video callbacks, checks
 state/movement/traps, and observes heart collection plus subsequent progress.

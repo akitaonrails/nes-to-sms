@@ -28,6 +28,7 @@ struct Machine {
     vcounters: Vec<u8>,
     vcounter_reads: usize,
     raw_writes: Vec<(u16, u8, usize)>,
+    min_sp: u16,
 }
 
 impl Machine {
@@ -73,6 +74,7 @@ impl Machine {
             vcounters: Vec::new(),
             vcounter_reads: 0,
             raw_writes: Vec::new(),
+            min_sp: 0xffff,
         };
         result.ram[0xdffd] = 0;
         result.ram[0xdffe] = 1;
@@ -104,6 +106,7 @@ impl Machine {
         // A coherent cold scene is intentionally prepared before publication;
         // its bounded chunks may total substantially more than one old IRQ.
         for _ in 0..2_000_000 {
+            self.min_sp = self.min_sp.min(cpu.sp);
             if cpu.pc == stop {
                 return;
             }
@@ -202,6 +205,7 @@ impl Machine {
         cpu.iff2 = false;
         cpu.pc = 0x38;
         for _ in 0..100_000 {
+            self.min_sp = self.min_sp.min(cpu.sp);
             if cpu.pc == resume && cpu.sp == resume_sp && self.ram[0xdffe] == resume_bank {
                 return;
             }
@@ -210,6 +214,219 @@ impl Machine {
         }
         panic!("IRQ did not return to {resume_bank:02x}:{resume:04x}");
     }
+}
+
+#[test]
+fn split_replacement_preserves_original_early_return_body() {
+    let profile = profile::load_from_str(include_str!("../../../profiles/cv1.toml")).unwrap();
+    let replacement = profile.replacement_for(0xf868).expect("F868 split hook");
+    assert_eq!(replacement.runtime_label, "rt_cv1_split_prepare");
+    assert!(!replacement.stub_body, "F87C must remain an early RTS");
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn split_setup_matches_original_ppu_abi_except_enabled_clear_rearm() {
+    let base = Machine::assembled();
+    for iff in [false, true] {
+        for mask in [0, 8, 0x10, 0x18] {
+            for phase in [0, 1, 2, 0xff] {
+                for split in 0..8 {
+                    for control in [0, 0x81, 0xb0, 0xff] {
+                        let mut original = base.clone();
+                        original.seed_ppu(control & 1, control);
+                        // The same matrix covers both busy states, every
+                        // latch combination, and varied preserved flag bits.
+                        original.ram[0xcb03] = control;
+                        original.ram[0xcb05] = phase & 1;
+                        original.ram[0xcb0b] = split & 1;
+                        original.ram[0xcb0e] = (split >> 1) & 1;
+                        original.ram[0xcb09] = mask;
+                        original.ram[0xcb12] = phase;
+                        original.ram[0xcb20] = split;
+                        original.ram[0xdffc] = if split == 3 { 8 } else { 0 };
+                        let mut cpu = original.cpu("L_F868", iff);
+                        let mut replacement = original.clone();
+                        let stop = original.labels["rt_translated_rts"].1;
+                        original.run_until(&mut cpu, stop);
+                        let hook = replacement.call("rt_cv1_split_prepare", iff);
+                        assert_eq!((hook.a, hook.d, hook.e), (cpu.a, cpu.d, cpu.e));
+                        assert_eq!((hook.iff1, hook.iff2), (cpu.iff1, cpu.iff2));
+                        assert_eq!(hook.sp, cpu.sp + 2, "native replacement return only");
+                        for address in FIELDS.into_iter().chain([
+                            0xcb03, 0xcb05, 0xcb0b, 0xcb0e, 0xcb62, 0xcb14, 0xd47f, 0xdffc, 0xdffe,
+                            0xdfff, 0xcb02, READY, PENDING, PUBLISH, CONSUME,
+                        ]) {
+                            assert_eq!(
+                                replacement.ram[address], original.ram[address],
+                                "field {address:04x}, iff={iff}, mask={mask}, phase={phase}, split={split}, ctrl={control}"
+                            );
+                        }
+                        assert_eq!(replacement.ram[0xcb12], if mask == 0 { phase } else { 1 });
+                        assert_eq!(replacement.ports, original.ports);
+                        assert_eq!(replacement.sram, original.sram);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn split_setup_retains_original_wait_loop_endpoints_and_disabled_timeouts() {
+    for mask in [0, 8, 0x10, 0x18] {
+        let mut old = Machine::assembled();
+        old.seed_ppu(1, 0xb0);
+        old.ram[0xcb09] = mask;
+        old.ram[0xcb12] = 1;
+        let mut original = old.cpu("L_F868", true);
+        let mut new = old.clone();
+        let stop = old.labels["rt_translated_rts"].1;
+        old.run_until(&mut original, stop);
+        new.call("rt_cv1_split_prepare", true);
+        let mut read_counts = Vec::new();
+        let mut outcomes = Vec::new();
+        for m in [&mut old, &mut new] {
+            let mut cpu = m.cpu("L_F8C7", true);
+            let stop = m.labels["L_F8E6"].1;
+            let mut starts = 0;
+            let loop_start = m.labels["L_F8C9"].1;
+            for _ in 0..100_000 {
+                if cpu.pc == stop {
+                    break;
+                }
+                starts += usize::from(cpu.pc == loop_start);
+                cpu.step(m).unwrap();
+            }
+            assert_eq!(cpu.pc, stop);
+            outcomes.push((
+                cpu.a,
+                cpu.d,
+                m.ram[0xcb03],
+                m.ram[0xcb05],
+                m.ram[0xcb0b],
+                m.ram[0xcb0e],
+                m.ram[0xcb12],
+                m.ram[0xcb20],
+            ));
+            read_counts.push(starts);
+        }
+        assert_eq!(outcomes[0], outcomes[1], "mask={mask}");
+        assert_eq!(
+            read_counts,
+            if mask == 0 { vec![1, 1] } else { vec![256, 1] }
+        );
+        assert_eq!(outcomes[0].1, if mask == 0 { 0 } else { 1 });
+    }
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn split_setup_survives_every_live_irq_boundary_and_respects_native_floor() {
+    for busy in [0, 1] {
+        for depth in [1, 2] {
+            for status in [0, 0x80] {
+                let mut m = Machine::assembled();
+                m.seed_busy_lag_irq();
+                m.ram[0xc01b] = busy;
+                m.ram[0xca11] = depth;
+                m.ram[0xc018] = 5;
+                m.ram[0xc019] = 6;
+                m.ram[0xc027] = 6;
+                m.vdp_status = status;
+                let mut cpu = m.cpu("rt_cv1_split_prepare", true);
+                let mut boundaries = 0;
+                while cpu.pc != 7 {
+                    if cpu.iff1 && cpu.ei_pending == 0 {
+                        let mut interrupted = m.clone();
+                        let mut resumed = cpu;
+                        interrupted.interrupt(&mut resumed);
+                        assert_eq!(
+                            (
+                                resumed.a, resumed.f, resumed.b, resumed.c, resumed.d, resumed.e,
+                                resumed.h, resumed.l, resumed.sp
+                            ),
+                            (
+                                cpu.a, cpu.f, cpu.b, cpu.c, cpu.d, cpu.e, cpu.h, cpu.l, cpu.sp
+                            ),
+                            "context at {:04x}, busy={busy}, depth={depth}, status={status}",
+                            cpu.pc
+                        );
+                        for address in [0xcb03, 0xcb14, 0xcb62, 0xdffc, 0xdffe, 0xdfff, 0xd47f] {
+                            assert_eq!(
+                                interrupted.ram[address], m.ram[address],
+                                "field {address:04x}"
+                            );
+                        }
+                        interrupted.run_until(&mut resumed, 7);
+                        assert_eq!(
+                            (resumed.a, resumed.d, resumed.e, resumed.sp),
+                            (0xb0, 0x52, 0xa9, 0xdff6)
+                        );
+                        assert!(resumed.iff1 && resumed.iff2);
+                        assert_eq!(interrupted.ram[0xcb1d], 0);
+                        assert!(
+                            interrupted.min_sp >= 0xde40,
+                            "native floor {:04x}",
+                            interrupted.min_sp
+                        );
+                        boundaries += 1;
+                    }
+                    cpu.step(&mut m).unwrap();
+                }
+                assert!(boundaries > 20);
+            }
+        }
+    }
+    // The replacement's native CALL takes one word, and the PPU helper CALL
+    // takes one more. Unlike a translated JSR, it adds no software-call shim.
+    for iff in [false, true] {
+        let mut m = Machine::assembled();
+        m.seed_ppu(1, 0xb0);
+        let mut cpu = m.cpu("rt_cv1_split_prepare", iff);
+        cpu.sp = 0xde42;
+        m.ram[0xde42] = 7;
+        m.ram[0xde43] = 0;
+        m.run_until(&mut cpu, 7);
+        assert_eq!(m.min_sp, 0xde40);
+        assert_eq!(cpu.sp, 0xde44);
+    }
+}
+
+#[test]
+#[ignore = "requires CV1_HANDOFF_PROJECT assembled with Docker WLA-DX"]
+fn split_setup_keeps_each_irq_masked_window_inside_the_hint_deadline() {
+    let mut maximum = 0;
+    for mask in [0, 8, 0x10, 0x18] {
+        for phase in [0, 1, 2] {
+            for split in [0, 3, 7] {
+                let mut m = Machine::assembled();
+                m.seed_ppu(1, 0xff);
+                m.ram[0xcb09] = mask;
+                m.ram[0xcb12] = phase;
+                m.ram[0xcb20] = split;
+                let mut cpu = m.cpu("rt_cv1_split_prepare", true);
+                let mut masked = 0;
+                while cpu.pc != 7 {
+                    let interruptible = cpu.iff1 && cpu.ei_pending == 0;
+                    let ticks = step_commit_tstates(&mut m, &mut cpu);
+                    if !interruptible || !cpu.iff1 || cpu.ei_pending != 0 {
+                        masked += ticks;
+                    } else {
+                        maximum = maximum.max(masked);
+                        masked = 0;
+                    }
+                }
+                maximum = maximum.max(masked);
+            }
+        }
+    }
+    eprintln!("split helper longest masked window: {maximum} nominal T");
+    // The existing actual coherent line-IRQ test proves 348T from acceptance
+    // through the scroll-register pair. HINT follows row38, leaving nine
+    // 228T stock-clock lines before row48. Include EI's acceptance delay.
+    assert!(maximum + 348 < 9 * 228);
 }
 
 impl Bus for Machine {
@@ -1132,7 +1349,7 @@ fn cv1_rejects_nonempty_dormant_vbuf_before_any_video_write() {
     assert!(m.ports.is_empty());
 }
 
-// Exact Z80 timing for the deliberately small admitted SAT/scroll path.
+// Exact Z80 timing for the admitted SAT/scroll path and split setup guards.
 // Cpu.cycles is approximate (notably OUTI), so reject unknown opcodes here.
 fn step_commit_tstates(m: &mut Machine, cpu: &mut Cpu) -> u32 {
     let pc = cpu.pc;
@@ -1143,8 +1360,15 @@ fn step_commit_tstates(m: &mut Machine, cpu: &mut Cpu) -> u32 {
         0xd3 | 0xdb => 11,
         0x32 | 0x3a => 13,
         0x01 | 0x11 | 0x21 => 10,
-        0x3e | 0xd6 | 0xe6 | 0xf6 | 0xfe => 7,
-        0xaf | 0xb7 => 4,
+        0x06 | 0x0e | 0x16 | 0x1e | 0x26 | 0x2e | 0x3e | 0xd6 | 0xe6 | 0xf6 | 0xfe => 7,
+        0x3c | 0x3d | 0xf3 | 0xfb => 4,
+        0x80..=0xbf => {
+            if op & 7 == 6 {
+                7
+            } else {
+                4
+            }
+        }
         0x40..=0x7f if op != 0x76 && op & 7 != 6 && (op >> 3) & 7 != 6 => 4,
         0x18 => 12,
         0x20 | 0x28 | 0x30 | 0x38 => {
@@ -1157,7 +1381,15 @@ fn step_commit_tstates(m: &mut Machine, cpu: &mut Cpu) -> u32 {
         0xc3 | 0xc2 | 0xca | 0xd2 | 0xda | 0xe2 | 0xea | 0xf2 | 0xfa => 10,
         0xcd => 17,
         0xc9 => 10,
-        0xcb if (0x40..0x80).contains(&second) && second & 7 != 6 => 8,
+        0xcb => {
+            if second & 7 != 6 {
+                8
+            } else if (0x40..0x80).contains(&second) {
+                12
+            } else {
+                15
+            }
+        }
         0xed => match second {
             0xa3 => 16,
             0xb0 => {
@@ -1168,6 +1400,8 @@ fn step_commit_tstates(m: &mut Machine, cpu: &mut Cpu) -> u32 {
                 }
             }
             0x44 => 8,
+            0x57 => 9,
+            0x53 | 0x5b => 20,
             _ => panic!("unbudgeted ED {second:02x} at {pc:04x}"),
         },
         _ => panic!("unbudgeted commit opcode {op:02x} at {pc:04x}"),

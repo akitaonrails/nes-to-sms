@@ -41,6 +41,14 @@ addr = 0xc11f
 runtime_label = "rt_cv1_scroll_publish"
 reason = "Preserve scroll/control writes and publish the completed graphics prologue once"
 
+# F868's status read precedes the game's clear-then-hit polling barrier.
+# Preserve its original PPU writes, then rearm only the synthetic clear edge.
+# Keep the translated body: F87D has external early-return branches to F87C.
+[[replacement]]
+addr = 0xf868
+runtime_label = "rt_cv1_split_prepare"
+reason = "Retain HUD setup and rearm the synthetic clear edge before native-HINT-backed split polling"
+
 # Trap-driven bank annotations (see out/cv1/reports/unresolved_labels.txt
 # + $CB62 shadow at trap time).
 [[function]]

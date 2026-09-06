@@ -17,6 +17,23 @@ trap-free soak. It is not a pixel-perfect, real-time, or full-game claim.
 
 ## Latest performance checkpoint (2026-09-05)
 
+The measured sprite-zero handshake correction reaches **26.22 walking /
+29.26 heart-route game updates/s at 500%**, about 36% faster than the
+preceding coherent build. Walking at 250% rises from 5.02 to 12.39 updates/s.
+The CV1-only pre-split hook preserves original PPU writes and polling loops;
+it rearms a synthetic clear observation that earlier status reads consumed.
+See [the measured correction and verification](cv1-performance-reassessment.md#measured-sprite-zero-wait-correction).
+
+Walking, heart pickup, repeated daggers and first-stair continuation pass;
+continuous HUD/known-stripe checks remain clean, and rebuilt SMB is unchanged.
+This is not full speed or full-stage completion. A deliberate second-stair
+route exposes a pre-existing upper-exit return-stack failure on both old and
+optimized builds; it remains separate from this accepted performance change.
+
+### Earlier coherent-renderer and return-stack checkpoint
+
+The following cadence and byte-identical comparisons predate the polling fix.
+
 The coherent background/HUD build reaches **19.26 walking / 21.53 heart-route
 game updates/s at 500%**, completing pickup and another 301 ticks. It improves
 slightly over the previously installed handoff build (19.08/20.97), but remains
