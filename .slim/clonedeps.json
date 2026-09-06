@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "updatedAt": "2026-09-06T00:00:00.000Z",
+  "dependencies": [
+    {
+      "name": "Genesis Plus GX",
+      "resolvedVersion": "1.7.4-a7985a9",
+      "repoUrl": "https://github.com/libretro/Genesis-Plus-GX.git",
+      "ref": "a7985a9c4278ac352f8ca7bb4d3cc6b36e9e3e7d",
+      "path": ".slim/clonedeps/repos/libretro__Genesis-Plus-GX",
+      "packagePath": ".",
+      "reason": "User-approved pinned read-only source for isolated stock/instrumented Docker profiler builds; editable copies belong under out/."
+    }
+  ]
+}

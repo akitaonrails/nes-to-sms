@@ -1,5 +1,41 @@
 # CV1: next performance experiments
 
+## Actual-core follow-up: sprite-zero timeout amplification
+
+The isolated [actual-core profiler](core-profiling.md) now measures 360
+complete update intervals on the stair-fixed CV1 build. Stock and instrumented
+cores produce identical callback/state CSVs on walk/heart at numeric `500` and
+walk at `250`. This replaces the earlier sampled-PC hypothesis with instruction
+costs; it is not yet a guest optimization.
+
+The original `$F8C7` clear-wait loop executes **255 PPUSTATUS reads and exits
+by timeout on every measured invocation**. Its direct cost is 224,231T per
+walking update at 500% (22.96% of all CPU work), 199,745T on the heart route
+(23.32%), and 769,053T walking at 250% (41.40%). The 360 game updates invoke
+the wait 989/881/3,392 times respectively: one full-handler call per update,
+plus repeated busy/lag-handler calls. The clear-wait alone accounts for
+61.8% of the additional work at 250% versus 500%.
+
+Source inspection explains the timeout: NMI acknowledgement at `$C058` and
+the pre-split routine `$F868` consume the synthetic stale/clear phases before
+the actual clear-wait starts. The IRQ bridge already resets that phase for
+each delivered NMI; another unconditional IRQ reset is not the missing fix.
+SMS HINT already owns the physical HUD split. Investigate a CV1-only `$F868`
+replacement that preserves its PPU writes and rearms the synthetic clear
+observation, retaining both original loops and the render-disabled timeout.
+Preserve externally targeted `$F87C` RTS, flags/registers, scroll classification,
+interrupt service, native stack headroom and unchanged-clock gameplay gates.
+
+This is now the first candidate, ahead of generic mapper/read optimizations.
+For example, 57,797 of the apparent 67,193T/update fixed-PRG read cost at 500%
+belongs to C030 idle-loop calls, not active game work. Do not count all IRQ
+context as overhead either: translated CV1 game execution occurs there.
+Build-pinned source spans, exact-PC counts and complete category totals are
+recorded locally in `out/gpgx-profile.xwbUpU/ATTRIBUTION.md`,
+`POLLING-CANDIDATE.md` and the three `attribution.json` reports.
+
+## Earlier clock-scaling assessment
+
 Date: 2026-09-05. Checkpoint: `d667ed3`. This is a measurement/research
 follow-up, not a new optimization or a full-speed claim. It refines step 5 of
 [the performance reassessment](cv1-performance-reassessment.md).

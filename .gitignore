@@ -10,3 +10,7 @@ third_party/nesrecomp/
 *.mkv
 *.mc0
 __pycache__/
+
+# BEGIN oh-my-opencode-slim clonedeps
+.slim/clonedeps/repos/
+# END oh-my-opencode-slim clonedeps
