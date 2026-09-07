@@ -130,6 +130,26 @@ is chunked into at most 128 bytes between host-service opportunities, with
 BUSY excluding guest producer reentry. Transient rendering-off writes inside
 NMI are source-only; a completed rendering-off packet still blanks.
 
+The first incremental path also retains BG patterns, exact-key metadata and
+the prepared/visible nametable when **both frozen BG sources are unchanged**.
+C8EC records BG differences; C8ED selects the comparison group (then becomes
+the renderer's skip-BG scratch). Both CIRAM snapshots, each record's
+BG-selected four physical CHR pages, control/mask, scroll/t, mirroring,
+explicit IRQ reload and the committed split participate. Physical pages are
+already resolved through MMC3 inversion; changes to the other CHR half do
+not invalidate BG. Control changes conservatively invalidate it, including
+pattern-table selection. An earlier sprite/palette difference cannot bypass
+a later BG comparison.
+
+OAM, non-BG CHR, palettes and fine X can therefore reuse BG. The renderer
+still blanks, rebuilds sprite patterns/SAT and both palettes, and publishes
+at VBlank. Active/hidden transitions keep the existing per-OAM slot rules;
+there is no visible sprite-pattern overwrite. Single-record fallback
+conservatively treats any copied HUD-record change as a BG change. There is
+no dirty-intent capture shortcut, no SAT-only unblanked update, and no new
+cache allocation. READY, partial-layer rejection and render-off behavior
+remain mandatory.
+
 Existing assembled helper tests in `trace_sms.rs` use `TRACE_FUNCTIONAL_PROJECT`:
 
 ```sh
@@ -141,6 +161,8 @@ TRACE_FUNCTIONAL_PROJECT=out/tests/<generated-fixture>/sms \
   cargo test -p nes_to_sms --bin trace-sms mmc3_full_renderer -- --ignored --nocapture
 TRACE_FUNCTIONAL_PROJECT=out/tests/<generated-fixture>/sms \
   cargo test -p nes_to_sms --bin trace-sms mmc3_full_packets -- --ignored --nocapture
+TRACE_FUNCTIONAL_PROJECT=out/tests/<generated-fixture>/sms \
+  cargo test -p nes_to_sms --bin trace-sms mmc3_full_bg_stable -- --ignored --nocapture
 TRACE_FUNCTIONAL_PROJECT=out/tests/<generated-fixture>/sms \
   cargo test -p nes_to_sms --bin trace-sms mmc3_full_partial_layers -- --ignored --nocapture
 ```
@@ -157,16 +179,63 @@ actual NMI acknowledgement, and stale-event traps. They are **synthetic
 renderer evidence**, not an original-NES frame oracle or a game run.
 
 The tiny renderer fixture measured roughly 1.69–1.81 million interpreter
-T-states per rebuild, with a longest measured DI span of 32,548 T-states.
+T-states per rebuild, with a longest measured DI span of 32,576 T-states.
 Those runs did not deliver host interrupts and do not establish steady-state
 game speed, display duty cycle, or hardware IRQ latency.
 
-The exact-packet fixture measured first capture 70,268 plus rebuild 1,548,049
-interpreter T-states, versus identical capture 220,866 plus reuse 230 T-states.
+After BG classification, the exact-packet fixture measured first capture
+73,546 plus rebuild 1,548,233 interpreter T-states, versus identical capture
+222,067 plus reuse 230 T-states. Before this increment those figures were
+70,268 / 1,548,049 / 220,866 / 230 respectively: classification adds cost,
+and does not optimize the identical-CIRAM comparison itself.
 Its reuse path leaves VRAM, CRAM and VDP registers unchanged; individual source
 identity changes, HUD-only writes, split-only changes and rendering-off are
 separate assertions. These numbers describe that synthetic packet only,
-not an actual-game speedup; the renderer still rebuilds changed packets.
+not an actual-game speedup.
+
+The incremental fixture compares 120 dependency/configuration cases against
+forced full rebuilds, including fine-Y/split boundaries, physical CHR table
+selection/inversion, both records, IRQ reload, palette/fine-X, and sprite
+active/hidden changes. Entire VRAM and both raster palettes/register sets
+must agree, with BG/NT bytes unchanged on eligible packets. Each case also
+mutates live producer state after freezing and repeats with one nested host
+VINT, checking host service without guest reentry. Without the injected IRQ,
+one active moving sprite takes **42,097 T** on the BG-stable path versus
+**1,783,920–2,028,068 T** for the same forced-full packet. These synthetic
+costs exclude capture and do not predict how often real gameplay qualifies;
+matched actual-core map/level A/B measurements remain a separate gate.
+
+The first actual-core map A/B now establishes a **2.22× route-specific gain**.
+With the same profile, compiler, translated code, source-timed controller
+inputs and Genesis Plus GX core at numeric `500`, the first 400 map updates
+take 4,814 physical frames before this change versus 2,168 afterward. At the
+core's reported 59.922743 Hz this is **4.979 → 11.056 game updates/second**.
+All 401 matched completed-wait snapshots have identical full 2 KiB guest RAM,
+including stack and controller state; 42 matched captured frame pairs have
+identical RGB pixels. Renderer-BUSY=2 samples fall from 66.47% to 25.55%.
+That is a renderer occupancy measurement, not measured blank-frame duty:
+captures were sparse and selected around publications. These observations
+establish map correctness and throughput only, not playable-level performance
+or full-speed execution on stock SMS hardware.
+
+A separate no-input level comparison, through the death animation, covers
+560 updates with all 561 matched completed-wait guest-RAM snapshots identical.
+The same optimization reduces 8,969 physical frames to 5,120: **3.741 → 6.554
+updates/second (1.75×)** at `500`. Both builds subsequently hit the same strict
+unresolved death-return target. This is a bounded correctness/performance
+comparison before that stop, not successful death recovery or active gameplay
+acceptance. Its remaining non-render work is substantial and needs profiling.
+
+The final matched **active 1-1 route** completes on both builds. From initial
+ready state through the goal sequence, the same 1,979 updates take 36,588
+physical frames before versus 31,020 after: **3.241 → 3.823 updates/second
+(1.18×)** at `500`. All seven matched map/level/block/mushroom/goal/exit/map-return
+checkpoints have identical full guest RAM and cartridge RAM. Dense video
+classification records uniform-color callbacks falling from 19,223/40,438
+to 12,459/33,678 in the gameplay window (about 47.54% → 36.99%), with a maximum
+11-callback flat streak in both builds. Thus the larger map gain does **not**
+generalize to moving gameplay. Both routes keep four lives and mark 1-1 complete;
+the remaining cadence and rebuild blanking are severe playability limitations.
 
 ## Remaining acceptance limits
 
@@ -190,13 +259,14 @@ x64–79/y33–48 match under a one-to-one five-color translation. Red and skin-
 changed its appearance, not its shape or position in that state. This checks
 one matched map icon, not all sprite animations or split-crossing sprites.
 
-Actual reset → title → input-responsive map now passes the phase-2 functional
+Actual reset → title → input-responsive map passed the phase-2 functional
 route in Genesis Plus GX at numeric `500`, without guest-memory writes. ROM
 SHA256 `1db48a519d3b76a72d9fc4383aadff859b67136a934bf522e575a89dd775d966`
 reached the map at physical frame2014, then Right/Up inputs moved its source
 coordinates from (32,64) to (64,32). The 6,000-frame run observed 330 map ticks,
 259 distinct video hashes, and no trap. This establishes input-responsive map
-progress, not playable level1, normal NES cadence, or general mapper timing.
+progress alone, not level1, normal NES cadence, or general mapper timing.
+The later phase-3 route above separately establishes first-level completion.
 
 Historical pre-cooperative probes showed curtain/intro publications amid
 mostly blank frames: one 1,600-frame probe had 194 renderer-busy exits and

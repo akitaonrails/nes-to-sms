@@ -137,11 +137,12 @@ _latch_no_b:
 
 _latch_buttons_done:
 .ifdef INPUT_PAUSE_START
+.ifndef MMC3_FULL_RUNTIME
   ; Chord fallback: some frontends do not route the SMS PAUSE button
   ; (RetroArch/GPGX pause routing varies). Holding BOTH buttons for 30
   ; consecutive frames (~half a second) arms the same Start injector.
-  ; No gameplay collision: jump+whip chords are transient. $CB2F is
-  ; the consecutive-hold counter; $FE = already fired (until release).
+  ; Disabled in full MMC3 mode: sustained run+jump needs both buttons.
+  ; $CB2F is the consecutive-hold counter; $FE = fired until release.
   ld   a, b
   and  %00110000
   cp   %00110000
@@ -162,6 +163,7 @@ _latch_chord_reset:
   xor  a
   ld   ($cb2f), a
 _latch_chord_done:
+.endif
   ; SMS PAUSE pressed recently (or the chord above): the pause NMI
   ; ($0066) armed a small countdown at $CB2E; while it runs, hold NES
   ; Start down. Full MMC3 rendering can span many host frames, so its

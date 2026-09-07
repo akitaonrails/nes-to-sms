@@ -7960,6 +7960,35 @@ mod tests {
                 assert_eq!(bus.read(0xcb06), 1 << nes_bit, "mode={mode}");
             }
         }
+        // Run+jump may span many physical frames. Only the Pause vector may
+        // inject Start in full mode; holding both action buttons never does.
+        bus.controller_port_dc = 0xcf;
+        for frame in 0..180 {
+            call(&mut bus, latch, 0);
+            assert_eq!(bus.read(0xcb2e), 0, "A+B armed Start at frame {frame}");
+            call(&mut bus, strobe, 0);
+            let mut buttons = 0;
+            for bit in 0..8 {
+                buttons |= call(&mut bus, read, 0x16) << bit;
+            }
+            assert_eq!(buttons, 3, "A+B serial byte at frame {frame}");
+        }
+        call(&mut bus, 0x66, 0);
+        for remaining in (0..4).rev() {
+            call(&mut bus, latch, 0);
+            call(&mut bus, strobe, 0);
+            let mut buttons = 0;
+            for bit in 0..8 {
+                buttons |= call(&mut bus, read, 0x16) << bit;
+            }
+            assert_eq!(buttons, 11, "Pause must coexist with A+B");
+            assert_eq!(bus.read(0xcb2e), remaining);
+        }
+        call(&mut bus, latch, 0);
+        assert_eq!(bus.read(0xcb06), 3, "Start releases while A+B stays held");
+        bus.controller_port_dc = 0xff;
+        call(&mut bus, latch, 0);
+        assert_eq!(bus.read(0xcb06), 0);
     }
 
     #[test]
@@ -9874,6 +9903,255 @@ mod tests {
                             );
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_bg_stable_matches_forced_rebuild() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let asm = std::fs::read_to_string(path.join("sms.asm")).unwrap();
+        let chr_base = asm
+            .lines()
+            .find_map(|line| line.strip_prefix(".define MMC3_CHR_DATA_BASE "))
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            * BANK_SIZE;
+        let mut rom = std::fs::read(path.join("sms.sms")).unwrap();
+        // Physical-page, tile and row identities must all affect pixels.
+        for page in 0..8usize {
+            for tile in 0..64usize {
+                for row in 0..8usize {
+                    rom[chr_base + page * 1024 + tile * 16 + row] = (page as u8 * 29)
+                        .wrapping_add(tile as u8)
+                        .rotate_left(row as u32);
+                    rom[chr_base + page * 1024 + tile * 16 + row + 8] =
+                        !(page as u8 * 19 + row as u8);
+                }
+            }
+        }
+        let invoke = |bus: &mut SmsBus, label: &str| {
+            let mut cpu = Cpu::new();
+            cpu.pc = defs[label].1;
+            cpu.sp = 0xdff0;
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            for _ in 0..3_000_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                cpu.step(bus).unwrap();
+                assert_eq!(bus.read(0xcb1d), 0, "{label} trapped");
+            }
+            assert_eq!(cpu.pc, 7);
+            cpu.cycles
+        };
+        let invoke_with_host_irq = |bus: &mut SmsBus| {
+            let mut cpu = Cpu::new();
+            cpu.pc = defs["rt_mmc3_frame_present"].1;
+            cpu.sp = 0xdff0;
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            bus.write(0xcb28, 1);
+            let mut fired = false;
+            let ticks = bus.read(0xcb04);
+            for _ in 0..3_000_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                if !fired && cpu.iff1 && cpu.ei_pending == 0 && bus.read(0xc831) == 2 {
+                    cpu.sp -= 1;
+                    bus.write(cpu.sp, (cpu.pc >> 8) as u8);
+                    cpu.sp -= 1;
+                    bus.write(cpu.sp, cpu.pc as u8);
+                    cpu.pc = 0x38;
+                    cpu.iff1 = false;
+                    cpu.iff2 = false;
+                    bus.frame_int_pending = true;
+                    fired = true;
+                }
+                cpu.step(bus).unwrap();
+                assert_eq!(bus.read(0xcb1d), 0);
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+            }
+            assert!(fired);
+            assert_eq!(cpu.pc, 7);
+            assert_eq!(bus.read(0xcb04), ticks.wrapping_add(1));
+            assert_eq!(
+                (bus.read(0xc070), bus.read(0xc071)),
+                (0, 0),
+                "no nested guest handler"
+            );
+            cpu.cycles
+        };
+        // Distinct field groups and both source records. A sprite change
+        // before a HUD-only BG change must not hide the latter comparison.
+        for (fine_y, split, table, inverted) in [
+            (0u8, 192u8, 0u8, false),
+            (7, 193, 0, true),
+            (7, 192, 16, false),
+            (0, 193, 16, true),
+        ] {
+            let mut cases = vec![
+                (0xc900u16, false, false),
+                (0xc901, false, false),
+                (0xc902, false, false),
+                (0xc903, false, false),
+                (0xc904, false, false), // hidden -> visible
+                (0xc860, false, false),
+                (0xc87f, true, false),
+                (0xc836, false, false),
+                (0xc836, true, false),
+                (0x8000, false, true),
+                (0x87ff, true, true),
+                (0xcb08, false, true),
+                (0xcb09, true, true),
+                (0xcb0c, false, true),
+                (0xcb0d, true, true),
+                (0xc834, false, true),
+                (0xc835, true, true),
+                (0xc824, true, true),
+                (0xcb10, true, true),
+                (0xcb0f, true, true),
+                (0xc8f7, true, true),
+                (0xc837, true, false), // presentation independently checks split
+            ];
+            for page in 0..8u16 {
+                cases.push((
+                    0xc850 + page,
+                    page & 1 != 0,
+                    page / 4 == u16::from(table / 16),
+                ));
+            }
+            for (address, hud_only, bg_changed) in cases {
+                let mut outcomes = Vec::new();
+                for mode in 0..3 {
+                    let force_full = mode == 1;
+                    let mut bus = SmsBus::new(rom.clone(), 0xff);
+                    bus.write(0xfffc, 8);
+                    bus.write(0xc831, 1);
+                    bus.write(0xcb08, 0xa8 | table);
+                    bus.write(0xcb09, 0x18);
+                    bus.write(0xc824, 1);
+                    bus.write(0xc834, fine_y << 4);
+                    bus.write(0xc837, split);
+                    for page in 0..8u16 {
+                        bus.write(0xc850 + page, page as u8 ^ if inverted { 4 } else { 0 });
+                    }
+                    for index in 0..32u16 {
+                        bus.write(0xc860 + index, index as u8);
+                    }
+                    for index in 0..256u16 {
+                        bus.write(0xc900 + index, 0xe0);
+                    }
+                    for (index, value) in [24, 1, 3, 17].into_iter().enumerate() {
+                        bus.write(0xc900 + index as u16, value);
+                    }
+                    let capture = |bus: &mut SmsBus, mutate: bool| {
+                        bus.write(0xc8f7, 0);
+                        if mutate && !hud_only {
+                            let value = bus.read(address);
+                            bus.write(
+                                address,
+                                match address {
+                                    0xc900 => 0xe0,                  // active -> hidden
+                                    0xcb08 | 0xc834 => value ^ 0x10, // BG table / fine Y
+                                    _ => value ^ 1,
+                                },
+                            );
+                        }
+                        invoke(bus, "rt_mmc3_capture_playfield");
+                        bus.write(0xc8f7, 3);
+                        bus.write(0xcb0f, 0x1b);
+                        bus.write(0xcb10, 0);
+                        if mutate && hud_only {
+                            let value = bus.read(address);
+                            bus.write(address, value ^ if address == 0xc8f7 { 2 } else { 1 });
+                        }
+                        invoke(bus, "rt_mmc3_capture_hud");
+                    };
+                    capture(&mut bus, false);
+                    invoke(&mut bus, "rt_mmc3_frame_present");
+                    let prior_bg = bus.vram[..0x2000].to_vec();
+                    let prior_nt = bus.vram[0x3700..0x3f00].to_vec();
+                    // Ensure an earlier non-BG difference never short-circuits
+                    // the later BG compare; also exercises moving sprite SAT.
+                    bus.write(0xc903, 23);
+                    if address == 0xc904 {
+                        bus.write(address, 24);
+                    }
+                    capture(&mut bus, true);
+                    assert_eq!(
+                        bus.read(0xc8ec) != 0,
+                        bg_changed,
+                        "group addr{address:04X} HUD{hud_only} table{table} inverted{inverted}"
+                    );
+                    // Frozen records, not subsequent producer writes, own this
+                    // frame. Host-only service cannot reenter the producer.
+                    bus.write(0x8000, 0xff);
+                    bus.write(0xc850, 7);
+                    bus.write(0xc900, 90);
+                    bus.write(0xc860, 0x30);
+                    if force_full {
+                        bus.write(0xc8ec, 1);
+                    }
+                    let cycles = if mode == 2 {
+                        invoke_with_host_irq(&mut bus)
+                    } else {
+                        invoke(&mut bus, "rt_mmc3_frame_present")
+                    };
+                    if !bg_changed && address != 0xc837 {
+                        assert_eq!(&bus.vram[..0x2000], prior_bg);
+                        assert_eq!(&bus.vram[0x3700..0x3f00], prior_nt);
+                    }
+                    let playfield_cram = bus.cram;
+                    let playfield_regs = bus.vdp_regs;
+                    bus.write(0xc831, 0);
+                    invoke(&mut bus, "rt_mmc3_display_line");
+                    outcomes.push((
+                        bus.vram,
+                        playfield_cram,
+                        bus.cram,
+                        bus.vdp_regs,
+                        cycles,
+                        playfield_regs,
+                    ));
+                }
+                assert_eq!(outcomes[0].0, outcomes[1].0, "VRAM addr{address:04X}");
+                assert_eq!(outcomes[0].1, outcomes[1].1, "playfield palette");
+                assert_eq!(outcomes[0].2, outcomes[1].2, "HUD palette");
+                assert_eq!(outcomes[0].3, outcomes[1].3, "presentation registers");
+                assert_eq!(outcomes[0].5, outcomes[1].5, "playfield registers");
+                assert_eq!(outcomes[0].0, outcomes[2].0, "nested host VRAM");
+                assert_eq!(
+                    outcomes[0].1, outcomes[2].1,
+                    "nested host playfield palette"
+                );
+                assert_eq!(outcomes[0].2, outcomes[2].2, "nested host HUD palette");
+                assert_eq!(outcomes[0].3, outcomes[2].3, "nested host HUD registers");
+                assert_eq!(
+                    outcomes[0].5, outcomes[2].5,
+                    "nested host playfield registers"
+                );
+                if !bg_changed && address != 0xc837 {
+                    assert!(outcomes[0].4 < outcomes[1].4 / 2);
+                }
+                if address == 0xc903 {
+                    eprintln!(
+                        "MMC3 BG-stable synthetic fineY{fine_y} split{split} table{table} inversion{inverted}: fast={}T forcedFull={}T (no delivered host IRQ)",
+                        outcomes[0].4, outcomes[1].4
+                    );
                 }
             }
         }

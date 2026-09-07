@@ -35,11 +35,13 @@ See [media encoding notes](docs/media/README.md) for sizes and settings.
 - **Castlevania:** mapper-2 banking and CHR-RAM translation support title,
   outdoor and indoor Stage 1 gameplay, pickups, weapons and stairs. Speed and
   rendering fidelity still need work; this is not full-game completion.
-- **Super Mario Bros. 3:** experimental MMC3 conversion reaches its animated
-  title and input-responsive World 1 map at 500% emulator overclock. Playable
-  level support is still pending; the IRQ adapter is not cycle-accurate.
+- **Super Mario Bros. 3:** experimental MMC3 conversion completes an input-only
+  1-1 route: movement, jumping, mushroom pickup, level clear and return to the
+  map. It is still very slow (about 3.8 game updates/second during that traversal
+  at 500% overclock) and blanks during rebuilds. This is functional first-level
+  support, not full-speed/full-game support or cycle-accurate IRQ emulation.
   [Plan and limits](docs/smb3-plan.md).
-- **Validation:** 13 Rust crates; the latest workspace run has 576 passing
+- **Validation:** 13 Rust crates; the latest workspace run has 577 passing
   tests, plus separately run assembled-runtime and actual-emulator checks.
   NES APU audio is approximated on the SMS PSG, not reproduced exactly.
 

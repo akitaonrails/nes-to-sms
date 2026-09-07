@@ -268,4 +268,47 @@ edges and the already-measured sprite producer with existing evidence, choose
 one closed region, establish its live-state/effect contract, and compare
 pointer/flag retention against a small semantic inline. Proceed only if the
 complete region and actual gameplay measurements justify it. No 2× claim is
-currently established.
+currently established for these proposed compiler passes.
+
+## Follow-up: measured SMB3 costs after the first rendering improvement
+
+The experimental MMC3 map now provides a second workload, distinct from CV1.
+Reusing the existing actual-core profiler, a 200-complete-update window at
+numeric `500` totals **338,119,350 nominal Z80 T-states**, or **1,690,596.75 per
+map update**. Stock and instrumented cores agree across 7,000 physical-frame
+RAM/state samples and their dense video hashes. Accounting closes without
+unknown, external, or unclassified execution. This measures one map route,
+not level traversal or stock-SMS performance.
+
+| Exclusive execution category | Share | Nominal T-states/update |
+| --- | ---: | ---: |
+| Full memory routing and cartridge SRAM | 22.522% | 380,758 |
+| Translated code, including inline lowering, excluding explicit waits | 16.840% | 284,692 |
+| Shared calls, returns and banked dispatch | 16.919% | 286,037 |
+| Renderer | 13.065% | 220,881 |
+| Exact frozen-state capture/comparison | 12.391% | 209,480 |
+
+The remaining roughly 18.26% includes PPU/DMA, original cooperative waits,
+VBlank polling, VDP transfers, mapper register writes, audio and other runtime service. The translated category is
+not pure guest logic: it includes the lowering recipes emitted inline.
+
+This changes the immediate experiment ranking for MMC3. Investigate an
+effective-address-checked internal-RAM fast path and the measured banked
+dispatch search before adding a general inliner. Dispatch already has a
+high-byte directory: the **page-local** linear search costs 13.317%, averaging
+15.04 entries per successful lookup; other shared call/return work costs 3.602%.
+Of the full-bus entries, 77.10% resolve to internal RAM, but the ledger does
+not establish which call sites were compile-time constants. An `H < $20`
+runtime guard could bypass general routing only after the effective address
+is known, with a proposed budget of 64 fixed-bank bytes and no extra RAM.
+Preserve exact address mirrors, mapper ownership, flags and interrupt
+contracts; a profile-hot address is not proof of a constant address.
+Capture alone has only roughly 12.4% of this workload to remove. These are
+measured opportunities, not implemented optimizations or predicted gains.
+
+Separately, retaining unchanged backgrounds already produced a measured
+**2.22× map**, **1.75× idle-level**, and **1.18× active 1-1 traversal** throughput
+gains. Both final active routes complete with identical guest/cart RAM at seven
+matched checkpoints; the idle comparison ends at a then-unresolved target.
+These results come from runtime rendering changes, not LLVM or inlining.
+See [the scope and comparison details](mmc3-graphics-runtime.md).

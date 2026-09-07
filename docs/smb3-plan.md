@@ -4,16 +4,23 @@ Started 2026-09-07 at `80e30f6`. SMB3 is the user-selected next compatibility
 target; SMB1 and Castlevania remain the regression floor. This supplements
 the architecture in [master-plan.md](master-plan.md).
 
-## Status: experimental title and world map; playable level pending
+## Status: experimental first-level route verified; performance remains limited
 
 `profiles/smb3.toml` identifies the local USA Rev 1 target and opts into the
 experimental full runtime and profile-scoped cooperative single-split adapter.
 The user has requested continuation until a playable SMB3 SMS ROM exists.
 Cartridge RAM, physical CHR rendering and mapped-call translation now support
-reset → animated title → controller-driven World 1 map in Genesis Plus GX at
-explicit 500% overclock. A 10,000-physical-frame run has no trap/reset; a separate
-6,000-frame route moves the map icon from (32,64) to (64,32) using Right/Up.
-This is bring-up evidence, **not playable level support or a speed result**.
+reset → animated title → controller-driven World 1 map → level 1-1 in Genesis
+Plus GX at explicit 500% overclock. The input-only route now runs/jumps, hits
+the mushroom question block, collects the mushroom, clears 1-1 and returns to
+the normal map with the panel changed from `$03` to `$00`, lives still four,
+and no trap. A separate no-input death route returns to the map with three lives.
+This establishes functional first-level support, **not full-speed or full-game
+compatibility**. The active traversal averages only 3.823 game updates/second
+at `500`; 36.99% of callbacks in the gameplay window are uniform-color frames
+during rebuilding, with a longest run of 11 callbacks. Presentation remains
+visibly slow and intermittent; completing an automated route does not establish
+comfortable human playability. See the measured contract below.
 The adapter is not cycle-accurate MMC3/A12 emulation; see
 [the runtime contract and limits](mmc3-graphics-runtime.md).
 
@@ -107,10 +114,26 @@ specific tested cartridge/emulator contract before claiming feasibility.
 5. **First visible conversion.** Reset → animated title → controller-driven
    world map, with no permissive stubs or injected game state. Gate moving
    frames, input response, bank restoration and stack bounds.
-6. **First playable route.** Enter 1-1, move/jump, collect a power-up, break a
-   block, finish the level and return to the map. Compare game/cart-RAM state
+6. **First functional route (verified; performance limitations remain).** Enter 1-1, move/jump, hit a question block,
+   collect its power-up, finish the level and return to the map. Compare game/cart-RAM state
    and consecutive HUD/playfield frames with NES evidence. Then expand to
    vertical scrolling, inventory, transformations, roulette and other splits.
+
+The native input-only reference now proves that route with lives unchanged,
+including the level panel changing to Mario-completed. It does not prove brick
+destruction: 1-1's ordinary bricks form ground-supported stacks, requiring a
+separate shell/tail setup rather than a simple head bump. That mechanic belongs
+to expanded coverage, not an unsupported claim about this first route.
+
+The translated route uses only controller input and read-only observation;
+no state loads, guest-memory writes or permissive stubs. ROM SHA-256 is
+`ec5299b6dace9689d54f37e8c3a8bb985781cdca64ac41f1d299602527fe8c3b`.
+It reaches the question block at physical frame 6257, collects the mushroom
+at 9106, starts the goal sequence at 33982 and reaches the completed map at
+37468. The run ends after 60 further logical updates, at physical frame 37851.
+The observer accounts for elapsed epochs when a brief wait boundary is missed,
+but never fabricates intermediate RAM snapshots or input decisions. These
+controller-based checkpoints are not a cycle-exact NES/SMS state oracle.
 
 Measure logical game ticks/second at stock clock and explicit overclock,
 Z80 cycles/tick, mapper overhead, CHR bytes uploaded/frame, peak tile residency,

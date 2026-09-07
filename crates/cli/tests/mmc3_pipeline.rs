@@ -593,6 +593,124 @@ fn mmc3_wrong_bank_data_annotation_cannot_hide_an_unsupported_opcode() {
 }
 
 #[test]
+#[ignore = "requires existing nes-to-sms-poc Docker toolchain"]
+fn mmc3_profile_root_preserves_branch_across_inline_data() {
+    let reset = [0x78, 0x20, 0, 0x80, 0x85, 0x40, 0x4c, 6, 0xe1];
+    let code = [0xa2, 0, 0xf0, 2, 0x02, 0x02, 0xa9, 0x69, 0x60];
+    let (rom, profile) = two_bank_fixture(&reset, &code, &[0x60]);
+    let profile = profile.replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+    ) + "[[bank_entry]]\nbank=0\naddr=0x8006\n\
+         [[data_region]]\nbank=0\nstart=0x8004\nend=0x8005\n";
+    assert_eq!(reference_ram(&rom)[0x40], 0x69);
+    let (work, project) = assembled_fixture("inline-data-branch", &rom, &profile);
+    let unresolved =
+        std::fs::read_to_string(project.join("reports/unresolved_labels.txt")).unwrap();
+    assert!(!unresolved.contains("L_b0_8006"));
+    assert!(
+        unresolved.contains("L_b0_8004"),
+        "data fallthrough stays strict"
+    );
+    let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+    trace.arg(project.join("sms.sms")).args([
+        "--steps",
+        "500000",
+        "--no-irq",
+        "--expect-no-trap",
+        "--expect-ram",
+        "C040=69",
+    ]);
+    run_trace(&work, &mut trace);
+}
+
+fn cross_window_consume_fixture(normal_return: bool) -> (Vec<u8>, String) {
+    let reset = [
+        0x78, 0x20, 0x80, 0xe1, 0xa9, 0xa5, 0x85, 0x3f, 0x4c, 8, 0xe1,
+    ];
+    let wrapper = [0x20, 0, 0xe2, 0xe6, 0x40, 0x68, 0x68, 0x4c, 0, 0xe3];
+    // A store in another physical bank makes $8006 a potential mapped
+    // continuation, but it cannot authorize bypassing bank0's first PLA.
+    let collision = [0xa9, 0, 0xea, 0x8d, 1, 0x80, 0x60];
+    let (mut rom, profile) = two_bank_fixture(&reset, &wrapper, &collision);
+    rom[16 + 0xe180..16 + 0xe186].copy_from_slice(&[0x20, 0, 0x80, 0xe6, 0x41, 0x60]);
+    let callee = if normal_return {
+        [0x60, 0xea, 0xea]
+    } else {
+        [0x4c, 5, 0x80]
+    };
+    rom[16 + 0xe200..16 + 0xe203].copy_from_slice(&callee);
+    rom[16 + 0xe300..16 + 0xe303].copy_from_slice(&[0xa9, 0x69, 0x60]);
+    let profile = profile.replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+    ) + "[[bank_entry]]\nbank=0\naddr=0x8005\n\
+         [[function]]\naddr=0xe300\nname='suffix'\n\
+         [[return_consume]]\nbank=0\nat=0x8005\n\
+         calls=[{bank=0,caller=0x8000,target=0xe200},{caller=0xe180,target=0x8000}]\n";
+    (rom, profile)
+}
+
+#[test]
+fn mmc3_consume_interior_rejects_real_entries_despite_continuation_collision() {
+    for decoded in [false, true] {
+        let (mut rom, mut profile) = cross_window_consume_fixture(false);
+        if decoded {
+            rom[16 + 0x10..16 + 0x13].copy_from_slice(&[0x4c, 6, 0x80]);
+        }
+        profile.push_str(&format!(
+            "[[bank_entry]]\nbank=0\naddr={}\n",
+            if decoded { 0x8010 } else { 0x8006 }
+        ));
+        let (_, output) = generated_fixture(&format!("consume-bypass-{decoded}"), &rom, &profile);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("bypass"));
+    }
+}
+
+#[test]
+#[ignore = "requires existing nes-to-sms-poc Docker toolchain"]
+fn mmc3_full_cross_window_consume_preserves_both_caller_paths() {
+    for normal_return in [false, true] {
+        let (rom, profile) = cross_window_consume_fixture(normal_return);
+        let reference = reference_ram(&rom);
+        assert_eq!(
+            &reference[0x3f..0x42],
+            &[0xa5, u8::from(normal_return), u8::from(!normal_return)]
+        );
+        let (work, project) = assembled_fixture(
+            &format!("cross-window-consume-{normal_return}"),
+            &rom,
+            &profile,
+        );
+        let symbols = std::fs::read_to_string(project.join("sms.sym")).unwrap();
+        assert!(!symbols.lines().any(|line| line.ends_with(" L_b0_8006")));
+        assert!(symbols.lines().any(|line| line.ends_with(" L_b1_8006")));
+        let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+        trace.arg(project.join("sms.sms")).args([
+            "--steps",
+            "500000",
+            "--no-irq",
+            "--expect-no-trap",
+        ]);
+        for addr in 0x3f..0x42 {
+            trace
+                .arg("--expect-ram")
+                .arg(format!("{:04X}={:02X}", 0xc000 + addr, reference[addr]));
+        }
+        trace.args([
+            "--expect-ram",
+            "CB76=00",
+            "--expect-ram",
+            "CB77=D3",
+            "--expect-ram",
+            "CB02=FD",
+        ]);
+        run_trace(&work, &mut trace);
+    }
+}
+
+#[test]
 fn mmc3_full_discovers_backward_branch_before_any_existing_routine() {
     let (mut rom, profile) = two_bank_fixture(&[0xa9, 1, 0xd0, 0xec, 0x60], &[0x60], &[0x60]);
     rom[16 + 0xe0f0..16 + 0xe0f7].copy_from_slice(&[0xa9, 0x7c, 0x85, 0x40, 0x4c, 0, 0xe1]);

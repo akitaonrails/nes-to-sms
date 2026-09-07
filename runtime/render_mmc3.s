@@ -47,6 +47,15 @@
 .section "render_mmc3" free
 
 rt_mmc3_frame_render:
+  xor a
+  jr _m3r_begin
+; Caller proved both frozen BG sources, selected physical maps and raster
+; geometry equal to the committed frame. Sprite patterns still rebuild
+; while blank; no live pattern eviction or partial-frame publication.
+rt_mmc3_frame_render_bg_stable:
+  ld a, 1
+_m3r_begin:
+  ld (M3G_COMPARE_BG), a    ; capture scratch is renderer's skip-BG flag
   di
   ld a, 8
   ld ($fffc), a
@@ -65,6 +74,9 @@ rt_mmc3_frame_render:
   ld (M3G_READY), a         ; rendering-off frames publish blank immediately
   ret
 _m3r_enabled:
+  ld a, (M3G_COMPARE_BG)
+  or a
+  jp nz, _m3r_bg_done
   ld hl, $ac00
   ld de, $ac01
   ld (hl), $ff
@@ -468,6 +480,14 @@ _m3r_row_limit:
   ld (M3R_ROW), a
   cp b
   jp c, _m3r_row
+_m3r_bg_done:
+  ; Fine X changes only SMS scroll, not physical tile/row identities.
+  ld a, (M3G_RECORD+14)
+  neg
+  ld (M3G_PRESENT_X), a
+  ld a, (M3G_RECORD+$40+14)
+  neg
+  ld (M3G_HUD_X), a
   call _m3r_sprites
   xor a
   ld (M3R_RECORD), a
@@ -477,6 +497,9 @@ _m3r_row_limit:
   ld (M3R_RECORD), a
   ld de, M3R_HUD_CRAM
   call _m3r_palette
+  ld a, (M3G_COMPARE_BG)
+  or a
+  jr nz, _m3r_upload_sat
   ; The complete NT and SAT are uploaded while still blanked. Each bounded
   ; block returns to an interruptible, closed-port boundary.
   ld hl, $a000
@@ -498,6 +521,7 @@ _m3r_upload_nt:
   add a, 2
   ld d, a
   djnz _m3r_upload_nt
+_m3r_upload_sat:
   ld a, 0
   ld d, $3f
   call vdp_set_vram_addr

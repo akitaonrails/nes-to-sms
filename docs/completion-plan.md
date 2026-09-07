@@ -20,12 +20,18 @@ ordered implementation and acceptance gates. The compatibility baseline is
 committed; the executable 8 KiB banking foundation has passed independent review
 and all regression gates, including bank-sensitive flags and conservative
 computed-continuation rejection.
-The experimental full-runtime profile now reaches an animated title and
-input-responsive World 1 map in actual Genesis Plus GX at 500% overclock.
+The experimental full-runtime profile now completes an input-only 1-1 route
+in actual Genesis Plus GX at 500% overclock: title/map, movement/jumping,
+question block/mushroom, goal and completed-map return, with lives unchanged.
 Cartridge RAM, physical CHR records and a verified-wait single-split adapter
 are integrated; this is not cycle/A12-accurate general MMC3 support. Current
-gate: finish independent review and legacy regressions, then enter and complete
-a playable 1-1 route with measured rendering/performance work. The parallel [LLVM-style optimization
+functional checkpoint has passed independent correctness and structure review;
+fresh SMB1/CV1 ROMs retain exact byte parity. Performance remains severe:
+about 3.8 updates/second during active traversal and frequent rebuild blanking;
+functional completion is not comfortable/full-speed playability. The next
+bounded experiment is the measured full-bus internal-RAM fast path, followed
+by remeasurement before considering a separate dispatch/presentation change.
+The parallel [LLVM-style optimization
 research](ir-optimization-research.md) is complete; its measured experiments
 follow correctness rather than replacing the playable-ROM work. Preserve SMB1/CV1
 and their current performance while exploring this path. The CV1 optimization

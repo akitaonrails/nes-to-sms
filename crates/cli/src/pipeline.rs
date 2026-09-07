@@ -150,6 +150,7 @@ fn check_mmc3_mapping_continuations(routines: &[ir::Routine]) -> Result<(), Erro
 /// a missing destination stays a strict dispatch miss.
 fn add_mmc3_continuation_labels(
     routines: &mut [ir::Routine],
+    prof: &profile::Profile,
 ) -> std::collections::BTreeSet<String> {
     let pcs: std::collections::BTreeSet<u16> = routines
         .iter()
@@ -167,6 +168,7 @@ fn add_mmc3_continuation_labels(
         .collect();
     let mut continuations = std::collections::BTreeSet::new();
     for routine in routines {
+        let bank = profile_target_identity(&routine.name).and_then(|(bank, _)| bank);
         let prefix = routine
             .name
             .strip_prefix("L_b")
@@ -178,6 +180,14 @@ fn add_mmc3_continuation_labels(
             if let ir::Op::Source { pc, .. } = &op
                 && pcs.contains(pc)
                 && *pc != routine.entry
+                // Cross-bank resumptions cannot enter after a verified
+                // ownership transfer. Real decoded/profile entries are still
+                // rejected by check_consume_entries; unknown entries trap.
+                && !prof.return_consumes.iter().any(|site| {
+                    site.bank == bank
+                        && *pc > site.at
+                        && *pc <= site.second_pla.unwrap_or(site.at + 1)
+                })
             {
                 let label = format!("{prefix}{pc:04X}");
                 continuations.insert(label.clone());
@@ -1407,7 +1417,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 lift_failures.join("; ")
             )));
         }
-        mmc3_continuations = add_mmc3_continuation_labels(&mut routines);
+        mmc3_continuations = add_mmc3_continuation_labels(&mut routines, &prof);
     } else if policy.is_mmc3() {
         check_mmc3_mapping_continuations(&routines)?;
     }

@@ -6,6 +6,8 @@
 ; service continues while a guest handler or blanked renderer is busy.
 .ifdef MMC3_FULL_RUNTIME
 .define M3G_PACKET_CHANGED $c8f4
+.define M3G_BG_CHANGED $c8ec
+.define M3G_COMPARE_BG $c8ed
 .section "frame_mmc3" free
 
 rt_mmc3_sms_interrupt:
@@ -288,18 +290,24 @@ _m3f_push_guest_frame:
 rt_mmc3_capture_playfield:
   xor a
   ld (M3G_PACKET_CHANGED), a
+  ld (M3G_BG_CHANGED), a
   ld a, (M3G_READY)
   or a
   jr nz, _m3f_capture_existing
   inc a
   ld (M3G_PACKET_CHANGED), a
+  ld (M3G_BG_CHANGED), a
 _m3f_capture_existing:
+  ld a, 1
+  ld (M3G_COMPARE_BG), a
   ld a, 8
   ld ($fffc), a
   ld hl, $8000
   ld de, $8800
   ld bc, $0800
   call _m3f_compare_copy
+  xor a
+  ld (M3G_COMPARE_BG), a
   ld hl, $c900
   ld de, $9800
   ld bc, $0100
@@ -307,6 +315,8 @@ _m3f_capture_existing:
   ld de, M3G_RECORD
   jp _m3f_capture_record
 rt_mmc3_capture_hud:
+  ld a, 1
+  ld (M3G_COMPARE_BG), a
   ld a, 8
   ld ($fffc), a
   ld hl, $8000
@@ -315,9 +325,33 @@ rt_mmc3_capture_hud:
   call _m3f_compare_copy
   ld de, M3G_RECORD+$40
 _m3f_capture_record:
+  ; Compare the BG-selected physical four-page map independently. The
+  ; remaining pages may change sprite patterns without invalidating BG.
+  ; A table-selection change is separately invalidated by CTRL below.
+  push de
+  ld a, 1
+  ld (M3G_COMPARE_BG), a
+  ld a, ($cb08)
+  and $10
+  rrca
+  rrca
+  ld c, a
+  add a, e
+  ld e, a
+  ld a, c
+  add a, $50
+  ld l, a
+  ld h, $c8
+  ld bc, 4
+  call _m3f_compare_copy
+  pop de
+  xor a
+  ld (M3G_COMPARE_BG), a
   ld hl, M3G_CHR_MAP
   ld bc, 8
   call _m3f_compare_copy
+  ld a, 1
+  ld (M3G_COMPARE_BG), a
   ld a, ($cb08)
   call _m3f_record_put
   ld a, ($cb09)
@@ -330,13 +364,21 @@ _m3f_capture_record:
   call _m3f_record_put
   ld a, (M3G_TEMP_HI)
   call _m3f_record_put
+  xor a
+  ld (M3G_COMPARE_BG), a
   ld a, (M3G_FINE_X)
   call _m3f_record_put
+  ld a, 1
+  ld (M3G_COMPARE_BG), a
   ld a, ($c824)
   call _m3f_record_put
+  xor a
+  ld (M3G_COMPARE_BG), a
   ld hl, M3G_PALETTE
   ld bc, 32
   call _m3f_compare_copy
+  ld a, 1
+  ld (M3G_COMPARE_BG), a
   ; Only an actual IRQ-time $2006 reload changes the vertical raster origin.
   ; Do not include stale live v in an NMI or no-reload record's identity.
   ld a, (M3G_IRQ_V)
@@ -356,6 +398,10 @@ _m3f_record_no_reload:
   xor a
   jp _m3f_record_put
 rt_mmc3_capture_single:
+  ; Conservative fallback: changing any copied HUD identity invalidates
+  ; BG too. The split-record path classifies palette/fine-X independently.
+  ld a, 1
+  ld (M3G_COMPARE_BG), a
   ld a, 8
   ld ($fffc), a
   ld hl, $8800
@@ -390,6 +436,17 @@ rt_mmc3_frame_present:
 _m3f_rebuild:
   ld a, 2
   ld (M3G_BUSY), a
+  ld a, (M3G_READY)
+  or a
+  jp z, rt_mmc3_frame_render
+  ld a, (M3G_BG_CHANGED)
+  or a
+  jp nz, rt_mmc3_frame_render
+  ld a, (M3G_SPLIT)
+  ld b, a
+  ld a, (M3R_SPLIT)
+  cp b
+  jp z, rt_mmc3_frame_render_bg_stable
   jp rt_mmc3_frame_render
 
 ; This experimental renderer publishes both layers or a fully blank packet.
@@ -442,6 +499,12 @@ _m3f_copy_last:
 _m3f_copy_part:
   ld a, (M3G_PACKET_CHANGED)
   or a
+  jr z, _m3f_compare_byte
+  ld a, (M3G_COMPARE_BG)
+  or a
+  jr z, _m3f_copy_changed
+  ld a, (M3G_BG_CHANGED)
+  or a
   jr nz, _m3f_copy_changed
 _m3f_compare_byte:
   ld a, (de)
@@ -451,8 +514,7 @@ _m3f_compare_byte:
   jp pe, _m3f_compare_byte
   ret
 _m3f_copy_mark:
-  ld a, 1
-  ld (M3G_PACKET_CHANGED), a
+  call _m3f_mark_changed
 _m3f_copy_changed:
   ldir
   ret
@@ -461,12 +523,20 @@ _m3f_record_put:
   ld a, (de)
   cp b
   jr z, _m3f_record_same
-  ld a, 1
-  ld (M3G_PACKET_CHANGED), a
+  call _m3f_mark_changed
 _m3f_record_same:
   ld a, b
   ld (de), a
   inc de
+  ret
+
+_m3f_mark_changed:
+  ld a, 1
+  ld (M3G_PACKET_CHANGED), a
+  ld a, (M3G_COMPARE_BG)
+  or a
+  ret z
+  ld (M3G_BG_CHANGED), a
   ret
 
 rt_mmc3_raster_unsupported:

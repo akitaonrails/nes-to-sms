@@ -158,6 +158,8 @@ addr = 0xAC13
 [input]
 mode = "action"
 pause_start = true
+# Start requires the SMS Pause button. Holding A+B remains run+jump;
+# the legacy two-button Start shortcut is disabled in the full MMC3 runtime.
 
 [translation]
 runtime_defines = ["MMC3_FULL_RUNTIME", "SMB3_MMC3_SINGLE_SPLIT"]
@@ -181,6 +183,35 @@ tick_enable = 0x1c
 nmi = 0xf486
 reset = 0xff40
 irq = 0xf795
+
+# Same-bank sound-queue branches verified against Southbird and local bytes:
+# A46E B0 2A -> SndLev1_Text (A49A 4C D2 A3);
+# A478 B0 2C -> SndLev1_1up (A4A6 8C E2 04 A9 30 8D E8 04).
+[[bank_entry]]
+bank = 28
+addr = 0xa49a
+
+[[bank_entry]]
+bank = 28
+addr = 0xa4a6
+
+# Reached object ID A6 (relative index22): physical5 init tableA02C=34 A6.
+# ObjInit_RedPiranha starts A0 21 D0 02; source and live R7=5 agree.
+[[bank_entry]]
+bank = 5
+addr = 0xa634
+
+# Death return Map_Operation2: admitted10:C4AF DynJump table index2=56 A7.
+# Live R7=11 selects MO_SkidToPrev (A756 AE 26 07 A5 C5), source verified.
+[[bank_entry]]
+bank = 11
+addr = 0xa756
+
+# Fixed E3F1 D0 52 branches to SndMus_Queue1, reached by death music.
+# E445 8D E4 04 AC E5 04 matches the source queue/current-music stores.
+[[function]]
+addr = 0xe445
+name = "nes_E445"
 
 # Sound continuation ORA #$10 / BNE cannot fall into the following tables.
 # Source PRG028_A709 and SndLev2_SkidNCtl: 32 + 23 verified bytes.
@@ -840,6 +871,13 @@ name = "DynJump_30_9A78"
 at = 0xfe9b
 second_pla = 0xfe9e
 calls = [
+  # Native clear-E: exact executed 20 99 FE calls with expected FE99 entry.
+  # Existing source-verified inline table extents remain declared data.
+  { bank = 2, caller = 0xBB3D, target = 0xfe99 },
+  { bank = 5, caller = 0xA79E, target = 0xfe99 },
+  { bank = 7, caller = 0xAFA1, target = 0xfe99 },
+  { bank = 11, caller = 0xAC75, target = 0xfe99 },
+  { bank = 29, caller = 0xDC82, target = 0xfe99 },
   { bank = 0, caller = 0xCA8D, target = 0xfe99 },
   { bank = 0, caller = 0xD528, target = 0xfe99 },
   { bank = 10, caller = 0xC4AF, target = 0xfe99 },
@@ -858,6 +896,45 @@ calls = [
   { bank = 30, caller = 0x9A78, target = 0xfe99 },
 ]
 
+# Player_DrawAndDoActions29: non-pipe code at physical29:D3EC jumps to
+# physical8:A224 (68 68 4C 31 A2), dropping its caller before restoring R6.
+# The normal pipe return increments Player_InPipe then drops the wrapper's
+# caller instead. Both JSR operands and return pairs match the local ROM.
+[[return_consume]]
+bank = 8
+at = 0xa224
+calls = [
+  { bank = 8, caller = 0xa21e, target = 0xd1ba },
+  { bank = 8, caller = 0xa472, target = 0xa216 },
+]
+
+# AScrlURDiag_NoWrapAbort skips its caller when no wrap is active or gameplay
+# is halted. Local DEB0 bytes AD FE 05 F0 04 A5 CE F0 02 68 68 60 match
+# Southbird PRG000_DEB9; both source JSR sites contain 20 B0 DE.
+[[return_consume]]
+bank = 0
+at = 0xdeb9
+calls = [
+  { bank = 0, caller = 0xde44, target = 0xdeb0 },
+  { bank = 0, caller = 0xde94, target = 0xdeb0 },
+]
+
+# Level_DoChangeReset restores its two locally pushed scroll bytes, then
+# the horizontal initial-object scan drops its caller at BF6D (68 68 60).
+# Southbird PRG005_BF49 path and local B7F0 JSR bytes 20 2F BE agree.
+[[return_consume]]
+bank = 5
+at = 0xbf6d
+calls = [{ bank = 5, caller = 0xb7f0, target = 0xbe2f }]
+
+# Mushroom raising: PowerUp_DoRaise discards its caller at A93D (68 68 60).
+# Native clear-E observed 1:A871 JSR A8C4 (20 C4 A8) 216 times and
+# Object_DeleteOffScreen returning to A93D 44 times; live return pair=A873.
+[[return_consume]]
+bank = 1
+at = 0xa93d
+calls = [{ bank = 1, caller = 0xa871, target = 0xa8c4 }]
+
 
 # LDX #$08 / BNE at $E835 always skips this 12-word note table.
 # Local payload bytes agree with Southbird's Square1_Table_Notes declaration.
@@ -865,6 +942,345 @@ calls = [
 start = 0xe839
 end = 0xe850
 name = "Square1_Table_Notes"
+
+# Additional native clear-E transfer destinations (83 roots, 19-bank trace).
+# 36,314,540 original instructions; zero physical-bank/ROM-byte mismatches.
+# targets.tsv derives observed PCs only, not inferred caller edges.
+# entries.tsv SHA256 c372d820b5ebae0da5f1820ec44ba428fbc14f3a6e6b20fcfb2e5ae8ed842868.
+# JSR/JMP destinations absent from the earlier dispatch table are included;
+# return-only and RTI-only PCs are not blanket roots. Declared data is unchanged.
+
+[[bank_entry]]
+bank = 0
+addr = 0xC412
+
+[[bank_entry]]
+bank = 0
+addr = 0xC449
+
+[[bank_entry]]
+bank = 0
+addr = 0xC49B
+
+[[bank_entry]]
+bank = 0
+addr = 0xD162
+
+[[bank_entry]]
+bank = 0
+addr = 0xD1BA
+
+[[bank_entry]]
+bank = 0
+addr = 0xD736
+
+[[bank_entry]]
+bank = 0
+addr = 0xD83B
+
+[[bank_entry]]
+bank = 0
+addr = 0xDC5F
+
+[[bank_entry]]
+bank = 0
+addr = 0xDCCD
+
+[[bank_entry]]
+bank = 0
+addr = 0xDD3D
+
+[[bank_entry]]
+bank = 0
+addr = 0xDDA5
+
+[[bank_entry]]
+bank = 1
+addr = 0xA4AE
+
+[[bank_entry]]
+bank = 1
+addr = 0xA507
+
+[[bank_entry]]
+bank = 1
+addr = 0xA5FD
+
+[[bank_entry]]
+bank = 1
+addr = 0xA61B
+
+[[bank_entry]]
+bank = 1
+addr = 0xA83A
+
+[[bank_entry]]
+bank = 1
+addr = 0xA871
+
+[[bank_entry]]
+bank = 1
+addr = 0xA88A
+
+[[bank_entry]]
+bank = 1
+addr = 0xA893
+
+[[bank_entry]]
+bank = 1
+addr = 0xA8BB
+
+[[bank_entry]]
+bank = 1
+addr = 0xA8C4
+
+[[bank_entry]]
+bank = 1
+addr = 0xA94A
+
+[[bank_entry]]
+bank = 1
+addr = 0xA95A
+
+[[bank_entry]]
+bank = 1
+addr = 0xA966
+
+[[bank_entry]]
+bank = 2
+addr = 0xBB3B
+
+[[bank_entry]]
+bank = 2
+addr = 0xBB50
+
+[[bank_entry]]
+bank = 2
+addr = 0xBC18
+
+[[bank_entry]]
+bank = 2
+addr = 0xBC64
+
+[[bank_entry]]
+bank = 2
+addr = 0xBC7A
+
+[[bank_entry]]
+bank = 2
+addr = 0xBC91
+
+[[bank_entry]]
+bank = 2
+addr = 0xBCAC
+
+[[bank_entry]]
+bank = 2
+addr = 0xBD35
+
+[[bank_entry]]
+bank = 2
+addr = 0xBD49
+
+[[bank_entry]]
+bank = 2
+addr = 0xBE12
+
+[[bank_entry]]
+bank = 2
+addr = 0xBE44
+
+[[bank_entry]]
+bank = 2
+addr = 0xBE4C
+
+[[bank_entry]]
+bank = 2
+addr = 0xBE82
+
+[[bank_entry]]
+bank = 2
+addr = 0xBEA6
+
+[[bank_entry]]
+bank = 2
+addr = 0xBEA9
+
+[[bank_entry]]
+bank = 2
+addr = 0xBEBA
+
+[[bank_entry]]
+bank = 2
+addr = 0xBEDC
+
+[[bank_entry]]
+bank = 2
+addr = 0xBFA0
+
+[[bank_entry]]
+bank = 4
+addr = 0xAE90
+
+[[bank_entry]]
+bank = 4
+addr = 0xAF1E
+
+[[bank_entry]]
+bank = 4
+addr = 0xB253
+
+[[bank_entry]]
+bank = 4
+addr = 0xB29F
+
+[[bank_entry]]
+bank = 5
+addr = 0xA638
+
+[[bank_entry]]
+bank = 5
+addr = 0xA661
+
+[[bank_entry]]
+bank = 5
+addr = 0xA78F
+
+[[bank_entry]]
+bank = 5
+addr = 0xA7A9
+
+[[bank_entry]]
+bank = 5
+addr = 0xA7C4
+
+[[bank_entry]]
+bank = 5
+addr = 0xA7E1
+
+[[bank_entry]]
+bank = 5
+addr = 0xA834
+
+[[bank_entry]]
+bank = 5
+addr = 0xA87C
+
+[[bank_entry]]
+bank = 7
+addr = 0xB4D8
+
+[[bank_entry]]
+bank = 7
+addr = 0xB7D1
+
+[[bank_entry]]
+bank = 7
+addr = 0xB9F8
+
+[[bank_entry]]
+bank = 7
+addr = 0xBAE1
+
+[[bank_entry]]
+bank = 7
+addr = 0xBB1D
+
+[[bank_entry]]
+bank = 7
+addr = 0xBB41
+
+[[bank_entry]]
+bank = 8
+addr = 0xA9AE
+
+[[bank_entry]]
+bank = 8
+addr = 0xB0A0
+
+[[bank_entry]]
+bank = 8
+addr = 0xB7FA
+
+[[bank_entry]]
+bank = 8
+addr = 0xB810
+
+[[bank_entry]]
+bank = 8
+addr = 0xB917
+
+[[bank_entry]]
+bank = 11
+addr = 0xA9EB
+
+[[bank_entry]]
+bank = 11
+addr = 0xA9FE
+
+[[bank_entry]]
+bank = 11
+addr = 0xAA23
+
+[[bank_entry]]
+bank = 11
+addr = 0xAB1B
+
+[[bank_entry]]
+bank = 11
+addr = 0xAB61
+
+[[bank_entry]]
+bank = 11
+addr = 0xABBE
+
+[[bank_entry]]
+bank = 11
+addr = 0xAC53
+
+[[bank_entry]]
+bank = 11
+addr = 0xAC73
+
+[[bank_entry]]
+bank = 11
+addr = 0xAC80
+
+[[bank_entry]]
+bank = 11
+addr = 0xACF1
+
+[[bank_entry]]
+bank = 11
+addr = 0xAD31
+
+[[bank_entry]]
+bank = 11
+addr = 0xAD62
+
+[[bank_entry]]
+bank = 11
+addr = 0xBA35
+
+[[bank_entry]]
+bank = 26
+addr = 0xB19A
+
+[[bank_entry]]
+bank = 29
+addr = 0xDD11
+
+[[bank_entry]]
+bank = 30
+addr = 0x95F4
+
+[[bank_entry]]
+bank = 30
+addr = 0x99AA
+
+[[function]]
+addr = 0xFD44
+name = "nes_FD44"
 
 # Source-core observed instruction entries (reset/title/map/first-level route).
 # Includes return PCs: these are reachability facts, not replacement routines.
@@ -1237,6 +1653,12 @@ addr = 0xB956
 [[bank_entry]]
 bank = 5
 addr = 0xBB9B
+
+# LevelEvent_Do: local BB9E F0 1F skips the declared DynJump table
+# BBA3..BBB4 to BBBF 60 (RTS), matching Southbird PRG005_BBBF.
+[[bank_entry]]
+bank = 5
+addr = 0xBBBF
 
 [[bank_entry]]
 bank = 5
@@ -2166,6 +2588,13 @@ addr = 0xD293
 bank = 14
 addr = 0xD297
 
+# LoadLevel_Pitfall's A2 00 / F0 0E crosses the declared D29B..D2A6
+# tile tables. Southbird PRG014_D2A9 matches local A5 63 / 85 00 bytes.
+# Explicit root retains the destination without classifying tables as code.
+[[bank_entry]]
+bank = 14
+addr = 0xD2A9
+
 [[bank_entry]]
 bank = 14
 addr = 0xD2CC
@@ -2569,6 +2998,12 @@ addr = 0xACA1
 [[bank_entry]]
 bank = 26
 addr = 0xACA4
+
+# Exit-to-map path sets PAGE_A000=26 before physical30:8F9E JSR ACAA.
+# Palette_FadeOut starts 20 20 AC / AD 02 20, matching Southbird PRG026.
+[[bank_entry]]
+bank = 26
+addr = 0xACAA
 
 [[bank_entry]]
 bank = 26
