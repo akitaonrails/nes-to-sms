@@ -1,0 +1,2 @@
+# Gameplay recordings are LFS objects; small README previews stay in normal Git.
+docs/media/*.mp4 filter=lfs diff=lfs merge=lfs -text
