@@ -29,6 +29,13 @@ exactly the right situation for an optimizer.
 
 ## LLVM verdict: not the tool
 
+Historical assessment: the backend-status and semantic-encoding claims below
+are superseded by [the 2026-09-07 IR optimization research](ir-optimization-research.md).
+Faithful LLVM encoding is possible but needs explicit guest effects, banking,
+and ABI constraints; focused passes over our existing IR remain the more
+practical immediate route. Do not infer current backend readiness from this
+older section.
+
 Researched 2026-07-04:
 
 - LLVM has **no in-tree Z80 backend**. The principal out-of-tree
