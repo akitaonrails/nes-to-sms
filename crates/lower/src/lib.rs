@@ -214,6 +214,13 @@ enum IdxReg {
 }
 
 impl IdxReg {
+    fn load_into_l(self, p: &mut z80_emit::Program) {
+        match self {
+            IdxReg::X => p.ld_l_d(),
+            IdxReg::Y => p.ld_l_e(),
+        }
+    }
+
     fn load_into_a(self, p: &mut z80_emit::Program) {
         match self {
             IdxReg::X => p.ld_a_d(),
@@ -317,6 +324,15 @@ fn emit_prg_high_indexed_direct(
 
 /// A := (sms_base + idx). Clobbers HL/B/C and native flags.
 fn emit_indexed_read_direct(p: &mut z80_emit::Program, sms_base: u16, idx: IdxReg) {
+    // An aligned base plus any byte index stays within its page. Build HL
+    // without arithmetic: 18T including the load instead of 44T. This is
+    // only reached after the existing direct-memory classification.
+    if sms_base & 0xFF == 0 {
+        p.ld_h_imm((sms_base >> 8) as u8);
+        idx.load_into_l(p);
+        p.ld_a_hl_ptr();
+        return;
+    }
     // Phase R: index from the resident register; 16-bit add via A/L so
     // BC/DE stay untouched.
     p.ld_hl_imm(sms_base);
@@ -626,8 +642,16 @@ fn emit_pop6502_inline(p: &mut z80_emit::Program) {
 }
 
 /// (sms_base + idx) := A; A preserved (6502 store contract). Clobbers
-/// HL/C/DE and native flags.
+/// HL/C and native flags; resident X/Y in DE are preserved.
 fn emit_indexed_write_direct(p: &mut z80_emit::Program, sms_base: u16, idx: IdxReg) {
+    // No carry is possible for an aligned base. A can stay in place while
+    // constructing HL: 18T instead of 52T, with no flags or RAM spill.
+    if sms_base & 0xFF == 0 {
+        p.ld_h_imm((sms_base >> 8) as u8);
+        idx.load_into_l(p);
+        p.ld_hl_ptr_a();
+        return;
+    }
     // (sms_base + idx) := A; A preserved. Clobbers HL/C; DE untouched.
     p.ld_c_a();
     p.ld_hl_imm(sms_base);
@@ -5122,6 +5146,54 @@ pub fn lower_routines(
 mod tests {
     use super::*;
     use ir::{AddrExpr, Cond, MemRegion, Op, Routine, ValueSrc};
+
+    #[test]
+    fn aligned_indexed_access_uses_three_instructions() {
+        for (idx, index_opcode) in [(super::IdxReg::X, 0x6A), (super::IdxReg::Y, 0x6B)] {
+            for base in [0xC000, 0xC100, 0xC200, 0xC700, 0x8000, 0xBF00] {
+                let mut p = z80_emit::Program::new();
+                super::emit_indexed_read_direct(&mut p, base, idx);
+                assert_eq!(
+                    p.finish().unwrap().bytes,
+                    [0x26, (base >> 8) as u8, index_opcode, 0x7E]
+                );
+                if base >= 0xC000 {
+                    let mut p = z80_emit::Program::new();
+                    super::emit_indexed_write_direct(&mut p, base, idx);
+                    assert_eq!(
+                        p.finish().unwrap().bytes,
+                        [0x26, (base >> 8) as u8, index_opcode, 0x77]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unaligned_indexed_access_keeps_carry_repair() {
+        for idx in [super::IdxReg::X, super::IdxReg::Y] {
+            for base in [0xC001, 0xC27F, 0xC6FF, 0x80FF] {
+                let mut p = z80_emit::Program::new();
+                super::emit_indexed_read_direct(&mut p, base, idx);
+                assert!(
+                    p.finish()
+                        .unwrap()
+                        .bytes
+                        .windows(4)
+                        .any(|w| w == [0x7C, 0xCE, 0, 0x67])
+                );
+                let mut p = z80_emit::Program::new();
+                super::emit_indexed_write_direct(&mut p, base, idx);
+                assert!(
+                    p.finish()
+                        .unwrap()
+                        .bytes
+                        .windows(4)
+                        .any(|w| w == [0x7C, 0xCE, 0, 0x67])
+                );
+            }
+        }
+    }
 
     fn make_routine(name: &str, ops: Vec<Op>) -> Routine {
         // Collect any Op::Label names so BranchIf knows they are

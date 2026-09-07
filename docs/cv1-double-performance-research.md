@@ -1,6 +1,10 @@
 # CV1: research toward twice the gameplay throughput
 
 Date: 2026-09-06. Correctness checkpoint: `b9fc51f`.
+Follow-up: [aligned indexed-access experiment](cv1-aligned-indexing.md)
+(2026-09-07) implements the first bounded lowering candidate, with measured
+0.35–1.55% route gains and its own regression evidence.
+
 This is a measured research assessment and implementation plan, **not an
 implemented 2× optimization**. It supersedes the hotspot ranking in
 [next performance experiments](cv1-next-performance-experiments.md), while

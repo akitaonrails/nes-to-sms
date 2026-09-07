@@ -24,6 +24,9 @@ use z80_emu::Bus as Z80Bus;
 mod runtime_stubs;
 pub use runtime_stubs::{REQUIRED_HELPERS, emit_runtime_helpers};
 
+#[cfg(test)]
+mod indexed_tests;
+
 /// Result of running one routine through N random initial states.
 #[derive(Debug, Clone)]
 pub struct ValidationResult {

@@ -21,8 +21,11 @@ define the next performance work: close hot-region measurement, prove one
 cost-aware lowering rule, optimize the measured sprite producer, then expand
 to register/flag-retaining regions and stack-safe calls. Preserve the current
 ROM until each candidate passes the documented semantic, rendering, gameplay
-and timing gates. The research is complete; the proposed optimizations are
-not implemented or credited as speed gains.
+and timing gates. The research is complete. The first
+[aligned indexed-access experiment](cv1-aligned-indexing.md) is implemented
+and measured; it is a small gain, not completion of the 2× target. Next is the
+sprite-producer region's oracle/contract and loop optimization, not more
+unmeasured address micro-optimizations.
 
 ## Definition of done
 
