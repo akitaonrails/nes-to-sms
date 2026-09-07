@@ -4,14 +4,18 @@ Started 2026-09-07 at `80e30f6`. SMB3 is the user-selected next compatibility
 target; SMB1 and Castlevania remain the regression floor. This supplements
 the architecture in [master-plan.md](master-plan.md).
 
-## Status: executable banking foundation complete; SMB3 conversion pending
+## Status: experimental title and world map; playable level pending
 
-`profiles/smb3.toml` identifies the local USA Rev 1 target. Its conversion
-still fails closed. The user has requested continuation until a playable
-SMB3 SMS ROM exists; the current implementation phase is an opt-in synthetic
-MMC3 banking path, not a reason to stop at another compatibility report.
-There is **no translated SMB3 boot, screenshot, or performance result yet**.
-An assembled fixture or recognizable static image will not count as gameplay.
+`profiles/smb3.toml` identifies the local USA Rev 1 target and opts into the
+experimental full runtime and profile-scoped cooperative single-split adapter.
+The user has requested continuation until a playable SMB3 SMS ROM exists.
+Cartridge RAM, physical CHR rendering and mapped-call translation now support
+reset → animated title → controller-driven World 1 map in Genesis Plus GX at
+explicit 500% overclock. A 10,000-physical-frame run has no trap/reset; a separate
+6,000-frame route moves the map icon from (32,64) to (64,32) using Right/Up.
+This is bring-up evidence, **not playable level support or a speed result**.
+The adapter is not cycle-accurate MMC3/A12 emulation; see
+[the runtime contract and limits](mmc3-graphics-runtime.md).
 
 The checked local file has a NES 2.0 header, mapper 4/submapper 0, 256 KiB
 PRG ROM, 128 KiB CHR ROM, 8 KiB volatile PRG RAM, no trainer, no battery,
@@ -24,8 +28,8 @@ that behavior explicitly; this is not identification of the physical chip.
 - PRG+CHR SHA-256, used by the profile:
   `959fdd32c71735d6fb2bd16a646d39f4ee65623273dd035e6a968e991bd13ef8`.
 - Independently read final PRG bytes: `86 f4 40 ff 95 f7`, giving NMI `$F486`,
-  RESET `$FF40`, IRQ `$F795`. The pipeline currently rejects mapper 4 **before**
-  vector validation; its error alone does not verify these values.
+  RESET `$FF40`, IRQ `$F795`. The original mapper-rejection probe did not
+  validate vectors; these values were independently read from the payload.
 
 Reproduce the compatibility probe with a legally obtained matching ROM:
 
@@ -34,12 +38,13 @@ cargo run --release -p nes_to_sms --bin nes-to-sms -- \
   /path/to/smb3.nes profiles/smb3.toml out/smb3 --runtime runtime
 ```
 
-Failure is currently expected, including with `--debug-unresolved-stubs`.
-Do not change the ROM header to masquerade as UxROM.
+Generation now succeeds for this matching payload; assemble the emitted project
+with the Docker toolchain. Unresolved targets still trap. Do not use permissive
+stubs or change the ROM header to masquerade as UxROM.
 
 ## Why this is a new architectural step
 
-| Boundary | Current implementation | SMB3 requirement |
+| Boundary | Starting implementation | SMB3 requirement |
 | --- | --- | --- |
 | PRG identity | Experimental independent 8 KiB banking; legacy UxROM retained | Full-game reachability and safe remapping continuations |
 | Game memory | NES 2 KiB mirror plus runtime/render storage | Additional 8 KiB cartridge work RAM |
@@ -143,16 +148,18 @@ does not imply replacing the backend with LLVM or promising a speedup.
 
 `MMC3_BANKING_EXPERIMENT` opts a synthetic profile into the new path. A separate
 Sharp MMC3 board model supplies 8 KiB PRG / 1 KiB CHR identities and qualified
-A12/M2 IRQ semantics. The runtime currently executes PRG banking only: cartridge
+A12/M2 IRQ semantics. This bounded experiment executes PRG banking only: cartridge
 RAM, banked CHR rendering, IRQ delivery and unsafe remapping continuations
-remain rejected or trapped. The SMB3 profile does not opt in yet.
+remain rejected or trapped. SMB3 now uses the separate `MMC3_FULL_RUNTIME`
+contract, not this bounded experiment.
 Computed indirect jumps and indirect pointer accesses remain outside this
 bounded contract; helper tests alone do not establish their pipeline support.
 
-Raw PRG pages are packed in pairs into SMS banks starting at 96; translated
-code is temporarily limited to banks 4–31 in a 2 MiB image. The existing
-software-return frame packs bank identity and flags into one byte; expanding
-code placement requires separating those fields first. This cartridge size is tested in Genesis
+Raw PRG pages are packed in pairs into SMS banks starting at 96. The experiment
+limits translated code to banks 4–31 in a 2 MiB image because its software-return
+frame packs bank identity and flags into one byte. Full mode separates those
+fields and permits additional code banks; its assembled tests include banks
+31/32/64/95. The current SMB3 image is also 2 MiB. This cartridge size is tested in Genesis
 Plus GX, not claimed compatible with every historical cartridge mapper.
 Assembled fixtures cover both PRG modes, all physical pages, mapped-window
 calls/returns, aliases, indexed boundaries and mapping/register preservation.
@@ -174,6 +181,29 @@ ROM/emulator hashes, inputs and reproduction. The CLI Lua loader's fortified
 `realpath` call caused the original abort; loading Lua through the existing UI
 bypasses that branch without changing the emulator or adding a dependency.
 The ignored runner is `bash out/smb3-reference.jncimG/run.sh`.
+
+Additional native evidence under `out/smb3-irq-reference.i8pP7A/` records
+1,563 NMI and 1,560 IRQ entries across that same route. Each IRQ-bearing frame
+has one IRQ, with observed latch values `$C0/$C1`. At completed NMI and IRQ
+handlers, the CHR mappings differ: playfield and HUD require separate records.
+This is route-specific evidence, not a replacement for qualified-A12 semantics.
+Save-only PPU records under `out/smb3-raster-records.TsUusn/` confirm the
+vertical-scroll origin. A preliminary residency census is not a final bound:
+subsequent intro captures proved that IRQ writes to PPUADDR reload the live
+vertical position, invalidating unconditional continuity across the split.
+Rendering-time PPUDATA reads also affect that position. The renderer must
+distinguish those effects from later PPUSCROLL writes to the temporary address.
+
+Useful original-game assertions are world `$0727`, map operation `$0729`,
+tileset `$070A`, and cartridge-RAM layout/object pointers `$7EB9–$7EBC`.
+Native frame 1101 enters tileset `$01`, layout `$BB82`, objects `$C527`.
+During gameplay only, X is `$0075:$0090`, Y is `$0087:$00A2`, suit is `$00ED`,
+death is `$00F1`, and Mario's lives are `$0736`. The zero-page fields are
+overlaid in other game modes. Definitions from the
+[source RAM declarations](https://raw.githubusercontent.com/captainsouthbird/smb3/master/smb3.asm)
+were checked against native transitions and matching ROM stores. Completion
+must include the actual exit sequence and cleared map panel; a zero status
+byte alone is not evidence of a successful level clear.
 
 Current `frame-diff` is **not** an MMC3 ground-truth oracle: it has no PPU
 fetch/A12 stream, uses an instruction-based frame allowance, and does not

@@ -1,3 +1,4 @@
+.ifndef MMC3_FULL_RUNTIME
 ; ntmap.s — NES nametable/CIRAM address helpers.
 ;
 ; This is a scaffold for the runtime nametable-shadow materializer. It does not
@@ -753,3 +754,4 @@ _npc_attr:
   jr   c, _npc_attr
   ret
 .endif
+.endif ; separate full MMC3 graphics backend

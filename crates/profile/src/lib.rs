@@ -50,6 +50,9 @@ pub struct Profile {
     /// before the first PLA, independently of subsequent branches or RTS.
     #[serde(default, rename = "return_consume")]
     pub return_consumes: Vec<ReturnConsumeSite>,
+    /// Verified cooperative VBlank polling boundaries; original code remains translated.
+    #[serde(default, rename = "cooperative_wait")]
+    pub cooperative_waits: Vec<CooperativeWait>,
     /// Controller mapping policy. SMS pads have two buttons; NES has
     /// four. `heuristic` (default) keeps the SMB behavior: a
     /// title-mode RAM discriminator flips buttons between
@@ -221,6 +224,9 @@ pub struct Label {
 pub struct DataRegion {
     pub start: u16,
     pub end: u16,
+    /// Optional physical PRG bank. Omitted regions retain legacy global scope.
+    #[serde(default)]
+    pub bank: Option<u8>,
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -248,6 +254,15 @@ pub struct Replacement {
     /// back into this routine's own translated body.
     #[serde(default)]
     pub stub_body: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CooperativeWait {
+    pub bank: u8,
+    /// First instruction of LDA tick / BPL self, after the eight-byte setup.
+    pub at: u16,
+    pub tick: u8,
+    pub tick_enable: u8,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -315,12 +330,16 @@ pub struct ReturnEscapeSite {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Transfer a materialized call's ownership before an adjacent PLA/PLA pair.
-/// Entry immediately after both PLAs is permitted; entry at the second PLA
-/// bypasses ownership transfer and must be rejected by ROM/pipeline validation.
+/// Transfer a materialized call's ownership before two PLAs, optionally
+/// separated by verified zero-page stores/NOPs. Interior entry bypasses the
+/// transfer and is rejected by ROM/pipeline validation.
 pub struct ReturnConsumeSite {
     /// Original PC of the first PLA; the suffix remains ordinary guest code.
     pub at: u16,
+    /// Explicit high-byte PLA for a straight-line, stack-neutral gap.
+    /// Omitted retains the adjacent PLA/PLA contract.
+    #[serde(default)]
+    pub second_pla: Option<u16>,
     /// Physical bank of the pair, omitted for fixed-window or NROM code.
     #[serde(default)]
     pub bank: Option<u8>,
@@ -446,6 +465,41 @@ pub fn load_from_path(path: impl AsRef<Path>) -> Result<Profile, LoadError> {
 }
 
 fn validate(p: &Profile) -> Result<(), LoadError> {
+    if p.translation
+        .runtime_defines
+        .iter()
+        .any(|d| d == "MMC3_COOPERATIVE_WAIT")
+    {
+        return Err(LoadError::Validation(
+            "MMC3_COOPERATIVE_WAIT is reserved: use cooperative_wait annotations".into(),
+        ));
+    }
+    for (index, wait) in p.cooperative_waits.iter().enumerate() {
+        if p.rom.mapper != 4
+            || u32::from(wait.bank) >= p.rom.prg_kib / 8
+            || !(0x8008..0xe000).contains(&wait.at)
+            || wait.at & 0x1fff < 8
+            || wait.at & 0x1fff > 0x1ffc
+            || wait.tick == wait.tick_enable
+            || p.cooperative_waits[..index]
+                .iter()
+                .any(|other| other.bank == wait.bank && other.at == wait.at)
+        {
+            return Err(LoadError::Validation(
+                "invalid cooperative_wait bank, range or duplicate".into(),
+            ));
+        }
+    }
+    if p.translation
+        .runtime_defines
+        .iter()
+        .any(|d| d == "MMC3_FULL_RUNTIME")
+        && (p.rom.mapper != 4 || p.native_calls())
+    {
+        return Err(LoadError::Validation(
+            "MMC3_FULL_RUNTIME requires mapper 4 and software calls".into(),
+        ));
+    }
     if p.translation.runtime_defines.iter().any(|name| {
         matches!(
             name.as_str(),
@@ -709,9 +763,12 @@ fn validate_return_consumes(p: &Profile) -> Result<(), LoadError> {
     for site in &p.return_consumes {
         check_bank(site.at, site.bank)?;
         let last = site
-            .at
-            .checked_add(1)
+            .second_pla
+            .or_else(|| site.at.checked_add(1))
             .ok_or_else(|| invalid("PLA pair wraps"))?;
+        if last <= site.at || last - site.at > 16 {
+            return Err(invalid("second PLA must follow within 16 bytes"));
+        }
         if prg_window(p.rom.mapper, site.at) != prg_window(p.rom.mapper, last)
             || site.calls.is_empty()
         {
@@ -792,6 +849,7 @@ fn validate_bank_annotations(p: &Profile) -> Result<(), LoadError> {
             || !p.bank_calls.is_empty()
             || p.jump_engines.iter().any(|site| site.bank.is_some())
             || p.return_escapes.iter().any(|site| site.bank.is_some())
+            || p.data_regions.iter().any(|region| region.bank.is_some())
         {
             return Err(LoadError::Validation(format!(
                 "bank-qualified annotations require mapper 2 or 4, got mapper {}",
@@ -827,6 +885,22 @@ fn validate_bank_annotations(p: &Profile) -> Result<(), LoadError> {
         )));
     }
 
+    for region in &p.data_regions {
+        if let Some(bank) = region.bank {
+            if u32::from(bank) >= bank_count {
+                return Err(LoadError::Validation(format!(
+                    "data_region bank {bank} is out of range for {bank_count} banks"
+                )));
+            }
+            validate_switchable_address("data_region.start", region.start, fixed_start)?;
+            validate_switchable_address("data_region.end", region.end, fixed_start)?;
+            if prg_window(mapper, region.start) != prg_window(mapper, region.end) {
+                return Err(LoadError::Validation(
+                    "bank-qualified data_region crosses a CPU window".into(),
+                ));
+            }
+        }
+    }
     let mut entries = BTreeMap::new();
     for entry in &p.bank_entries {
         validate_switchable_address("bank_entry.addr", entry.addr, fixed_start)?;
@@ -918,6 +992,15 @@ fn validate_switchable_address(field: &str, addr: u16, fixed_start: u16) -> Resu
 }
 
 impl Profile {
+    pub fn mmc3_full_runtime(&self) -> bool {
+        self.rom.mapper == 4
+            && self
+                .translation
+                .runtime_defines
+                .iter()
+                .any(|d| d == "MMC3_FULL_RUNTIME")
+    }
+
     /// All known function roots discovered via the profile, including
     /// jump-table targets. Vector-derived roots are added by the analyzer.
     pub fn function_roots(&self) -> Vec<u16> {
@@ -943,7 +1026,7 @@ impl Profile {
     pub fn is_data_byte(&self, addr: u16) -> bool {
         self.data_regions
             .iter()
-            .any(|r| addr >= r.start && addr <= r.end)
+            .any(|r| r.bank.is_none() && addr >= r.start && addr <= r.end)
             || self.jump_engines.iter().any(|site| {
                 site.contains_table_byte(addr) && !site.contains_executable_table_suffix_byte(addr)
             })
@@ -952,7 +1035,7 @@ impl Profile {
     pub fn is_data_byte_in_bank(&self, addr: u16, bank: Option<u8>) -> bool {
         self.data_regions
             .iter()
-            .any(|r| addr >= r.start && addr <= r.end)
+            .any(|r| (r.bank.is_none() || r.bank == bank) && addr >= r.start && addr <= r.end)
             || self.jump_engines.iter().any(|site| {
                 site.applies_to_bank(bank)
                     && site.contains_table_byte(addr)
@@ -1003,11 +1086,17 @@ impl Profile {
         }
         // Even an escape before its PLA pair can own an already arranged
         // dispatcher return. It needs the live-byte validation path too.
-        if !self.return_escapes.is_empty() || !self.return_consumes.is_empty() {
+        if self.mmc3_full_runtime()
+            || !self.return_escapes.is_empty()
+            || !self.return_consumes.is_empty()
+        {
             defines.push("CONSUMED_RETURN_ESCAPE".into());
         }
-        if !self.return_consumes.is_empty() {
+        if self.mmc3_full_runtime() || !self.return_consumes.is_empty() {
             defines.push("MATERIALIZED_CALL_RETURNS".into());
+        }
+        if self.mmc3_full_runtime() && !self.cooperative_waits.is_empty() {
+            defines.push("MMC3_COOPERATIVE_WAIT".into());
         }
         defines
     }
@@ -1020,6 +1109,36 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cooperative_wait_requires_valid_unique_mmc3_physical_identity() {
+        let base = "[rom]\nname='wait'\nmapper=4\nprg_kib=64\nchr_kib=8\n[translation]\nruntime_defines=['MMC3_FULL_RUNTIME']\n";
+        let wait = "[[cooperative_wait]]\nbank=0\nat=0x8008\ntick=0x10\ntick_enable=0x1c\n";
+        let parsed = load_from_str(&(base.to_owned() + wait)).unwrap();
+        assert!(
+            parsed
+                .effective_runtime_defines()
+                .iter()
+                .any(|d| d == "MMC3_COOPERATIVE_WAIT")
+        );
+        for invalid in [
+            wait.replace("bank=0", "bank=8"),
+            wait.replace("at=0x8008", "at=0x8007"),
+            wait.replace("at=0x8008", "at=0x9ffe"),
+            wait.replace("tick_enable=0x1c", "tick_enable=0x10"),
+            wait.to_owned() + wait,
+        ] {
+            assert!(load_from_str(&(base.to_owned() + &invalid)).is_err());
+        }
+        assert!(load_from_str(&(base.replace("mapper=4", "mapper=2") + wait)).is_err());
+        for suffix in ["", wait] {
+            let manual = base.replace(
+                "'MMC3_FULL_RUNTIME'",
+                "'MMC3_FULL_RUNTIME','MMC3_COOPERATIVE_WAIT'",
+            );
+            assert!(load_from_str(&(manual + suffix)).is_err());
+        }
+    }
 
     const SAMPLE: &str = r#"
 [rom]
@@ -1074,7 +1193,7 @@ dest = 0x100
 "#;
 
     #[test]
-    fn parses_smb3_exploration_profile_without_translation_annotations() {
+    fn parses_pinned_smb3_profile_with_observed_reachability() {
         let p = load_from_str(include_str!("../../../profiles/smb3.toml")).unwrap();
         assert_eq!(p.rom.mapper, 4);
         assert_eq!(p.rom.prg_kib, 256);
@@ -1084,12 +1203,18 @@ dest = 0x100
         assert!(vectors.nmi >= 0xe000);
         assert!(vectors.reset >= 0xe000);
         assert!(vectors.irq >= 0xe000);
-        assert!(p.functions.is_empty());
-        assert!(p.bank_entries.is_empty());
+        assert!(!p.functions.is_empty());
+        assert!(!p.bank_entries.is_empty());
         assert!(p.bank_calls.is_empty());
         assert!(p.replacements.is_empty());
         assert!(p.chr_packs.is_empty());
-        assert!(p.translation.runtime_defines.is_empty());
+        assert!(p.mmc3_full_runtime());
+        assert_eq!(p.cooperative_waits.len(), 2);
+        assert!(
+            p.effective_runtime_defines()
+                .iter()
+                .any(|d| d == "MMC3_COOPERATIVE_WAIT")
+        );
     }
 
     #[test]

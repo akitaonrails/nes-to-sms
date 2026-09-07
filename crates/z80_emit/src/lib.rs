@@ -95,6 +95,9 @@ pub struct Program {
     /// downgrade to a plain `call` when the target lives in the same
     /// section (= same bank), avoiding the trampoline overhead.
     label_section: HashMap<String, usize>,
+    /// Opt-in frame ABI: keep full bank IDs, store ownership in address bit 15.
+    wide_continuation_banks: bool,
+    checked_continuations: std::collections::BTreeSet<String>,
 }
 
 impl Default for Program {
@@ -115,7 +118,13 @@ impl Program {
             label_counter: 0,
             referenced_labels: std::collections::BTreeSet::new(),
             label_section: HashMap::new(),
+            wide_continuation_banks: false,
+            checked_continuations: std::collections::BTreeSet::new(),
         }
+    }
+
+    pub fn set_wide_continuation_banks(&mut self, enabled: bool) {
+        self.wide_continuation_banks = enabled;
     }
 
     /// Switch to (or create) a named section.
@@ -1137,7 +1146,7 @@ impl Program {
             if return_addr.is_some() { 0x40 } else { 0 },
         );
         if self.label_section.get(label) == Some(&self.current) {
-            self.ld_a_hl_ptr();
+            self.restore_translated_entry_a();
             self.jp(label);
         } else {
             self.ld_bc_label(label);
@@ -1172,7 +1181,7 @@ impl Program {
         };
 
         self.emit_translated_call_frame(continuation, &overflow, Some(continuation), frame_flags);
-        self.ld_a_hl_ptr();
+        self.restore_translated_entry_a();
         self.translated_tail_jmp(label);
         self.label(&overflow);
         self.ld_a_imm(0xE4);
@@ -1257,13 +1266,25 @@ impl Program {
         };
 
         self.emit_translated_call_frame(continuation, &overflow, Some(continuation), frame_flags);
-        self.ld_a_hl_ptr();
+        self.restore_translated_entry_a();
         self.translated_banked_tail_dispatch(addr);
         self.label(&overflow);
         self.ld_a_imm(0xE4);
         self.ld_abs_a(0xCB1D);
         self.jp("rt_unresolved_jsr_flash");
         self.referenced_labels.insert(continuation.to_string());
+    }
+
+    /// Frame[0] first transports entry A; full-runtime frames then retain
+    /// call-time guest S until ownership transfer or RTS scratch reuse.
+    fn restore_translated_entry_a(&mut self) {
+        self.ld_a_hl_ptr();
+        if self.wide_continuation_banks {
+            self.push_af();
+            self.ld_a_abs(0xcb02);
+            self.ld_hl_ptr_a();
+            self.pop_af();
+        }
     }
 
     fn emit_translated_call_frame(
@@ -1354,14 +1375,23 @@ impl Program {
         self.ld_bc_label(cont);
         self.ld_hl_ptr_c();
         self.inc_hl();
-        self.ld_hl_ptr_b();
+        if self.wide_continuation_banks {
+            self.checked_continuations.insert(cont.to_owned());
+            self.ld_a_b();
+            if frame_flags != 0 {
+                self.or_imm(0x80);
+            }
+            self.ld_hl_ptr_a();
+        } else {
+            self.ld_hl_ptr_b();
+        }
         self.inc_hl();
         if let Some(label) = return_bank_label {
             self.emit_bytes_asm(&[0x3E, 0x00], &format!("  ld a,:{label}"));
         } else {
             self.ld_a_abs(0xCB14);
         }
-        if frame_flags != 0 {
+        if frame_flags != 0 && !self.wide_continuation_banks {
             self.or_imm(frame_flags);
         }
         self.ld_hl_ptr_a();
@@ -1569,6 +1599,18 @@ impl Program {
     }
 
     pub fn finish(mut self) -> Result<Build, EmitError> {
+        for label in &self.checked_continuations {
+            let addr = *self
+                .labels
+                .get(label)
+                .ok_or_else(|| EmitError::UnresolvedLabel(label.clone()))?;
+            if addr >= 0x8000 {
+                return Err(EmitError::InvalidContinuationAddress {
+                    label: label.clone(),
+                    addr,
+                });
+            }
+        }
         if let Some(name) = self.dup_labels.into_iter().next() {
             if std::env::var("Z80_ALLOW_DUP").is_err() {
                 return Err(EmitError::DuplicateLabel(name));
@@ -1678,6 +1720,7 @@ pub enum EmitError {
     UnresolvedLabel(String),
     JrOutOfRange { label: String, delta: i32 },
     DuplicateLabel(String),
+    InvalidContinuationAddress { label: String, addr: u16 },
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1685,6 +1728,38 @@ pub enum EmitError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_continuation_abi_owns_address_bit_not_bank_bits() {
+        for flags in [0, 0x40] {
+            let mut p = Program::new();
+            p.set_wide_continuation_banks(true);
+            p.org(0x4000);
+            p.emit_translated_call_frame("continuation", "overflow", None, flags);
+            p.label("overflow");
+            p.label("continuation");
+            p.ret();
+            let b = p.finish().unwrap();
+            assert!(!b.asm.contains("or $40"));
+            assert_eq!(b.asm.contains("or $80"), flags != 0);
+            assert!(b.asm.contains("ld a,($CB14)\n  ld (hl),a"));
+        }
+    }
+
+    #[test]
+    fn wide_continuations_reject_addresses_with_the_owned_bit_set() {
+        let mut p = Program::new();
+        p.set_wide_continuation_banks(true);
+        p.emit_translated_call_frame("bad", "overflow", None, 0);
+        p.label("overflow");
+        p.section("invalid_slot2_continuation");
+        p.org(0x8000);
+        p.label("bad");
+        assert!(matches!(
+            p.finish(),
+            Err(EmitError::InvalidContinuationAddress { addr: 0x8000, .. })
+        ));
+    }
 
     // ── opcode bytes ─────────────────────────────────────────────────────────
 

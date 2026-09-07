@@ -145,6 +145,54 @@ fn check_mmc3_mapping_continuations(routines: &[ir::Routine]) -> Result<(), Erro
     Ok(())
 }
 
+/// Only decoded instruction boundaries become legal live-mapping resumptions.
+/// A different physical bank must already have an analyzed owner for the PC;
+/// a missing destination stays a strict dispatch miss.
+fn add_mmc3_continuation_labels(
+    routines: &mut [ir::Routine],
+) -> std::collections::BTreeSet<String> {
+    let pcs: std::collections::BTreeSet<u16> = routines
+        .iter()
+        .flat_map(|routine| {
+            routine
+                .ops
+                .iter()
+                .enumerate()
+                .filter(|(_, op)| {
+                    matches!(op, ir::Op::Jsr { .. } | ir::Op::MaterializedJsr { .. })
+                        || (routine.name.starts_with("L_b") && op.may_remap_mmc3_prg())
+                })
+                .map(|(index, _)| routine.next_source_pc(index))
+        })
+        .collect();
+    let mut continuations = std::collections::BTreeSet::new();
+    for routine in routines {
+        let prefix = routine
+            .name
+            .strip_prefix("L_b")
+            .and_then(|rest| rest.split_once('_'))
+            .map(|(bank, _)| format!("L_b{bank}_"))
+            .unwrap_or_else(|| "L_".into());
+        let mut ops = Vec::with_capacity(routine.ops.len());
+        for op in std::mem::take(&mut routine.ops) {
+            if let ir::Op::Source { pc, .. } = &op
+                && pcs.contains(pc)
+                && *pc != routine.entry
+            {
+                let label = format!("{prefix}{pc:04X}");
+                continuations.insert(label.clone());
+                if !routine.branch_labels.contains(&label) {
+                    routine.branch_labels.push(label.clone());
+                    ops.push(ir::Op::Label(label));
+                }
+            }
+            ops.push(op);
+        }
+        routine.ops = ops;
+    }
+    continuations
+}
+
 /// One WLA-DX slot is a physical 16 KiB ROM bank.
 const TRANSLATED_SECTION_CAPACITY: usize = 0x4000;
 const TRANSLATED_BANK_BASE: u32 = 4;
@@ -166,7 +214,7 @@ impl TranslationMapping {
                 .translation
                 .runtime_defines
                 .iter()
-                .any(|d| d == "MMC3_BANKING_EXPERIMENT")
+                .any(|d| d == "MMC3_BANKING_EXPERIMENT" || d == "MMC3_FULL_RUNTIME")
         {
             let board = nes_rom::mmc3::Mmc3::new(
                 &image.header,
@@ -175,12 +223,14 @@ impl TranslationMapping {
                 nes_rom::mmc3::Mmc3Revision::Sharp,
             )
             .map_err(|e| Error::Diagnostic(e.to_string()))?;
-            if image.header.prg_ram_size != 0 || image.header.prg_nvram_size != 0 {
+            if !prof.mmc3_full_runtime()
+                && (image.header.prg_ram_size != 0 || image.header.prg_nvram_size != 0)
+            {
                 return Err(Error::Diagnostic(
                     "MMC3 banking experiment does not yet support cartridge RAM".into(),
                 ));
             }
-            if image.chr.len() != 0x2000 {
+            if !prof.mmc3_full_runtime() && image.chr.len() != 0x2000 {
                 return Err(Error::Diagnostic("MMC3 banking experiment requires 8 KiB CHR; banked CHR presentation is not implemented".into()));
             }
             Ok(Self::Mmc3 {
@@ -455,7 +505,8 @@ fn check_consume_entries(
     }
     for site in &prof.return_consumes {
         if let Some(&(bank, addr)) = entries.iter().find(|(bank, addr)| {
-            *addr == site.at + 1
+            *addr > site.at
+                && *addr <= site.second_pla.unwrap_or(site.at + 1)
                 && (*addr >= if prof.rom.mapper == 4 { 0xe000 } else { 0xc000 }
                     || prof.rom.mapper == 0
                     || bank.is_none()
@@ -476,8 +527,23 @@ fn return_consume_sites(prof: &profile::Profile, bank: Option<u8>) -> Vec<ir::Re
         .filter(|s| s.bank == bank)
         .map(|s| ir::ReturnConsumeSite {
             at: s.at,
+            second_pla: s.second_pla,
             return_addrs: s.calls.iter().map(|call| call.caller + 2).collect(),
         })
+        .collect()
+}
+
+fn lift_data_regions(
+    prof: &profile::Profile,
+    bank: Option<u8>,
+) -> Vec<std::ops::RangeInclusive<u16>> {
+    if !prof.mmc3_full_runtime() {
+        return Vec::new();
+    }
+    prof.data_regions
+        .iter()
+        .filter(|region| region.bank.is_none() || region.bank == bank)
+        .map(|region| region.start..=region.end)
         .collect()
 }
 
@@ -523,11 +589,16 @@ fn analyze_with_continuation_roots(
 
         let mut continuations = std::collections::BTreeSet::new();
         for function in &analyzed.functions.functions {
-            for &label in &function.internal_labels {
+            let external = if prof.mmc3_full_runtime() {
+                function.external_refs.as_slice()
+            } else {
+                &[]
+            };
+            for &label in function.internal_labels.iter().chain(external) {
                 let is_owned = normalized
                     .iter()
                     .any(|owner| label >= owner.addr && label < owner.end);
-                if window.contains(label) && !is_owned {
+                if window.contains(label) && !is_owned && !prof.is_data_byte_in_bank(label, bank) {
                     continuations.insert(label);
                 }
             }
@@ -622,6 +693,13 @@ fn emit_translated_routine(
     }
     let lifter_emits_auto = r.branch_labels.contains(&auto) || r.name == auto;
     if r.ops.len() > 600 {
+        if opts.profile.is_some_and(|p| p.mmc3_full_runtime()) {
+            return Err(Error::Diagnostic(format!(
+                "MMC3 full runtime routine {} exceeds the analyzed routine size bound ({} ops)",
+                r.name,
+                r.ops.len()
+            )));
+        }
         *program = pre_routine_program;
         *defined_labels = pre_routine_labels;
         emit_routine_trap_stub(program, defined_labels, r);
@@ -648,6 +726,9 @@ fn emit_translated_routine(
         if lower_error_is_fatal(&e) || opts.profile.is_some_and(|p| p.rom.mapper == 4) {
             *program = pre_routine_program;
             *defined_labels = pre_routine_labels;
+            if opts.profile.is_some_and(|p| p.mmc3_full_runtime()) {
+                return Err(Error::Diagnostic(format!("MMC3 routine {}: {e}", r.name)));
+            }
             return Err(Error::Lower(e));
         }
         *program = pre_routine_program;
@@ -765,7 +846,9 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // verified [[bank_entry]] facts; vectors are never replayed in those views.
     let banked = policy.is_banked();
     let fixed_start = policy.fixed_start();
-    let code_bank_limit = if policy.is_mmc3() {
+    let code_bank_limit = if prof.mmc3_full_runtime() {
+        sms_project::MMC3_PRG_DATA_BASE
+    } else if policy.is_mmc3() {
         sms_project::MMC3_CODE_BANK_LIMIT
     } else if banked {
         sms_project::NES_PRG_BANK_BASE
@@ -997,6 +1080,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
             materialized_call_sites: materialized_call_sites(&prof, None),
             window_label_prefix: None,
             window_label_range: 0x8000..0xC000,
+            dynamic_cpu_bus: prof.mmc3_full_runtime(),
+            data_regions: lift_data_regions(&prof, None),
             extra_label_pcs: Vec::new(),
         };
         if let Ok(r) = ir::lift_range(&analysis_view, &opts) {
@@ -1121,6 +1206,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     materialized_call_sites: materialized_call_sites(&prof, Some(bank)),
                     window_label_prefix: Some(prefix.clone()),
                     window_label_range: window.start..window.end_inclusive + 1,
+                    dynamic_cpu_bus: prof.mmc3_full_runtime(),
+                    data_regions: lift_data_regions(&prof, Some(bank)),
                     extra_label_pcs: Vec::new(),
                 };
                 if let Ok(r) = ir::lift_range(&view, &opts) {
@@ -1157,6 +1244,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     materialized_call_sites: materialized_call_sites(&prof, Some(bank)),
                     window_label_prefix: in_window.then(|| prefix.clone()),
                     window_label_range: window.start..window.end_inclusive + 1,
+                    dynamic_cpu_bus: prof.mmc3_full_runtime(),
+                    data_regions: lift_data_regions(&prof, Some(bank)),
                     extra_label_pcs: extras,
                 };
                 match ir::lift_range(&view, &opts) {
@@ -1212,6 +1301,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
             materialized_call_sites: materialized_call_sites(&prof, None),
             window_label_prefix: None,
             window_label_range: 0x8000..0xC000,
+            dynamic_cpu_bus: prof.mmc3_full_runtime(),
+            data_regions: lift_data_regions(&prof, None),
             extra_label_pcs: extras,
         };
         match ir::lift_range(&analysis_view, &opts) {
@@ -1250,7 +1341,74 @@ pub fn run(args: &Args) -> Result<String, Error> {
     }
 
     routines.extend(banked_routines);
-    if policy.is_mmc3() {
+    if prof.mmc3_full_runtime() {
+        for wait in &prof.cooperative_waits {
+            let offset = usize::from(wait.bank) * 0x2000 + usize::from(wait.at & 0x1fff);
+            let expected = [
+                0xa9,
+                1,
+                0x85,
+                wait.tick_enable,
+                0xa9,
+                0,
+                0x85,
+                wait.tick,
+                0xa5,
+                wait.tick,
+                0x10,
+                0xfc,
+            ];
+            if image.prg.get(offset - 8..offset + 4) != Some(expected.as_slice()) {
+                return Err(Error::Diagnostic(format!(
+                    "cooperative_wait {}:${:04X}: expected enable/clear setup and LDA tick / BPL self",
+                    wait.bank, wait.at
+                )));
+            }
+            let mut owners = 0;
+            for routine in &mut routines {
+                if profile_target_identity(&routine.name).and_then(|(bank, _)| bank)
+                    != Some(wait.bank)
+                {
+                    continue;
+                }
+                if let Some(index) = routine
+                    .ops
+                    .iter()
+                    .position(|op| matches!(op, ir::Op::Source { pc, .. } if *pc == wait.at))
+                {
+                    if prof.replacement_for(routine.entry).is_some() {
+                        return Err(Error::Diagnostic(
+                            "cooperative_wait owner cannot be replaced".into(),
+                        ));
+                    }
+                    routine.ops.insert(
+                        index + 1,
+                        ir::Op::CooperativeWait {
+                            tick: wait.tick,
+                            tick_enable: wait.tick_enable,
+                        },
+                    );
+                    owners += 1;
+                }
+            }
+            if owners != 1 {
+                return Err(Error::Diagnostic(format!(
+                    "cooperative_wait {}:${:04X} requires exactly one translated owner, found {owners}",
+                    wait.bank, wait.at
+                )));
+            }
+        }
+    }
+    let mut mmc3_continuations = std::collections::BTreeSet::new();
+    if prof.mmc3_full_runtime() {
+        if !lift_failures.is_empty() {
+            return Err(Error::Diagnostic(format!(
+                "MMC3 full runtime lift failed: {}",
+                lift_failures.join("; ")
+            )));
+        }
+        mmc3_continuations = add_mmc3_continuation_labels(&mut routines);
+    } else if policy.is_mmc3() {
         check_mmc3_mapping_continuations(&routines)?;
     }
 
@@ -1371,7 +1529,13 @@ pub fn run(args: &Args) -> Result<String, Error> {
             let owner = owners[0];
             if prof.replacement_for(owner.entry).is_some()
                 || prof.replacements.iter().any(|r| {
-                    r.addr >= pc && r.addr <= pc + if call_target.is_some() { 2 } else { 1 }
+                    r.addr >= pc
+                        && r.addr
+                            <= if call_target.is_some() {
+                                pc + 2
+                            } else {
+                                site.second_pla.unwrap_or(pc + 1)
+                            }
                 })
             {
                 return Err(Error::Diagnostic(format!(
@@ -1607,6 +1771,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
         Error,
     > {
         let mut program = z80_emit::Program::new();
+        program.set_wide_continuation_banks(prof.mmc3_full_runtime());
         let mut section_idx: u32 = 0;
         begin_translated_section(&mut program, section_idx, code_bank_limit)?;
         program.prepopulate_label_section(section_map);
@@ -1711,6 +1876,17 @@ pub fn run(args: &Args) -> Result<String, Error> {
             program.label(sym);
             program.ret();
         }
+        if prof.mmc3_full_runtime() {
+            for sym in [
+                "rt_mmc3_read_bus",
+                "rt_mmc3_write_bus",
+                "rt_mmc3_indirect_jump",
+                "rt_mmc3_guard_pla",
+            ] {
+                program.label(sym);
+                program.ret();
+            }
+        }
         for rep in &prof.replacements {
             if RUNTIME_SYMBOLS.contains(&rep.runtime_label.as_str()) {
                 continue; // already forward-declared above
@@ -1779,6 +1955,19 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 None => (0xFF, r.entry, format_label(r.entry)),
             })
             .collect::<Vec<_>>();
+        if prof.mmc3_full_runtime() {
+            for routine in &routines {
+                for label in &routine.branch_labels {
+                    if mmc3_continuations.contains(label)
+                        && let Some((bank, addr)) = profile_target_identity(label)
+                    {
+                        dispatch_records.push((bank.unwrap_or(0xff), addr, label.clone()));
+                    }
+                }
+            }
+            dispatch_records.sort();
+            dispatch_records.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        }
         // Computed dispatch honors profile replacements too: a dispatched
         // NES address whose routine is replaced lands on the runtime hook
         // (slot 0) instead of the translated body.
@@ -1858,7 +2047,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // set from an all-zero 8 KiB CHR (blank tiles, identity maps). The
     // runtime $2007 pattern-write conversion fills real tiles in play.
     let chr_ram_blank;
-    let chr_source: &[u8] = if image.chr.is_empty() {
+    let chr_source: &[u8] = if image.chr.is_empty() || prof.mmc3_full_runtime() {
         chr_ram_blank = vec![0u8; 8192];
         &chr_ram_blank
     } else {
@@ -2648,6 +2837,7 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_translated_rts",
     "rt_translated_return_escape",
     "rt_translated_return_consume",
+    "rt_mmc3_wait_boundary",
     "rt_translated_call_materialize",
     "rt_translated_call_gate",
     "rt_translated_tail_gate",

@@ -175,10 +175,9 @@ reset_entry:
 
 .org $0066
 .ifdef INPUT_PAUSE_START
-  ; NMI = SMS pause button -> inject a NES Start press: arm a 4-frame
-  ; countdown that rt_controller_latch translates into Start held for
-  ; 4 frames then released (a clean press edge). $CB2E is free (the old
-  ; far-gate park moved to the native stack).
+  ; NMI = SMS pause button -> arm a four-count NES Start press at $CB2E.
+  ; Legacy input consumes one count per host frame; full MMC3 consumes
+  ; one per completed port-1 byte, then releases at the next host latch.
   ; DIAG: also capture the interrupted PC (the NMI pushed it) into
   ; $CA36/37 and count NMIs at $CA35 — a non-maskable probe that works
   ; even when the machine is interrupt-dead (press pause, read RAM).
@@ -321,7 +320,9 @@ boot_main:
   ; 6b. Clear external raw-CIRAM SRAM backend ($8000-$87FF in slot-2 SRAM
   ; bank 0). Rendering is still driven by the folded internal shadows; this is
   ; only storage scaffolding for later parity/materializer phases.
+.ifndef MMC3_FULL_RUNTIME
   call rt_raw_ciram_sram_clear
+.endif
 .endif
 
   ; 7. Init emulated 6502 CPU state.
@@ -431,6 +432,9 @@ boot_main:
   ; SRAM metadata and palette shadow match the boot assets before the first
   ; producer write; no internal OAM or continuation storage is repurposed.
   call rt_cv1_bg_init
+.endif
+.ifdef MMC3_FULL_RUNTIME
+  call rt_mmc3_graphics_init
 .endif
 
   ; 12. Enable display and frame interrupts (VDP reg 1).
@@ -590,6 +594,9 @@ rt_boot_beacon:
   ret
 
 irq_handler:
+.ifdef MMC3_FULL_RUNTIME
+  jp rt_mmc3_sms_interrupt
+.else
   ; Save the interrupted context on the NATIVE STACK. The handler is
   ; re-entrant (nested translated-NMI entries, skip entries, the line
   ; split); the old fixed save words ($D472/$D475/$D477) were single-slot,
@@ -1580,6 +1587,7 @@ rt_smb_hud_repeat:
   ret
 .endif
 .endif
+.endif ; legacy IRQ/presentation policy
 
 .ends
 

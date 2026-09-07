@@ -1,7 +1,7 @@
-# Super Mario Bros. 3 (USA) (Rev 1) — unsupported mapper-4 exploration.
-# This pins the baseline ROM, not a working SMS conversion. Generation must
-# reject MMC3 until its banking, cartridge RAM, CHR mapping, and IRQ runtime
-# are implemented. See docs/smb3-plan.md for the staged acceptance gates.
+# Super Mario Bros. 3 (USA) (Rev 1) — experimental cooperative MMC3 conversion.
+# Reset/title/world-map progression is verified in the emulator at 500% clock.
+# The declared wait boundaries adapt frame scheduling; this is not cycle-exact
+# MMC3 IRQ emulation or a claim of complete gameplay. See docs/smb3-plan.md.
 # The payload hash covers PRG followed by CHR, excluding the NES header.
 [rom]
 name = "Super Mario Bros. 3 (USA) (Rev 1)"
@@ -10,8 +10,3678 @@ prg_kib = 256
 chr_kib = 128
 payload_sha256 = "959fdd32c71735d6fb2bd16a646d39f4ee65623273dd035e6a968e991bd13ef8"
 
+
+# Same-window DynJump 0:$CA8D: source ObjState_DeadEmpty; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xD3A0
+
+# Same-window DynJump 0:$CA8D: source ObjState_Shelled; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xCAF9
+
+# Same-window DynJump 0:$CA8D: source ObjState_Held; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xCE21
+
+# Same-window DynJump 0:$CA8D: source ObjState_Kicked; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xCC6E
+
+# Same-window DynJump 0:$CA8D: source ObjState_Killed; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xCFB1
+
+# Same-window DynJump 0:$CA8D: source ObjState_Squashed; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xD06B
+
+# Same-window DynJump 0:$CA8D: source ObjState_PoofDying; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xCAA6
+
+# Same-window DynJump 0:$D528: source Object_ShakeAndDraw; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xD5E7
+
+# Same-window DynJump 0:$D528: source Object_Draw16x32Sprite; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xD618
+
+# Same-window DynJump 0:$D528: source Object_DrawWide; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xD64C
+
+# Same-window DynJump 0:$D528: source Object_ShakeAndDrawMirrored; table bytes verified.
+[[bank_entry]]
+bank = 0
+addr = 0xD5F0
+
+# Same-window DynJump 10:$C4AF: source MO_Wait14Ticks; table bytes verified.
+[[bank_entry]]
+bank = 10
+addr = 0xC7A8
+
+# Same-window DynJump 10:$C4AF: source MO_DoFortressFX; table bytes verified.
+[[bank_entry]]
+bank = 10
+addr = 0xC8A9
+
+# Same-window DynJump 10:$C4AF: source MO_HammerBroMarch; table bytes verified.
+[[bank_entry]]
+bank = 10
+addr = 0xC9E5
+
+# Same-window DynJump 10:$C4AF: source MO_Wait8Proceed; table bytes verified.
+[[bank_entry]]
+bank = 10
+addr = 0xCA2B
+
+# Same-window DynJump 10:$CA8F: source Map_PanInit; table bytes verified.
+[[bank_entry]]
+bank = 10
+addr = 0xCC3F
+
+# Same-window DynJump 10:$CA8F: source Map_PanRight; table bytes verified.
+[[bank_entry]]
+bank = 10
+addr = 0xCC4C
+
+# Same-window DynJump 10:$CA8F: source Map_PanLeft; table bytes verified.
+[[bank_entry]]
+bank = 10
+addr = 0xCCE4
+
+# Same-window DynJump 11:$AE0B: source Map_Object_Airship; table bytes verified.
+[[bank_entry]]
+bank = 11
+addr = 0xB126
+
+# Same-window DynJump 11:$AE0B: source Map_Object_Stationary; table bytes verified.
+[[bank_entry]]
+bank = 11
+addr = 0xAF94
+
+# Same-window DynJump 11:$AE0B: source Map_Object_Canoe; table bytes verified.
+[[bank_entry]]
+bank = 11
+addr = 0xBAB6
+
+# Same-window DynJump 11:$B76F: source WWFX_WarpWhistleFlash; table bytes verified.
+[[bank_entry]]
+bank = 11
+addr = 0xA386
+
+# Same-window DynJump 24:$A9BC: source Title_DebugMenu; table bytes verified.
+[[bank_entry]]
+bank = 24
+addr = 0xACC9
+
+# Same-window DynJump 24:$AB83: source Title_Drop; table bytes verified.
+[[bank_entry]]
+bank = 24
+addr = 0xABAD
+
+# Same-window DynJump 24:$AB83: source Title_LogoShakeUp; table bytes verified.
+[[bank_entry]]
+bank = 24
+addr = 0xABC0
+
+# Same-window DynJump 24:$AB83: source Title_LogoShakeDown; table bytes verified.
+[[bank_entry]]
+bank = 24
+addr = 0xABCA
+
+# Same-window DynJump 24:$AB83: source Title_InitObjects; table bytes verified.
+[[bank_entry]]
+bank = 24
+addr = 0xABE4
+
+# Same-window DynJump 24:$AB83: source Title_PalFadeIn; table bytes verified.
+[[bank_entry]]
+bank = 24
+addr = 0xABF7
+
+# Same-window DynJump 24:$AB83: source Title_DrawMenu; table bytes verified.
+[[bank_entry]]
+bank = 24
+addr = 0xAC13
+[input]
+mode = "action"
+pause_start = true
+
+[translation]
+runtime_defines = ["MMC3_FULL_RUNTIME", "SMB3_MMC3_SINGLE_SPLIT"]
+
+# Original polling bodies remain translated. Native title/map/level census:
+# only these two wait loops; first startup wait has I set with rendering off.
+[[cooperative_wait]]
+bank = 24
+at = 0xa81c
+tick = 0x10
+tick_enable = 0x1c
+
+[[cooperative_wait]]
+bank = 30
+at = 0x96fb
+tick = 0x10
+tick_enable = 0x1c
+
 # Physical vectors in the final, fixed 8-KiB PRG bank.
 [vectors]
 nmi = 0xf486
 reset = 0xff40
 irq = 0xf795
+
+# Sound continuation ORA #$10 / BNE cannot fall into the following tables.
+# Source PRG028_A709 and SndLev2_SkidNCtl: 32 + 23 verified bytes.
+[[data_region]]
+bank = 28
+start = 0xa709
+end = 0xa73f
+name = "Sound_noise_control_tables"
+
+# LoadLevel_Pitfall LDX #0 / BEQ skips three four-byte tile tables.
+# Southbird prg014 LL_RightEdge/LL_PitTile/LL_LeftEdge; local bytes verified.
+[[data_region]]
+bank = 14
+start = 0xd29b
+end = 0xd2a6
+name = "Pitfall_edge_tiles"
+
+# Additional source-declared inline tables are data even on paths not yet
+# observed. This does not authorize their computed destinations at runtime.
+
+[[data_region]]
+bank = 0
+start = 0xCFCC
+end = 0xCFDF
+name = "DynJump_0_CFC9"
+
+[[data_region]]
+bank = 1
+start = 0xAED9
+end = 0xAEE8
+name = "DynJump_1_AED6"
+
+[[data_region]]
+bank = 1
+start = 0xB8EB
+end = 0xB8F6
+name = "DynJump_1_B8E8"
+
+[[data_region]]
+bank = 1
+start = 0xB94D
+end = 0xB954
+name = "DynJump_1_B94A"
+
+[[data_region]]
+bank = 2
+start = 0xA37D
+end = 0xA384
+name = "DynJump_2_A37A"
+
+[[data_region]]
+bank = 2
+start = 0xB27A
+end = 0xB27F
+name = "DynJump_2_B277"
+
+[[data_region]]
+bank = 2
+start = 0xBB40
+end = 0xBB4F
+name = "DynJump_2_BB3D"
+
+[[data_region]]
+bank = 3
+start = 0xA6E2
+end = 0xA6E7
+name = "DynJump_3_A6DF"
+
+[[data_region]]
+bank = 3
+start = 0xAADE
+end = 0xAAE9
+name = "DynJump_3_AADB"
+
+[[data_region]]
+bank = 3
+start = 0xAC89
+end = 0xAC8C
+name = "DynJump_3_AC86"
+
+[[data_region]]
+bank = 3
+start = 0xAF6B
+end = 0xAF72
+name = "DynJump_3_AF68"
+
+[[data_region]]
+bank = 3
+start = 0xBDFD
+end = 0xBE02
+name = "DynJump_3_BDFA"
+
+[[data_region]]
+bank = 4
+start = 0xA4C8
+end = 0xA4CF
+name = "DynJump_4_A4C5"
+
+[[data_region]]
+bank = 4
+start = 0xA689
+end = 0xA68E
+name = "DynJump_4_A686"
+
+[[data_region]]
+bank = 4
+start = 0xA759
+end = 0xA75E
+name = "DynJump_4_A756"
+
+[[data_region]]
+bank = 4
+start = 0xA7FC
+end = 0xA803
+name = "DynJump_4_A7F9"
+
+[[data_region]]
+bank = 4
+start = 0xA95E
+end = 0xA965
+name = "DynJump_4_A95B"
+
+[[data_region]]
+bank = 4
+start = 0xAAEC
+end = 0xAAF3
+name = "DynJump_4_AAE9"
+
+[[data_region]]
+bank = 4
+start = 0xAF9B
+end = 0xAFA0
+name = "DynJump_4_AF98"
+
+[[data_region]]
+bank = 4
+start = 0xB7AB
+end = 0xB7B2
+name = "DynJump_4_B7A8"
+
+[[data_region]]
+bank = 4
+start = 0xBA71
+end = 0xBA76
+name = "DynJump_4_BA6E"
+
+[[data_region]]
+bank = 5
+start = 0xA7A1
+end = 0xA7A8
+name = "DynJump_5_A79E"
+
+[[data_region]]
+bank = 5
+start = 0xAA03
+end = 0xAA10
+name = "DynJump_5_AA00"
+
+[[data_region]]
+bank = 5
+start = 0xAD5B
+end = 0xAD68
+name = "DynJump_5_AD58"
+
+[[data_region]]
+bank = 5
+start = 0xBBA3
+end = 0xBBB4
+name = "DynJump_5_BBA0"
+
+[[data_region]]
+bank = 7
+start = 0xAFA4
+end = 0xAFD1
+name = "DynJump_7_AFA1"
+
+[[data_region]]
+bank = 7
+start = 0xBB9B
+end = 0xBBC6
+name = "DynJump_7_BB98"
+
+[[data_region]]
+bank = 9
+start = 0xA1F0
+end = 0xA1F3
+name = "DynJump_9_A1ED"
+
+[[data_region]]
+bank = 9
+start = 0xA224
+end = 0xA23B
+name = "DynJump_9_A221"
+
+[[data_region]]
+bank = 9
+start = 0xA2CD
+end = 0xA2E4
+name = "DynJump_9_A2CA"
+
+[[data_region]]
+bank = 9
+start = 0xA44B
+end = 0xA452
+name = "DynJump_9_A448"
+
+[[data_region]]
+bank = 9
+start = 0xAC5E
+end = 0xAC63
+name = "DynJump_9_AC5B"
+
+[[data_region]]
+bank = 9
+start = 0xAD33
+end = 0xAD3A
+name = "DynJump_9_AD30"
+
+[[data_region]]
+bank = 9
+start = 0xAD89
+end = 0xADA0
+name = "DynJump_9_AD86"
+
+[[data_region]]
+bank = 9
+start = 0xB928
+end = 0xB933
+name = "DynJump_9_B925"
+
+[[data_region]]
+bank = 10
+start = 0xC6F8
+end = 0xC709
+name = "DynJump_10_C6F5"
+
+[[data_region]]
+bank = 10
+start = 0xCA88
+end = 0xCA8B
+name = "DynJump_10_CA85"
+
+[[data_region]]
+bank = 11
+start = 0xA2D1
+end = 0xA2F0
+name = "DynJump_11_A2CE"
+
+[[data_region]]
+bank = 11
+start = 0xA31F
+end = 0xA32A
+name = "DynJump_11_A31C"
+
+[[data_region]]
+bank = 11
+start = 0xA464
+end = 0xA469
+name = "DynJump_11_A461"
+
+[[data_region]]
+bank = 11
+start = 0xAC78
+end = 0xAC7F
+name = "DynJump_11_AC75"
+
+[[data_region]]
+bank = 12
+start = 0xB204
+end = 0xB225
+name = "DynJump_12_B201"
+
+[[data_region]]
+bank = 13
+start = 0xA448
+end = 0xA4E3
+name = "DynJump_13_A445"
+
+[[data_region]]
+bank = 13
+start = 0xA4F1
+end = 0xA576
+name = "DynJump_13_A4EE"
+
+[[data_region]]
+bank = 14
+start = 0xC447
+end = 0xC488
+name = "DynJump_14_C444"
+
+[[data_region]]
+bank = 14
+start = 0xC496
+end = 0xC49D
+name = "DynJump_14_C493"
+
+[[data_region]]
+bank = 16
+start = 0xA448
+end = 0xA4E3
+name = "DynJump_16_A445"
+
+[[data_region]]
+bank = 16
+start = 0xA4F1
+end = 0xA576
+name = "DynJump_16_A4EE"
+
+[[data_region]]
+bank = 17
+start = 0xA44A
+end = 0xA4B7
+name = "DynJump_17_A447"
+
+[[data_region]]
+bank = 17
+start = 0xA4C5
+end = 0xA518
+name = "DynJump_17_A4C2"
+
+[[data_region]]
+bank = 18
+start = 0xA4A6
+end = 0xA519
+name = "DynJump_18_A4A3"
+
+[[data_region]]
+bank = 18
+start = 0xA527
+end = 0xA57A
+name = "DynJump_18_A524"
+
+[[data_region]]
+bank = 19
+start = 0xA44D
+end = 0xA4B4
+name = "DynJump_19_A44A"
+
+[[data_region]]
+bank = 19
+start = 0xA4C2
+end = 0xA515
+name = "DynJump_19_A4BF"
+
+[[data_region]]
+bank = 20
+start = 0xA446
+end = 0xA4BB
+name = "DynJump_20_A443"
+
+[[data_region]]
+bank = 20
+start = 0xA4C9
+end = 0xA51C
+name = "DynJump_20_A4C6"
+
+[[data_region]]
+bank = 21
+start = 0xA478
+end = 0xA4ED
+name = "DynJump_21_A475"
+
+[[data_region]]
+bank = 21
+start = 0xA4FB
+end = 0xA54E
+name = "DynJump_21_A4F8"
+
+[[data_region]]
+bank = 22
+start = 0xC492
+end = 0xC493
+name = "DynJump_22_C48F"
+
+[[data_region]]
+bank = 22
+start = 0xC49A
+end = 0xC4A7
+name = "DynJump_22_C497"
+
+[[data_region]]
+bank = 22
+start = 0xC6EC
+end = 0xC6F3
+name = "DynJump_22_C6E9"
+
+[[data_region]]
+bank = 22
+start = 0xC8A6
+end = 0xC8B9
+name = "DynJump_22_C8A3"
+
+[[data_region]]
+bank = 22
+start = 0xCD75
+end = 0xCD78
+name = "DynJump_22_CD72"
+
+[[data_region]]
+bank = 22
+start = 0xD030
+end = 0xD033
+name = "DynJump_22_D02D"
+
+[[data_region]]
+bank = 22
+start = 0xD03A
+end = 0xD03D
+name = "DynJump_22_D037"
+
+[[data_region]]
+bank = 22
+start = 0xD055
+end = 0xD05E
+name = "DynJump_22_D052"
+
+[[data_region]]
+bank = 22
+start = 0xD0F8
+end = 0xD103
+name = "DynJump_22_D0F5"
+
+[[data_region]]
+bank = 22
+start = 0xD64C
+end = 0xD651
+name = "DynJump_22_D649"
+
+[[data_region]]
+bank = 22
+start = 0xD798
+end = 0xD7A9
+name = "DynJump_22_D795"
+
+[[data_region]]
+bank = 23
+start = 0xA43C
+end = 0xA4AD
+name = "DynJump_23_A439"
+
+[[data_region]]
+bank = 23
+start = 0xA4BB
+end = 0xA520
+name = "DynJump_23_A4B8"
+
+[[data_region]]
+bank = 24
+start = 0xA057
+end = 0xA05C
+name = "DynJump_24_A054"
+
+[[data_region]]
+bank = 24
+start = 0xA4B8
+end = 0xA4C5
+name = "DynJump_24_A4B5"
+
+[[data_region]]
+bank = 24
+start = 0xA6EC
+end = 0xA6F3
+name = "DynJump_24_A6E9"
+
+[[data_region]]
+bank = 24
+start = 0xB3FD
+end = 0xB408
+name = "DynJump_24_B3FA"
+
+[[data_region]]
+bank = 24
+start = 0xB425
+end = 0xB430
+name = "DynJump_24_B422"
+
+[[data_region]]
+bank = 24
+start = 0xB55E
+end = 0xB567
+name = "DynJump_24_B55B"
+
+[[data_region]]
+bank = 24
+start = 0xB8F2
+end = 0xB8FF
+name = "DynJump_24_B8EF"
+
+[[data_region]]
+bank = 24
+start = 0xBA30
+end = 0xBA35
+name = "DynJump_24_BA2D"
+
+[[data_region]]
+bank = 24
+start = 0xBD3F
+end = 0xBD42
+name = "DynJump_24_BD3C"
+
+[[data_region]]
+bank = 24
+start = 0xBD4C
+end = 0xBD5F
+name = "DynJump_24_BD49"
+
+[[data_region]]
+bank = 26
+start = 0xA088
+end = 0xA091
+name = "DynJump_26_A085"
+
+[[data_region]]
+bank = 26
+start = 0xA3A1
+end = 0xA3B0
+name = "DynJump_26_A39E"
+
+[[data_region]]
+bank = 26
+start = 0xA540
+end = 0xA55B
+name = "DynJump_26_A53D"
+
+[[data_region]]
+bank = 26
+start = 0xA99E
+end = 0xA9A9
+name = "DynJump_26_A99B"
+
+[[data_region]]
+bank = 26
+start = 0xAE73
+end = 0xAE7A
+name = "DynJump_26_AE70"
+
+[[data_region]]
+bank = 27
+start = 0xA030
+end = 0xA039
+name = "DynJump_27_A02D"
+
+[[data_region]]
+bank = 29
+start = 0xD2B3
+end = 0xD2BC
+name = "DynJump_29_D2B0"
+
+[[data_region]]
+bank = 29
+start = 0xDC85
+end = 0xDCB6
+name = "DynJump_29_DC82"
+
+
+# Actual translated DynJump consumes JSR return bytes at FE9B/FE9E.
+# These 16 callers were observed by the original NES core. Table extents
+# match Southbird 09b1bd8 and the pinned ROM's little-endian destinations.
+
+[[data_region]]
+bank = 0
+start = 0xCA90
+end = 0xCAA1
+name = "DynJump_0_CA8D"
+
+[[data_region]]
+bank = 0
+start = 0xD52B
+end = 0xD548
+name = "DynJump_0_D528"
+
+[[data_region]]
+bank = 10
+start = 0xC4B2
+end = 0xC4CF
+name = "DynJump_10_C4AF"
+
+[[data_region]]
+bank = 10
+start = 0xC500
+end = 0xC505
+name = "DynJump_10_C4FD"
+
+[[data_region]]
+bank = 10
+start = 0xCA92
+end = 0xCA9F
+name = "DynJump_10_CA8F"
+
+[[data_region]]
+bank = 11
+start = 0xAE0E
+end = 0xAE2F
+name = "DynJump_11_AE0B"
+
+[[data_region]]
+bank = 11
+start = 0xB59C
+end = 0xB5BD
+name = "DynJump_11_B599"
+
+[[data_region]]
+bank = 11
+start = 0xB772
+end = 0xB777
+name = "DynJump_11_B76F"
+
+[[data_region]]
+bank = 15
+start = 0xA43C
+end = 0xA497
+name = "DynJump_15_A439"
+
+[[data_region]]
+bank = 15
+start = 0xA4A5
+end = 0xA4F8
+name = "DynJump_15_A4A2"
+
+[[data_region]]
+bank = 24
+start = 0xA9BF
+end = 0xA9CE
+name = "DynJump_24_A9BC"
+
+[[data_region]]
+bank = 24
+start = 0xAB86
+end = 0xAB99
+name = "DynJump_24_AB83"
+
+[[data_region]]
+bank = 26
+start = 0xAD6E
+end = 0xAD75
+name = "DynJump_26_AD6B"
+
+[[data_region]]
+bank = 30
+start = 0x9A23
+end = 0x9A48
+name = "DynJump_30_9A20"
+
+[[data_region]]
+bank = 30
+start = 0x9A4F
+end = 0x9A74
+name = "DynJump_30_9A4C"
+
+[[data_region]]
+bank = 30
+start = 0x9A7B
+end = 0x9AA0
+name = "DynJump_30_9A78"
+
+[[return_consume]]
+at = 0xfe9b
+second_pla = 0xfe9e
+calls = [
+  { bank = 0, caller = 0xCA8D, target = 0xfe99 },
+  { bank = 0, caller = 0xD528, target = 0xfe99 },
+  { bank = 10, caller = 0xC4AF, target = 0xfe99 },
+  { bank = 10, caller = 0xC4FD, target = 0xfe99 },
+  { bank = 10, caller = 0xCA8F, target = 0xfe99 },
+  { bank = 11, caller = 0xAE0B, target = 0xfe99 },
+  { bank = 11, caller = 0xB599, target = 0xfe99 },
+  { bank = 11, caller = 0xB76F, target = 0xfe99 },
+  { bank = 15, caller = 0xA439, target = 0xfe99 },
+  { bank = 15, caller = 0xA4A2, target = 0xfe99 },
+  { bank = 24, caller = 0xA9BC, target = 0xfe99 },
+  { bank = 24, caller = 0xAB83, target = 0xfe99 },
+  { bank = 26, caller = 0xAD6B, target = 0xfe99 },
+  { bank = 30, caller = 0x9A20, target = 0xfe99 },
+  { bank = 30, caller = 0x9A4C, target = 0xfe99 },
+  { bank = 30, caller = 0x9A78, target = 0xfe99 },
+]
+
+
+# LDX #$08 / BNE at $E835 always skips this 12-word note table.
+# Local payload bytes agree with Southbird's Square1_Table_Notes declaration.
+[[data_region]]
+start = 0xe839
+end = 0xe850
+name = "Square1_Table_Notes"
+
+# Source-core observed instruction entries (reset/title/map/first-level route).
+# Includes return PCs: these are reachability facts, not replacement routines.
+# Captured from the pinned ROM; dynamic destinations absent here still trap.
+
+[[bank_entry]]
+bank = 0
+addr = 0xC515
+
+[[bank_entry]]
+bank = 0
+addr = 0xC54A
+
+[[bank_entry]]
+bank = 0
+addr = 0xC56B
+
+[[bank_entry]]
+bank = 0
+addr = 0xC649
+
+[[bank_entry]]
+bank = 0
+addr = 0xC69D
+
+[[bank_entry]]
+bank = 0
+addr = 0xC6A2
+
+[[bank_entry]]
+bank = 0
+addr = 0xC716
+
+[[bank_entry]]
+bank = 0
+addr = 0xC79A
+
+[[bank_entry]]
+bank = 0
+addr = 0xC7A9
+
+[[bank_entry]]
+bank = 0
+addr = 0xC82F
+
+[[bank_entry]]
+bank = 0
+addr = 0xC834
+
+[[bank_entry]]
+bank = 0
+addr = 0xC843
+
+[[bank_entry]]
+bank = 0
+addr = 0xC915
+
+[[bank_entry]]
+bank = 0
+addr = 0xC927
+
+[[bank_entry]]
+bank = 0
+addr = 0xC963
+
+[[bank_entry]]
+bank = 0
+addr = 0xC966
+
+[[bank_entry]]
+bank = 0
+addr = 0xC969
+
+[[bank_entry]]
+bank = 0
+addr = 0xC9C5
+
+[[bank_entry]]
+bank = 0
+addr = 0xC9C8
+
+[[bank_entry]]
+bank = 0
+addr = 0xCA46
+
+[[bank_entry]]
+bank = 0
+addr = 0xCA6B
+
+[[bank_entry]]
+bank = 0
+addr = 0xCA84
+
+[[bank_entry]]
+bank = 0
+addr = 0xCA87
+
+[[bank_entry]]
+bank = 0
+addr = 0xCA8A
+
+[[bank_entry]]
+bank = 0
+addr = 0xD097
+
+[[bank_entry]]
+bank = 0
+addr = 0xD0AC
+
+[[bank_entry]]
+bank = 0
+addr = 0xD0B2
+
+[[bank_entry]]
+bank = 0
+addr = 0xD0B5
+
+[[bank_entry]]
+bank = 0
+addr = 0xD16D
+
+[[bank_entry]]
+bank = 0
+addr = 0xD170
+
+[[bank_entry]]
+bank = 0
+addr = 0xD1BD
+
+[[bank_entry]]
+bank = 0
+addr = 0xD331
+
+[[bank_entry]]
+bank = 0
+addr = 0xD38F
+
+[[bank_entry]]
+bank = 0
+addr = 0xD3A1
+
+[[bank_entry]]
+bank = 0
+addr = 0xD3A4
+
+[[bank_entry]]
+bank = 0
+addr = 0xD3AA
+
+[[bank_entry]]
+bank = 0
+addr = 0xD3BC
+
+[[bank_entry]]
+bank = 0
+addr = 0xD3E0
+
+[[bank_entry]]
+bank = 0
+addr = 0xD3F4
+
+[[bank_entry]]
+bank = 0
+addr = 0xD499
+
+[[bank_entry]]
+bank = 0
+addr = 0xD507
+
+[[bank_entry]]
+bank = 0
+addr = 0xD50E
+
+[[bank_entry]]
+bank = 0
+addr = 0xD520
+
+[[bank_entry]]
+bank = 0
+addr = 0xD549
+
+[[bank_entry]]
+bank = 0
+addr = 0xD554
+
+[[bank_entry]]
+bank = 0
+addr = 0xD79E
+
+[[bank_entry]]
+bank = 0
+addr = 0xD7E2
+
+[[bank_entry]]
+bank = 0
+addr = 0xD836
+
+[[bank_entry]]
+bank = 0
+addr = 0xD83D
+
+[[bank_entry]]
+bank = 0
+addr = 0xD855
+
+[[bank_entry]]
+bank = 0
+addr = 0xD882
+
+[[bank_entry]]
+bank = 0
+addr = 0xD89F
+
+[[bank_entry]]
+bank = 0
+addr = 0xD8C5
+
+[[bank_entry]]
+bank = 0
+addr = 0xD92F
+
+[[bank_entry]]
+bank = 0
+addr = 0xD955
+
+[[bank_entry]]
+bank = 0
+addr = 0xD97B
+
+[[bank_entry]]
+bank = 0
+addr = 0xD9D3
+
+[[bank_entry]]
+bank = 0
+addr = 0xDA15
+
+[[bank_entry]]
+bank = 0
+addr = 0xDAF2
+
+[[bank_entry]]
+bank = 0
+addr = 0xDAFD
+
+[[bank_entry]]
+bank = 0
+addr = 0xDB19
+
+[[bank_entry]]
+bank = 0
+addr = 0xDCD9
+
+[[bank_entry]]
+bank = 0
+addr = 0xDCE1
+
+[[bank_entry]]
+bank = 0
+addr = 0xDCE4
+
+[[bank_entry]]
+bank = 0
+addr = 0xDCE7
+
+[[bank_entry]]
+bank = 0
+addr = 0xDCFB
+
+[[bank_entry]]
+bank = 0
+addr = 0xDD2C
+
+[[bank_entry]]
+bank = 0
+addr = 0xDD4E
+
+[[bank_entry]]
+bank = 0
+addr = 0xDD54
+
+[[bank_entry]]
+bank = 0
+addr = 0xDE3E
+
+[[bank_entry]]
+bank = 0
+addr = 0xDE94
+
+[[bank_entry]]
+bank = 0
+addr = 0xDEB0
+
+[[bank_entry]]
+bank = 4
+addr = 0xAF1A
+
+[[bank_entry]]
+bank = 4
+addr = 0xB22A
+
+[[bank_entry]]
+bank = 4
+addr = 0xB22D
+
+[[bank_entry]]
+bank = 4
+addr = 0xB364
+
+[[bank_entry]]
+bank = 4
+addr = 0xB367
+
+[[bank_entry]]
+bank = 4
+addr = 0xB3A8
+
+[[bank_entry]]
+bank = 4
+addr = 0xB3AB
+
+[[bank_entry]]
+bank = 4
+addr = 0xB3B4
+
+[[bank_entry]]
+bank = 4
+addr = 0xB3EF
+
+[[bank_entry]]
+bank = 4
+addr = 0xB412
+
+[[bank_entry]]
+bank = 4
+addr = 0xB42B
+
+[[bank_entry]]
+bank = 4
+addr = 0xB4A8
+
+[[bank_entry]]
+bank = 4
+addr = 0xB92E
+
+[[bank_entry]]
+bank = 4
+addr = 0xB93F
+
+[[bank_entry]]
+bank = 4
+addr = 0xB9B8
+
+[[bank_entry]]
+bank = 5
+addr = 0xB7F0
+
+[[bank_entry]]
+bank = 5
+addr = 0xB7F3
+
+[[bank_entry]]
+bank = 5
+addr = 0xB836
+
+[[bank_entry]]
+bank = 5
+addr = 0xB956
+
+[[bank_entry]]
+bank = 5
+addr = 0xBB9B
+
+[[bank_entry]]
+bank = 5
+addr = 0xBE2F
+
+[[bank_entry]]
+bank = 5
+addr = 0xBEB6
+
+[[bank_entry]]
+bank = 5
+addr = 0xBF58
+
+[[bank_entry]]
+bank = 5
+addr = 0xBF5B
+
+[[bank_entry]]
+bank = 7
+addr = 0xA01B
+
+[[bank_entry]]
+bank = 7
+addr = 0xA18F
+
+[[bank_entry]]
+bank = 7
+addr = 0xA229
+
+[[bank_entry]]
+bank = 7
+addr = 0xA22C
+
+[[bank_entry]]
+bank = 7
+addr = 0xA22F
+
+[[bank_entry]]
+bank = 7
+addr = 0xA232
+
+[[bank_entry]]
+bank = 7
+addr = 0xA235
+
+[[bank_entry]]
+bank = 7
+addr = 0xA238
+
+[[bank_entry]]
+bank = 7
+addr = 0xA23B
+
+[[bank_entry]]
+bank = 7
+addr = 0xA23E
+
+[[bank_entry]]
+bank = 7
+addr = 0xA241
+
+[[bank_entry]]
+bank = 7
+addr = 0xA244
+
+[[bank_entry]]
+bank = 7
+addr = 0xA247
+
+[[bank_entry]]
+bank = 7
+addr = 0xA329
+
+[[bank_entry]]
+bank = 7
+addr = 0xA330
+
+[[bank_entry]]
+bank = 7
+addr = 0xA333
+
+[[bank_entry]]
+bank = 7
+addr = 0xA77A
+
+[[bank_entry]]
+bank = 7
+addr = 0xA868
+
+[[bank_entry]]
+bank = 7
+addr = 0xA979
+
+[[bank_entry]]
+bank = 7
+addr = 0xAA81
+
+[[bank_entry]]
+bank = 7
+addr = 0xABC5
+
+[[bank_entry]]
+bank = 7
+addr = 0xABCC
+
+[[bank_entry]]
+bank = 7
+addr = 0xABD4
+
+[[bank_entry]]
+bank = 7
+addr = 0xADB0
+
+[[bank_entry]]
+bank = 7
+addr = 0xAF14
+
+[[bank_entry]]
+bank = 7
+addr = 0xAF20
+
+[[bank_entry]]
+bank = 7
+addr = 0xAF24
+
+[[bank_entry]]
+bank = 7
+addr = 0xBB6F
+
+[[bank_entry]]
+bank = 7
+addr = 0xBB7D
+
+[[bank_entry]]
+bank = 7
+addr = 0xBB81
+
+[[bank_entry]]
+bank = 8
+addr = 0xA141
+
+[[bank_entry]]
+bank = 8
+addr = 0xA15B
+
+[[bank_entry]]
+bank = 8
+addr = 0xA15E
+
+[[bank_entry]]
+bank = 8
+addr = 0xA1AB
+
+[[bank_entry]]
+bank = 8
+addr = 0xA20D
+
+[[bank_entry]]
+bank = 8
+addr = 0xA210
+
+[[bank_entry]]
+bank = 8
+addr = 0xA213
+
+[[bank_entry]]
+bank = 8
+addr = 0xA216
+
+[[bank_entry]]
+bank = 8
+addr = 0xA219
+
+[[bank_entry]]
+bank = 8
+addr = 0xA221
+
+[[bank_entry]]
+bank = 8
+addr = 0xA224
+
+[[bank_entry]]
+bank = 8
+addr = 0xA229
+
+[[bank_entry]]
+bank = 8
+addr = 0xA231
+
+[[bank_entry]]
+bank = 8
+addr = 0xA23D
+
+[[bank_entry]]
+bank = 8
+addr = 0xA255
+
+[[bank_entry]]
+bank = 8
+addr = 0xA266
+
+[[bank_entry]]
+bank = 8
+addr = 0xA27A
+
+[[bank_entry]]
+bank = 8
+addr = 0xA2B9
+
+[[bank_entry]]
+bank = 8
+addr = 0xA2DC
+
+[[bank_entry]]
+bank = 8
+addr = 0xA32D
+
+[[bank_entry]]
+bank = 8
+addr = 0xA34B
+
+[[bank_entry]]
+bank = 8
+addr = 0xA3CA
+
+[[bank_entry]]
+bank = 8
+addr = 0xA3FA
+
+[[bank_entry]]
+bank = 8
+addr = 0xA475
+
+[[bank_entry]]
+bank = 8
+addr = 0xA478
+
+[[bank_entry]]
+bank = 8
+addr = 0xA47B
+
+[[bank_entry]]
+bank = 8
+addr = 0xA47E
+
+[[bank_entry]]
+bank = 8
+addr = 0xA481
+
+[[bank_entry]]
+bank = 8
+addr = 0xA484
+
+[[bank_entry]]
+bank = 8
+addr = 0xA487
+
+[[bank_entry]]
+bank = 8
+addr = 0xA48A
+
+[[bank_entry]]
+bank = 8
+addr = 0xA48D
+
+[[bank_entry]]
+bank = 8
+addr = 0xA490
+
+[[bank_entry]]
+bank = 8
+addr = 0xA493
+
+[[bank_entry]]
+bank = 8
+addr = 0xA4A1
+
+[[bank_entry]]
+bank = 8
+addr = 0xA4C2
+
+[[bank_entry]]
+bank = 8
+addr = 0xA549
+
+[[bank_entry]]
+bank = 8
+addr = 0xA66A
+
+[[bank_entry]]
+bank = 8
+addr = 0xA6AA
+
+[[bank_entry]]
+bank = 8
+addr = 0xA6BB
+
+[[bank_entry]]
+bank = 8
+addr = 0xA74C
+
+[[bank_entry]]
+bank = 8
+addr = 0xA7B9
+
+[[bank_entry]]
+bank = 8
+addr = 0xA8F9
+
+[[bank_entry]]
+bank = 8
+addr = 0xA909
+
+[[bank_entry]]
+bank = 8
+addr = 0xA943
+
+[[bank_entry]]
+bank = 8
+addr = 0xA983
+
+[[bank_entry]]
+bank = 8
+addr = 0xA986
+
+[[bank_entry]]
+bank = 8
+addr = 0xA989
+
+[[bank_entry]]
+bank = 8
+addr = 0xAB44
+
+[[bank_entry]]
+bank = 8
+addr = 0xAC28
+
+[[bank_entry]]
+bank = 8
+addr = 0xAD1A
+
+[[bank_entry]]
+bank = 8
+addr = 0xADD9
+
+[[bank_entry]]
+bank = 8
+addr = 0xAEC3
+
+[[bank_entry]]
+bank = 8
+addr = 0xB11F
+
+[[bank_entry]]
+bank = 8
+addr = 0xB3C7
+
+[[bank_entry]]
+bank = 8
+addr = 0xB435
+
+[[bank_entry]]
+bank = 8
+addr = 0xB43F
+
+[[bank_entry]]
+bank = 8
+addr = 0xB473
+
+[[bank_entry]]
+bank = 8
+addr = 0xB4CA
+
+[[bank_entry]]
+bank = 8
+addr = 0xB4D9
+
+[[bank_entry]]
+bank = 8
+addr = 0xB4E9
+
+[[bank_entry]]
+bank = 8
+addr = 0xB4F8
+
+[[bank_entry]]
+bank = 8
+addr = 0xB5BC
+
+[[bank_entry]]
+bank = 8
+addr = 0xB5D1
+
+[[bank_entry]]
+bank = 8
+addr = 0xB652
+
+[[bank_entry]]
+bank = 8
+addr = 0xB6D8
+
+[[bank_entry]]
+bank = 8
+addr = 0xB78B
+
+[[bank_entry]]
+bank = 8
+addr = 0xB950
+
+[[bank_entry]]
+bank = 8
+addr = 0xBC52
+
+[[bank_entry]]
+bank = 8
+addr = 0xBF9D
+
+[[bank_entry]]
+bank = 8
+addr = 0xBFB4
+
+[[bank_entry]]
+bank = 8
+addr = 0xBFED
+
+[[bank_entry]]
+bank = 8
+addr = 0xBFFE
+
+[[bank_entry]]
+bank = 10
+addr = 0xC2C4
+
+[[bank_entry]]
+bank = 10
+addr = 0xC34D
+
+[[bank_entry]]
+bank = 10
+addr = 0xC3C3
+
+[[bank_entry]]
+bank = 10
+addr = 0xC3C6
+
+[[bank_entry]]
+bank = 10
+addr = 0xC4E0
+
+[[bank_entry]]
+bank = 10
+addr = 0xC4FA
+
+[[bank_entry]]
+bank = 10
+addr = 0xC506
+
+[[bank_entry]]
+bank = 10
+addr = 0xC509
+
+[[bank_entry]]
+bank = 10
+addr = 0xC52B
+
+[[bank_entry]]
+bank = 10
+addr = 0xC54A
+
+[[bank_entry]]
+bank = 10
+addr = 0xC54D
+
+[[bank_entry]]
+bank = 10
+addr = 0xC566
+
+[[bank_entry]]
+bank = 10
+addr = 0xC56E
+
+[[bank_entry]]
+bank = 10
+addr = 0xC6C3
+
+[[bank_entry]]
+bank = 10
+addr = 0xC6C4
+
+[[bank_entry]]
+bank = 10
+addr = 0xC6C7
+
+[[bank_entry]]
+bank = 10
+addr = 0xC7A0
+
+[[bank_entry]]
+bank = 10
+addr = 0xCA8C
+
+[[bank_entry]]
+bank = 10
+addr = 0xCAA2
+
+[[bank_entry]]
+bank = 10
+addr = 0xCB84
+
+[[bank_entry]]
+bank = 10
+addr = 0xCDCA
+
+[[bank_entry]]
+bank = 10
+addr = 0xCDEF
+
+[[bank_entry]]
+bank = 10
+addr = 0xCE1C
+
+[[bank_entry]]
+bank = 10
+addr = 0xCE67
+
+[[bank_entry]]
+bank = 10
+addr = 0xCE71
+
+[[bank_entry]]
+bank = 10
+addr = 0xCEE4
+
+[[bank_entry]]
+bank = 10
+addr = 0xCF15
+
+[[bank_entry]]
+bank = 10
+addr = 0xCF29
+
+[[bank_entry]]
+bank = 10
+addr = 0xCFFA
+
+[[bank_entry]]
+bank = 10
+addr = 0xD179
+
+[[bank_entry]]
+bank = 10
+addr = 0xD1AC
+
+[[bank_entry]]
+bank = 10
+addr = 0xD1FE
+
+[[bank_entry]]
+bank = 10
+addr = 0xD280
+
+[[bank_entry]]
+bank = 10
+addr = 0xD2BF
+
+[[bank_entry]]
+bank = 10
+addr = 0xD369
+
+[[bank_entry]]
+bank = 11
+addr = 0xA1D8
+
+[[bank_entry]]
+bank = 11
+addr = 0xA1DB
+
+[[bank_entry]]
+bank = 11
+addr = 0xA299
+
+[[bank_entry]]
+bank = 11
+addr = 0xADBD
+
+[[bank_entry]]
+bank = 11
+addr = 0xADF0
+
+[[bank_entry]]
+bank = 11
+addr = 0xADF4
+
+[[bank_entry]]
+bank = 11
+addr = 0xADF5
+
+[[bank_entry]]
+bank = 11
+addr = 0xADF8
+
+[[bank_entry]]
+bank = 11
+addr = 0xAE7C
+
+[[bank_entry]]
+bank = 11
+addr = 0xB53B
+
+[[bank_entry]]
+bank = 11
+addr = 0xB53E
+
+[[bank_entry]]
+bank = 11
+addr = 0xB541
+
+[[bank_entry]]
+bank = 11
+addr = 0xB578
+
+[[bank_entry]]
+bank = 11
+addr = 0xB58D
+
+[[bank_entry]]
+bank = 11
+addr = 0xB5BE
+
+[[bank_entry]]
+bank = 11
+addr = 0xB60A
+
+[[bank_entry]]
+bank = 11
+addr = 0xB76C
+
+[[bank_entry]]
+bank = 11
+addr = 0xB792
+
+[[bank_entry]]
+bank = 11
+addr = 0xB7EE
+
+[[bank_entry]]
+bank = 11
+addr = 0xB7FB
+
+[[bank_entry]]
+bank = 11
+addr = 0xB820
+
+[[bank_entry]]
+bank = 11
+addr = 0xB8AF
+
+[[bank_entry]]
+bank = 11
+addr = 0xB8E3
+
+[[bank_entry]]
+bank = 11
+addr = 0xB8E6
+
+[[bank_entry]]
+bank = 11
+addr = 0xB8F3
+
+[[bank_entry]]
+bank = 11
+addr = 0xB904
+
+[[bank_entry]]
+bank = 11
+addr = 0xB91F
+
+[[bank_entry]]
+bank = 11
+addr = 0xB92A
+
+[[bank_entry]]
+bank = 11
+addr = 0xB93A
+
+[[bank_entry]]
+bank = 11
+addr = 0xB952
+
+[[bank_entry]]
+bank = 11
+addr = 0xB970
+
+[[bank_entry]]
+bank = 11
+addr = 0xB97B
+
+[[bank_entry]]
+bank = 11
+addr = 0xB98B
+
+[[bank_entry]]
+bank = 11
+addr = 0xB9AA
+
+[[bank_entry]]
+bank = 11
+addr = 0xB9D4
+
+[[bank_entry]]
+bank = 11
+addr = 0xB9F4
+
+[[bank_entry]]
+bank = 11
+addr = 0xBA8A
+
+[[bank_entry]]
+bank = 11
+addr = 0xBB6D
+
+[[bank_entry]]
+bank = 11
+addr = 0xBC29
+
+[[bank_entry]]
+bank = 12
+addr = 0xA40E
+
+[[bank_entry]]
+bank = 12
+addr = 0xA415
+
+[[bank_entry]]
+bank = 12
+addr = 0xA418
+
+[[bank_entry]]
+bank = 12
+addr = 0xA45D
+
+[[bank_entry]]
+bank = 12
+addr = 0xA460
+
+[[bank_entry]]
+bank = 12
+addr = 0xA469
+
+[[bank_entry]]
+bank = 12
+addr = 0xA473
+
+[[bank_entry]]
+bank = 12
+addr = 0xA496
+
+[[bank_entry]]
+bank = 12
+addr = 0xA4CC
+
+[[bank_entry]]
+bank = 12
+addr = 0xA4E5
+
+[[bank_entry]]
+bank = 12
+addr = 0xA4E9
+
+[[bank_entry]]
+bank = 12
+addr = 0xA585
+
+[[bank_entry]]
+bank = 12
+addr = 0xB0FF
+
+[[bank_entry]]
+bank = 14
+addr = 0xC64C
+
+[[bank_entry]]
+bank = 14
+addr = 0xC672
+
+[[bank_entry]]
+bank = 14
+addr = 0xC684
+
+[[bank_entry]]
+bank = 14
+addr = 0xC688
+
+[[bank_entry]]
+bank = 14
+addr = 0xC862
+
+[[bank_entry]]
+bank = 14
+addr = 0xC8C2
+
+[[bank_entry]]
+bank = 14
+addr = 0xCA7C
+
+[[bank_entry]]
+bank = 14
+addr = 0xCADD
+
+[[bank_entry]]
+bank = 14
+addr = 0xCAF0
+
+[[bank_entry]]
+bank = 14
+addr = 0xCB1F
+
+[[bank_entry]]
+bank = 14
+addr = 0xCB3B
+
+[[bank_entry]]
+bank = 14
+addr = 0xCB47
+
+[[bank_entry]]
+bank = 14
+addr = 0xCBA7
+
+[[bank_entry]]
+bank = 14
+addr = 0xCBAE
+
+[[bank_entry]]
+bank = 14
+addr = 0xCBB5
+
+[[bank_entry]]
+bank = 14
+addr = 0xCBB9
+
+[[bank_entry]]
+bank = 14
+addr = 0xCC00
+
+[[bank_entry]]
+bank = 14
+addr = 0xCC07
+
+[[bank_entry]]
+bank = 14
+addr = 0xCFD6
+
+[[bank_entry]]
+bank = 14
+addr = 0xCFEA
+
+[[bank_entry]]
+bank = 14
+addr = 0xD095
+
+[[bank_entry]]
+bank = 14
+addr = 0xD0A8
+
+[[bank_entry]]
+bank = 14
+addr = 0xD0C1
+
+[[bank_entry]]
+bank = 14
+addr = 0xD0C4
+
+[[bank_entry]]
+bank = 14
+addr = 0xD14F
+
+[[bank_entry]]
+bank = 14
+addr = 0xD151
+
+[[bank_entry]]
+bank = 14
+addr = 0xD154
+
+[[bank_entry]]
+bank = 14
+addr = 0xD173
+
+[[bank_entry]]
+bank = 14
+addr = 0xD1A8
+
+[[bank_entry]]
+bank = 14
+addr = 0xD1DE
+
+[[bank_entry]]
+bank = 14
+addr = 0xD1E8
+
+[[bank_entry]]
+bank = 14
+addr = 0xD1F8
+
+[[bank_entry]]
+bank = 14
+addr = 0xD226
+
+[[bank_entry]]
+bank = 14
+addr = 0xD22E
+
+[[bank_entry]]
+bank = 14
+addr = 0xD25B
+
+[[bank_entry]]
+bank = 14
+addr = 0xD283
+
+[[bank_entry]]
+bank = 14
+addr = 0xD293
+
+[[bank_entry]]
+bank = 14
+addr = 0xD297
+
+[[bank_entry]]
+bank = 14
+addr = 0xD2CC
+
+[[bank_entry]]
+bank = 14
+addr = 0xD2CF
+
+[[bank_entry]]
+bank = 14
+addr = 0xD306
+
+[[bank_entry]]
+bank = 14
+addr = 0xD344
+
+[[bank_entry]]
+bank = 14
+addr = 0xD350
+
+[[bank_entry]]
+bank = 14
+addr = 0xD383
+
+[[bank_entry]]
+bank = 14
+addr = 0xD38F
+
+[[bank_entry]]
+bank = 14
+addr = 0xD39F
+
+[[bank_entry]]
+bank = 14
+addr = 0xD3C0
+
+[[bank_entry]]
+bank = 14
+addr = 0xD3C5
+
+[[bank_entry]]
+bank = 14
+addr = 0xD3EE
+
+[[bank_entry]]
+bank = 14
+addr = 0xDF69
+
+[[bank_entry]]
+bank = 14
+addr = 0xDFB3
+
+[[bank_entry]]
+bank = 14
+addr = 0xDFCD
+
+[[bank_entry]]
+bank = 15
+addr = 0xA408
+
+[[bank_entry]]
+bank = 15
+addr = 0xA40F
+
+[[bank_entry]]
+bank = 15
+addr = 0xA412
+
+[[bank_entry]]
+bank = 15
+addr = 0xA421
+
+[[bank_entry]]
+bank = 15
+addr = 0xA498
+
+[[bank_entry]]
+bank = 24
+addr = 0xA806
+
+[[bank_entry]]
+bank = 24
+addr = 0xA81C
+
+[[bank_entry]]
+bank = 24
+addr = 0xA81E
+
+[[bank_entry]]
+bank = 24
+addr = 0xA826
+
+[[bank_entry]]
+bank = 24
+addr = 0xA859
+
+[[bank_entry]]
+bank = 24
+addr = 0xA8AF
+
+[[bank_entry]]
+bank = 24
+addr = 0xA8B2
+
+[[bank_entry]]
+bank = 24
+addr = 0xA8B5
+
+[[bank_entry]]
+bank = 24
+addr = 0xA8FF
+
+[[bank_entry]]
+bank = 24
+addr = 0xA910
+
+[[bank_entry]]
+bank = 24
+addr = 0xA949
+
+[[bank_entry]]
+bank = 24
+addr = 0xA95C
+
+[[bank_entry]]
+bank = 24
+addr = 0xA979
+
+[[bank_entry]]
+bank = 24
+addr = 0xA990
+
+[[bank_entry]]
+bank = 24
+addr = 0xA9B4
+
+[[bank_entry]]
+bank = 24
+addr = 0xA9CF
+
+[[bank_entry]]
+bank = 24
+addr = 0xA9EE
+
+[[bank_entry]]
+bank = 24
+addr = 0xAA7D
+
+[[bank_entry]]
+bank = 24
+addr = 0xAAB2
+
+[[bank_entry]]
+bank = 24
+addr = 0xAABD
+
+[[bank_entry]]
+bank = 24
+addr = 0xAAC8
+
+[[bank_entry]]
+bank = 24
+addr = 0xAAD3
+
+[[bank_entry]]
+bank = 24
+addr = 0xAAD6
+
+[[bank_entry]]
+bank = 24
+addr = 0xAAF4
+
+[[bank_entry]]
+bank = 24
+addr = 0xAB15
+
+[[bank_entry]]
+bank = 24
+addr = 0xAB26
+
+[[bank_entry]]
+bank = 24
+addr = 0xAB5E
+
+[[bank_entry]]
+bank = 24
+addr = 0xAB81
+
+[[bank_entry]]
+bank = 24
+addr = 0xAB9A
+
+[[bank_entry]]
+bank = 24
+addr = 0xAB9B
+
+[[bank_entry]]
+bank = 24
+addr = 0xAC1A
+
+[[bank_entry]]
+bank = 24
+addr = 0xAC35
+
+[[bank_entry]]
+bank = 24
+addr = 0xAC55
+
+[[bank_entry]]
+bank = 24
+addr = 0xAC86
+
+[[bank_entry]]
+bank = 24
+addr = 0xAC99
+
+[[bank_entry]]
+bank = 24
+addr = 0xACAB
+
+[[bank_entry]]
+bank = 24
+addr = 0xACBB
+
+[[bank_entry]]
+bank = 24
+addr = 0xAEC5
+
+[[bank_entry]]
+bank = 24
+addr = 0xAEC8
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF02
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF05
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF0F
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF12
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF15
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF18
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF1B
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF23
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF3D
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF43
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF44
+
+[[bank_entry]]
+bank = 24
+addr = 0xAF6D
+
+[[bank_entry]]
+bank = 24
+addr = 0xAFEC
+
+[[bank_entry]]
+bank = 24
+addr = 0xAFF8
+
+[[bank_entry]]
+bank = 24
+addr = 0xB056
+
+[[bank_entry]]
+bank = 24
+addr = 0xB071
+
+[[bank_entry]]
+bank = 24
+addr = 0xB0A0
+
+[[bank_entry]]
+bank = 24
+addr = 0xB0B5
+
+[[bank_entry]]
+bank = 24
+addr = 0xB0C1
+
+[[bank_entry]]
+bank = 24
+addr = 0xB20B
+
+[[bank_entry]]
+bank = 24
+addr = 0xB340
+
+[[bank_entry]]
+bank = 24
+addr = 0xB36E
+
+[[bank_entry]]
+bank = 24
+addr = 0xB3C3
+
+[[bank_entry]]
+bank = 24
+addr = 0xB6AD
+
+[[bank_entry]]
+bank = 24
+addr = 0xB754
+
+[[bank_entry]]
+bank = 24
+addr = 0xB76E
+
+[[bank_entry]]
+bank = 24
+addr = 0xB773
+
+[[bank_entry]]
+bank = 24
+addr = 0xB78E
+
+[[bank_entry]]
+bank = 24
+addr = 0xB791
+
+[[bank_entry]]
+bank = 24
+addr = 0xB79E
+
+[[bank_entry]]
+bank = 24
+addr = 0xB7A4
+
+[[bank_entry]]
+bank = 24
+addr = 0xB7A8
+
+[[bank_entry]]
+bank = 24
+addr = 0xB7D6
+
+[[bank_entry]]
+bank = 24
+addr = 0xB7D9
+
+[[bank_entry]]
+bank = 24
+addr = 0xB7DC
+
+[[bank_entry]]
+bank = 24
+addr = 0xB836
+
+[[bank_entry]]
+bank = 26
+addr = 0xABA3
+
+[[bank_entry]]
+bank = 26
+addr = 0xABDC
+
+[[bank_entry]]
+bank = 26
+addr = 0xAC0F
+
+[[bank_entry]]
+bank = 26
+addr = 0xAC69
+
+[[bank_entry]]
+bank = 26
+addr = 0xAC6C
+
+[[bank_entry]]
+bank = 26
+addr = 0xACA1
+
+[[bank_entry]]
+bank = 26
+addr = 0xACA4
+
+[[bank_entry]]
+bank = 26
+addr = 0xACD1
+
+[[bank_entry]]
+bank = 26
+addr = 0xACFF
+
+[[bank_entry]]
+bank = 26
+addr = 0xAD3A
+
+[[bank_entry]]
+bank = 26
+addr = 0xAD68
+
+[[bank_entry]]
+bank = 26
+addr = 0xAD76
+
+[[bank_entry]]
+bank = 26
+addr = 0xADA6
+
+[[bank_entry]]
+bank = 26
+addr = 0xADBB
+
+[[bank_entry]]
+bank = 26
+addr = 0xADD6
+
+[[bank_entry]]
+bank = 26
+addr = 0xAF9D
+
+[[bank_entry]]
+bank = 26
+addr = 0xB03C
+
+[[bank_entry]]
+bank = 26
+addr = 0xB073
+
+[[bank_entry]]
+bank = 26
+addr = 0xB0C4
+
+[[bank_entry]]
+bank = 26
+addr = 0xB108
+
+[[bank_entry]]
+bank = 26
+addr = 0xB175
+
+[[bank_entry]]
+bank = 26
+addr = 0xB256
+
+[[bank_entry]]
+bank = 26
+addr = 0xB293
+
+[[bank_entry]]
+bank = 26
+addr = 0xB2DC
+
+[[bank_entry]]
+bank = 26
+addr = 0xB3E6
+
+[[bank_entry]]
+bank = 26
+addr = 0xB44A
+
+[[bank_entry]]
+bank = 26
+addr = 0xB44D
+
+[[bank_entry]]
+bank = 26
+addr = 0xB450
+
+[[bank_entry]]
+bank = 26
+addr = 0xB453
+
+[[bank_entry]]
+bank = 26
+addr = 0xB456
+
+[[bank_entry]]
+bank = 26
+addr = 0xB459
+
+[[bank_entry]]
+bank = 26
+addr = 0xB47A
+
+[[bank_entry]]
+bank = 26
+addr = 0xB4FF
+
+[[bank_entry]]
+bank = 26
+addr = 0xB506
+
+[[bank_entry]]
+bank = 27
+addr = 0xB83F
+
+[[bank_entry]]
+bank = 28
+addr = 0xA000
+
+[[bank_entry]]
+bank = 28
+addr = 0xA078
+
+[[bank_entry]]
+bank = 28
+addr = 0xA07B
+
+[[bank_entry]]
+bank = 28
+addr = 0xA07E
+
+[[bank_entry]]
+bank = 28
+addr = 0xA081
+
+[[bank_entry]]
+bank = 28
+addr = 0xA084
+
+[[bank_entry]]
+bank = 28
+addr = 0xA087
+
+[[bank_entry]]
+bank = 28
+addr = 0xA0A1
+
+[[bank_entry]]
+bank = 28
+addr = 0xA105
+
+[[bank_entry]]
+bank = 28
+addr = 0xA12C
+
+[[bank_entry]]
+bank = 28
+addr = 0xA15F
+
+[[bank_entry]]
+bank = 28
+addr = 0xA185
+
+[[bank_entry]]
+bank = 28
+addr = 0xA1AC
+
+[[bank_entry]]
+bank = 28
+addr = 0xA2AB
+
+[[bank_entry]]
+bank = 28
+addr = 0xA3C9
+
+[[bank_entry]]
+bank = 28
+addr = 0xA3E3
+
+[[bank_entry]]
+bank = 28
+addr = 0xA449
+
+[[bank_entry]]
+bank = 28
+addr = 0xA661
+
+[[bank_entry]]
+bank = 29
+addr = 0xCE9F
+
+[[bank_entry]]
+bank = 29
+addr = 0xD1BA
+
+[[bank_entry]]
+bank = 29
+addr = 0xD33E
+
+[[bank_entry]]
+bank = 29
+addr = 0xD3EC
+
+[[bank_entry]]
+bank = 29
+addr = 0xD6BC
+
+[[bank_entry]]
+bank = 29
+addr = 0xD6CD
+
+[[bank_entry]]
+bank = 29
+addr = 0xD768
+
+[[bank_entry]]
+bank = 29
+addr = 0xD771
+
+[[bank_entry]]
+bank = 29
+addr = 0xD778
+
+[[bank_entry]]
+bank = 29
+addr = 0xDC00
+
+[[bank_entry]]
+bank = 30
+addr = 0x841D
+
+[[bank_entry]]
+bank = 30
+addr = 0x844B
+
+[[bank_entry]]
+bank = 30
+addr = 0x845D
+
+[[bank_entry]]
+bank = 30
+addr = 0x8460
+
+[[bank_entry]]
+bank = 30
+addr = 0x8463
+
+[[bank_entry]]
+bank = 30
+addr = 0x848E
+
+[[bank_entry]]
+bank = 30
+addr = 0x84A0
+
+[[bank_entry]]
+bank = 30
+addr = 0x84AD
+
+[[bank_entry]]
+bank = 30
+addr = 0x84B0
+
+[[bank_entry]]
+bank = 30
+addr = 0x84DA
+
+[[bank_entry]]
+bank = 30
+addr = 0x84DD
+
+[[bank_entry]]
+bank = 30
+addr = 0x84E0
+
+[[bank_entry]]
+bank = 30
+addr = 0x8533
+
+[[bank_entry]]
+bank = 30
+addr = 0x8581
+
+[[bank_entry]]
+bank = 30
+addr = 0x8584
+
+[[bank_entry]]
+bank = 30
+addr = 0x8587
+
+[[bank_entry]]
+bank = 30
+addr = 0x85B0
+
+[[bank_entry]]
+bank = 30
+addr = 0x85B3
+
+[[bank_entry]]
+bank = 30
+addr = 0x85BB
+
+[[bank_entry]]
+bank = 30
+addr = 0x85BE
+
+[[bank_entry]]
+bank = 30
+addr = 0x85C1
+
+[[bank_entry]]
+bank = 30
+addr = 0x85E3
+
+[[bank_entry]]
+bank = 30
+addr = 0x85F5
+
+[[bank_entry]]
+bank = 30
+addr = 0x8602
+
+[[bank_entry]]
+bank = 30
+addr = 0x8605
+
+[[bank_entry]]
+bank = 30
+addr = 0x8608
+
+[[bank_entry]]
+bank = 30
+addr = 0x860B
+
+[[bank_entry]]
+bank = 30
+addr = 0x8610
+
+[[bank_entry]]
+bank = 30
+addr = 0x8613
+
+[[bank_entry]]
+bank = 30
+addr = 0x8646
+
+[[bank_entry]]
+bank = 30
+addr = 0x8649
+
+[[bank_entry]]
+bank = 30
+addr = 0x864E
+
+[[bank_entry]]
+bank = 30
+addr = 0x8665
+
+[[bank_entry]]
+bank = 30
+addr = 0x8668
+
+[[bank_entry]]
+bank = 30
+addr = 0x867A
+
+[[bank_entry]]
+bank = 30
+addr = 0x867D
+
+[[bank_entry]]
+bank = 30
+addr = 0x8682
+
+[[bank_entry]]
+bank = 30
+addr = 0x86B8
+
+[[bank_entry]]
+bank = 30
+addr = 0x86BB
+
+[[bank_entry]]
+bank = 30
+addr = 0x86C8
+
+[[bank_entry]]
+bank = 30
+addr = 0x86CB
+
+[[bank_entry]]
+bank = 30
+addr = 0x86D3
+
+[[bank_entry]]
+bank = 30
+addr = 0x86D6
+
+[[bank_entry]]
+bank = 30
+addr = 0x86DE
+
+[[bank_entry]]
+bank = 30
+addr = 0x86E1
+
+[[bank_entry]]
+bank = 30
+addr = 0x86E4
+
+[[bank_entry]]
+bank = 30
+addr = 0x86EC
+
+[[bank_entry]]
+bank = 30
+addr = 0x86EF
+
+[[bank_entry]]
+bank = 30
+addr = 0x871D
+
+[[bank_entry]]
+bank = 30
+addr = 0x8720
+
+[[bank_entry]]
+bank = 30
+addr = 0x872F
+
+[[bank_entry]]
+bank = 30
+addr = 0x8732
+
+[[bank_entry]]
+bank = 30
+addr = 0x87C0
+
+[[bank_entry]]
+bank = 30
+addr = 0x87F1
+
+[[bank_entry]]
+bank = 30
+addr = 0x884C
+
+[[bank_entry]]
+bank = 30
+addr = 0x884F
+
+[[bank_entry]]
+bank = 30
+addr = 0x88A5
+
+[[bank_entry]]
+bank = 30
+addr = 0x88B4
+
+[[bank_entry]]
+bank = 30
+addr = 0x8927
+
+[[bank_entry]]
+bank = 30
+addr = 0x892A
+
+[[bank_entry]]
+bank = 30
+addr = 0x899D
+
+[[bank_entry]]
+bank = 30
+addr = 0x89A0
+
+[[bank_entry]]
+bank = 30
+addr = 0x89A3
+
+[[bank_entry]]
+bank = 30
+addr = 0x89A6
+
+[[bank_entry]]
+bank = 30
+addr = 0x89AE
+
+[[bank_entry]]
+bank = 30
+addr = 0x89B1
+
+[[bank_entry]]
+bank = 30
+addr = 0x8A4E
+
+[[bank_entry]]
+bank = 30
+addr = 0x8AE0
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B09
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B11
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B14
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B17
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B1A
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B1D
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B22
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B25
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B39
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B3C
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B6D
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B88
+
+[[bank_entry]]
+bank = 30
+addr = 0x8B8B
+
+[[bank_entry]]
+bank = 30
+addr = 0x8BA2
+
+[[bank_entry]]
+bank = 30
+addr = 0x8BA5
+
+[[bank_entry]]
+bank = 30
+addr = 0x8BB1
+
+[[bank_entry]]
+bank = 30
+addr = 0x8CB8
+
+[[bank_entry]]
+bank = 30
+addr = 0x8CC4
+
+[[bank_entry]]
+bank = 30
+addr = 0x8DCB
+
+[[bank_entry]]
+bank = 30
+addr = 0x8DD8
+
+[[bank_entry]]
+bank = 30
+addr = 0x8DDB
+
+[[bank_entry]]
+bank = 30
+addr = 0x8ECC
+
+[[bank_entry]]
+bank = 30
+addr = 0x8EEA
+
+[[bank_entry]]
+bank = 30
+addr = 0x8EFF
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F02
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F10
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F13
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F1B
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F1E
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F21
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F4A
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F4D
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F55
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F70
+
+[[bank_entry]]
+bank = 30
+addr = 0x8F78
+
+[[bank_entry]]
+bank = 30
+addr = 0x94BB
+
+[[bank_entry]]
+bank = 30
+addr = 0x94CD
+
+[[bank_entry]]
+bank = 30
+addr = 0x94E2
+
+[[bank_entry]]
+bank = 30
+addr = 0x94E5
+
+[[bank_entry]]
+bank = 30
+addr = 0x951B
+
+[[bank_entry]]
+bank = 30
+addr = 0x9553
+
+[[bank_entry]]
+bank = 30
+addr = 0x968E
+
+[[bank_entry]]
+bank = 30
+addr = 0x96CE
+
+[[bank_entry]]
+bank = 30
+addr = 0x96E5
+
+[[bank_entry]]
+bank = 30
+addr = 0x96FB
+
+[[bank_entry]]
+bank = 30
+addr = 0x96FD
+
+[[bank_entry]]
+bank = 30
+addr = 0x9705
+
+[[bank_entry]]
+bank = 30
+addr = 0x9734
+
+[[bank_entry]]
+bank = 30
+addr = 0x97B7
+
+[[bank_entry]]
+bank = 30
+addr = 0x98EE
+
+[[bank_entry]]
+bank = 30
+addr = 0x991B
+
+[[bank_entry]]
+bank = 30
+addr = 0x9921
+
+[[bank_entry]]
+bank = 30
+addr = 0x992B
+
+[[bank_entry]]
+bank = 30
+addr = 0x9931
+
+[[bank_entry]]
+bank = 30
+addr = 0x9935
+
+[[bank_entry]]
+bank = 30
+addr = 0x9984
+
+[[bank_entry]]
+bank = 30
+addr = 0x9A1D
+
+[[bank_entry]]
+bank = 30
+addr = 0x9A49
+
+[[bank_entry]]
+bank = 30
+addr = 0x9A75
+
+[[bank_entry]]
+bank = 30
+addr = 0x9ABA
+
+[[bank_entry]]
+bank = 30
+addr = 0x9AD1
+
+[[bank_entry]]
+bank = 30
+addr = 0x9AD4
+
+[[bank_entry]]
+bank = 30
+addr = 0x9ADC
+
+[[bank_entry]]
+bank = 30
+addr = 0x9ADF
+
+[[bank_entry]]
+bank = 30
+addr = 0x9AEC
+
+[[bank_entry]]
+bank = 30
+addr = 0x9AEF
+
+[[bank_entry]]
+bank = 30
+addr = 0x9B73
+
+[[bank_entry]]
+bank = 30
+addr = 0x9BA9
+
+[[bank_entry]]
+bank = 30
+addr = 0x9BB1
+
+[[bank_entry]]
+bank = 30
+addr = 0x9BD5
+
+[[bank_entry]]
+bank = 30
+addr = 0x9BE1
+
+[[bank_entry]]
+bank = 30
+addr = 0x9C06
+
+[[bank_entry]]
+bank = 30
+addr = 0x9C78
+
+[[bank_entry]]
+bank = 30
+addr = 0x9C8D
+
+[[bank_entry]]
+bank = 30
+addr = 0x9E9D
+
+[[bank_entry]]
+bank = 30
+addr = 0x9F40
+
+[[function]]
+addr = 0xE2C0
+name = "nes_E2C0"
+
+[[function]]
+addr = 0xE33B
+name = "nes_E33B"
+
+[[function]]
+addr = 0xE34F
+name = "nes_E34F"
+
+[[function]]
+addr = 0xE3A3
+name = "nes_E3A3"
+
+[[function]]
+addr = 0xE3EE
+name = "nes_E3EE"
+
+[[function]]
+addr = 0xE48C
+name = "nes_E48C"
+
+[[function]]
+addr = 0xE4C5
+name = "nes_E4C5"
+
+[[function]]
+addr = 0xE532
+name = "nes_E532"
+
+[[function]]
+addr = 0xE547
+name = "nes_E547"
+
+[[function]]
+addr = 0xE559
+name = "nes_E559"
+
+[[function]]
+addr = 0xE57A
+name = "nes_E57A"
+
+[[function]]
+addr = 0xE59D
+name = "nes_E59D"
+
+[[function]]
+addr = 0xE5CF
+name = "nes_E5CF"
+
+[[function]]
+addr = 0xE5F9
+name = "nes_E5F9"
+
+[[function]]
+addr = 0xE60A
+name = "nes_E60A"
+
+[[function]]
+addr = 0xE651
+name = "nes_E651"
+
+[[function]]
+addr = 0xE67C
+name = "nes_E67C"
+
+[[function]]
+addr = 0xE691
+name = "nes_E691"
+
+[[function]]
+addr = 0xE6C7
+name = "nes_E6C7"
+
+[[function]]
+addr = 0xE6D6
+name = "nes_E6D6"
+
+[[function]]
+addr = 0xE709
+name = "nes_E709"
+
+[[function]]
+addr = 0xE713
+name = "nes_E713"
+
+[[function]]
+addr = 0xE722
+name = "nes_E722"
+
+[[function]]
+addr = 0xE73B
+name = "nes_E73B"
+
+[[function]]
+addr = 0xE756
+name = "nes_E756"
+
+[[function]]
+addr = 0xE785
+name = "nes_E785"
+
+[[function]]
+addr = 0xE7AB
+name = "nes_E7AB"
+
+[[function]]
+addr = 0xE7B2
+name = "nes_E7B2"
+
+[[function]]
+addr = 0xE7BF
+name = "nes_E7BF"
+
+[[function]]
+addr = 0xE82B
+name = "nes_E82B"
+
+[[function]]
+addr = 0xE831
+name = "nes_E831"
+
+[[function]]
+addr = 0xE835
+name = "nes_E835"
+
+[[function]]
+addr = 0xF499
+name = "nes_F499"
+
+[[function]]
+addr = 0xF4F3
+name = "nes_F4F3"
+
+[[function]]
+addr = 0xF504
+name = "nes_F504"
+
+[[function]]
+addr = 0xF507
+name = "nes_F507"
+
+[[function]]
+addr = 0xF50A
+name = "nes_F50A"
+
+[[function]]
+addr = 0xF50D
+name = "nes_F50D"
+
+[[function]]
+addr = 0xF562
+name = "nes_F562"
+
+[[function]]
+addr = 0xF565
+name = "nes_F565"
+
+[[function]]
+addr = 0xF567
+name = "nes_F567"
+
+[[function]]
+addr = 0xF57E
+name = "nes_F57E"
+
+[[function]]
+addr = 0xF581
+name = "nes_F581"
+
+[[function]]
+addr = 0xF610
+name = "nes_F610"
+
+[[function]]
+addr = 0xF620
+name = "nes_F620"
+
+[[function]]
+addr = 0xF62B
+name = "nes_F62B"
+
+[[function]]
+addr = 0xF631
+name = "nes_F631"
+
+[[function]]
+addr = 0xF6F9
+name = "nes_F6F9"
+
+[[function]]
+addr = 0xF709
+name = "nes_F709"
+
+[[function]]
+addr = 0xF738
+name = "nes_F738"
+
+[[function]]
+addr = 0xF781
+name = "nes_F781"
+
+[[function]]
+addr = 0xF784
+name = "nes_F784"
+
+[[function]]
+addr = 0xF8B3
+name = "nes_F8B3"
+
+[[function]]
+addr = 0xF8CA
+name = "nes_F8CA"
+
+[[function]]
+addr = 0xFC6F
+name = "nes_FC6F"
+
+[[function]]
+addr = 0xFCBF
+name = "nes_FCBF"
+
+[[function]]
+addr = 0xFCD1
+name = "nes_FCD1"
+
+[[function]]
+addr = 0xFCD8
+name = "nes_FCD8"
+
+[[function]]
+addr = 0xFD84
+name = "nes_FD84"
+
+[[function]]
+addr = 0xFD97
+name = "nes_FD97"
+
+[[function]]
+addr = 0xFDA9
+name = "nes_FDA9"
+
+[[function]]
+addr = 0xFDB1
+name = "nes_FDB1"
+
+[[function]]
+addr = 0xFDB4
+name = "nes_FDB4"
+
+[[function]]
+addr = 0xFDB9
+name = "nes_FDB9"
+
+[[function]]
+addr = 0xFDBE
+name = "nes_FDBE"
+
+[[function]]
+addr = 0xFDBF
+name = "nes_FDBF"
+
+[[function]]
+addr = 0xFDC7
+name = "nes_FDC7"
+
+[[function]]
+addr = 0xFE99
+name = "nes_FE99"
+
+[[function]]
+addr = 0xFEBE
+name = "nes_FEBE"
+
+[[function]]
+addr = 0xFEC3
+name = "nes_FEC3"
+
+[[function]]
+addr = 0xFEC9
+name = "nes_FEC9"
+
+[[function]]
+addr = 0xFF12
+name = "nes_FF12"
+
+[[function]]
+addr = 0xFF40
+name = "nes_FF40"
+
+[[function]]
+addr = 0xFF9A
+name = "nes_FF9A"
+
+[[function]]
+addr = 0xFFA7
+name = "nes_FFA7"
+
+[[function]]
+addr = 0xFFAD
+name = "nes_FFAD"
+
+[[function]]
+addr = 0xFFBF
+name = "nes_FFBF"
+
+[[function]]
+addr = 0xFFC2
+name = "nes_FFC2"
+
+[[function]]
+addr = 0xFFD1
+name = "nes_FFD1"

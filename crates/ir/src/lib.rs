@@ -139,10 +139,20 @@ pub enum Op {
     /// Block label / branch target.
     Label(String),
 
-    /// 6502 source debug marker.
+    /// Original 6502 instruction identity and size, also used to derive guest
+    /// return addresses. Optimizers must preserve this source metadata and its
+    /// original-return semantics, not treat it as disposable debug text.
     Source {
         pc: u16,
+        size: u8,
         text: String,
+    },
+
+    /// Profile-verified idle poll. Signals scheduling intent without replacing
+    /// the following original load, branch, or guest register effects.
+    CooperativeWait {
+        tick: u8,
+        tick_enable: u8,
     },
 
     // Loads / stores
@@ -398,6 +408,32 @@ pub enum Op {
 }
 
 impl Op {
+    /// Writes which may change an MMC3 PRG window. CHR, mirroring and IRQ
+    /// registers do not change CPU instruction identity.
+    pub fn may_remap_mmc3_prg(&self) -> bool {
+        let address = match self {
+            Op::MapperWrite { addr, .. } => return (0x8000..0xa000).contains(addr),
+            Op::StaMem { addr, .. }
+            | Op::StxMem { addr, .. }
+            | Op::StyMem { addr, .. }
+            | Op::SaxMem { addr, .. }
+            | Op::AslMem { addr, .. }
+            | Op::LsrMem { addr, .. }
+            | Op::RolMem { addr, .. }
+            | Op::RorMem { addr, .. }
+            | Op::IncMem { addr, .. }
+            | Op::DecMem { addr, .. } => addr,
+            _ => return false,
+        };
+        match address {
+            AddrExpr::Const(addr) => (0x8000..0xa000).contains(addr),
+            AddrExpr::AbsIndexedX(base) | AddrExpr::AbsIndexedY(base) => {
+                (0..=255).any(|index| (0x8000..0xa000).contains(&base.wrapping_add(index)))
+            }
+            AddrExpr::IndirectX(_) | AddrExpr::IndirectY(_) => true,
+            _ => false,
+        }
+    }
     /// True when execution cannot fall through to the next translated op.
     pub fn is_hard_terminator(&self) -> bool {
         matches!(
@@ -436,6 +472,20 @@ pub struct Routine {
     pub unresolved: Vec<u16>,
 }
 
+impl Routine {
+    /// Original next instruction, never an address inferred from Z80 size.
+    pub fn next_source_pc(&self, op_index: usize) -> u16 {
+        self.ops[..=op_index]
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                Op::Source { pc, size, .. } => Some(pc.wrapping_add(u16::from(*size))),
+                _ => None,
+            })
+            .unwrap_or(self.end)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // LiftOptions / LiftError
 // ---------------------------------------------------------------------------
@@ -460,6 +510,11 @@ pub struct LiftOptions {
     /// CPU window whose physical bank is established by this analysis unit.
     /// Defaults to UxROM's 16 KiB window; MMC3 units use one 8 KiB window.
     pub window_label_range: std::ops::Range<u16>,
+    /// Preserve cartridge/expansion memory operands for a complete runtime
+    /// bus instead of applying the legacy mapper-store restrictions.
+    pub dynamic_cpu_bus: bool,
+    /// Profile-verified data holes in this physical analysis unit.
+    pub data_regions: Vec<std::ops::RangeInclusive<u16>>,
     /// PCs that other routines branch to which fall inside our range.
     /// We emit `Op::Label(L_<pc>)` at each so the cross-routine
     /// reference resolves. Without this, a `BEQ $85C8` from one
@@ -490,6 +545,7 @@ pub struct ReturnEscapeSite {
 #[derive(Debug, Clone)]
 pub struct ReturnConsumeSite {
     pub at: u16,
+    pub second_pla: Option<u16>,
     pub return_addrs: Vec<u16>,
 }
 
@@ -530,6 +586,8 @@ impl Default for LiftOptions {
             return_escape_sites: Vec::new(),
             window_label_prefix: None,
             window_label_range: 0x8000..0xC000,
+            dynamic_cpu_bus: false,
+            data_regions: Vec::new(),
             extra_label_pcs: Vec::new(),
         }
     }
@@ -980,6 +1038,12 @@ fn lift_insn(
                 return vec![Op::LdaImm(v)];
             }
             if let Some((addr, base)) = make_addr_expr(insn) {
+                if opts.dynamic_cpu_bus {
+                    return vec![Op::LdaMem {
+                        addr,
+                        region: classify_addr(base),
+                    }];
+                }
                 // Controller reads must be checked before the generic ApuIo arm.
                 if let Some(ca) = addr.const_addr() {
                     if ca == 0x4016 || ca == 0x4017 {
@@ -1034,6 +1098,9 @@ fn lift_insn(
         Mnemonic::STA => {
             if let Some((addr, base)) = make_addr_expr(insn) {
                 let region = classify_addr(base);
+                if opts.dynamic_cpu_bus {
+                    return vec![Op::StaMem { addr, region }];
+                }
                 return match region {
                     MemRegion::PpuReg => vec![Op::PpuWrite {
                         reg: (base & 0x07) as u8,
@@ -1105,6 +1172,9 @@ fn lift_insn(
         Mnemonic::STX => {
             if let Some((addr, base)) = make_addr_expr(insn) {
                 let region = classify_addr(base);
+                if opts.dynamic_cpu_bus {
+                    return vec![Op::StxMem { addr, region }];
+                }
                 return match region {
                     MemRegion::PpuReg => vec![Op::PpuWrite {
                         reg: (base & 0x07) as u8,
@@ -1133,6 +1203,9 @@ fn lift_insn(
         Mnemonic::STY => {
             if let Some((addr, base)) = make_addr_expr(insn) {
                 let region = classify_addr(base);
+                if opts.dynamic_cpu_bus {
+                    return vec![Op::StyMem { addr, region }];
+                }
                 return match region {
                     MemRegion::PpuReg => vec![Op::PpuWrite {
                         reg: (base & 0x07) as u8,
@@ -1293,13 +1366,19 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
     // ---- Pass 1: collect internal branch targets ----
     let mut internal_targets: HashSet<u16> = HashSet::new();
     let is_jump_engine_table_byte = |pc: u16| {
-        opts.jump_engine_sites
-            .iter()
-            .any(|site| site.contains_table_byte(pc))
+        opts.data_regions.iter().any(|range| range.contains(&pc))
+            || opts
+                .jump_engine_sites
+                .iter()
+                .any(|site| site.contains_table_byte(pc))
     };
     {
         let mut pc = opts.start;
         while pc < opts.end {
+            if let Some(range) = opts.data_regions.iter().find(|range| range.contains(&pc)) {
+                pc = range.end().saturating_add(1);
+                continue;
+            }
             let offset = cpu_to_prg_offset(pc).ok_or(LiftError::OutsideRange { pc })?;
             let insn = decode_at(prg, pc, offset).map_err(|_| LiftError::Truncated { pc })?;
 
@@ -1381,8 +1460,8 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
     }
     for site in &opts.return_consume_sites {
         let last = site
-            .at
-            .checked_add(1)
+            .second_pla
+            .or_else(|| site.at.checked_add(1))
             .ok_or_else(|| LiftError::Decode("return_consume pair wraps".into()))?;
         if site.at >= opts.end || last < opts.start {
             continue;
@@ -1390,7 +1469,8 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
         if site.at < opts.start
             || last >= opts.end
             || site.return_addrs.is_empty()
-            || all_targets.contains(&last)
+            || last <= site.at
+            || all_targets.iter().any(|pc| *pc > site.at && *pc <= last)
         {
             return Err(LiftError::Decode(format!(
                 "return_consume ${:04X}: incomplete pair or bypass entry",
@@ -1407,9 +1487,30 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
                 )));
             }
         }
-        let label = label_for_prefixed(last, opts);
+        // The gap may expose the first pulled byte (e.g. STA zp) but may
+        // neither alter the stack nor branch around the second pull.
+        let mut gap = site.at + 1;
+        while gap < last {
+            let insn = decode_at(prg, gap, cpu_to_prg_offset(gap).unwrap())
+                .map_err(|_| LiftError::Truncated { pc: gap })?;
+            if !matches!(
+                insn.mnemonic,
+                Mnemonic::STA | Mnemonic::STX | Mnemonic::STY | Mnemonic::NOP
+            ) || gap + u16::from(insn.size) > last
+                || (insn.mnemonic != Mnemonic::NOP && insn.mode != AddrMode::ZeroPage)
+            {
+                return Err(LiftError::Decode(format!(
+                    "return_consume ${:04X}: gap must be stack-neutral zero-page stores or NOP",
+                    site.at
+                )));
+            }
+            gap += u16::from(insn.size);
+        }
         if opts.jump_engine_sites.iter().any(|engine| {
-            engine.targets.contains(&label) || engine.return_target.as_ref() == Some(&label)
+            (site.at + 1..=last).any(|pc| {
+                let label = label_for_prefixed(pc, opts);
+                engine.targets.contains(&label) || engine.return_target.as_ref() == Some(&label)
+            })
         }) {
             return Err(LiftError::Decode(format!(
                 "return_consume ${:04X}: dispatch bypasses first PLA",
@@ -1420,9 +1521,15 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
         // Inspect them without changing default discovery or generated bytes.
         let mut scan = opts.start;
         while scan < opts.end {
+            if let Some(range) = opts.data_regions.iter().find(|range| range.contains(&scan)) {
+                scan = range.end().saturating_add(1);
+                continue;
+            }
             let insn = decode_at(prg, scan, cpu_to_prg_offset(scan).unwrap())
                 .map_err(|_| LiftError::Truncated { pc: scan })?;
-            if insn.mnemonic == Mnemonic::JSR && insn.operand == Operand::Addr(last) {
+            if insn.mnemonic == Mnemonic::JSR
+                && matches!(insn.operand, Operand::Addr(target) if target > site.at && target <= last)
+            {
                 return Err(LiftError::Decode(format!(
                     "return_consume ${:04X}: JSR bypasses first PLA",
                     site.at
@@ -1477,6 +1584,10 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
         // Check them without changing default routine discovery/emission.
         let mut scan = opts.start;
         while scan < opts.end {
+            if let Some(range) = opts.data_regions.iter().find(|range| range.contains(&scan)) {
+                scan = range.end().saturating_add(1);
+                continue;
+            }
             let insn = decode_at(prg, scan, cpu_to_prg_offset(scan).unwrap())
                 .map_err(|_| LiftError::Truncated { pc: scan })?;
             if insn.mnemonic == Mnemonic::JSR
@@ -1531,6 +1642,23 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
     let mut pc = opts.start;
     let mut lifted_end = opts.start;
     while pc < opts.end {
+        if let Some(range) = opts.data_regions.iter().find(|range| range.contains(&pc)) {
+            // A taken branch may skip embedded data. The untaken path must
+            // trap, not quietly fall through into code after the table.
+            let target = label_for_prefixed(pc, opts);
+            external_calls.push(target.clone());
+            ops.push(Op::Jmp { target });
+            let after = range.end().saturating_add(1);
+            if let Some(&target) = internal_targets
+                .iter()
+                .filter(|&&target| target >= after)
+                .min()
+            {
+                pc = target;
+                continue;
+            }
+            break;
+        }
         // Emit internal label if this PC is a branch target
         if all_targets.contains(&pc) {
             let lbl = label_for_prefixed(pc, opts);
@@ -1550,6 +1678,7 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
         // Source marker
         ops.push(Op::Source {
             pc,
+            size: insn.size,
             text: format_instruction(&insn),
         });
 
@@ -1677,6 +1806,8 @@ mod tests {
         let opts = LiftOptions {
             window_label_prefix: None,
             window_label_range: 0x8000..0xC000,
+            dynamic_cpu_bus: false,
+            data_regions: Vec::new(),
             start: cpu_start,
             end: cpu_start + bytes.len() as u16,
             entry_name: format!("L_{cpu_start:04X}"),
@@ -1705,6 +1836,8 @@ mod tests {
                 end: window.start + code.len() as u16,
                 window_label_prefix: Some("b7_".to_owned()),
                 window_label_range: window.clone(),
+                dynamic_cpu_bus: false,
+                data_regions: Vec::new(),
                 ..LiftOptions::default()
             };
             let routine = lift_range(&prg, &opts).unwrap();
@@ -1760,6 +1893,7 @@ mod tests {
             end: 0x8109,
             return_consume_sites: vec![ReturnConsumeSite {
                 at: 0x8100,
+                second_pla: None,
                 return_addrs: vec![0x8002],
             }],
             ..LiftOptions::default()
@@ -1989,6 +2123,8 @@ mod tests {
             }],
             window_label_prefix: None,
             window_label_range: 0x8000..0xC000,
+            dynamic_cpu_bus: false,
+            data_regions: Vec::new(),
             extra_label_pcs: Vec::new(),
         };
         let routine = lift_range(&prg, &opts).expect("lift return escape");
@@ -2144,6 +2280,8 @@ mod tests {
         let opts = LiftOptions {
             window_label_prefix: None,
             window_label_range: 0x8000..0xC000,
+            dynamic_cpu_bus: false,
+            data_regions: Vec::new(),
             start: 0xAEF9,
             end: 0xAEFE,
             entry_name: "L_AEF9".to_string(),
@@ -2194,6 +2332,8 @@ mod tests {
                 return_escape_sites: Vec::new(),
                 window_label_prefix: None,
                 window_label_range: 0x8000..0xC000,
+                dynamic_cpu_bus: false,
+                data_regions: Vec::new(),
                 extra_label_pcs: Vec::new(),
             },
         )
@@ -2240,6 +2380,8 @@ mod tests {
                 return_escape_sites: Vec::new(),
                 window_label_prefix: None,
                 window_label_range: 0x8000..0xC000,
+                dynamic_cpu_bus: false,
+                data_regions: Vec::new(),
                 extra_label_pcs: Vec::new(),
             },
         )
@@ -2281,6 +2423,8 @@ mod tests {
             &LiftOptions {
                 window_label_prefix: None,
                 window_label_range: 0x8000..0xC000,
+                dynamic_cpu_bus: false,
+                data_regions: Vec::new(),
                 start: 0xE3E9,
                 end: 0xE3EC,
                 entry_name: "L_E3E9".into(),
@@ -2428,6 +2572,8 @@ mod tests {
         let opts = LiftOptions {
             window_label_prefix: None,
             window_label_range: 0x8000..0xC000,
+            dynamic_cpu_bus: false,
+            data_regions: Vec::new(),
             start: 0x8000,
             end: 0x8000,
             entry_name: "test".to_string(),
@@ -2446,6 +2592,8 @@ mod tests {
         let opts = LiftOptions {
             window_label_prefix: None,
             window_label_range: 0x8000..0xC000,
+            dynamic_cpu_bus: false,
+            data_regions: Vec::new(),
             start: 0x8010,
             end: 0x8000,
             entry_name: "test".to_string(),
@@ -2464,5 +2612,78 @@ mod tests {
         assert_eq!(AddrExpr::ZpConst(0x42).const_addr(), Some(0x42));
         assert_eq!(AddrExpr::AbsIndexedX(0x5000).const_addr(), None);
         assert_eq!(AddrExpr::IndirectY(0x10).const_addr(), None);
+    }
+    #[test]
+    fn separated_return_plas_keep_stores_and_reject_bypasses_or_stack_changes() {
+        let prg = make_prg_at(0x8100, &[0x68, 0x85, 0, 0x68, 0x60]);
+        let mut opts = LiftOptions {
+            start: 0x8100,
+            end: 0x8105,
+            return_consume_sites: vec![ReturnConsumeSite {
+                at: 0x8100,
+                second_pla: Some(0x8103),
+                return_addrs: vec![0x8002],
+            }],
+            ..LiftOptions::default()
+        };
+        let routine = lift_range(&prg, &opts).unwrap();
+        assert_eq!(
+            routine
+                .ops
+                .iter()
+                .filter(|op| matches!(op, Op::Pla))
+                .count(),
+            2
+        );
+        assert!(routine.ops.iter().any(|op| matches!(
+            op,
+            Op::StaMem {
+                addr: AddrExpr::ZpConst(0),
+                ..
+            }
+        )));
+        for entry in 0x8101..=0x8103 {
+            opts.extra_label_pcs = vec![entry];
+            assert!(lift_range(&prg, &opts).is_err());
+        }
+        opts.extra_label_pcs.clear();
+        for gap in [[0x48, 0xea], [0xd0, 0], [0x9a, 0xea]] {
+            let mut bytes = vec![0x68];
+            bytes.extend(gap);
+            bytes.extend([0x68, 0x60]);
+            assert!(lift_range(&make_prg_at(0x8100, &bytes), &opts).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_data_hole_preserves_branch_but_traps_fallthrough() {
+        let prg = make_prg_at(0x8000, &[0xa9, 1, 0xd0, 2, 0x02, 0x02, 0xa9, 2, 0x60]);
+        let routine = lift_range(
+            &prg,
+            &LiftOptions {
+                start: 0x8000,
+                end: 0x8009,
+                data_regions: std::iter::once(0x8004..=0x8005).collect(),
+                ..LiftOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(!routine.ops.iter().any(|op| matches!(
+            op,
+            Op::Source {
+                pc: 0x8004 | 0x8005,
+                ..
+            }
+        )));
+        assert!(routine.ops.contains(&Op::Jmp {
+            target: "L_8004".into()
+        }));
+        assert!(routine.ops.contains(&Op::Label("L_8006".into())));
+        let index = routine
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::BranchIf { .. }))
+            .unwrap();
+        assert_eq!(routine.next_source_pc(index), 0x8004);
     }
 }

@@ -34,6 +34,10 @@
 .define TR_RET_DIAG_PTR     $cb73
 .define TR_RET_SCRATCH_A    $cb73
 .define TR_RET_SCRATCH_BANK $cb74
+; Full MMC3 frame: [entry A -> live guest S -> returned A scratch,
+; continuation low, continuation high | owned-return bit7, clean SMS bank].
+; Continuations occupy slot0/1 (<$8000), checked by the emitter. Other mapper
+; builds retain the historical owner flag in the bank byte.
 .define DISPATCH_MRU_BASE   $ca08
 
 ; ─── rt_far_call ──────────────────────────────────────────────────────────────
@@ -159,6 +163,13 @@ rt_translated_call_gate:
   ld   ($cb14), a
   ld   ($fffe), a
   ld   a, (hl)              ; entry A from frame[0]
+.ifdef MMC3_FULL_RUNTIME
+  ; Entry A has been consumed: byte0 now guards the live guest-return S.
+  push af
+  ld   a, ($cb02)
+  ld   (hl), a
+  pop  af
+.endif
   ld   h, b
   ld   l, c
   .ifdef DIAG_WILDJUMP
@@ -446,6 +457,22 @@ _tr_rts_check_seg1:
 _tr_rts_bridge:
   ld   hl, $d3f8
 _tr_rts_pop_frame:
+.ifdef MMC3_FULL_RUNTIME
+  push hl
+  inc hl
+  inc hl
+  bit 7, (hl)
+  pop hl
+  jr z, _tr_full_rts_s_ok
+  di                        ; retire ownership and capture live guest bytes atomically
+  ld a, ($cb02)
+  cp (hl)
+  jp nz, rt_mmc3_unsupported
+  ld (TR_RET_PTR), hl
+  ld a, c
+  jp rt_rts_dispatch        ; guest code may have rewritten its return pair
+_tr_full_rts_s_ok:
+.endif
   ld   (hl), c               ; frame[0] = returned A scratch
   inc  hl
   ld   c, (hl)               ; continuation low
@@ -461,7 +488,11 @@ _tr_rts_cont_ok:
 .endif
   inc  hl
   ld   a, (hl)               ; return bank + translated-frame flags
+.ifdef MMC3_FULL_RUNTIME
+  bit  7, b                  ; wide ABI: ownership lives in continuation high
+.else
   bit  6, a
+.endif
   jr   z, _tr_rts_bank_ready ; ordinary frames already contain a clean bank
   ; A stack-aware JumpEngine frame represents an RTS address that the NES
   ; caller explicitly placed on $0100+S. Its handler's RTS consumes those two
@@ -471,7 +502,11 @@ _tr_rts_cont_ok:
   inc  a
   ld   ($cb02), a
   ld   a, (hl)
+.ifdef MMC3_FULL_RUNTIME
+  res  7, b                  ; restore the checked slot-0/1 continuation
+.else
   and  $1f                   ; SMS code bank (flags occupy the high bits)
+.endif
 _tr_rts_bank_ready:
   ld   ($cb14), a
   ld   ($fffe), a
@@ -610,9 +645,13 @@ _tr_escape_pop_frame:
   ; software continuation must not push a duplicate onto the guest stack.
   inc  hl
   inc  hl
+.ifdef MMC3_FULL_RUNTIME
+  bit  7, (hl)
+.else
   inc  hl
   bit  6, (hl)
   dec  hl
+.endif
   dec  hl
   dec  hl
   jp   nz, _tr_escape_discard_consumed
@@ -652,10 +691,15 @@ _tr_escape_discard_consumed:
   ; frames do not own any emulated return bytes and must not take this path.
   inc  hl
   inc  hl
+.ifdef MMC3_FULL_RUNTIME
+  bit  7, (hl)
+  jp   z, _tr_escape_underflow
+.else
   inc  hl
   bit  6, (hl)
   jp   z, _tr_escape_underflow
   dec  hl
+.endif
   dec  hl
   dec  hl
   push hl
@@ -1136,6 +1180,11 @@ _btd_trap_flash:
 ; MMC3 entries instead use the physical 8 KiB bank currently visible at the
 ; requested CPU address, including independently switched $A000/$C000 windows.
 rt_banked_dispatch:
+.ifdef MMC3_FULL_RUNTIME
+  ; Full-mode callers already own a software continuation (or are tails).
+  ; A native far-gate thunk cannot be retired by their software RTS.
+  jp rt_banked_tail_dispatch
+.else
   ; Entry A is the 6502 accumulator the callee expects: the transfer gate
   ; restored it from the pushed call frame before jumping to the stub.
   ; The lookup below clobbers A, and rt_far_gate re-reads the caller A from
@@ -1308,6 +1357,7 @@ _bd_miss:
   ld   ($cb1d), a
   jp   rt_unresolved_jsr_flash
 
+.endif ; MMC3_FULL_RUNTIME uses software-tail dispatch above
 ; ─── _dispatch_remap_de ───────────────────────────────────────────────────────
 ; Remaps a NES address in DE to the SMS equivalent if it falls in NES RAM.
 ; NES $0000-$07FF → SMS $C000-$C7FF (add $C000).
@@ -1344,6 +1394,9 @@ _remap_mirror:
 ; rt_banked_tail_dispatch. Lowered code tail-jumps here (no native helper
 ; return frame) because the 6502 semantics transfer control; they don't return.
 rt_rts_dispatch:
+.ifdef MMC3_FULL_RUNTIME
+  di                        ; protect return-pair/A scratch until tail dispatch
+.endif
   ld   (TR_RET_SCRATCH_A), a ; preserve incoming A while popping shadow stack
   ld   a, ($cb02)           ; 6502 S
   inc  a

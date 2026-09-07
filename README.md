@@ -1,7 +1,8 @@
 # nes-to-sms
 
 A Rust pipeline that translates NES ROMs into Sega Master System projects,
-with mapper 0 (NROM) and mapper 2 (UxROM) support. The output is a buildable
+with mapper 0 (NROM), mapper 2 (UxROM), and experimental mapper 4 (MMC3)
+support. The output is a buildable
 WLA-DX project: extracted
 assets, an annotated 6502 disassembly, lifted IR, lowered Z80 with
 SMS-native runtime calls, and a `Makefile` that produces a `.sms` ROM.
@@ -34,7 +35,11 @@ See [media encoding notes](docs/media/README.md) for sizes and settings.
 - **Castlevania:** mapper-2 banking and CHR-RAM translation support title,
   outdoor and indoor Stage 1 gameplay, pickups, weapons and stairs. Speed and
   rendering fidelity still need work; this is not full-game completion.
-- **Validation:** 13 Rust crates; the latest workspace run has 528 passing
+- **Super Mario Bros. 3:** experimental MMC3 conversion reaches its animated
+  title and input-responsive World 1 map at 500% emulator overclock. Playable
+  level support is still pending; the IRQ adapter is not cycle-accurate.
+  [Plan and limits](docs/smb3-plan.md).
+- **Validation:** 13 Rust crates; the latest workspace run has 576 passing
   tests, plus separately run assembled-runtime and actual-emulator checks.
   NES APU audio is approximated on the SMS PSG, not reproduced exactly.
 

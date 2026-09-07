@@ -208,6 +208,7 @@ fn new_return_contract_reports_caller_context_validation_skips() {
             vec![],
             vec![ir::ReturnConsumeSite {
                 at: 0x8000,
+                second_pla: None,
                 return_addrs: vec![0x8102],
             }],
         ),

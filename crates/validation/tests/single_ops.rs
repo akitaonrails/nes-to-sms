@@ -16,6 +16,8 @@ fn lift(prg: &[u8], at: u16, len: u16, name: &str) -> ir::Routine {
         &LiftOptions {
             window_label_prefix: None,
             window_label_range: 0x8000..0xc000,
+            dynamic_cpu_bus: false,
+            data_regions: Vec::new(),
             start: at,
             end: at + len,
             entry_name: name.into(),

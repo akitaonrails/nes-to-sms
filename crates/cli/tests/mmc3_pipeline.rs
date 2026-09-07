@@ -100,12 +100,15 @@ struct ReferenceBus<'a> {
     prg: &'a [u8],
     mapper: Mmc3,
     ram: [u8; 0x800],
+    cart_ram: [u8; 0x2000],
 }
 
 impl oracle_6502::Bus for ReferenceBus<'_> {
     fn read(&mut self, addr: u16) -> u8 {
         if addr < 0x2000 {
             self.ram[usize::from(addr & 0x7ff)]
+        } else if let Some(offset) = self.mapper.prg_ram_read_offset(addr) {
+            self.cart_ram[offset]
         } else {
             self.mapper
                 .cpu_to_prg_offset(addr)
@@ -116,6 +119,8 @@ impl oracle_6502::Bus for ReferenceBus<'_> {
     fn write(&mut self, addr: u16, value: u8) {
         if addr < 0x2000 {
             self.ram[usize::from(addr & 0x7ff)] = value;
+        } else if let Some(offset) = self.mapper.prg_ram_write_offset(addr) {
+            self.cart_ram[offset] = value;
         } else {
             self.mapper.write_register(addr, value);
         }
@@ -143,6 +148,7 @@ fn reference_ram(rom: &[u8]) -> [u8; 0x800] {
         )
         .unwrap(),
         ram: [0; 0x800],
+        cart_ram: [0; 0x2000],
     };
     let mut cpu = oracle_6502::Cpu::new();
     cpu.reset(&mut bus);
@@ -261,8 +267,110 @@ fn two_bank_fixture(reset: &[u8], bank_zero: &[u8], bank_one: &[u8]) -> (Vec<u8>
     (rom, profile)
 }
 
+fn full_bus_fixture() -> (Vec<u8>, String) {
+    let code = [
+        0x78, 0xa9, 0x80, 0x8d, 1, 0xa0, // enable cartridge RAM
+        0xa9, 0x5a, 0x8d, 0, 0x60, 0xa9, 0xa6, 0x8d, 0xff, 0x7f, 0xa9, 0xff, 0x85, 0xff, 0xa9,
+        0x5f, 0x85, 0, 0xa0, 1, 0xb1, 0xff, 0x85,
+        0x40, // ($ff),Y wraps pointer pair, crosses into $6000
+        0xa9, 0, 0x85, 0xff, 0xa9, 0x60, 0x85, 0, 0xa2, 1, 0xa1, 0xfe, 0x85,
+        0x41, // ($fe,X) wraps high pointer byte to zero
+        0xad, 0xff, 0x7f, 0x85, 0x42, 0xa9, 0xc0, 0x8d, 1, 0xa0, 0xa9, 0xee, 0x8d, 0, 0x60, 0xad,
+        0, 0x60, 0x85, 0x43, // protected write ignored
+        0xa9, 0, 0x8d, 1, 0xa0, 0xa9, 0xee, 0x8d, 0, 0x60, 0xa9, 0x80, 0x8d, 1, 0xa0, 0xad, 0,
+        0x60, 0x85, 0x44, 0xa9, 0x7f, 0x8d, 0xff, 1, 0xee, 0xff, 1, 0xad, 0xff, 1, 0x85, 0x45,
+        0x4e, 0xff, 1, 0x2e, 0xff, 1, 0xad, 0xff, 1, 0x85, 0x46, 0xa9, 0x63, 0x8d, 0xff, 0x1f,
+        0xad, 0xff, 7, 0x85, 0x47, 0xa9, 0, 0x85, 0xff, 0xa9, 0xe2, 0x85, 0, 0x6c, 0xff, 0,
+    ];
+    let (mut rom, profile) = two_bank_fixture(&code, &[0x60], &[0x60]);
+    rom[10] = 7; // NES 2.0: 8 KiB volatile PRG RAM
+    rom[16 + 0xe200..16 + 0xe207].copy_from_slice(&[0xa9, 0xa5, 0x85, 0x3f, 0x4c, 4, 0xe2]);
+    let profile = profile.replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+    ) + "[[function]]\naddr=0xe200\nname='done'\n[input]\nmode='action'\npause_start=true\n";
+    (rom, profile)
+}
+
+#[test]
+fn mmc3_full_bus_reference_covers_cart_ram_and_indirect_boundaries() {
+    let (rom, _) = full_bus_fixture();
+    let ram = reference_ram(&rom);
+    assert_eq!(
+        &ram[0x40..0x48],
+        &[0x5a, 0x5a, 0xa6, 0x5a, 0x5a, 0x80, 0x80, 0x63]
+    );
+    assert_eq!(ram[0x3f], 0xa5);
+}
+
+#[test]
+fn mmc3_cooperative_wait_requires_exact_physical_setup_and_poll() {
+    let (mut rom, profile) = full_bus_fixture();
+    let wait = [
+        0xa9, 1, 0x85, 0x1c, 0xa9, 0, 0x85, 0x10, 0xa5, 0x10, 0x10, 0xfc, 0xa9, 0, 0x85, 0x1c,
+        0x58, 0x60,
+    ];
+    rom[16..16 + wait.len()].copy_from_slice(&wait);
+    let annotation = "\n[[cooperative_wait]]\nbank=0\nat=0x8008\ntick=0x10\ntick_enable=0x1c\n";
+    let (work, output) = generated_fixture("wait-valid", &rom, &(profile.clone() + annotation));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = std::fs::read_to_string(work.join("sms/generated/translated.asm")).unwrap();
+    assert_eq!(asm.matches("call rt_mmc3_wait_boundary").count(), 1);
+    assert!(asm.contains("L_b0_8008:"));
+    assert!(asm.contains("$8008: LDA"));
+    assert!(asm.contains("$800A: BPL"));
+    for (name, offset, byte) in [("wait-bad-setup", 3, 0x1d), ("wait-bad-branch", 10, 0x30)] {
+        let mut invalid = rom.clone();
+        invalid[16 + offset] = byte;
+        let (_, output) = generated_fixture(name, &invalid, &(profile.clone() + annotation));
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cooperative_wait"));
+    }
+    let (_, output) = generated_fixture(
+        "wait-wrong-bank",
+        &rom,
+        &(profile + &annotation.replace("bank=0", "bank=1")),
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cooperative_wait"));
+}
+
+#[test]
+#[ignore = "requires existing nes-to-sms-poc Docker toolchain"]
+fn mmc3_full_bus_assembled_matches_original_6502() {
+    let (rom, profile) = full_bus_fixture();
+    let reference = reference_ram(&rom);
+    let (work, project) = assembled_fixture("full-bus", &rom, &profile);
+    let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+    trace
+        .arg(project.join("sms.sms"))
+        .args(["--steps", "2000000", "--no-irq", "--expect-no-trap"]);
+    for (addr, value) in reference.iter().enumerate().take(0x48).skip(0x3f) {
+        trace
+            .arg("--expect-ram")
+            .arg(format!("{:04X}={value:02X}", 0xc000 + addr));
+    }
+    run_trace(&work, &mut trace);
+}
+
 #[test]
 fn mmc3_pipeline_rejects_computed_callee_that_can_remap_a_pending_caller() {
+    let (rom, profile) = computed_remapping_fixture();
+    assert_eq!(reference_ram(&rom)[0x40], 0xee);
+    let (work, output) = generated_fixture("computed-callee-remapping", &rom, &profile);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("remapping continuations are not implemented")
+    );
+    assert!(!work.join("sms").exists());
+}
+
+fn computed_remapping_fixture() -> (Vec<u8>, String) {
     let reset = [
         0x78, 0xa9, 6, 0x8d, 0, 0x80, 0xa9, 0, 0x8d, 1, 0x80, 0x20, 0, 0x80, 0xa9, 0xa5, 0x85,
         0x3f, 0x4c, 0x12, 0xe1,
@@ -277,14 +385,177 @@ fn mmc3_pipeline_rejects_computed_callee_that_can_remap_a_pending_caller() {
     rom[16 + 0xe300..16 + 0xe307].copy_from_slice(&[0xa9, 0xe1, 0x48, 0xa9, 0xff, 0x48, 0x60]);
     rom[16 + 0xe200..16 + 0xe206].copy_from_slice(&[0xa9, 1, 0x8d, 1, 0x80, 0x60]);
     profile.push_str("[[function]]\naddr=0xe200\nname='writer'\n");
-    assert_eq!(reference_ram(&rom)[0x40], 0xee);
-    let (work, output) = generated_fixture("computed-callee-remapping", &rom, &profile);
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("remapping continuations are not implemented")
+    (rom, profile)
+}
+
+#[test]
+#[ignore = "requires existing nes-to-sms-poc Docker toolchain"]
+fn mmc3_full_continuation_resolves_live_mapping_after_computed_callee() {
+    let (rom, profile) = computed_remapping_fixture();
+    let profile = profile.replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
     );
-    assert!(!work.join("sms").exists());
+    let reference = reference_ram(&rom);
+    assert_eq!(reference[0x40], 0xee);
+    let (work, project) = assembled_fixture("full-computed-remapping", &rom, &profile);
+    let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+    trace.arg(project.join("sms.sms")).args([
+        "--steps",
+        "2000000",
+        "--no-irq",
+        "--expect-no-trap",
+        "--expect-ram",
+        "C040=EE",
+        "--expect-ram",
+        "C03F=A5",
+    ]);
+    run_trace(&work, &mut trace);
+}
+
+#[test]
+#[ignore = "requires existing nes-to-sms-poc Docker toolchain"]
+fn mmc3_full_store_barrier_resumes_in_new_physical_bank() {
+    let reset = [
+        0x78, 0xa9, 6, 0x8d, 0, 0x80, 0xa9, 0, 0x8d, 1, 0x80, 0x20, 0, 0x80, 0xa9, 0xa5, 0x85,
+        0x3f, 0x4c, 0x12, 0xe1,
+    ];
+    let (rom, profile) = two_bank_fixture(
+        &reset,
+        &[0xa9, 1, 0x8d, 1, 0x80, 0xa9, 0xaa, 0x85, 0x40, 0x60],
+        &[0xa9, 1, 0x8d, 1, 0x80, 0xa9, 0xee, 0x85, 0x40, 0x60],
+    );
+    let profile = profile.replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+    );
+    assert_eq!(reference_ram(&rom)[0x40], 0xee);
+    let (work, project) = assembled_fixture("full-store-remapping", &rom, &profile);
+    let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+    trace.arg(project.join("sms.sms")).args([
+        "--steps",
+        "2000000",
+        "--no-irq",
+        "--expect-no-trap",
+        "--expect-ram",
+        "C040=EE",
+        "--expect-ram",
+        "C03F=A5",
+    ]);
+    run_trace(&work, &mut trace);
+}
+
+#[test]
+#[ignore = "requires existing nes-to-sms-poc Docker toolchain"]
+fn mmc3_full_nested_calls_materialize_guest_stack_at_high_sms_banks() {
+    let reset = [
+        0x78, 0xa2, 0xf0, 0x9a, 0x20, 0, 0xe2, 0xba, 0x86, 0x42, 0xa9, 0xa5, 0x85, 0x3f, 0x4c,
+        0x0e, 0xe1,
+    ];
+    let (mut rom, profile) = two_bank_fixture(&reset, &[0x60], &[0x60]);
+    rom[16 + 0xe200..16 + 0xe20a]
+        .copy_from_slice(&[0xba, 0x86, 0x40, 0x20, 0, 0xe3, 0xba, 0x86, 0x43, 0x60]);
+    rom[16 + 0xe300..16 + 0xe304].copy_from_slice(&[0xba, 0x86, 0x41, 0x60]);
+    let profile = profile.replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+    );
+    let reference = reference_ram(&rom);
+    assert_eq!(&reference[0x40..0x44], &[0xee, 0xec, 0xf0, 0xee]);
+    for bank in [31, 32, 64, 95] {
+        let (work, project) = assembled_fixture_in_bank(
+            &format!("full-stack-bank{bank}"),
+            &rom,
+            &profile,
+            Some(bank),
+        );
+        let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+        trace.arg(project.join("sms.sms")).args([
+            "--steps",
+            "1000000",
+            "--no-irq",
+            "--expect-no-trap",
+            "--expect-ram",
+            "C03F=A5",
+        ]);
+        for (addr, value) in reference.iter().enumerate().take(0x44).skip(0x40) {
+            trace
+                .arg("--expect-ram")
+                .arg(format!("{:04X}={value:02X}", 0xc000 + addr));
+        }
+        run_trace(&work, &mut trace);
+    }
+}
+
+fn inline_dynjump_fixture() -> (Vec<u8>, String) {
+    let reset = [
+        0x78, 0xa2, 0xf0, 0x9a, 0x20, 0, 0x80, 0xba, 0x86, 0x44, 0xa9, 0xa5, 0x85, 0x3f, 0x4c,
+        0x0e, 0xe1,
+    ];
+    let (mut rom, profile) =
+        two_bank_fixture(&reset, &[0xa9, 0, 0x20, 0, 0xe2, 0x10, 0x80], &[0x60]);
+    // Handler records the actual dispatcher A/Y/P, table pointer, target,
+    // and nested-call S. No replacement is used for the dispatch engine.
+    rom[16 + 0x10..16 + 0x1d].copy_from_slice(&[
+        0x85, 0x40, 0x84, 0x41, 0x08, 0x68, 0x85, 0x42, 0xba, 0x86, 0x43, 0x60, 0xea,
+    ]);
+    rom[16 + 0xe200..16 + 0xe212].copy_from_slice(&[
+        0x0a, 0xa8, 0x68, 0x85, 0, 0x68, 0x85, 1, 0xc8, 0xb1, 0, 0x85, 2, 0xc8, 0xb1, 0, 0x85, 3,
+    ]);
+    rom[16 + 0xe212..16 + 0xe215].copy_from_slice(&[0x6c, 2, 0]);
+    let profile = profile.replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+    ) + "[[bank_entry]]\nbank=0\naddr=0x8010\n\
+           [[data_region]]\nbank=0\nstart=0x8005\nend=0x8006\n\
+           [[return_consume]]\nat=0xe202\nsecond_pla=0xe205\ncalls=[{bank=0,caller=0x8002,target=0xe200}]\n";
+    (rom, profile)
+}
+
+#[test]
+#[ignore = "requires existing nes-to-sms-poc Docker toolchain"]
+fn mmc3_full_actual_inline_dispatch_preserves_guest_side_effects() {
+    let (rom, profile) = inline_dynjump_fixture();
+    let reference = reference_ram(&rom);
+    assert_eq!(&reference[..4], &[4, 0x80, 0x10, 0x80]);
+    assert_eq!(&reference[0x40..0x45], &[0x80, 2, 0xb4, 0xee, 0xf0]);
+    let (work, project) = assembled_fixture("full-inline-dispatch", &rom, &profile);
+    let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+    trace.arg(project.join("sms.sms")).args([
+        "--steps",
+        "1000000",
+        "--no-irq",
+        "--expect-no-trap",
+        "--expect-ram",
+        "C03F=A5",
+    ]);
+    for addr in (0..4).chain(0x40..0x45) {
+        trace
+            .arg("--expect-ram")
+            .arg(format!("{:04X}={:02X}", 0xc000 + addr, reference[addr]));
+    }
+    run_trace(&work, &mut trace);
+}
+
+#[test]
+#[ignore = "requires existing nes-to-sms-poc Docker toolchain"]
+fn mmc3_full_unannotated_return_byte_pla_traps() {
+    let (rom, profile) = inline_dynjump_fixture();
+    let profile = profile.split("[[return_consume]]").next().unwrap();
+    let (work, project) = assembled_fixture("full-unguarded-pla", &rom, profile);
+    let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+    trace.arg(project.join("sms.sms")).args([
+        "--steps",
+        "1000000",
+        "--no-irq",
+        "--expect-ram",
+        "CB1D=E8",
+        "--expect-ram",
+        "CB1B=02",
+        "--expect-ram",
+        "CB1C=E2",
+    ]);
+    run_trace(&work, &mut trace);
 }
 
 #[test]
@@ -299,6 +570,46 @@ fn mmc3_pipeline_rejects_unimplemented_indirect_memory_and_jump_forms() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("MMC3"));
         assert!(!work.join("sms").exists());
     }
+}
+
+#[test]
+fn mmc3_wrong_bank_data_annotation_cannot_hide_an_unsupported_opcode() {
+    let (rom, profile) = two_bank_fixture(&[0x4c, 0, 0xe1], &[0x60], &[0x02]);
+    let profile = profile
+        .replace(
+            "MMC3_BANKING_EXPERIMENT",
+            "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+        )
+        .replace("[[bank_entry]]\nbank=0\naddr=0x8000\n", "")
+        + "[[data_region]]\nbank=0\nstart=0x8000\nend=0x8000\n";
+    let (work, output) = generated_fixture("wrong-bank-data", &rom, &profile);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("L_b1_8000") && error.contains("JAM"),
+        "{error}"
+    );
+    assert!(!work.join("sms").exists());
+}
+
+#[test]
+fn mmc3_full_discovers_backward_branch_before_any_existing_routine() {
+    let (mut rom, profile) = two_bank_fixture(&[0xa9, 1, 0xd0, 0xec, 0x60], &[0x60], &[0x60]);
+    rom[16 + 0xe0f0..16 + 0xe0f7].copy_from_slice(&[0xa9, 0x7c, 0x85, 0x40, 0x4c, 0, 0xe1]);
+    let profile = profile.replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+    );
+    let (work, output) = generated_fixture("backward-branch-root", &rom, &profile);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let asm = std::fs::read_to_string(work.join("sms/generated/translated.asm")).unwrap();
+    let translated = asm.split(".section \"unresolved_stubs\"").next().unwrap();
+    assert!(translated.contains("L_E0F0:"));
+    assert!(translated.contains("6502 $E0F0: LDA #$7C"));
 }
 
 #[test]
@@ -372,6 +683,15 @@ fn mmc3_assembled_banking_matches_original_6502() {
 }
 
 fn assembled_fixture(name: &str, rom: &[u8], profile: &str) -> (PathBuf, PathBuf) {
+    assembled_fixture_in_bank(name, rom, profile, None)
+}
+
+fn assembled_fixture_in_bank(
+    name: &str,
+    rom: &[u8],
+    profile: &str,
+    code_bank: Option<u8>,
+) -> (PathBuf, PathBuf) {
     let (work, output) = generated_fixture(name, rom, profile);
     assert!(
         output.status.success(),
@@ -383,6 +703,19 @@ fn assembled_fixture(name: &str, rom: &[u8], profile: &str) -> (PathBuf, PathBuf
         .canonicalize()
         .unwrap();
     let project = work.join("sms").canonicalize().unwrap();
+    if let Some(bank) = code_bank {
+        // Relocate this tiny single-section fixture through the real linker;
+        // bank-of-label frame bytes must not be mocked by a flat CPU bus.
+        let path = project.join("generated/translated.asm");
+        let asm = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(asm.matches(".bank 4 slot 1").count(), 1);
+        assert!(!asm.contains(".bank 5 slot 1"));
+        std::fs::write(
+            path,
+            asm.replace(".bank 4 slot 1", &format!(".bank {bank} slot 1")),
+        )
+        .unwrap();
+    }
     let container_project = PathBuf::from("/work").join(project.strip_prefix(&root).unwrap());
     let uid = std::process::Command::new("id").arg("-u").output().unwrap();
     let gid = std::process::Command::new("id").arg("-g").output().unwrap();
@@ -456,5 +789,328 @@ fn mmc3_assembled_unsupported_chr_and_irq_effects_trap() {
             "CB1D=E8",
         ]);
         run_trace(&work, &mut trace);
+    }
+}
+
+#[test]
+#[ignore = "requires existing Docker assembler; produces fixture for trace-sms IRQ bridge tests"]
+fn mmc3_full_irq_bridge_fixture() {
+    let (mut rom, profile) = two_bank_fixture(&[0x4c, 0x00, 0xe1], &[0x60], &[0x60]);
+    rom[10] = 7;
+    // An actual translated poll authorizes the cooperative scheduler; the
+    // helper tests enter it independently of the fixture's reset loop.
+    let wait = [
+        0xa9, 1, 0x85, 0x1c, 0xa9, 0, 0x85, 0x10, 0xa5, 0x10, 0x10, 0xfc, 0xa9, 0, 0x85, 0x1c,
+        0x58, 0x60,
+    ];
+    rom[16..16 + wait.len()].copy_from_slice(&wait);
+    // Actual translated 6502 handlers, not Z80-side stand-ins. NMI arms the
+    // declared raster split; IRQ acknowledges it. Both restore interrupted A.
+    let nmi = [
+        0x48, 0xa5, 0x72, 0xf0, 5, 0xa9, 0, 0x8d, 0, 0xe0, 0xa9, 0xc0, 0x8d, 0, 0xc0, 0xa9, 0,
+        0x8d, 1, 0xc0, 0x8d, 1, 0xe0, 0xe6, 0x70, 0xc6, 0x10, 0x68, 0x40,
+    ];
+    let irq = [0x48, 0xa9, 0, 0x8d, 0, 0xe0, 0xe6, 0x71, 0x68, 0x40];
+    rom[16 + 0xe700..16 + 0xe700 + nmi.len()].copy_from_slice(&nmi);
+    rom[16 + 0xe720..16 + 0xe720 + irq.len()].copy_from_slice(&irq);
+    rom[16 + 0xfffa..16 + 0xfffc].copy_from_slice(&0xe700u16.to_le_bytes());
+    rom[16 + 0xfffe..16 + 0x10000].copy_from_slice(&0xe720u16.to_le_bytes());
+    let profile = profile
+        .replace("nmi=0xe100", "nmi=0xe700")
+        .replace("irq=0xe100", "irq=0xe720")
+        .replace(
+            "MMC3_BANKING_EXPERIMENT",
+            "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+        )
+        + "[[cooperative_wait]]\nbank=0\nat=0x8008\ntick=0x10\ntick_enable=0x1c\n";
+    let image = nes_rom::parse(&rom).unwrap();
+    let mut bus = ReferenceBus {
+        prg: image.prg,
+        mapper: Mmc3::new(
+            &image.header,
+            image.prg.len(),
+            image.chr.len(),
+            Mmc3Revision::Sharp,
+        )
+        .unwrap(),
+        ram: [0; 0x800],
+        cart_ram: [0; 0x2000],
+    };
+    let mut cpu = oracle_6502::Cpu::new();
+    cpu.pc = 7;
+    cpu.a = 0x6d;
+    cpu.x = 0x52;
+    cpu.y = 0xa9;
+    cpu.p = 0xa1;
+    for nmi_event in [true, false, true] {
+        if nmi_event {
+            cpu.nmi(&mut bus);
+        } else {
+            cpu.irq(&mut bus);
+        }
+        for _ in 0..100 {
+            if cpu.pc == 7 {
+                break;
+            }
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!(
+            (cpu.pc, cpu.a, cpu.x, cpu.y, cpu.p, cpu.sp),
+            (7, 0x6d, 0x52, 0xa9, 0xa1, 0xfd)
+        );
+    }
+    assert_eq!((bus.ram[0x70], bus.ram[0x71]), (2, 1));
+    let (_, project) = assembled_fixture("full-irq-bridge", &rom, &profile);
+    eprintln!("IRQ bridge fixture: {}", project.display());
+}
+
+#[test]
+#[ignore = "requires existing Docker assembler; executes original cooperative polling body"]
+fn mmc3_cooperative_wait_assembled_returns_after_actual_nmi() {
+    let wait = [
+        0xa9, 1, 0x85, 0x1c, 0xa9, 0, 0x85, 0x10, 0xa5, 0x10, 0x10, 0xfc, 0xa9, 0, 0x85, 0x1c,
+        0x58, 0x60,
+    ];
+    let reset = [
+        0xa9, 0xa8, 0x8d, 0, 0x20, 0x20, 0, 0x80, 0xa9, 0x5a, 0x85, 0x40, 0x4c, 0x0c, 0xe1,
+    ];
+    let (mut rom, profile) = two_bank_fixture(&reset, &wait, &[0x60]);
+    rom[10] = 7;
+    rom[16 + 0xe700..16 + 0xe707].copy_from_slice(&[0x48, 0xc6, 0x10, 0xe6, 0x70, 0x68, 0x40]);
+    rom[16 + 0xfffa..16 + 0xfffc].copy_from_slice(&0xe700u16.to_le_bytes());
+    let profile = profile.replace("nmi=0xe100", "nmi=0xe700").replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+    ) + "[[cooperative_wait]]\nbank=0\nat=0x8008\ntick=0x10\ntick_enable=0x1c\n";
+    let image = nes_rom::parse(&rom).unwrap();
+    let mut bus = ReferenceBus {
+        prg: image.prg,
+        mapper: Mmc3::new(
+            &image.header,
+            image.prg.len(),
+            image.chr.len(),
+            Mmc3Revision::Sharp,
+        )
+        .unwrap(),
+        ram: [0; 0x800],
+        cart_ram: [0; 0x2000],
+    };
+    let mut cpu = oracle_6502::Cpu::new();
+    cpu.pc = 0xe100;
+    let mut nmi_delivered = false;
+    for _ in 0..100 {
+        if cpu.pc == 0x8008 && !nmi_delivered {
+            assert_eq!((bus.ram[0x10], bus.ram[0x1c]), (0, 1));
+            cpu.nmi(&mut bus);
+            nmi_delivered = true;
+        }
+        cpu.step(&mut bus).unwrap();
+        if bus.ram[0x40] == 0x5a {
+            break;
+        }
+    }
+    assert!(nmi_delivered);
+    assert_eq!(
+        (bus.ram[0x10], bus.ram[0x1c], bus.ram[0x40], bus.ram[0x70]),
+        (0xff, 0, 0x5a, 1)
+    );
+    assert_eq!(cpu.p & 4, 0);
+    let (work, project) = assembled_fixture("cooperative-wait", &rom, &profile);
+    let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+    trace
+        .arg(project.join("sms.sms"))
+        .args(["--steps", "3000000", "--expect-no-trap"]);
+    for (addr, value) in [
+        (0xc010, 0xff),
+        (0xc01c, 0),
+        (0xc040, 0x5a),
+        (0xc070, 1),
+        (0xc825, 0),
+    ] {
+        trace
+            .arg("--expect-ram")
+            .arg(format!("{addr:04X}={value:02X}"));
+    }
+    run_trace(&work, &mut trace);
+}
+
+#[test]
+#[ignore = "requires existing Docker assembler; stresses full software calls and tails"]
+fn mmc3_full_dynamic_dispatch_does_not_accumulate_native_frames() {
+    // 1024 ordinary mapped calls, then 1024 mapped tail cycles under one
+    // software owner. Repeated targets exercise the old MRU hit/miss paths.
+    let mut reset = vec![
+        0xa9, 7, 0x8d, 0, 0x80, 0xa9, 1, 0x8d, 1, 0x80, 0xa0, 4, 0xa2, 0, 0x20, 0, 0x80, 0xe8,
+        0xd0, 0xfa, 0x88, 0xd0, 0xf5, 0xa9, 0x44, 0x85, 0x40, 0xa9, 0, 0x85, 0x50, 0xa9, 4, 0x85,
+        0x51, 0x20, 0x20, 0x80, 0x08, 0x68, 0x85, 0x42, 0xa9, 0x5a, 0x85, 0x41,
+    ];
+    let stop = 0xe100 + reset.len() as u16;
+    reset.extend_from_slice(&[0x4c, stop as u8, (stop >> 8) as u8]);
+    let (mut rom, profile) = two_bank_fixture(&reset, &[0x60], &[0x60]);
+    rom[10] = 7;
+    rom[16 + 0x20..16 + 0x23].copy_from_slice(&[0x4c, 0x20, 0xa0]);
+    // DEC low; BNE tail; DEC high; BEQ done; tail:JMP $8020; done:SEC/RTS.
+    let tail = [
+        0xc6, 0x50, 0xd0, 4, 0xc6, 0x51, 0xf0, 3, 0x4c, 0x20, 0x80, 0x38, 0x60,
+    ];
+    rom[16 + 0x2020..16 + 0x2020 + tail.len()].copy_from_slice(&tail);
+    let profile = profile.replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+    ) + "[[bank_entry]]\nbank=0\naddr=0x8020\n[[bank_entry]]\nbank=1\naddr=0xa020\n";
+    let image = nes_rom::parse(&rom).unwrap();
+    let mut bus = ReferenceBus {
+        prg: image.prg,
+        mapper: Mmc3::new(
+            &image.header,
+            image.prg.len(),
+            image.chr.len(),
+            Mmc3Revision::Sharp,
+        )
+        .unwrap(),
+        ram: [0; 0x800],
+        cart_ram: [0; 0x2000],
+    };
+    let mut cpu = oracle_6502::Cpu::new();
+    cpu.pc = 0xe100;
+    for _ in 0..20000 {
+        if cpu.pc == stop {
+            break;
+        }
+        cpu.step(&mut bus).unwrap();
+    }
+    assert_eq!(cpu.pc, stop);
+    assert_eq!((cpu.x, cpu.y, cpu.sp), (0, 0, 0xfd));
+    assert_eq!(&bus.ram[0x40..0x43], &[0x44, 0x5a, 0x37]);
+    let (work, project) = assembled_fixture("full-dispatch-stack", &rom, &profile);
+    let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+    trace
+        .arg(project.join("sms.sms"))
+        .args(["--steps", "5000000", "--no-irq", "--expect-no-trap"]);
+    for (addr, value) in [
+        (0xc040, 0x44),
+        (0xc041, 0x5a),
+        (0xc042, 0x37),
+        (0xc050, 0),
+        (0xc051, 0),
+        (0xcb02, 0xfd),
+        (0xcb76, 0),
+        (0xcb77, 0xd3),
+        (0xd47d, 0xc0),
+        (0xd47e, 0xd4),
+    ] {
+        trace
+            .arg("--expect-ram")
+            .arg(format!("{addr:04X}={value:02X}"));
+    }
+    run_trace(&work, &mut trace);
+    let log = std::fs::read_to_string(work.join("trace.log")).unwrap();
+    let state = log
+        .lines()
+        .find(|line| line.starts_with("Cpu state:"))
+        .unwrap();
+    assert!(
+        state.contains("A=$5A") && state.contains("D=$00 E=$00"),
+        "{state}"
+    );
+    assert!(
+        log.contains("SP=$DFFC"),
+        "native caller depth must not accumulate: {log}"
+    );
+}
+
+#[test]
+#[ignore = "requires existing Docker assembler; compares rewritten live RTS bytes with 6502"]
+fn mmc3_full_rts_honors_rewritten_live_return_and_current_mapping() {
+    for stack in [0u8, 1, 0xfd, 0xff] {
+        for mapped in [false, true] {
+            let reset = [
+                0xa2, stack, 0x9a, 0x20, 0, 0xe2, 0xa9, 0xaa, 0x85, 0x40, 0x4c, 0x0a, 0xe1,
+            ];
+            let (mut rom, profile) = two_bank_fixture(&reset, &[0x60], &[0x60]);
+            rom[10] = 7;
+            let target = if mapped { 0xa020u16 } else { 0xe300u16 };
+            let return_addr = target - 1;
+            // INX wraps within the guest stack page, unlike absolute $0101,X.
+            let mut callee = vec![
+                0xba,
+                0xe8,
+                0xa9,
+                return_addr as u8,
+                0x9d,
+                0,
+                1,
+                0xe8,
+                0xa9,
+                (return_addr >> 8) as u8,
+                0x9d,
+                0,
+                1,
+            ];
+            if mapped {
+                callee.extend_from_slice(&[0xa9, 7, 0x8d, 0, 0x80, 0xa9, 2, 0x8d, 1, 0x80]);
+            }
+            callee.extend_from_slice(&[0xa2, 0x52, 0xa0, 0xa9, 0xa9, 0x69, 0x38, 0xf8, 0x60]);
+            rom[16 + 0xe200..16 + 0xe200 + callee.len()].copy_from_slice(&callee);
+            let mut destination = vec![
+                0x85, 0x40, 0x08, 0x68, 0x85, 0x41, 0x8a, 0x85, 0x42, 0x98, 0x85, 0x43, 0xba, 0x8a,
+                0x85, 0x44,
+            ];
+            let stop = target + destination.len() as u16;
+            destination.extend_from_slice(&[0x4c, stop as u8, (stop >> 8) as u8]);
+            let offset = if mapped { 0x4020 } else { 0xe300 };
+            rom[16 + offset..16 + offset + destination.len()].copy_from_slice(&destination);
+            let profile = profile.replace(
+                "MMC3_BANKING_EXPERIMENT",
+                "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+            ) + if mapped {
+                "[[bank_entry]]\nbank=2\naddr=0xa020\n"
+            } else {
+                "[[function]]\naddr=0xe300\nname='rewritten_destination'\n"
+            };
+            let image = nes_rom::parse(&rom).unwrap();
+            let mut bus = ReferenceBus {
+                prg: image.prg,
+                mapper: Mmc3::new(
+                    &image.header,
+                    image.prg.len(),
+                    image.chr.len(),
+                    Mmc3Revision::Sharp,
+                )
+                .unwrap(),
+                ram: [0; 0x800],
+                cart_ram: [0; 0x2000],
+            };
+            let mut cpu = oracle_6502::Cpu::new();
+            cpu.pc = 0xe100;
+            for _ in 0..200 {
+                if cpu.pc == stop {
+                    break;
+                }
+                cpu.step(&mut bus).unwrap();
+            }
+            assert_eq!(cpu.pc, stop);
+            assert_eq!(&bus.ram[0x40..0x45], &[0x69, 0x3d, 0x52, 0xa9, stack]);
+            assert_eq!(cpu.sp, stack);
+            let (work, project) = assembled_fixture(
+                &format!("rewritten-rts-{stack:02x}-{mapped}"),
+                &rom,
+                &profile,
+            );
+            let mut trace = std::process::Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+            trace.arg(project.join("sms.sms")).args([
+                "--steps",
+                "500000",
+                "--no-irq",
+                "--expect-no-trap",
+            ]);
+            for (offset, value) in bus.ram[0x40..0x45].iter().enumerate() {
+                trace
+                    .arg("--expect-ram")
+                    .arg(format!("{:04X}={value:02X}", 0xc040 + offset));
+            }
+            trace.args(["--expect-ram", "CB76=00", "--expect-ram", "CB77=D3"]);
+            run_trace(&work, &mut trace);
+        }
     }
 }

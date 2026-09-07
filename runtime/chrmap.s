@@ -1,3 +1,4 @@
+.ifndef MMC3_FULL_RUNTIME
 ; chrmap.s — runtime tile remapping + background sub-palette baking.
 ;
 ; THE PALETTE PROBLEM: the NES picks one of 4 background sub-palettes per
@@ -1061,3 +1062,4 @@ _chrmap_attr_write_one_s:
   ret
 
 .ends
+.endif ; separate full MMC3 graphics backend

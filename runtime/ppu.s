@@ -43,6 +43,7 @@
 ; target under DI and returns by JP instead of consuming a native call frame.
 ; rt_ppu_read:  entry B = register index (0..7). Returns A.
 
+.ifndef MMC3_FULL_RUNTIME
 .section "ppu" free
 
 ; ─── rt_ppu_write ─────────────────────────────────────────────────────────────
@@ -1544,3 +1545,4 @@ _nes_to_sms_palette:
   .db $3F, $3E, $3A, $3B, $3B, $3B, $2B, $2F, $1F, $1E, $2E, $2E, $3E, $2A, $00, $00
 
 .ends
+.endif ; legacy PPU; MMC3_FULL_RUNTIME owns ppu_mmc3.s

@@ -490,7 +490,11 @@ pub fn analyze_in_window(
     let mut unresolved_external: BTreeSet<u16> = BTreeSet::new();
 
     // ---- Pre-mark data regions ----
-    for dr in &profile.data_regions {
+    for dr in profile
+        .data_regions
+        .iter()
+        .filter(|dr| dr.bank.is_none() || dr.bank == bank)
+    {
         if dr.start >= 0x8000 {
             let start_off = (dr.start - 0x8000) as usize;
             // DataRegion.end is inclusive
@@ -1110,6 +1114,35 @@ end   = 0x880F
         let f = result.functions.by_addr(0x87FD).unwrap();
         // Function should end at or before $8800
         assert!(f.end <= 0x8800);
+    }
+
+    #[test]
+    fn physical_bank_data_does_not_hide_another_banks_code() {
+        let mut prg = empty_prg();
+        prg[..3].copy_from_slice(&[0xa9, 0x42, 0x60]);
+        let profile = profile::load_from_str(
+            "[rom]\nname='banked-data'\nmapper=4\nprg_kib=64\nchr_kib=8\n\
+             [[function]]\naddr=0x8000\nname='entry'\n\
+             [[data_region]]\nbank=0\nstart=0x8000\nend=0x8002\n",
+        )
+        .unwrap();
+        assert!(profile.is_data_byte_in_bank(0x8000, Some(0)));
+        assert!(!profile.is_data_byte_in_bank(0x8000, Some(1)));
+        assert!(!profile.is_data_byte(0x8000));
+        for bank in [0, 1] {
+            let result = analyze_in_window(
+                &prg,
+                vectors_reset(0),
+                &profile,
+                AnalysisWindow {
+                    start: 0x8000,
+                    end_inclusive: 0x9fff,
+                },
+                Some(bank),
+            );
+            let function = result.functions.by_addr(0x8000).unwrap();
+            assert_eq!(function.end > function.addr, bank == 1);
+        }
     }
 
     // Test 9: ClassMap counts.

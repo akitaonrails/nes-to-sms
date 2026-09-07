@@ -164,13 +164,15 @@ _latch_chord_reset:
 _latch_chord_done:
   ; SMS PAUSE pressed recently (or the chord above): the pause NMI
   ; ($0066) armed a small countdown at $CB2E; while it runs, hold NES
-  ; Start down. The counter makes the press a clean multi-frame edge
-  ; (press then release), which is what new-press detectors need.
+  ; Start down. Full MMC3 rendering can span many host frames, so its
+  ; countdown advances on completed guest controller bytes instead.
   ld   a, ($cb2e)
   or   a
   jr   z, _latch_no_pause_start
+.ifndef MMC3_FULL_RUNTIME
   dec  a
   ld   ($cb2e), a
+.endif
   ld   a, c
   or   %00001000            ; NES Start
   ld   c, a
@@ -268,6 +270,20 @@ _ctrl_read_shift_done:
   ld   a, ($cb07)
   inc  a
   ld   ($cb07), a
+.ifdef MMC3_FULL_RUNTIME
+.ifdef INPUT_PAUSE_START
+  ; Consume one injected poll only after all eight port-1 bits. Port 2,
+  ; partial bytes and reads past eight cannot expire an unseen Start.
+  cp   8
+  jr   nz, _ctrl_read_pause_done
+  ld   a, ($cb2e)
+  or   a
+  jr   z, _ctrl_read_pause_done
+  dec  a
+  ld   ($cb2e), a
+_ctrl_read_pause_done:
+.endif
+.endif
   ld   a, c                 ; return sampled button bit, not incremented index
   ret
 

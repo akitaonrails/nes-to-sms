@@ -1,3 +1,4 @@
+.ifndef MMC3_FULL_RUNTIME
 ; vbuf.s — VRAM update buffer.
 ;
 ; The buffer lives at $C800-$C8FF (256 bytes).
@@ -334,3 +335,4 @@ _vbuf_flush_done:
   ret
 
 .ends
+.endif ; separate full MMC3 graphics backend

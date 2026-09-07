@@ -20,8 +20,12 @@ ordered implementation and acceptance gates. The compatibility baseline is
 committed; the executable 8 KiB banking foundation has passed independent review
 and all regression gates, including bank-sensitive flags and conservative
 computed-continuation rejection.
-Cartridge RAM, CHR residency and actual IRQ/reference timing remain required
-for the first visible conversion. The parallel [LLVM-style optimization
+The experimental full-runtime profile now reaches an animated title and
+input-responsive World 1 map in actual Genesis Plus GX at 500% overclock.
+Cartridge RAM, physical CHR records and a verified-wait single-split adapter
+are integrated; this is not cycle/A12-accurate general MMC3 support. Current
+gate: finish independent review and legacy regressions, then enter and complete
+a playable 1-1 route with measured rendering/performance work. The parallel [LLVM-style optimization
 research](ir-optimization-research.md) is complete; its measured experiments
 follow correctness rather than replacing the playable-ROM work. Preserve SMB1/CV1
 and their current performance while exploring this path. The CV1 optimization

@@ -181,6 +181,15 @@ fn validate_config(
     assets: &ProjectAssets,
     build: &z80_emit::Build,
 ) -> Result<(), EmitError> {
+    let mmc3_full = cfg
+        .runtime_defines
+        .iter()
+        .any(|name| name == "MMC3_FULL_RUNTIME");
+    if mmc3_full && cfg.mapper != 4 {
+        return Err(EmitError::InvalidMmc3Config(
+            "full MMC3 runtime requires mapper 4".into(),
+        ));
+    }
     if !cfg.title.is_ascii() || cfg.title.len() > 11 {
         return Err(EmitError::InvalidTitle(cfg.title.to_string()));
     }
@@ -247,16 +256,35 @@ fn validate_config(
                 "experimental MMC3 layout requires a 2048 KiB SMS image".into(),
             ));
         }
-        if !cfg
-            .runtime_defines
-            .iter()
-            .any(|name| name == "MMC3_BANKING_EXPERIMENT")
+        if !mmc3_full
+            && !cfg
+                .runtime_defines
+                .iter()
+                .any(|name| name == "MMC3_BANKING_EXPERIMENT")
         {
             return Err(EmitError::InvalidMmc3Config(
                 "MMC3 requires the explicit MMC3_BANKING_EXPERIMENT capability gate".into(),
             ));
         }
-        if cfg.chr_ram
+        if mmc3_full {
+            let chr_len = assets.chr_nes.as_ref().map_or(0, Vec::len);
+            if !(0x2000..=0x40000).contains(&chr_len)
+                || !chr_len.is_power_of_two()
+                || cfg.chr_ram
+                || cfg.chr_ram_bg_identity
+                || cfg.native_calls
+                || assets.chr_4bpp.len() != 0x4000
+                || cfg.raw_ciram_backend != RawCiramBackend::SramSlot2
+                || cfg
+                    .runtime_defines
+                    .iter()
+                    .any(|name| name.starts_with("CV1_") || name == "MMC3_BANKING_EXPERIMENT")
+            {
+                return Err(EmitError::InvalidMmc3Config(
+                    "full MMC3 requires power-of-two 8..256 KiB CHR-ROM, software stack, SRAM CIRAM, and no CV1/experiment capabilities".into(),
+                ));
+            }
+        } else if cfg.chr_ram
             || cfg.chr_ram_bg_identity
             || assets.chr_nes.as_ref().map(Vec::len) != Some(0x2000)
         {
@@ -299,6 +327,7 @@ fn validate_config(
         });
     }
     if cfg.mapper == 4
+        && !mmc3_full
         && let Some(bank) = explicit_banks
             .iter()
             .find(|&&bank| bank >= MMC3_CODE_BANK_LIMIT)
@@ -322,7 +351,7 @@ fn validate_config(
             ));
         }
         if assets.nametable.as_ref().is_some_and(|v| v.len() > 0x700)
-            || assets.chr_nes.as_ref().is_some_and(|v| v.len() > 0x2000)
+            || (!mmc3_full && assets.chr_nes.as_ref().is_some_and(|v| v.len() > 0x2000))
             || assets
                 .chr_maps
                 .as_ref()
@@ -340,6 +369,11 @@ fn validate_config(
             }));
         }
         required_bank = required_bank.max(asset_base + 1);
+        if mmc3_full {
+            required_bank = required_bank.max(
+                asset_base + 1 + (assets.chr_nes.as_ref().unwrap().len() as u32).div_ceil(0x4000),
+            );
+        }
     } else {
         for (enabled, offset) in [
             (true, 0),
@@ -476,6 +510,10 @@ fn sms_asm_content(
     runtime_s_files: &[PathBuf],
 ) -> String {
     let rom_banks = cfg.rom_kib / 16;
+    let mmc3_full = cfg
+        .runtime_defines
+        .iter()
+        .any(|name| name == "MMC3_FULL_RUNTIME");
     let runtime_includes = build_runtime_includes(runtime_s_files);
     let prg_data_base = if cfg.mapper == 4 {
         MMC3_PRG_DATA_BASE
@@ -544,6 +582,13 @@ fn sms_asm_content(
             "\n.define NES_MMC3 1\n.define NES_MMC3_PRG_BANK_COUNT {}\n.define MMC3_PRG_DATA_BASE {MMC3_PRG_DATA_BASE}",
             cfg.mmc3_prg_bank_count.expect("validated MMC3 config")
         ));
+        if mmc3_full {
+            let pages = assets.chr_nes.as_ref().expect("validated CHR-ROM").len() / 0x400;
+            mapper_define.push_str(&format!(
+                "\n.define MMC3_CHR_DATA_BASE {}\n.define MMC3_CHR_BANK_COUNT {pages}\n.define MMC3_CHR_BANK_MASK {}",
+                asset_base + 2, pages - 1,
+            ));
+        }
     } else if assets.prg_banks.is_some() {
         mapper_define.push_str(&format!(
             "\n.define NES_PRG_BANK_BASE {NES_PRG_BANK_BASE}\n.define NES_PRG_BANK_COUNT {}\n.define NES_PRG_BANK_MASK {}",
@@ -698,7 +743,17 @@ fn sms_asm_content(
         }
     }
 
-    if assets.chr_nes.is_some() {
+    if mmc3_full {
+        for (page, bytes) in assets.chr_nes.as_ref().unwrap().chunks(0x4000).enumerate() {
+            let bank = asset_base + 2 + page as u32;
+            let skip = page * 0x4000;
+            out.push_str(&format!(
+                "\n.bank {bank} slot 2\n.org $0000\n.section \"data_mmc3_chr_{page}\" force\ndata_mmc3_chr_{page}:\n.incbin \"data/chr.nes\" SKIP {skip} READ {}\n.ends\n", bytes.len()
+            ));
+        }
+        // Legacy code remains assembled but its PPU read path is bypassed.
+        out.push_str("\n.define data_chr_nes data_mmc3_chr_0\n");
+    } else if assets.chr_nes.is_some() {
         let (bank, org) = if assets.prg_banks.is_some() {
             (asset_base + 1, PACKED_CHR_NES_OFFSET)
         } else {
@@ -1609,6 +1664,62 @@ mod tests {
                 validate_config(&cfg, &assets, &build),
                 Err(EmitError::InvalidMmc3Config(reason)) if reason.contains("continuation ABI")
             ));
+        }
+    }
+
+    #[test]
+    fn mmc3_full_chr_layout_preserves_every_physical_page() {
+        let (mut assets, mut cfg) = mmc3_assets_and_cfg(32);
+        cfg.runtime_defines = vec!["MMC3_FULL_RUNTIME".into(), "SMB3_MMC3_SINGLE_SPLIT".into()];
+        cfg.raw_ciram_backend = RawCiramBackend::SramSlot2;
+        assets.chr_nes = Some((0..128u8).flat_map(|page| vec![page; 0x400]).collect());
+        let mut build = minimal_build();
+        build.asm.push_str("\n.bank 95 slot 1\n");
+        let out = unique_dir("sms_proj_mmc3_full_chr");
+        emit_project(&out, &build, &assets, &cfg, None).unwrap();
+        let asm = fs::read_to_string(out.join("sms.asm")).unwrap();
+        assert!(asm.contains(".define MMC3_CHR_DATA_BASE 114"));
+        assert!(asm.contains(".define MMC3_CHR_BANK_COUNT 128"));
+        assert!(asm.contains(".define MMC3_CHR_BANK_MASK 127"));
+        assert!(!asm.contains(".define NES_CHR_RAM"));
+        assert!(!asm.contains(".define NES_PRG_BANK_BASE"));
+        for bank in 0..8 {
+            assert!(asm.contains(&format!(".bank {} slot 2", 114 + bank)));
+            assert!(asm.contains(&format!("SKIP {} READ 16384", bank * 16384)));
+        }
+        assert_eq!(
+            fs::read(out.join("data/chr.nes")).unwrap(),
+            assets.chr_nes.unwrap()
+        );
+        fs::remove_dir_all(out).unwrap();
+    }
+
+    #[test]
+    fn mmc3_full_rejects_unsafe_graphics_contracts() {
+        for case in 0..8 {
+            let (mut assets, mut cfg) = mmc3_assets_and_cfg(32);
+            cfg.runtime_defines = vec!["MMC3_FULL_RUNTIME".into()];
+            cfg.raw_ciram_backend = RawCiramBackend::SramSlot2;
+            assets.chr_nes = Some(vec![0; 0x20000]);
+            match case {
+                0 => cfg.native_calls = true,
+                1 => cfg.raw_ciram_backend = RawCiramBackend::None,
+                2 => cfg.runtime_defines.push("CV1_RUNTIME_HOOKS".into()),
+                3 => cfg.runtime_defines.push("MMC3_BANKING_EXPERIMENT".into()),
+                4 => assets.chr_nes = Some(vec![0; 0x18000]),
+                5 => assets.chr_nes = Some(vec![0; 0x1000]),
+                6 => cfg.chr_ram = true,
+                7 => assets.chr_nes = Some(vec![0; 0x40000]), // bank129 exceeds image
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    validate_config(&cfg, &assets, &minimal_build()),
+                    Err(EmitError::InvalidMmc3Config(_)
+                        | EmitError::LayoutExceedsRomCapacity { .. })
+                ),
+                "case {case}"
+            );
         }
     }
 }
