@@ -27,10 +27,13 @@ Cartridge RAM, physical CHR records and a verified-wait single-split adapter
 are integrated; this is not cycle/A12-accurate general MMC3 support. Current
 functional checkpoint has passed independent correctness and structure review;
 fresh SMB1/CV1 ROMs retain exact byte parity. Performance remains severe:
-about 3.8 updates/second during active traversal and frequent rebuild blanking;
-functional completion is not comfortable/full-speed playability. The next
-bounded experiment is the measured full-bus internal-RAM fast path, followed
-by remeasurement before considering a separate dispatch/presentation change.
+about 4.0 updates/second during active traversal and frequent rebuild blanking;
+functional completion is not comfortable/full-speed playability. The
+[32-byte internal-RAM fast path](mmc3-ram-fast-path.md) passes independent review
+and yields 4.9% active-traversal gain without reducing rebuild blanking. The
+moving-level profile puts rendering first (44.6%), then dispatch (17.5%).
+Next: identify exact background invalidations and propose a bounded coherent
+presentation improvement before changing cache or scroll architecture.
 The parallel [LLVM-style optimization
 research](ir-optimization-research.md) is complete; its measured experiments
 follow correctness rather than replacing the playable-ROM work. Preserve SMB1/CV1

@@ -284,7 +284,13 @@ fn full_bus_fixture() -> (Vec<u8>, String) {
     ];
     let (mut rom, profile) = two_bank_fixture(&code, &[0x60], &[0x60]);
     rom[10] = 7; // NES 2.0: 8 KiB volatile PRG RAM
-    rom[16 + 0xe200..16 + 0xe207].copy_from_slice(&[0xa9, 0xa5, 0x85, 0x3f, 0x4c, 4, 0xe2]);
+    let finish = [
+        0xa9, 0x7f, 0x85, 0xf0, 0xe6, 0xf0, // tagged zero-page store and RMW
+        0x18, 0x65, 0xf0, 0x49, 0xaa, 0x85, 0x48, // ADC/EOR through RAM bus
+        0x08, 0x68, 0x85, 0x49, // record original flags through guest stack
+        0xa9, 0xa5, 0x85, 0x3f, 0x4c, 0x15, 0xe2,
+    ];
+    rom[16 + 0xe200..16 + 0xe200 + finish.len()].copy_from_slice(&finish);
     let profile = profile.replace(
         "MMC3_BANKING_EXPERIMENT",
         "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
@@ -301,6 +307,7 @@ fn mmc3_full_bus_reference_covers_cart_ram_and_indirect_boundaries() {
         &[0x5a, 0x5a, 0xa6, 0x5a, 0x5a, 0x80, 0x80, 0x63]
     );
     assert_eq!(ram[0x3f], 0xa5);
+    assert_eq!(&ram[0x48..0x4a], &[0x55, 0x34]);
 }
 
 #[test]
@@ -349,7 +356,7 @@ fn mmc3_full_bus_assembled_matches_original_6502() {
     trace
         .arg(project.join("sms.sms"))
         .args(["--steps", "2000000", "--no-irq", "--expect-no-trap"]);
-    for (addr, value) in reference.iter().enumerate().take(0x48).skip(0x3f) {
+    for (addr, value) in reference.iter().enumerate().take(0x4a).skip(0x3f) {
         trace
             .arg("--expect-ram")
             .arg(format!("{:04X}={value:02X}", 0xc000 + addr));

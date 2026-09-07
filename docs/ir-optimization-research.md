@@ -312,3 +312,12 @@ gains. Both final active routes complete with identical guest/cart RAM at seven
 matched checkpoints; the idle comparison ends at a then-unresolved target.
 These results come from runtime rendering changes, not LLVM or inlining.
 See [the scope and comparison details](mmc3-graphics-runtime.md).
+
+The subsequent [32-byte checked-RAM experiment](mmc3-ram-fast-path.md) is now
+implemented and measured: +9.75% map throughput but only +4.90% active traversal,
+with unchanged game-state checkpoints and essentially unchanged rebuild
+blanking. It is a runtime specialization, not an IR inliner. This reinforces
+the requirement to profile the actual moving workload before choosing a pass.
+Its later moving-level profile attributes 44.6% to rendering and 17.5% to
+page-local dispatch, while bus routing is 7.5%; map cost shares are not a
+substitute for that workload. Background invalidation is the next investigation.

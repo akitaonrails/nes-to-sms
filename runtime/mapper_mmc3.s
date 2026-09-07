@@ -342,7 +342,20 @@ _m3_wait_di:
 
 ; Effective CPU-bus operations. HL is a raw NES address; A is the written or
 ; read byte. Preserve BC/DE/HL, entry IFF, shadow P and exact mapper controls.
+; Internal RAM is one interruptible native byte access, requiring no mapper
+; or IFF changes. All other addresses retain the guarded full-bus path.
 rt_mmc3_read_bus:
+  ld a, h
+  cp $20
+  jr nc, _m3_read_bus_slow
+  push hl
+  and 7
+  or $c0
+  ld h, a
+  ld a, (hl)
+  pop hl
+  ret
+_m3_read_bus_slow:
   push bc
   push de
   push hl
@@ -360,6 +373,21 @@ rt_mmc3_read_bus:
   ei
   ret
 rt_mmc3_write_bus:
+  push hl
+  push af
+  ld a, h
+  cp $20
+  jr nc, _m3_write_bus_slow
+  and 7
+  or $c0
+  ld h, a
+  pop af
+  ld (hl), a
+  pop hl
+  ret
+_m3_write_bus_slow:
+  pop af
+  pop hl
   push bc
   push de
   push hl

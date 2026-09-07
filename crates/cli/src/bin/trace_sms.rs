@@ -8203,6 +8203,290 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_ram_bus_fast_path_preserves_boundaries_and_interrupt_context() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        // These are the complete additions, including restoration before
+        // the unchanged slow entries. Nominal Z80 costs (not Cpu's approximate
+        // cycle counter): RAM read 74 T/write 95 T; misses add 23 T/65 T.
+        let read_prefix = [
+            0x7c, 0xfe, 0x20, 0x30, 9, 0xe5, 0xe6, 7, 0xf6, 0xc0, 0x67, 0x7e, 0xe1, 0xc9,
+        ];
+        let write_prefix = [
+            0xe5, 0xf5, 0x7c, 0xfe, 0x20, 0x30, 9, 0xe6, 7, 0xf6, 0xc0, 0x67, 0xf1, 0x77, 0xe1,
+            0xc9, 0xf1, 0xe1,
+        ];
+        let mut cases = 0;
+        let mut injected = 0;
+        for writing in [false, true] {
+            let entry = defs[if writing {
+                "rt_mmc3_write_bus"
+            } else {
+                "rt_mmc3_read_bus"
+            }]
+            .1;
+            for address in [
+                0x0000u16, 0x00ff, 0x0100, 0x07ff, 0x0800, 0x17ff, 0x1fff, 0x2000, 0x3fff, 0x4016,
+                0x5fff, 0x6000, 0x7fff, 0x8000, 0xffff,
+            ] {
+                for iff in [false, true] {
+                    for control in [0, 8, 12] {
+                        let setup = || {
+                            let mut bus = SmsBus::new(rom.clone(), 0xff);
+                            for (addr, value) in [
+                                (0xfffe, 95),
+                                (0xcb14, 17),
+                                (0xffff, 104),
+                                (0xfffc, control),
+                                (0xc81e, 0x80),
+                                (0xcb03, 0xa5),
+                                (0xcb28, 1),
+                                (0xc831, 2),
+                                (0xc83f, 0x35),
+                            ] {
+                                bus.write(addr, value);
+                            }
+                            for (i, page) in [0, 1, 6, 7].into_iter().enumerate() {
+                                bus.write(0xc819 + i as u16, page);
+                            }
+                            bus.write(0xc000 + (address & 0x7ff), 0x96);
+                            bus.cart_ram[0x4000 + (address as usize & 0x1fff)] = 0x96;
+                            let mut cpu = Cpu::new();
+                            cpu.pc = entry;
+                            cpu.sp = 0xdff0;
+                            cpu.a = 0x5a;
+                            cpu.f = 0x95;
+                            cpu.set_hl(address);
+                            cpu.set_bc(0x4587);
+                            cpu.set_de(0x52a9);
+                            cpu.iff1 = iff;
+                            cpu.iff2 = iff;
+                            bus.write(cpu.sp, 7);
+                            bus.write(cpu.sp + 1, 0);
+                            (bus, cpu)
+                        };
+                        let (mut reference_bus, mut reference_cpu) = setup();
+                        let mapping = (reference_bus.slot_bank, reference_bus.read(0xfffc));
+                        let mut boundaries = Vec::new();
+                        for _ in 0..5000 {
+                            if reference_cpu.pc == 7 || reference_bus.read(0xcb1d) != 0 {
+                                break;
+                            }
+                            boundaries.push((
+                                reference_cpu.pc,
+                                reference_cpu.iff1 && reference_cpu.ei_pending == 0,
+                            ));
+                            reference_cpu.step(&mut reference_bus).unwrap();
+                        }
+                        cases += 1;
+                        if address == 0x5fff {
+                            assert_eq!(reference_bus.read(0xcb1d), 0xe8);
+                            continue;
+                        }
+                        assert_eq!(reference_bus.read(0xcb1d), 0, "{writing} {address:04x}");
+                        assert_eq!(reference_cpu.pc, 7, "{writing} {address:04x}");
+                        assert_eq!(
+                            (
+                                reference_cpu.bc(),
+                                reference_cpu.de(),
+                                reference_cpu.hl(),
+                                reference_cpu.sp
+                            ),
+                            (0x4587, 0x52a9, address, 0xdff2)
+                        );
+                        assert_eq!((reference_cpu.iff1, reference_cpu.iff2), (iff, iff));
+                        assert_eq!(
+                            (reference_bus.slot_bank, reference_bus.read(0xfffc)),
+                            mapping
+                        );
+                        assert_eq!(reference_bus.read(0xcb03), 0xa5);
+                        if writing {
+                            assert_eq!(reference_cpu.a, 0x5a);
+                        } else {
+                            let expected = match address {
+                                0x2000 => 0x35,       // write-only PPU register returns its bus latch
+                                0x3fff | 0x4016 => 0, // buffered PPUDATA / first serial button
+                                0x6000 | 0x7fff => 0x96,
+                                0x8000 | 0xffff => {
+                                    let page =
+                                        [0, 1, 6, 7][usize::from((address - 0x8000) / 0x2000)];
+                                    rom[96 * 0x4000 + page * 0x2000 + usize::from(address & 0x1fff)]
+                                }
+                                _ => 0x96,
+                            };
+                            assert_eq!(reference_cpu.a, expected, "read {address:04x}");
+                        }
+                        if (0x6000..0x8000).contains(&address) {
+                            assert_eq!(
+                                reference_bus.cart_ram[0x4000 + usize::from(address & 0x1fff)],
+                                if writing { 0x5a } else { 0x96 }
+                            );
+                        }
+                        if address < 0x2000 {
+                            assert_eq!(reference_cpu.a, if writing { 0x5a } else { 0x96 });
+                            assert_eq!(
+                                reference_bus.read(0xc000 + (address & 0x7ff)),
+                                if writing { 0x5a } else { 0x96 }
+                            );
+                        }
+                        // Inject the real IM1 handler at every interruptible
+                        // instruction boundary, including before/after each
+                        // new PUSH/POP. DI sections must remain uninterruptible.
+                        for (step, (_, interruptible)) in boundaries.iter().enumerate() {
+                            if !interruptible {
+                                continue;
+                            }
+                            let (mut bus, mut cpu) = setup();
+                            for _ in 0..step {
+                                cpu.step(&mut bus).unwrap();
+                            }
+                            let interrupted = cpu;
+                            cpu.sp -= 1;
+                            bus.write(cpu.sp, (cpu.pc >> 8) as u8);
+                            cpu.sp -= 1;
+                            bus.write(cpu.sp, cpu.pc as u8);
+                            cpu.pc = 0x38;
+                            cpu.iff1 = false;
+                            cpu.iff2 = false;
+                            cpu.ei_pending = 0;
+                            bus.frame_int_pending = true;
+                            for _ in 0..20000 {
+                                cpu.step(&mut bus).unwrap();
+                                if cpu.pc == interrupted.pc && cpu.sp == interrupted.sp {
+                                    break;
+                                }
+                            }
+                            assert_eq!(
+                                (cpu.pc, cpu.sp, cpu.a, cpu.f, cpu.bc(), cpu.de(), cpu.hl()),
+                                (
+                                    interrupted.pc,
+                                    interrupted.sp,
+                                    interrupted.a,
+                                    interrupted.f,
+                                    interrupted.bc(),
+                                    interrupted.de(),
+                                    interrupted.hl()
+                                )
+                            );
+                            assert_eq!((cpu.iff1, cpu.iff2), (true, true));
+                            for _ in 0..5000 {
+                                if cpu.pc == 7 || bus.read(0xcb1d) != 0 {
+                                    break;
+                                }
+                                cpu.step(&mut bus).unwrap();
+                            }
+                            assert_eq!(
+                                (cpu.pc, cpu.sp, cpu.a, cpu.bc(), cpu.de(), cpu.hl()),
+                                (7, 0xdff2, reference_cpu.a, 0x4587, 0x52a9, address),
+                                "write={writing} address={address:04x} step={step}"
+                            );
+                            assert_eq!((bus.slot_bank, bus.read(0xfffc)), mapping);
+                            assert_eq!(bus.read(0xcb03), 0xa5);
+                            assert_eq!((cpu.iff1, cpu.iff2), (true, true));
+                            if address < 0x2000 {
+                                assert_eq!(
+                                    bus.read(0xc000 + (address & 0x7ff)),
+                                    reference_bus.read(0xc000 + (address & 0x7ff))
+                                );
+                            }
+                            injected += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("{cases} bus vectors; {injected} real host IRQ instruction-boundary injections");
+        for (name, expected) in [
+            ("rt_mmc3_read_bus", read_prefix.as_slice()),
+            ("rt_mmc3_write_bus", write_prefix.as_slice()),
+        ] {
+            let (bank, entry) = defs[name];
+            assert_eq!(bank, 0, "fast path must remain in fixed slot zero");
+            assert_eq!(
+                &rom[entry as usize..entry as usize + expected.len()],
+                expected,
+                "32-byte shared fast-path budget / nominal timing contract"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT from mmc3_full_bus_assembled_matches_original_6502"]
+    fn mmc3_compiled_ram_rmw_preserves_old_and_final_bus_writes() {
+        struct Writes {
+            bus: SmsBus,
+            enabled: bool,
+            stack: Vec<u8>,
+            zero_page: Vec<u8>,
+        }
+        impl Bus for Writes {
+            fn read(&mut self, address: u16) -> u8 {
+                self.bus.read(address)
+            }
+            fn write(&mut self, address: u16, value: u8) {
+                if self.enabled {
+                    match address {
+                        0xc1ff => self.stack.push(value),
+                        0xc0f0 => self.zero_page.push(value),
+                        _ => {}
+                    }
+                }
+                self.bus.write(address, value);
+            }
+            fn in_port(&mut self, port: u8) -> u8 {
+                self.bus.in_port(port)
+            }
+            fn out_port(&mut self, port: u8, value: u8) {
+                self.bus.out_port(port, value);
+            }
+        }
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let mut bus = Writes {
+            bus: SmsBus::new(std::fs::read(path.join("sms.sms")).unwrap(), 0xff),
+            enabled: false,
+            stack: Vec::new(),
+            zero_page: Vec::new(),
+        };
+        let mut cpu = Cpu::new();
+        for _ in 0..2_000_000 {
+            if cpu.pc == defs["translated_reset"].1
+                && bus.bus.slot_bank[1] == defs["translated_reset"].0
+            {
+                bus.enabled = true;
+            }
+            if bus.read(0xc03f) == 0xa5 || bus.read(0xcb1d) != 0 {
+                break;
+            }
+            cpu.step(&mut bus).unwrap();
+        }
+        assert!(bus.enabled);
+        assert_eq!(bus.read(0xcb1d), 0);
+        assert_eq!(bus.read(0xc03f), 0xa5);
+        // Source fixture: STA/INC/LSR/ROL $01FF. Every RMW
+        // writes its old value before its new value, even through fast RAM.
+        assert_eq!(bus.stack, [0x7f, 0x7f, 0x80, 0x80, 0x40, 0x40, 0x80]);
+        assert_eq!(bus.zero_page, [0x7f, 0x7f, 0x80]);
+        assert_eq!((bus.read(0xc048), bus.read(0xc049)), (0x55, 0x34));
+    }
+
+    #[test]
     fn native_stack_guard_rejects_existing_bg_refcounts_but_accepts_floor() {
         assert_eq!(NATIVE_STACK_FLOOR, 0xDD80 + 192);
         for sp in [0, 0xDD7F, 0xDD80, 0xDE3F] {
