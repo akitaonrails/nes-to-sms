@@ -7643,6 +7643,184 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT Docker-assembled MMC3 fixture"]
+    fn mmc3_assembled_helpers_preserve_live_state_and_mapping() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        assert_eq!(rom.len(), 0x200000);
+        for label in ["rt_mmc3_write", "rt_mmc3_read_prg"] {
+            assert_eq!(defs[label].0, 0, "helper must remain in fixed slot 0");
+        }
+        // Seed only the runtime ABI, not game state. The separate full-pipeline
+        // fixture starts at reset and compares against the original 6502 CPU.
+        for iff in [false, true] {
+            for sram_control in [0, 8, 12] {
+                for address in [0x8010u16, 0xa010, 0xc010, 0xe010, 0] {
+                    for writing in [false, true] {
+                        let mut bus = SmsBus::new(rom.clone(), 0xff);
+                        bus.write(0xfffe, 17);
+                        bus.write(0xcb14, 17);
+                        bus.write(0xffff, 104);
+                        bus.write(0xfffc, sram_control);
+                        bus.write(0xcb03, 0xa5);
+                        bus.write(0xc000, 0x5a);
+                        bus.write(0xc810, 6); // selected PRG register R6
+                        for (offset, page) in [2, 3, 6, 7].into_iter().enumerate() {
+                            bus.write(0xc819 + offset as u16, page);
+                        }
+                        let mapping = (bus.slot_bank, bus.read(0xfffc));
+                        let label = if writing {
+                            "rt_mmc3_write"
+                        } else {
+                            "rt_mmc3_read_prg"
+                        };
+                        let mut cpu = Cpu::new();
+                        cpu.pc = defs[label].1;
+                        cpu.sp = 0xdff0;
+                        cpu.a = 2;
+                        cpu.f = 0x95;
+                        cpu.c = 0x87;
+                        cpu.set_de(0x52a9);
+                        cpu.set_hl(if writing { 0x9fff } else { address });
+                        cpu.iff1 = iff;
+                        cpu.iff2 = iff;
+                        bus.write(cpu.sp, 7);
+                        bus.write(cpu.sp + 1, 0);
+                        for _ in 0..400 {
+                            if cpu.pc == 7 {
+                                break;
+                            }
+                            cpu.step(&mut bus).unwrap();
+                            assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                            assert_eq!(bus.read(0xcb1d), 0);
+                        }
+                        assert_eq!(cpu.pc, 7, "{label} failed to return");
+                        assert_eq!(cpu.sp, 0xdff2);
+                        assert_eq!((cpu.c, cpu.de()), (0x87, 0x52a9));
+                        assert_eq!(bus.read(0xcb03), 0xa5);
+                        assert_eq!(bus.read(0xcb14), 17);
+                        assert_eq!((bus.slot_bank, bus.read(0xfffc)), mapping);
+                        assert_eq!((cpu.iff1, cpu.iff2, cpu.ei_pending), (iff, iff, 0));
+                        if writing {
+                            assert_eq!((cpu.a, cpu.f), (2, 0x95));
+                            assert_eq!(bus.read(0xc817), 2); // R6 data latch
+                            assert_eq!(bus.read(0xc819), 2); // normal-mode $8000 page
+                        } else {
+                            let expected = match address {
+                                0x8010 => 0x82,
+                                0xa010 => 0x83,
+                                0xc010 => 0x86,
+                                0xe010 => 0x87,
+                                0 => 0x5a,
+                                _ => unreachable!(),
+                            };
+                            assert_eq!(cpu.a, expected, "read ${address:04X}");
+                        }
+                    }
+                }
+            }
+        }
+        // Guest indirect addressing remains rejected by the experimental
+        // pipeline. Exercise the reachable helper ABI directly as a separate
+        // fail-closed defense, including effective-address and pointer wraps.
+        assert_eq!(defs["rt_read_zp_ptr_y"].0, 0);
+        for iff in [false, true] {
+            for sram_control in [0, 8, 12] {
+                for zp in [0x10u8, 0xff] {
+                    for (pointer, y) in [
+                        (0x1ffeu16, 1u8),
+                        (0x1fff, 1),
+                        (0x2000, 0),
+                        (0x2007, 0),
+                        (0x3fff, 0),
+                        (0x4000, 0),
+                        (0x4016, 0),
+                        (0x4020, 0),
+                        (0x6000, 0),
+                        (0x7ffe, 1),
+                        (0x7fff, 1),
+                        (0x8000, 0x10),
+                        (0x9fff, 1),
+                        (0xffff, 1),
+                        (0xff80, 0xff),
+                    ] {
+                        let effective = pointer.wrapping_add(u16::from(y));
+                        let unsupported = (0x2000..0x8000).contains(&effective);
+                        let mut bus = SmsBus::new(rom.clone(), 0xff);
+                        bus.write(0xfffe, 17);
+                        bus.write(0xcb14, 17);
+                        bus.write(0xffff, 104);
+                        bus.write(0xfffc, sram_control);
+                        bus.write(0xcb03, 0xa5);
+                        bus.write(0xc000, 0x5a);
+                        bus.write(0xc07f, 0xb6);
+                        bus.write(0xc7ff, 0x6d);
+                        bus.write(0xc000 + u16::from(zp), pointer as u8);
+                        bus.write(0xc000 + u16::from(zp.wrapping_add(1)), (pointer >> 8) as u8);
+                        for (offset, page) in [2, 3, 6, 7].into_iter().enumerate() {
+                            bus.write(0xc819 + offset as u16, page);
+                        }
+                        let expected = if effective < 0x2000 {
+                            bus.read(0xc000 + (effective & 0x7ff))
+                        } else if effective >= 0x8000 {
+                            let page =
+                                [2usize, 3, 6, 7][usize::from((effective - 0x8000) / 0x2000)];
+                            rom[96 * BANK_SIZE + page * 0x2000 + usize::from(effective & 0x1fff)]
+                        } else {
+                            0
+                        };
+                        let mapping = (bus.slot_bank, bus.read(0xfffc));
+                        let mut cpu = Cpu::new();
+                        cpu.pc = defs["rt_read_zp_ptr_y"].1;
+                        cpu.sp = 0xdff0;
+                        cpu.b = zp;
+                        cpu.c = 0x87;
+                        cpu.d = 0x52;
+                        cpu.e = y;
+                        cpu.iff1 = iff;
+                        cpu.iff2 = iff;
+                        bus.write(cpu.sp, 7);
+                        bus.write(cpu.sp + 1, 0);
+                        for _ in 0..400 {
+                            if cpu.pc == 7 || bus.read(0xcb1d) != 0 {
+                                break;
+                            }
+                            cpu.step(&mut bus).unwrap();
+                            assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                        }
+                        assert_eq!(cpu.de(), 0x5200 + u16::from(y));
+                        // Unlike rt_mmc3_read_prg, this address-construction
+                        // helper documents BC as scratch; C now carries Y.
+                        assert_eq!(cpu.c, y);
+                        assert_eq!(bus.read(0xcb03), 0xa5);
+                        assert_eq!(bus.read(0xcb14), 17);
+                        assert_eq!((bus.slot_bank, bus.read(0xfffc)), mapping);
+                        if unsupported {
+                            assert_eq!(bus.read(0xcb1d), 0xe8, "untrapped ${effective:04X}");
+                            assert_ne!(cpu.pc, 7);
+                            assert!(!cpu.iff1 && !cpu.iff2);
+                        } else {
+                            assert_eq!(bus.read(0xcb1d), 0);
+                            assert_eq!(cpu.pc, 7, "unreturned ${effective:04X}");
+                            assert_eq!(cpu.sp, 0xdff2);
+                            assert_eq!(cpu.a, expected, "read ${effective:04X} via ZP ${zp:02X}");
+                            assert_eq!((cpu.iff1, cpu.iff2, cpu.ei_pending), (iff, iff, 0));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn native_stack_guard_rejects_existing_bg_refcounts_but_accepts_floor() {
         assert_eq!(NATIVE_STACK_FLOOR, 0xDD80 + 192);
         for sp in [0, 0xDD7F, 0xDD80, 0xDE3F] {

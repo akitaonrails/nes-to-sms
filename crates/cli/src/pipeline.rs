@@ -88,24 +88,222 @@ fn lower_error_is_fatal(error: &lower::LowerError) -> bool {
     matches!(error, lower::LowerError::UnsupportedMapperStore { .. })
 }
 
+/// A mapped unit cannot keep executing its old translation after changing
+/// that window. Until remapping continuations are modeled, reject all mapped
+/// writers, including an indirect store that could address mapper registers
+/// and a call chain that reaches a fixed-window mapper writer.
+fn check_mmc3_mapping_continuations(routines: &[ir::Routine]) -> Result<(), Error> {
+    let mut writers: std::collections::HashSet<String> = routines
+        .iter()
+        .filter(|r| {
+            r.ops.iter().any(|op| {
+                matches!(
+                    op,
+                    ir::Op::MapperWrite { .. }
+                        // Computed targets may enter a mapper writer even
+                        // when no static call edge names it.
+                        | ir::Op::RtsDispatch
+                        | ir::Op::JmpIndirect { .. }
+                        | ir::Op::JsrUnknown { .. }
+                        | ir::Op::StaMem {
+                            region: ir::MemRegion::PrgRom | ir::MemRegion::Mapper,
+                            ..
+                        }
+                        | ir::Op::StaMem {
+                            addr: ir::AddrExpr::IndirectX(_) | ir::AddrExpr::IndirectY(_),
+                            ..
+                        }
+                )
+            })
+        })
+        .map(routine_auto_label)
+        .collect();
+    loop {
+        let old_len = writers.len();
+        for routine in routines {
+            if routine
+                .external_calls
+                .iter()
+                .any(|target| writers.contains(target))
+            {
+                writers.insert(routine_auto_label(routine));
+            }
+        }
+        if writers.len() == old_len {
+            break;
+        }
+    }
+    if let Some(routine) = routines
+        .iter()
+        .find(|r| r.name.starts_with("L_b") && writers.contains(&r.name))
+    {
+        return Err(Error::Diagnostic(format!(
+            "MMC3 mapped routine {} can change PRG mapping; remapping continuations are not implemented",
+            routine.name
+        )));
+    }
+    Ok(())
+}
+
 /// One WLA-DX slot is a physical 16 KiB ROM bank.
 const TRANSLATED_SECTION_CAPACITY: usize = 0x4000;
 const TRANSLATED_BANK_BASE: u32 = 4;
 const TRANSLATED_SLOT: u8 = 1;
 
-fn translated_section_bank(section_idx: u32, banked: bool) -> Result<u8, Error> {
+/// Static translation geometry is separate from live mapper state. In
+/// particular an MMC3 analysis unit establishes exactly one physical 8 KiB
+/// page at one CPU window, not a guessed mapping of its neighbours.
+#[derive(Clone, Copy)]
+enum TranslationMapping {
+    Legacy(nes_rom::MapperPolicy),
+    Mmc3 { bank_count: u8 },
+}
+
+impl TranslationMapping {
+    fn resolve(image: &nes_rom::Image<'_>, prof: &profile::Profile) -> Result<Self, Error> {
+        if image.header.mapper == 4
+            && prof
+                .translation
+                .runtime_defines
+                .iter()
+                .any(|d| d == "MMC3_BANKING_EXPERIMENT")
+        {
+            let board = nes_rom::mmc3::Mmc3::new(
+                &image.header,
+                image.prg.len(),
+                image.chr.len(),
+                nes_rom::mmc3::Mmc3Revision::Sharp,
+            )
+            .map_err(|e| Error::Diagnostic(e.to_string()))?;
+            if image.header.prg_ram_size != 0 || image.header.prg_nvram_size != 0 {
+                return Err(Error::Diagnostic(
+                    "MMC3 banking experiment does not yet support cartridge RAM".into(),
+                ));
+            }
+            if image.chr.len() != 0x2000 {
+                return Err(Error::Diagnostic("MMC3 banking experiment requires 8 KiB CHR; banked CHR presentation is not implemented".into()));
+            }
+            Ok(Self::Mmc3 {
+                bank_count: board.prg_bank_count(),
+            })
+        } else {
+            Ok(Self::Legacy(nes_rom::resolve_mapper_policy(
+                &image.header,
+                image.prg.len(),
+            )?))
+        }
+    }
+
+    fn is_mmc3(self) -> bool {
+        matches!(self, Self::Mmc3 { .. })
+    }
+    fn is_banked(self) -> bool {
+        match self {
+            Self::Legacy(p) => p.is_banked(),
+            Self::Mmc3 { .. } => true,
+        }
+    }
+    fn bank_count(self) -> u8 {
+        match self {
+            Self::Legacy(p) => p.bank_count(),
+            Self::Mmc3 { bank_count } => bank_count,
+        }
+    }
+    fn fixed_start(self) -> u16 {
+        if self.is_mmc3() { 0xe000 } else { 0xc000 }
+    }
+    fn window(self, addr: u16) -> analysis::AnalysisWindow {
+        if self.is_mmc3() {
+            analysis::AnalysisWindow {
+                start: addr & 0xe000,
+                end_inclusive: addr | 0x1fff,
+            }
+        } else {
+            analysis::AnalysisWindow::SWITCHABLE_16K
+        }
+    }
+    fn analysis_view(self, prg: &[u8], bank: u8, window: u16) -> Result<Vec<u8>, Error> {
+        match self {
+            Self::Legacy(p) => Ok(p.analysis_view(prg, bank)?),
+            Self::Mmc3 { bank_count } => {
+                if bank >= bank_count || !matches!(window, 0x8000 | 0xa000 | 0xc000) {
+                    return Err(Error::Diagnostic(format!(
+                        "invalid MMC3 analysis unit: bank {bank} window ${window:04X}"
+                    )));
+                }
+                let mut view = vec![0; 0x8000];
+                view[0x6000..].copy_from_slice(&prg[prg.len() - 0x2000..]);
+                let offset = usize::from(window - 0x8000);
+                let physical = usize::from(bank) * 0x2000;
+                view[offset..offset + 0x2000].copy_from_slice(&prg[physical..physical + 0x2000]);
+                Ok(view)
+            }
+        }
+    }
+    fn vectors(self, prg: &[u8]) -> Result<Option<nes_rom::Vectors>, Error> {
+        match self {
+            Self::Legacy(p) => Ok(nes_rom::read_vectors_with_policy(p, prg)?),
+            Self::Mmc3 { .. } => {
+                let tail = &prg[prg.len() - 6..];
+                Ok(Some(nes_rom::Vectors {
+                    nmi: u16::from_le_bytes([tail[0], tail[1]]),
+                    reset: u16::from_le_bytes([tail[2], tail[3]]),
+                    irq: u16::from_le_bytes([tail[4], tail[5]]),
+                }))
+            }
+        }
+    }
+    fn legacy(self) -> Option<nes_rom::MapperPolicy> {
+        match self {
+            Self::Legacy(p) => Some(p),
+            Self::Mmc3 { .. } => None,
+        }
+    }
+}
+
+fn validate_translation_routine(
+    mapping: TranslationMapping,
+    prg: &[u8],
+    routine: &ir::Routine,
+    vector_count: usize,
+) -> validation::ValidationResult {
+    if mapping.is_mmc3() {
+        // The isolated harness uses flat NES PRG and legacy Z80 runtime
+        // stubs. Even a routine with no explicit mapper write may depend on
+        // an 8 KiB mapping; running it there cannot establish MMC3 parity.
+        validation::ValidationResult {
+            routine_name: routine.name.clone(),
+            routine_entry: routine.entry,
+            vectors_run: 0,
+            vectors_passed: 0,
+            failures: Vec::new(),
+            skipped_reason: Some(
+                "MMC3 requires a mapper-aware NES bus and assembled SMS runtime; isolated validation uses legacy mappings".into(),
+            ),
+        }
+    } else {
+        validation::validate_routine(prg, routine, vector_count)
+    }
+}
+
+fn translated_section_bank(section_idx: u32, bank_limit: u32) -> Result<u8, Error> {
     let bank = TRANSLATED_BANK_BASE
         .checked_add(section_idx)
         .ok_or_else(|| {
             Error::Diagnostic("translated section index overflows WLA bank numbering".to_string())
         })?;
-    if banked && bank >= sms_project::NES_PRG_BANK_BASE {
-        let max_section = sms_project::NES_PRG_BANK_BASE - TRANSLATED_BANK_BASE - 1;
+    if bank >= bank_limit {
+        let max_section = bank_limit - TRANSLATED_BANK_BASE - 1;
+        if bank_limit == sms_project::MMC3_CODE_BANK_LIMIT {
+            return Err(Error::Diagnostic(format!(
+                "translated code exceeds the MMC3 phase-1 continuation ABI: section {section_idx} > {max_section}; code banks must remain below {bank_limit}"
+            )));
+        }
         return Err(Error::Diagnostic(format!(
-            "translated code overflows the banked 512K layout \
+            "translated code overflows the banked layout \
              (section {section_idx} > {max_section}; banks \
              {}+ hold PRG data)",
-            sms_project::NES_PRG_BANK_BASE
+            bank_limit
         )));
     }
     u8::try_from(bank).map_err(|_| {
@@ -118,9 +316,9 @@ fn translated_section_bank(section_idx: u32, banked: bool) -> Result<u8, Error> 
 fn begin_translated_section(
     program: &mut z80_emit::Program,
     section_idx: u32,
-    banked: bool,
+    bank_limit: u32,
 ) -> Result<u16, Error> {
-    let bank = translated_section_bank(section_idx, banked)?;
+    let bank = translated_section_bank(section_idx, bank_limit)?;
     program.section(&format!("generated_code_{section_idx}"));
     let expected_program_idx = usize::try_from(section_idx)
         .ok()
@@ -144,12 +342,12 @@ fn begin_translated_section(
 fn advance_translated_section(
     program: &mut z80_emit::Program,
     section_idx: &mut u32,
-    banked: bool,
+    bank_limit: u32,
 ) -> Result<u16, Error> {
     *section_idx = section_idx.checked_add(1).ok_or_else(|| {
         Error::Diagnostic("translated section index overflows WLA bank numbering".to_string())
     })?;
-    begin_translated_section(program, *section_idx, banked)
+    begin_translated_section(program, *section_idx, bank_limit)
 }
 
 fn translated_section_usage(program: &z80_emit::Program) -> usize {
@@ -162,7 +360,7 @@ fn pack_sizing_candidate<S: Clone>(
     program: &mut z80_emit::Program,
     state: &mut S,
     section_idx: &mut u32,
-    banked: bool,
+    bank_limit: u32,
     routine_name: &str,
     emit: impl Fn(&mut z80_emit::Program, &mut S) -> Result<(), Error>,
 ) -> Result<u32, Error> {
@@ -170,7 +368,7 @@ fn pack_sizing_candidate<S: Clone>(
     let mut candidate_state = state.clone();
     emit(&mut candidate, &mut candidate_state)?;
     if translated_section_usage(&candidate) > TRANSLATED_SECTION_CAPACITY {
-        advance_translated_section(program, section_idx, banked)?;
+        advance_translated_section(program, section_idx, bank_limit)?;
         candidate = program.clone();
         candidate_state = state.clone();
         emit(&mut candidate, &mut candidate_state)?;
@@ -245,7 +443,10 @@ fn check_consume_entries(
         if let Some(&(bank, addr)) = entries.iter().find(|(bank, addr)| {
             *addr > start
                 && *addr <= site.caller
-                && (*addr >= 0xc000 || prof.rom.mapper == 0 || bank.is_none() || *bank == site.bank)
+                && (*addr >= if prof.rom.mapper == 4 { 0xe000 } else { 0xc000 }
+                    || prof.rom.mapper == 0
+                    || bank.is_none()
+                    || *bank == site.bank)
         }) {
             return Err(Error::Diagnostic(format!(
                 "return_escape consume_at ${start:04X} has bypass entry ${addr:04X} in bank {bank:?}"
@@ -255,7 +456,10 @@ fn check_consume_entries(
     for site in &prof.return_consumes {
         if let Some(&(bank, addr)) = entries.iter().find(|(bank, addr)| {
             *addr == site.at + 1
-                && (*addr >= 0xc000 || prof.rom.mapper == 0 || bank.is_none() || *bank == site.bank)
+                && (*addr >= if prof.rom.mapper == 4 { 0xe000 } else { 0xc000 }
+                    || prof.rom.mapper == 0
+                    || bank.is_none()
+                    || *bank == site.bank)
         }) {
             return Err(Error::Diagnostic(format!(
                 "return_consume ${:04X} has second-PLA bypass entry ${addr:04X} in bank {bank:?}",
@@ -441,7 +645,7 @@ fn emit_translated_routine(
         defined_labels.insert(bl.clone());
     }
     if let Err(e) = lower::lower_routine(program, r, opts) {
-        if lower_error_is_fatal(&e) {
+        if lower_error_is_fatal(&e) || opts.profile.is_some_and(|p| p.rom.mapper == 4) {
             *program = pre_routine_program;
             *defined_labels = pre_routine_labels;
             return Err(Error::Lower(e));
@@ -516,7 +720,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             prof.rom.mapper, image.header.mapper
         )));
     }
-    let policy = nes_rom::resolve_mapper_policy(&image.header, image.prg.len())?;
+    let policy = TranslationMapping::resolve(&image, &prof)?;
     // Profile validation checks declared mapper-2 bank bounds. Recheck
     // against the parsed ROM policy before any banked analysis slicing.
     if policy.is_banked() {
@@ -538,7 +742,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
             }
         }
     }
-    let vectors = nes_rom::read_vectors_with_policy(policy, image.prg)?
+    let vectors = policy
+        .vectors(image.prg)?
         .ok_or_else(|| Error::Diagnostic("could not read NMI/RESET/IRQ vectors from PRG".into()))?;
     if let Some(v) = prof.vectors {
         if v.reset != vectors.reset {
@@ -559,6 +764,14 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // switchable bank is analyzed separately below and is rooted only by its
     // verified [[bank_entry]] facts; vectors are never replayed in those views.
     let banked = policy.is_banked();
+    let fixed_start = policy.fixed_start();
+    let code_bank_limit = if policy.is_mmc3() {
+        sms_project::MMC3_CODE_BANK_LIMIT
+    } else if banked {
+        sms_project::NES_PRG_BANK_BASE
+    } else {
+        256
+    };
     let mut consume_entries: Vec<(Option<u8>, u16)> = [vectors.nmi, vectors.reset, vectors.irq]
         .into_iter()
         .map(|pc| (None, pc))
@@ -580,11 +793,11 @@ pub fn run(args: &Args) -> Result<String, Error> {
             .filter_map(|target| consume_target_identity(&prof, target)),
     );
     check_consume_entries(&prof, &consume_entries)?;
-    let mut bank_entries_by_bank: std::collections::BTreeMap<u8, Vec<u16>> =
+    let mut bank_entries_by_bank: std::collections::BTreeMap<(u8, u16), Vec<u16>> =
         std::collections::BTreeMap::new();
     for entry in &prof.bank_entries {
         bank_entries_by_bank
-            .entry(entry.bank)
+            .entry((entry.bank, policy.window(entry.addr).start))
             .or_default()
             .push(entry.addr);
     }
@@ -595,9 +808,12 @@ pub fn run(args: &Args) -> Result<String, Error> {
     for site in &prof.jump_engines {
         for target in site.targets.iter().chain(site.return_target.iter()) {
             if let Some((Some(bank), addr)) = profile_target_identity(target)
-                && addr < 0xC000
+                && addr < fixed_start
             {
-                bank_entries_by_bank.entry(bank).or_default().push(addr);
+                bank_entries_by_bank
+                    .entry((bank, policy.window(addr).start))
+                    .or_default()
+                    .push(addr);
             }
         }
     }
@@ -614,7 +830,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
     for site in &prof.jump_engines {
         for target in site.targets.iter().chain(site.return_target.iter()) {
             if let Some((_, addr)) = profile_target_identity(target)
-                && ((!banked && addr >= 0x8000) || (banked && addr >= 0xC000))
+                && ((!banked && addr >= 0x8000) || (banked && addr >= fixed_start))
                 && fixed_prof
                     .functions
                     .iter()
@@ -632,8 +848,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
     }
     if banked {
-        for (&bank, entries) in &bank_entries_by_bank {
-            let view = policy.analysis_view(image.prg, bank)?;
+        for (&(bank, window_start), entries) in &bank_entries_by_bank {
+            let view = policy.analysis_view(image.prg, bank, window_start)?;
             let mut window_prof = prof.clone();
             window_prof.functions = entries
                 .iter()
@@ -655,7 +871,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     irq: 0,
                 },
                 &mut window_prof,
-                analysis::AnalysisWindow::SWITCHABLE_16K,
+                policy.window(window_start),
                 Some(bank),
             );
             for target in window_analysis
@@ -663,7 +879,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 .functions
                 .iter()
                 .flat_map(|function| function.external_refs.iter().copied())
-                .filter(|&target| target >= 0xC000)
+                .filter(|&target| target >= fixed_start)
             {
                 if fixed_prof
                     .functions
@@ -683,7 +899,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
         fixed_prof.jump_engines.retain(|site| site.bank.is_none());
     }
-    let analysis_view = policy.analysis_view(image.prg, 0)?;
+    let analysis_view = policy.analysis_view(image.prg, 0, 0x8000)?;
     let analysis_vectors = nes_rom_like::Vectors {
         nmi: vectors.nmi,
         reset: vectors.reset,
@@ -694,7 +910,10 @@ pub fn run(args: &Args) -> Result<String, Error> {
             &analysis_view,
             analysis_vectors,
             &mut fixed_prof,
-            analysis::AnalysisWindow::FIXED_16K,
+            analysis::AnalysisWindow {
+                start: fixed_start,
+                end_inclusive: 0xffff,
+            },
             None,
         )
     } else {
@@ -777,6 +996,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             return_consume_sites: return_consume_sites(&prof, None),
             materialized_call_sites: materialized_call_sites(&prof, None),
             window_label_prefix: None,
+            window_label_range: 0x8000..0xC000,
             extra_label_pcs: Vec::new(),
         };
         if let Ok(r) = ir::lift_range(&analysis_view, &opts) {
@@ -804,9 +1024,16 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // 4b. Banked-window translation units. Each physical bank is rooted only
     // at its verified entries and constrained to $8000-$BFFF. Calls into the
     // fixed window were folded into the one fixed pass above.
-    if banked && !prof.bank_entries.is_empty() {
-        for (bank, entries) in bank_entries_by_bank {
-            let view = policy.analysis_view(image.prg, bank)?;
+    if banked
+        && if policy.is_mmc3() {
+            !bank_entries_by_bank.is_empty()
+        } else {
+            !prof.bank_entries.is_empty()
+        }
+    {
+        for ((bank, window_start), entries) in bank_entries_by_bank {
+            let view = policy.analysis_view(image.prg, bank, window_start)?;
+            let window = policy.window(window_start);
             let prefix = format!("b{bank}_");
             let mut bprof = prof.clone();
             bprof.functions = entries
@@ -827,7 +1054,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     irq: 0,
                 },
                 &mut bprof,
-                analysis::AnalysisWindow::SWITCHABLE_16K,
+                window,
                 Some(bank),
             );
             let mut bfuncs: Vec<analysis::DiscoveredFunction> =
@@ -892,7 +1119,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     return_escape_sites: bank_return_escape_sites.clone(),
                     return_consume_sites: return_consume_sites(&prof, Some(bank)),
                     materialized_call_sites: materialized_call_sites(&prof, Some(bank)),
-                    window_label_prefix: (f.addr < 0xC000).then(|| prefix.clone()),
+                    window_label_prefix: Some(prefix.clone()),
+                    window_label_range: window.start..window.end_inclusive + 1,
                     extra_label_pcs: Vec::new(),
                 };
                 if let Ok(r) = ir::lift_range(&view, &opts) {
@@ -909,7 +1137,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 }
             }
             for f in &bfuncs {
-                let in_window = f.addr < 0xC000;
+                let in_window = window.contains(f.addr);
                 let extras: Vec<u16> = bank_referenced
                     .iter()
                     .filter(|&&pc| pc > f.addr && pc < f.end)
@@ -928,6 +1156,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     return_consume_sites: return_consume_sites(&prof, Some(bank)),
                     materialized_call_sites: materialized_call_sites(&prof, Some(bank)),
                     window_label_prefix: in_window.then(|| prefix.clone()),
+                    window_label_range: window.start..window.end_inclusive + 1,
                     extra_label_pcs: extras,
                 };
                 match ir::lift_range(&view, &opts) {
@@ -938,7 +1167,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                             // Trimmed fallthrough: continue into the next
                             // routine via an explicit jump (bank-prefixed
                             // when the target is in the window).
-                            let tgt = if r.end < 0xC000 {
+                            let tgt = if window.contains(r.end) {
                                 format!("L_{prefix}{:04X}", r.end)
                             } else {
                                 format_label(r.end)
@@ -982,6 +1211,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             return_consume_sites: return_consume_sites(&prof, None),
             materialized_call_sites: materialized_call_sites(&prof, None),
             window_label_prefix: None,
+            window_label_range: 0x8000..0xC000,
             extra_label_pcs: extras,
         };
         match ir::lift_range(&analysis_view, &opts) {
@@ -1020,6 +1250,9 @@ pub fn run(args: &Args) -> Result<String, Error> {
     }
 
     routines.extend(banked_routines);
+    if policy.is_mmc3() {
+        check_mmc3_mapping_continuations(&routines)?;
+    }
 
     for routine in &routines {
         let bank = profile_target_identity(&routine.name).and_then(|(bank, _)| bank);
@@ -1356,7 +1589,12 @@ pub fn run(args: &Args) -> Result<String, Error> {
         let mut m = std::collections::HashMap::new();
         for r in &routines {
             let mask = lower::routine_incoming_flag_reads(&r.ops);
-            m.insert(format_label(r.entry), mask);
+            // A dynamic MMC3 address has no proven physical target. Keep
+            // only qualified summaries so the lowerer preserves flags
+            // conservatively for an unqualified dispatch.
+            if !policy.is_mmc3() || r.entry >= fixed_start {
+                m.insert(format_label(r.entry), mask);
+            }
             m.insert(r.name.clone(), mask);
         }
         m
@@ -1370,7 +1608,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
     > {
         let mut program = z80_emit::Program::new();
         let mut section_idx: u32 = 0;
-        begin_translated_section(&mut program, section_idx, banked)?;
+        begin_translated_section(&mut program, section_idx, code_bank_limit)?;
         program.prepopulate_label_section(section_map);
         let opts = LowerOptions {
             profile: Some(&prof),
@@ -1426,7 +1664,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     )));
                 }
                 if planned > section_idx {
-                    begin_translated_section(&mut program, planned, banked)?;
+                    begin_translated_section(&mut program, planned, code_bank_limit)?;
                     section_idx = planned;
                 }
                 let mut candidate = program.clone();
@@ -1455,7 +1693,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     &mut program,
                     &mut state,
                     &mut section_idx,
-                    banked,
+                    code_bank_limit,
                     &r.name,
                     |candidate, state| emit_routine(candidate, &mut state.0, &mut state.1, r),
                 )?;
@@ -1495,9 +1733,12 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 program.ret();
             } else if let Some(addr) = ext
                 .strip_prefix("L_")
+                // A missing explicit physical-bank fact must trap, not be
+                // reinterpreted as whichever bank happens to be mapped now.
+                .filter(|h| !policy.is_mmc3() || h.len() == 4)
                 .map(|h| h.rsplit('_').next().unwrap_or(h))
                 .and_then(|h| u16::from_str_radix(h, 16).ok())
-                .filter(|a| (0x8000..0xC000).contains(a) && banked)
+                .filter(|a| (0x8000..fixed_start).contains(a) && banked)
             {
                 // Switchable-window target: the correct translation depends
                 // on the bank mapped AT CALL TIME. Route through the
@@ -1635,18 +1876,49 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // Banked mappers (M1): every switchable 16 KiB NES bank becomes its
     // own SMS data bank; the fixed LAST bank is prg_high. NROM keeps the
     // flat low/high split.
-    let (prg_low, prg_banks) = if banked {
+    let (prg_low, prg_banks) = if policy.is_mmc3() {
+        (
+            None,
+            Some(
+                image
+                    .prg
+                    .as_chunks::<0x4000>()
+                    .0
+                    .iter()
+                    .map(|pair| pair.to_vec())
+                    .collect(),
+            ),
+        )
+    } else if banked {
+        let legacy = policy.legacy().expect("UxROM mapping");
         let banks: Vec<Vec<u8>> = (0..policy.bank_count())
-            .map(|bank| policy.prg_bank(image.prg, bank).map(|bytes| bytes.to_vec()))
+            .map(|bank| legacy.prg_bank(image.prg, bank).map(|bytes| bytes.to_vec()))
             .collect::<Result<_, _>>()?;
         (None, Some(banks))
     } else {
-        (Some(policy.lower_prg(image.prg).to_vec()), None)
+        (
+            Some(
+                policy
+                    .legacy()
+                    .expect("NROM mapping")
+                    .lower_prg(image.prg)
+                    .to_vec(),
+            ),
+            None,
+        )
     };
     // Mirror the fixed upper PRG window as well. The translated code can run
     // from generated banks in slot 1, so original fixed-bank data tables such
     // as SMB's Bitmasks at $C68A are read via a slot-2 runtime helper.
-    let prg_high = Some(policy.fixed_prg(image.prg).to_vec());
+    let prg_high = Some(if policy.is_mmc3() {
+        image.prg[image.prg.len() - 0x4000..].to_vec()
+    } else {
+        policy
+            .legacy()
+            .expect("legacy mapping")
+            .fixed_prg(image.prg)
+            .to_vec()
+    });
     // Preserve raw NES CHR bytes for emulated PPUDATA reads. SMB's
     // DrawTitleScreen copies a command stream from PPU pattern-table space
     // ($1EC0+) through $2007; the converted SMS 4bpp tiles are not suitable
@@ -1689,17 +1961,21 @@ pub fn run(args: &Args) -> Result<String, Error> {
         // 512 KiB for everything: NROM translated uses banks 4-23;
         // banked carts use translated 4-16 + PRG data 17-24 + assets
         // 25-31 (1 MiB ROMs rendered black on real emulators).
-        rom_kib: 512,
+        rom_kib: if policy.is_mmc3() { 2048 } else { 512 },
         region: 0x4C,
         title: truncate_title(&prof.rom.name),
         mirroring,
         raw_ciram_backend: RawCiramBackend::SramSlot2,
         mapper: prof.rom.mapper,
-        uxrom_bank_count: policy.is_banked().then_some(policy.bank_count()),
-        uxrom_bus_conflicts: policy.uxrom_bus_conflicts().map(|mode| match mode {
-            nes_rom::UxromBusConflicts::None => sms_project::UxromBusConflicts::None,
-            nes_rom::UxromBusConflicts::And => sms_project::UxromBusConflicts::And,
-        }),
+        uxrom_bank_count: (banked && !policy.is_mmc3()).then_some(policy.bank_count()),
+        mmc3_prg_bank_count: policy.is_mmc3().then_some(policy.bank_count()),
+        uxrom_bus_conflicts: policy
+            .legacy()
+            .and_then(|p| p.uxrom_bus_conflicts())
+            .map(|mode| match mode {
+                nes_rom::UxromBusConflicts::None => sms_project::UxromBusConflicts::None,
+                nes_rom::UxromBusConflicts::And => sms_project::UxromBusConflicts::And,
+            }),
         chr_ram: image.chr.is_empty(),
         input_action: prof.input.mode == profile::InputMode::Action,
         input_pause_start: prof.input.pause_start,
@@ -1917,7 +2193,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
         // games; revisit when we add Z80-side banking to the harness.)
         let mut results: Vec<validation::ValidationResult> = Vec::with_capacity(routines.len());
         for r in &routines {
-            results.push(validation::validate_routine(
+            results.push(validate_translation_routine(
+                policy,
                 image.prg,
                 r,
                 args.validate_vectors,
@@ -2540,10 +2817,13 @@ mod tests {
     fn banked_translated_sections_stop_before_prg_data_bank() {
         let last_section = sms_project::NES_PRG_BANK_BASE - TRANSLATED_BANK_BASE - 1;
         assert_eq!(
-            u32::from(translated_section_bank(last_section, true).unwrap()),
+            u32::from(
+                translated_section_bank(last_section, sms_project::NES_PRG_BANK_BASE).unwrap()
+            ),
             sms_project::NES_PRG_BANK_BASE - 1
         );
-        let err = translated_section_bank(last_section + 1, true).unwrap_err();
+        let err =
+            translated_section_bank(last_section + 1, sms_project::NES_PRG_BANK_BASE).unwrap_err();
         assert!(
             err.to_string()
                 .contains(&format!("section {} > {last_section}", last_section + 1))
@@ -2551,11 +2831,91 @@ mod tests {
     }
 
     #[test]
+    fn mmc3_analysis_establishes_only_one_eight_kib_window_and_fixed_vectors() {
+        let mapping = TranslationMapping::Mmc3 { bank_count: 8 };
+        let mut prg: Vec<u8> = (0..8).flat_map(|bank| vec![bank; 0x2000]).collect();
+        prg[0xfffa..].copy_from_slice(&[0x10, 0xe0, 0x20, 0xe0, 0x30, 0xe0]);
+        for window in [0x8000, 0xa000, 0xc000] {
+            let view = mapping.analysis_view(&prg, 3, window).unwrap();
+            for cpu_window in [0x8000, 0xa000, 0xc000] {
+                assert_eq!(
+                    view[usize::from(cpu_window - 0x8000)],
+                    if window == cpu_window { 3 } else { 0 }
+                );
+            }
+            assert_eq!(view[0x6000], 7);
+            assert_eq!(mapping.window(window).start, window);
+            assert_eq!(mapping.window(window).end_inclusive, window + 0x1fff);
+        }
+        let vectors = mapping.vectors(&prg).unwrap().unwrap();
+        assert_eq!(
+            (vectors.nmi, vectors.reset, vectors.irq),
+            (0xe010, 0xe020, 0xe030)
+        );
+        assert!(mapping.analysis_view(&prg, 8, 0x8000).is_err());
+        assert!(mapping.analysis_view(&prg, 0, 0xe000).is_err());
+    }
+
+    #[test]
+    fn mmc3_code_packing_stops_at_continuation_abi_limit() {
+        let last = sms_project::MMC3_CODE_BANK_LIMIT - TRANSLATED_BANK_BASE - 1;
+        assert_eq!(
+            u32::from(translated_section_bank(last, sms_project::MMC3_CODE_BANK_LIMIT).unwrap()),
+            sms_project::MMC3_CODE_BANK_LIMIT - 1
+        );
+        assert!(translated_section_bank(last + 1, sms_project::MMC3_CODE_BANK_LIMIT).is_err());
+    }
+
+    #[test]
+    fn isolated_mmc3_validation_reports_skip_not_legacy_bus_parity() {
+        let mut prg = vec![0; 0x8000];
+        prg[..3].copy_from_slice(&[0xa9, 0x42, 0x60]);
+        let routine = ir::lift_range(
+            &prg,
+            &ir::LiftOptions {
+                start: 0x8000,
+                end: 0x8003,
+                entry_name: "L_b0_8000".into(),
+                ..ir::LiftOptions::default()
+            },
+        )
+        .unwrap();
+        let result = validate_translation_routine(
+            TranslationMapping::Mmc3 { bank_count: 8 },
+            &prg,
+            &routine,
+            8,
+        );
+        assert_eq!(result.routine_name, "L_b0_8000");
+        assert_eq!(result.routine_entry, 0x8000);
+        assert_eq!((result.vectors_run, result.vectors_passed), (0, 0));
+        assert!(!result.is_green());
+        assert!(result.failures.is_empty());
+        assert!(
+            result
+                .skipped_reason
+                .as_deref()
+                .unwrap()
+                .contains("assembled SMS runtime")
+        );
+        assert!(validation::format_report(&[result]).contains("skipped"));
+
+        let legacy = validate_translation_routine(
+            TranslationMapping::Legacy(nes_rom::MapperPolicy::Nrom { prg_len: prg.len() }),
+            &prg,
+            &routine,
+            8,
+        );
+        assert!(legacy.is_green());
+        assert_eq!(legacy.vectors_run, 8);
+    }
+
+    #[test]
     fn translated_section_identity_rejects_interposed_program_section() {
         let mut program = z80_emit::Program::new();
         program.section("unexpected_helper");
 
-        let err = begin_translated_section(&mut program, 0, false).unwrap_err();
+        let err = begin_translated_section(&mut program, 0, 256).unwrap_err();
         assert!(err.to_string().contains("logical section 0"));
         assert!(err.to_string().contains("expected 1"));
     }
@@ -2571,7 +2931,7 @@ mod tests {
         ]));
 
         emit_translated_vector_aliases(&mut program, 0xC000, 0xC100, 0xC200);
-        advance_translated_section(&mut program, &mut section, false).unwrap();
+        advance_translated_section(&mut program, &mut section, 256).unwrap();
         for label in ["L_C000", "L_C100", "L_C200"] {
             program.label(label);
             program.ret();
@@ -2590,7 +2950,7 @@ mod tests {
     fn packing_program() -> (z80_emit::Program, u32) {
         let mut program = z80_emit::Program::new();
         let section = 0;
-        begin_translated_section(&mut program, section, false).unwrap();
+        begin_translated_section(&mut program, section, 256).unwrap();
         (program, section)
     }
 
@@ -2603,7 +2963,7 @@ mod tests {
             &mut program,
             &mut state,
             &mut section,
-            false,
+            256,
             "crossing_marker",
             |candidate, state| {
                 candidate.label("crossing_marker");
@@ -2659,7 +3019,7 @@ mod tests {
             &mut program,
             &mut state,
             &mut section,
-            false,
+            256,
             "L_8000",
             |candidate, _| {
                 attempts.set(attempts.get() + 1);
@@ -2711,7 +3071,7 @@ mod tests {
             &mut program,
             &mut state,
             &mut section,
-            false,
+            256,
             "exact_full",
             |candidate, _| {
                 candidate.data(None, &vec![0; 0x4000]);
@@ -2732,7 +3092,7 @@ mod tests {
             &mut program,
             &mut state,
             &mut section,
-            false,
+            256,
             "too_large",
             |candidate, _| {
                 candidate.data(None, &vec![0; 0x4001]);
@@ -2754,7 +3114,7 @@ mod tests {
                 &mut program,
                 &mut state,
                 &mut section,
-                true,
+                sms_project::NES_PRG_BANK_BASE,
                 "full_section",
                 |candidate, _| {
                     candidate.data(None, &vec![0; 0x4000]);
@@ -2768,7 +3128,7 @@ mod tests {
             &mut program,
             &mut state,
             &mut section,
-            true,
+            sms_project::NES_PRG_BANK_BASE,
             "first_reserved_bank",
             |candidate, _| {
                 candidate.data(None, &[0]);

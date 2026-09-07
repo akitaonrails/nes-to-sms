@@ -15,6 +15,7 @@ fn lift(prg: &[u8], at: u16, len: u16, name: &str) -> ir::Routine {
         prg,
         &LiftOptions {
             window_label_prefix: None,
+            window_label_range: 0x8000..0xc000,
             start: at,
             end: at + len,
             entry_name: name.into(),
@@ -36,6 +37,36 @@ fn assert_green(prg: &[u8], at: u16, len: u16, name: &str) {
         "{name}: {}",
         validation::format_report(&[result])
     );
+}
+
+#[test]
+fn absolute_zero_page_operands_validate_without_silent_fallbacks() {
+    // Absolute encoding does not change the physical zero-page RAM target.
+    // The lifter preserves Const($003F), rather than converting it to ZpConst.
+    for (opcode, name) in [
+        (0x8d, "Sta"),
+        (0x8e, "Stx"),
+        (0x8c, "Sty"),
+        (0xad, "Lda"),
+        (0xae, "Ldx"),
+        (0xac, "Ldy"),
+        (0x6d, "Adc"),
+        (0xed, "Sbc"),
+        (0xcd, "Cmp"),
+        (0x2d, "And"),
+        (0x0d, "Ora"),
+        (0x4d, "Eor"),
+        (0x2c, "Bit"),
+        (0xee, "Inc"),
+        (0xce, "Dec"),
+        (0x0e, "Asl"),
+        (0x4e, "Lsr"),
+        (0x2e, "Rol"),
+        (0x6e, "Ror"),
+    ] {
+        let prg = slice(&[opcode, 0x3f, 0x00, 0x60], 0x8000);
+        assert_green(&prg, 0x8000, 4, &format!("{name}AbsoluteZeroPage"));
+    }
 }
 
 #[test]

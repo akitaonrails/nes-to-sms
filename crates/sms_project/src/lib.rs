@@ -19,11 +19,11 @@ pub struct ProjectAssets {
     /// Optional lower NES PRG window ($8000-$BFFF) mirrored into SMS slot 2
     /// so translated code can read profiled PRG data tables directly.
     pub prg_low: Option<Vec<u8>>,
-    /// Banked mappers (M1+): each switchable 16 KiB NES PRG bank as its
-    /// own SMS data bank ($8000-$BFFF window contents per NES bank).
+    /// Banked raw PRG in physical order, one 16 KiB SMS data bank per entry.
+    /// UxROM entries are NES banks; MMC3 entries pack two adjacent 8 KiB pages.
     pub prg_banks: Option<Vec<Vec<u8>>>,
-    /// Optional upper/fixed NES PRG window ($C000-$FFFF) mirrored into SMS slot 2
-    /// for runtime-assisted reads of fixed-bank data tables.
+    /// Optional upper/fixed NES PRG window ($C000-$FFFF), or final MMC3 page
+    /// pair. MMC3 reads use physical-page helpers, not the legacy fixed window.
     pub prg_high: Option<Vec<u8>>,
     /// Optional raw NES CHR bytes for emulated PPU $2007 pattern-table reads.
     pub chr_nes: Option<Vec<u8>>,
@@ -59,6 +59,13 @@ pub enum UxromBusConflicts {
 // GPGX and Mednafen.
 pub const NES_PRG_BANK_BASE: u32 = 21;
 
+/// Experimental raw PRG layout: two physical 8 KiB pages per SMS bank.
+pub const MMC3_PRG_DATA_BASE: u32 = 96;
+
+/// Exclusive translated-bank limit until continuation frames separate bank
+/// identity from flags. Materialized returns currently retain only five bits.
+pub const MMC3_CODE_BANK_LIMIT: u32 = 32;
+
 const PACKED_PALETTE_OFFSET: u32 = 0x0000;
 const PACKED_NAMETABLE_OFFSET: u32 = 0x0020;
 const PACKED_CHR_NES_OFFSET: u32 = 0x0720;
@@ -82,6 +89,8 @@ pub struct ProjectConfig<'a> {
     pub uxrom_bank_count: Option<u8>,
     /// Mapper 2 bus-conflict mode.
     pub uxrom_bus_conflicts: Option<UxromBusConflicts>,
+    /// Mapper 4 physical 8 KiB PRG page count (assets contain 16 KiB pairs).
+    pub mmc3_prg_bank_count: Option<u8>,
     /// CHR-RAM cart: patterns upload at runtime; variant regeneration
     /// reads back from VRAM instead of the (blank) data_chr asset.
     pub chr_ram: bool,
@@ -110,6 +119,7 @@ pub enum EmitError {
     InvalidTitle(String),
     InvalidRomSize(u32),
     InvalidUxromConfig(String),
+    InvalidMmc3Config(String),
     ReservedBankPlacement { bank: u32, reserved_bank: u32 },
     LayoutExceedsRomCapacity { required_bank: u32, bank_count: u32 },
 }
@@ -126,6 +136,9 @@ impl fmt::Display for EmitError {
             }
             EmitError::InvalidUxromConfig(reason) => {
                 write!(f, "invalid UxROM configuration: {reason}")
+            }
+            EmitError::InvalidMmc3Config(reason) => {
+                write!(f, "invalid MMC3 configuration: {reason}")
             }
             EmitError::ReservedBankPlacement {
                 bank,
@@ -174,7 +187,7 @@ fn validate_config(
     if cfg.rom_kib < 16 || cfg.rom_kib % 16 != 0 {
         return Err(EmitError::InvalidRomSize(cfg.rom_kib));
     }
-    if assets.prg_banks.is_some() && cfg.mapper != 2 {
+    if assets.prg_banks.is_some() && !matches!(cfg.mapper, 2 | 4) {
         return Err(EmitError::InvalidUxromConfig(
             "PRG bank assets require mapper 2".into(),
         ));
@@ -203,6 +216,71 @@ fn validate_config(
             "UxROM settings supplied for a non-UxROM mapper".into(),
         ));
     }
+    if cfg.mapper == 4 {
+        let count = cfg.mmc3_prg_bank_count.ok_or_else(|| {
+            EmitError::InvalidMmc3Config("missing physical 8 KiB PRG page count".into())
+        })?;
+        if count < 4 || !count.is_power_of_two() {
+            return Err(EmitError::InvalidMmc3Config(format!(
+                "physical PRG page count must be a power of two and at least 4, got {count}"
+            )));
+        }
+        if assets.prg_banks.as_ref().map(Vec::len) != Some(usize::from(count) / 2) {
+            return Err(EmitError::InvalidMmc3Config(
+                "packed 16 KiB PRG assets do not match physical 8 KiB page count".into(),
+            ));
+        }
+        if assets
+            .prg_banks
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|bank| bank.len() != 0x4000)
+            || assets.prg_low.is_some()
+        {
+            return Err(EmitError::InvalidMmc3Config(
+                "PRG assets require exact 16 KiB pairs and no separate low-window asset".into(),
+            ));
+        }
+        if cfg.rom_kib != 2048 {
+            return Err(EmitError::InvalidMmc3Config(
+                "experimental MMC3 layout requires a 2048 KiB SMS image".into(),
+            ));
+        }
+        if !cfg
+            .runtime_defines
+            .iter()
+            .any(|name| name == "MMC3_BANKING_EXPERIMENT")
+        {
+            return Err(EmitError::InvalidMmc3Config(
+                "MMC3 requires the explicit MMC3_BANKING_EXPERIMENT capability gate".into(),
+            ));
+        }
+        if cfg.chr_ram
+            || cfg.chr_ram_bg_identity
+            || assets.chr_nes.as_ref().map(Vec::len) != Some(0x2000)
+        {
+            return Err(EmitError::InvalidMmc3Config(
+                "banking experiment supports only a fixed 8 KiB CHR-ROM asset".into(),
+            ));
+        }
+    } else if cfg.mmc3_prg_bank_count.is_some() {
+        return Err(EmitError::InvalidMmc3Config(
+            "MMC3 settings supplied for a non-MMC3 mapper".into(),
+        ));
+    }
+    let prg_data_base = if cfg.mapper == 4 {
+        MMC3_PRG_DATA_BASE
+    } else {
+        NES_PRG_BANK_BASE
+    };
+    let banked_error = |reason: &str| {
+        if cfg.mapper == 4 {
+            EmitError::InvalidMmc3Config(reason.into())
+        } else {
+            EmitError::InvalidUxromConfig(reason.into())
+        }
+    };
     let explicit_banks: Vec<u32> = build
         .asm
         .lines()
@@ -210,7 +288,7 @@ fn validate_config(
         .filter_map(|tail| tail.split_whitespace().next()?.parse::<u32>().ok())
         .collect();
     let reserved_bank = if assets.prg_banks.is_some() {
-        NES_PRG_BANK_BASE
+        prg_data_base
     } else {
         24
     };
@@ -220,17 +298,27 @@ fn validate_config(
             reserved_bank,
         });
     }
+    if cfg.mapper == 4
+        && let Some(bank) = explicit_banks
+            .iter()
+            .find(|&&bank| bank >= MMC3_CODE_BANK_LIMIT)
+    {
+        return Err(EmitError::InvalidMmc3Config(format!(
+            "translated bank {bank} exceeds the phase-1 continuation ABI limit {}; raw PRG placement does not enlarge return-frame bank identity",
+            MMC3_CODE_BANK_LIMIT - 1
+        )));
+    }
     let mut required_bank = explicit_banks.into_iter().max().unwrap_or(0);
     let asset_base = if let Some(banks) = &assets.prg_banks {
-        required_bank = required_bank.max(NES_PRG_BANK_BASE + banks.len() as u32 - 1);
-        NES_PRG_BANK_BASE + banks.len() as u32
+        required_bank = required_bank.max(prg_data_base + banks.len() as u32 - 1);
+        prg_data_base + banks.len() as u32
     } else {
         24
     };
     if let Some(banks) = &assets.prg_banks {
         if assets.chr_4bpp.len() > 0x4000 {
-            return Err(EmitError::InvalidUxromConfig(
-                "converted CHR does not fit its packed asset bank".into(),
+            return Err(banked_error(
+                "converted CHR does not fit its packed asset bank",
             ));
         }
         if assets.nametable.as_ref().is_some_and(|v| v.len() > 0x700)
@@ -240,14 +328,16 @@ fn validate_config(
                 .as_ref()
                 .is_some_and(|v| v.len() > (0x4000 - PACKED_CHR_MAPS_OFFSET as usize))
         {
-            return Err(EmitError::InvalidUxromConfig(
-                "small runtime assets exceed the packed bank layout".into(),
+            return Err(banked_error(
+                "small runtime assets exceed the packed bank layout",
             ));
         }
         if assets.prg_high.as_deref() != banks.last().map(Vec::as_slice) {
-            return Err(EmitError::InvalidUxromConfig(
-                "fixed PRG asset must match the final UxROM bank".into(),
-            ));
+            return Err(banked_error(if cfg.mapper == 4 {
+                "high PRG asset must match the final packed MMC3 pair"
+            } else {
+                "fixed PRG asset must match the final UxROM bank"
+            }));
         }
         required_bank = required_bank.max(asset_base + 1);
     } else {
@@ -387,10 +477,15 @@ fn sms_asm_content(
 ) -> String {
     let rom_banks = cfg.rom_kib / 16;
     let runtime_includes = build_runtime_includes(runtime_s_files);
+    let prg_data_base = if cfg.mapper == 4 {
+        MMC3_PRG_DATA_BASE
+    } else {
+        NES_PRG_BANK_BASE
+    };
     // Asset banks: NROM keeps the legacy 24-30; banked carts place them
     // ABOVE the NES PRG data banks so generated code can grow into 4-35.
     let asset_base: u32 = if assets.prg_banks.is_some() {
-        NES_PRG_BANK_BASE
+        prg_data_base
             + assets
                 .prg_banks
                 .as_ref()
@@ -444,7 +539,12 @@ fn sms_asm_content(
     if cfg.chr_ram {
         mapper_define.push_str("\n.define NES_CHR_RAM 1\n.define CHR_RAM_SRAM_BASE $8800");
     }
-    if assets.prg_banks.is_some() {
+    if cfg.mapper == 4 {
+        mapper_define.push_str(&format!(
+            "\n.define NES_MMC3 1\n.define NES_MMC3_PRG_BANK_COUNT {}\n.define MMC3_PRG_DATA_BASE {MMC3_PRG_DATA_BASE}",
+            cfg.mmc3_prg_bank_count.expect("validated MMC3 config")
+        ));
+    } else if assets.prg_banks.is_some() {
         mapper_define.push_str(&format!(
             "\n.define NES_PRG_BANK_BASE {NES_PRG_BANK_BASE}\n.define NES_PRG_BANK_COUNT {}\n.define NES_PRG_BANK_MASK {}",
             cfg.uxrom_bank_count.expect("validated UxROM config"),
@@ -565,7 +665,7 @@ fn sms_asm_content(
         // the selected bank into the window; data_prg_low aliases bank 0
         // so game-agnostic runtime restore paths keep working.
         for (k, _) in banks.iter().enumerate() {
-            let bank = NES_PRG_BANK_BASE + k as u32;
+            let bank = prg_data_base + k as u32;
             out.push_str(&format!(
                 "\n.bank {bank} slot 2\n\
                  .org $0000\n\
@@ -781,6 +881,7 @@ mod tests {
         ProjectConfig {
             mapper: 0,
             uxrom_bank_count: None,
+            mmc3_prg_bank_count: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -827,6 +928,27 @@ mod tests {
         cfg.uxrom_bank_count = Some(8);
         cfg.uxrom_bus_conflicts = Some(bus_conflicts);
         cfg
+    }
+
+    fn mmc3_assets_and_cfg(count: u8) -> (ProjectAssets, ProjectConfig<'static>) {
+        let mut assets = minimal_assets();
+        let pairs: Vec<Vec<u8>> = (0..count / 2)
+            .map(|pair| {
+                let mut bytes = vec![pair * 2; 0x2000];
+                bytes.extend(vec![pair * 2 + 1; 0x2000]);
+                bytes
+            })
+            .collect();
+        assets.prg_high = pairs.last().cloned();
+        assets.prg_banks = Some(pairs);
+        assets.chr_nes = Some(vec![0; 0x2000]);
+        assets.chr_4bpp = vec![0; 0x4000];
+        let mut cfg = minimal_cfg();
+        cfg.mapper = 4;
+        cfg.rom_kib = 2048;
+        cfg.mmc3_prg_bank_count = Some(count);
+        cfg.runtime_defines.push("MMC3_BANKING_EXPERIMENT".into());
+        (assets, cfg)
     }
 
     // ── 1. emit_project produces all expected files and directories ────────────
@@ -970,6 +1092,7 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             uxrom_bank_count: None,
+            mmc3_prg_bank_count: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1002,6 +1125,7 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             uxrom_bank_count: None,
+            mmc3_prg_bank_count: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1034,6 +1158,7 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             uxrom_bank_count: None,
+            mmc3_prg_bank_count: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1111,6 +1236,7 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             uxrom_bank_count: None,
+            mmc3_prg_bank_count: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1166,6 +1292,7 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             uxrom_bank_count: None,
+            mmc3_prg_bank_count: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1222,6 +1349,7 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             uxrom_bank_count: None,
+            mmc3_prg_bank_count: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1257,6 +1385,7 @@ mod tests {
         let cfg = ProjectConfig {
             mapper: 0,
             uxrom_bank_count: None,
+            mmc3_prg_bank_count: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1373,5 +1502,113 @@ mod tests {
             emit_project(&out, &build, &assets, &cfg, None),
             Err(EmitError::LayoutExceedsRomCapacity { .. })
         ));
+    }
+
+    #[test]
+    fn mmc3_preserves_physical_pages_and_uses_separate_runtime_defines() {
+        let out = unique_dir("sms_proj_mmc3");
+        let (assets, cfg) = mmc3_assets_and_cfg(32);
+        let mut build = minimal_build();
+        build.asm.push_str("\n.bank 31 slot 1\n");
+        emit_project(&out, &build, &assets, &cfg, None).unwrap();
+        let asm = fs::read_to_string(out.join("sms.asm")).unwrap();
+        assert!(asm.contains("bankstotal 128"));
+        assert!(asm.contains(".define NES_MMC3 1"));
+        assert!(asm.contains(".define NES_MMC3_PRG_BANK_COUNT 32"));
+        assert!(asm.contains(".define MMC3_PRG_DATA_BASE 96"));
+        assert!(!asm.contains(".define NES_PRG_BANK_"));
+        assert!(!asm.contains(".define NES_PRG_BUS_CONFLICTS"));
+        assert!(asm.contains(".define data_prg_low data_prg_bank_0"));
+        assert!(asm.contains(".define data_prg_high data_prg_bank_15"));
+        assert!(asm.contains(".bank 112 slot 2"));
+        assert!(asm.contains(".bank 113 slot 2"));
+        for pair in 0..16u8 {
+            let bytes = fs::read(out.join(format!("data/prg_bank_{pair}.bin"))).unwrap();
+            assert_eq!(&bytes[..0x2000], vec![pair * 2; 0x2000]);
+            assert_eq!(&bytes[0x2000..], vec![pair * 2 + 1; 0x2000]);
+            assert!(asm.contains(&format!(
+                ".bank {} slot 2",
+                MMC3_PRG_DATA_BASE + u32::from(pair)
+            )));
+        }
+        fs::remove_dir_all(out).unwrap();
+    }
+
+    #[test]
+    fn mmc3_rejects_invalid_configuration_before_creating_output() {
+        for case in 0..12 {
+            let out = unique_dir("sms_proj_mmc3_invalid");
+            let (mut assets, mut cfg) = mmc3_assets_and_cfg(8);
+            match case {
+                0 => cfg.mmc3_prg_bank_count = None,
+                1 => cfg.mmc3_prg_bank_count = Some(3),
+                2 => cfg.mmc3_prg_bank_count = Some(16),
+                3 => {
+                    assets.prg_banks.as_mut().unwrap()[0].pop();
+                }
+                4 => cfg.rom_kib = 1024,
+                5 => cfg.runtime_defines.clear(),
+                6 => cfg.chr_ram = true,
+                7 => assets.chr_nes.as_mut().unwrap().push(0),
+                8 => assets.prg_low = Some(vec![0; 0x4000]),
+                9 => assets.prg_high.as_mut().unwrap()[0] ^= 1,
+                10 => cfg.mapper = 0,
+                11 => assets.chr_4bpp.push(0),
+                _ => unreachable!(),
+            }
+            // Non-MMC3 PRG assets are caught by the older banked-asset gate.
+            assert!(
+                matches!(
+                    emit_project(&out, &minimal_build(), &assets, &cfg, None),
+                    Err(EmitError::InvalidMmc3Config(_) | EmitError::InvalidUxromConfig(_))
+                ),
+                "case {case}"
+            );
+            assert!(!out.exists(), "case {case} created partial output");
+        }
+        let mut cfg = minimal_cfg();
+        cfg.mmc3_prg_bank_count = Some(8);
+        assert!(matches!(
+            validate_config(&cfg, &minimal_assets(), &minimal_build()),
+            Err(EmitError::InvalidMmc3Config(_))
+        ));
+    }
+
+    #[test]
+    fn mmc3_rejects_code_data_overlap_and_asset_capacity_overflow() {
+        let (assets, cfg) = mmc3_assets_and_cfg(8);
+        let mut build = minimal_build();
+        build.asm.push_str("\n.bank 96 slot 1\n");
+        assert!(matches!(
+            validate_config(&cfg, &assets, &build),
+            Err(EmitError::ReservedBankPlacement {
+                bank: 96,
+                reserved_bank: 96
+            })
+        ));
+        let (assets, cfg) = mmc3_assets_and_cfg(64);
+        assert!(matches!(
+            validate_config(&cfg, &assets, &minimal_build()),
+            Err(EmitError::LayoutExceedsRomCapacity {
+                required_bank: 129,
+                bank_count: 128
+            })
+        ));
+    }
+
+    #[test]
+    fn mmc3_code_banks_respect_materialized_continuation_bank_bits() {
+        let (assets, cfg) = mmc3_assets_and_cfg(8);
+        let mut last_supported = minimal_build();
+        last_supported.asm.push_str("\n.bank 31 slot 1\n");
+        assert!(validate_config(&cfg, &assets, &last_supported).is_ok());
+        for bank in [32, 63, 64, 95] {
+            let mut build = minimal_build();
+            build.asm.push_str(&format!("\n.bank {bank} slot 1\n"));
+            assert!(matches!(
+                validate_config(&cfg, &assets, &build),
+                Err(EmitError::InvalidMmc3Config(reason)) if reason.contains("continuation ABI")
+            ));
+        }
     }
 }

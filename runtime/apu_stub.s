@@ -1059,7 +1059,11 @@ rt_sound_stub:
 ; maps the matching SMS data bank into slot 2 immediately — every
 ; existing PRG-window read path then sees the right bytes with zero
 ; per-read cost.
+; MMC3 uses a separate register decoder and keeps slot 2 unchanged.
 rt_mapper_write:
+.ifdef NES_MMC3
+  jp rt_mmc3_write
+.else
 .ifndef NES_PRG_BANK_BASE
   ret
 .else
@@ -1156,6 +1160,7 @@ _mw_trap:
 _mw_halt:
   halt
   jr   _mw_halt
+.endif
 .endif
 
 ; ─── rt_restore_prg_window ────────────────────────────────────────────────────

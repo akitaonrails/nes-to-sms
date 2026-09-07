@@ -16,10 +16,14 @@ what we decided to do next and why.
 
 The user selected Super Mario Bros. 3 as the next compatibility effort.
 [SMB3 plan](smb3-plan.md) records the pinned target, architectural blockers,
-ordered implementation and acceptance gates. The first delivery is a tested
-compatibility baseline, not translated boot or mapper support. Next is the
-executable 8 KiB banking foundation; cartridge RAM, CHR residency and actual
-IRQ/reference timing are separate required milestones. Preserve SMB1/CV1
+ordered implementation and acceptance gates. The compatibility baseline is
+committed; the executable 8 KiB banking foundation has passed independent review
+and all regression gates, including bank-sensitive flags and conservative
+computed-continuation rejection.
+Cartridge RAM, CHR residency and actual IRQ/reference timing remain required
+for the first visible conversion. The parallel [LLVM-style optimization
+research](ir-optimization-research.md) is complete; its measured experiments
+follow correctness rather than replacing the playable-ROM work. Preserve SMB1/CV1
 and their current performance while exploring this path. The CV1 optimization
 queue below remains unfinished, but SMB3 is now the active priority.
 

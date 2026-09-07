@@ -453,12 +453,13 @@ pub struct LiftOptions {
     pub return_escape_sites: Vec<ReturnEscapeSite>,
     pub return_consume_sites: Vec<ReturnConsumeSite>,
     pub materialized_call_sites: Vec<MaterializedCallSite>,
-    /// Banked-window lifting (mapper plan M1): when set (e.g. "b0_"),
-    /// every label generated for an address inside $8000-$BFFF becomes
-    /// `L_b0_XXXX` — the routine's identity is (bank, addr). Fixed-bank
-    /// targets ($C000+) keep plain `L_XXXX` and resolve to the shared
-    /// fixed-bank translation.
+    /// When set (e.g. "b0_"), labels inside `window_label_range` become
+    /// `L_b0_XXXX`: their identity includes a physical bank and CPU address.
+    /// Other windows remain unqualified for fixed or runtime dispatch.
     pub window_label_prefix: Option<String>,
+    /// CPU window whose physical bank is established by this analysis unit.
+    /// Defaults to UxROM's 16 KiB window; MMC3 units use one 8 KiB window.
+    pub window_label_range: std::ops::Range<u16>,
     /// PCs that other routines branch to which fall inside our range.
     /// We emit `Op::Label(L_<pc>)` at each so the cross-routine
     /// reference resolves. Without this, a `BEQ $85C8` from one
@@ -528,6 +529,7 @@ impl Default for LiftOptions {
             materialized_call_sites: Vec::new(),
             return_escape_sites: Vec::new(),
             window_label_prefix: None,
+            window_label_range: 0x8000..0xC000,
             extra_label_pcs: Vec::new(),
         }
     }
@@ -599,9 +601,9 @@ fn label_for(addr: u16) -> String {
     format!("L_{addr:04X}")
 }
 
-fn label_for_prefixed(addr: u16, window_prefix: Option<&str>) -> String {
-    match window_prefix {
-        Some(p) if (0x8000..0xC000).contains(&addr) => format!("L_{p}{addr:04X}"),
+fn label_for_prefixed(addr: u16, opts: &LiftOptions) -> String {
+    match opts.window_label_prefix.as_deref() {
+        Some(p) if opts.window_label_range.contains(&addr) => format!("L_{p}{addr:04X}"),
         _ => label_for(addr),
     }
 }
@@ -664,7 +666,7 @@ fn lift_insn(
     // Helper: record a label (internal or external)
     let record_target =
         |target: u16, branch_labels: &mut Vec<String>, external_calls: &mut Vec<String>| {
-            let lbl = label_for_prefixed(target, opts.window_label_prefix.as_deref());
+            let lbl = label_for_prefixed(target, opts);
             if target >= opts.start && target < opts.end {
                 if !branch_labels.contains(&lbl) {
                     branch_labels.push(lbl.clone());
@@ -1405,7 +1407,7 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
                 )));
             }
         }
-        let label = label_for_prefixed(last, opts.window_label_prefix.as_deref());
+        let label = label_for_prefixed(last, opts);
         if opts.jump_engine_sites.iter().any(|engine| {
             engine.targets.contains(&label) || engine.return_target.as_ref() == Some(&label)
         }) {
@@ -1464,7 +1466,7 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
             .any(|pc| *pc > start && *pc <= site.caller)
             || opts.jump_engine_sites.iter().any(|engine| {
                 (start + 1..=site.caller).any(|pc| {
-                    let label = label_for_prefixed(pc, opts.window_label_prefix.as_deref());
+                    let label = label_for_prefixed(pc, opts);
                     engine.targets.contains(&label) || engine.return_target.as_ref() == Some(&label)
                 })
             })
@@ -1531,7 +1533,7 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
     while pc < opts.end {
         // Emit internal label if this PC is a branch target
         if all_targets.contains(&pc) {
-            let lbl = label_for_prefixed(pc, opts.window_label_prefix.as_deref());
+            let lbl = label_for_prefixed(pc, opts);
             // The entry label is already emitted as op 0 (entry_name); a
             // self-targeting entry must not define the same string twice.
             if lbl != opts.entry_name {
@@ -1674,6 +1676,7 @@ mod tests {
         let prg = make_prg_at(cpu_start, bytes);
         let opts = LiftOptions {
             window_label_prefix: None,
+            window_label_range: 0x8000..0xC000,
             start: cpu_start,
             end: cpu_start + bytes.len() as u16,
             entry_name: format!("L_{cpu_start:04X}"),
@@ -1687,6 +1690,48 @@ mod tests {
     }
 
     // ------ classify_addr tests ------
+
+    #[test]
+    fn eight_kib_units_qualify_only_their_established_cpu_window() {
+        for window in [0x8000..0xa000, 0xa000..0xc000, 0xc000..0xe000] {
+            // Calls into all four CPU windows: only the current unit's bank
+            // is known. Other switchable targets must be runtime-dispatched.
+            let code = [
+                0x20, 0x00, 0x81, 0x20, 0x00, 0xa1, 0x20, 0x00, 0xc1, 0x20, 0x00, 0xe1, 0x60,
+            ];
+            let prg = make_prg_at(window.start, &code);
+            let opts = LiftOptions {
+                start: window.start,
+                end: window.start + code.len() as u16,
+                window_label_prefix: Some("b7_".to_owned()),
+                window_label_range: window.clone(),
+                ..LiftOptions::default()
+            };
+            let routine = lift_range(&prg, &opts).unwrap();
+            let expected: Vec<_> = [0x8100, 0xa100, 0xc100, 0xe100]
+                .into_iter()
+                .map(|pc| {
+                    if window.contains(&pc) {
+                        format!("L_b7_{pc:04X}")
+                    } else {
+                        format!("L_{pc:04X}")
+                    }
+                })
+                .collect();
+            assert_eq!(routine.external_calls, expected);
+        }
+    }
+
+    #[test]
+    fn uxrom_default_still_qualifies_both_lower_eight_kib_halves() {
+        let opts = LiftOptions {
+            window_label_prefix: Some("b2_".to_owned()),
+            ..LiftOptions::default()
+        };
+        assert_eq!(label_for_prefixed(0x8000, &opts), "L_b2_8000");
+        assert_eq!(label_for_prefixed(0xbfff, &opts), "L_b2_BFFF");
+        assert_eq!(label_for_prefixed(0xc000, &opts), "L_C000");
+    }
 
     #[test]
     fn materialized_calls_and_adjacent_consumption_preserve_original_control_flow() {
@@ -1943,6 +1988,7 @@ mod tests {
                 consume_at: None,
             }],
             window_label_prefix: None,
+            window_label_range: 0x8000..0xC000,
             extra_label_pcs: Vec::new(),
         };
         let routine = lift_range(&prg, &opts).expect("lift return escape");
@@ -2097,6 +2143,7 @@ mod tests {
         let prg = make_prg_at(0xAEF9, bytes);
         let opts = LiftOptions {
             window_label_prefix: None,
+            window_label_range: 0x8000..0xC000,
             start: 0xAEF9,
             end: 0xAEFE,
             entry_name: "L_AEF9".to_string(),
@@ -2146,6 +2193,7 @@ mod tests {
                 materialized_call_sites: Vec::new(),
                 return_escape_sites: Vec::new(),
                 window_label_prefix: None,
+                window_label_range: 0x8000..0xC000,
                 extra_label_pcs: Vec::new(),
             },
         )
@@ -2191,6 +2239,7 @@ mod tests {
                 materialized_call_sites: Vec::new(),
                 return_escape_sites: Vec::new(),
                 window_label_prefix: None,
+                window_label_range: 0x8000..0xC000,
                 extra_label_pcs: Vec::new(),
             },
         )
@@ -2231,6 +2280,7 @@ mod tests {
             &prg,
             &LiftOptions {
                 window_label_prefix: None,
+                window_label_range: 0x8000..0xC000,
                 start: 0xE3E9,
                 end: 0xE3EC,
                 entry_name: "L_E3E9".into(),
@@ -2377,6 +2427,7 @@ mod tests {
         let prg = vec![0u8; 0x8000];
         let opts = LiftOptions {
             window_label_prefix: None,
+            window_label_range: 0x8000..0xC000,
             start: 0x8000,
             end: 0x8000,
             entry_name: "test".to_string(),
@@ -2394,6 +2445,7 @@ mod tests {
         let prg = vec![0u8; 0x8000];
         let opts = LiftOptions {
             window_label_prefix: None,
+            window_label_range: 0x8000..0xC000,
             start: 0x8010,
             end: 0x8000,
             entry_name: "test".to_string(),

@@ -367,6 +367,11 @@ boot_main:
   ld  bc, $0100
   xor a
   call mem_fill
+.ifdef NES_MMC3
+  ; Mapper state reuses the inactive legacy update-buffer body, so initialize
+  ; only AFTER its startup clear. C800 remains the empty-buffer sentinel.
+  call rt_mmc3_init
+.endif
 
   ; 11. Clear sprite staging area.
   ld  hl, $c900

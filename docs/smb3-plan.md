@@ -4,17 +4,21 @@ Started 2026-09-07 at `80e30f6`. SMB3 is the user-selected next compatibility
 target; SMB1 and Castlevania remain the regression floor. This supplements
 the architecture in [master-plan.md](master-plan.md).
 
-## Status: pinned compatibility baseline, not mapper support
+## Status: executable banking foundation complete; SMB3 conversion pending
 
-`profiles/smb3.toml` identifies the local USA Rev 1 target. Conversion still
-fails before analysis/output creation with `unsupported mapper 4`.
+`profiles/smb3.toml` identifies the local USA Rev 1 target. Its conversion
+still fails closed. The user has requested continuation until a playable
+SMB3 SMS ROM exists; the current implementation phase is an opt-in synthetic
+MMC3 banking path, not a reason to stop at another compatibility report.
 There is **no translated SMB3 boot, screenshot, or performance result yet**.
 An assembled fixture or recognizable static image will not count as gameplay.
 
 The checked local file has a NES 2.0 header, mapper 4/submapper 0, 256 KiB
 PRG ROM, 128 KiB CHR ROM, 8 KiB volatile PRG RAM, no trainer, no battery,
-and no four-screen flag. Submapper 0 does not establish an exact IRQ silicon
-revision; record that uncertainty instead of selecting behavior silently.
+and no four-screen flag. The current
+[NES 2.0 submapper specification](https://www.nesdev.org/wiki/NES_2.0_submappers#004:_MMC3)
+assigns mapper 4/submapper 0 Sharp MMC3 behavior. The host board model selects
+that behavior explicitly; this is not identification of the physical chip.
 
 - Whole-file SHA-256: `1ddc4b429490e298c05fa70389034107c0cb50f671c7c1baaa3f228224afc2e9`.
 - PRG+CHR SHA-256, used by the profile:
@@ -37,7 +41,7 @@ Do not change the ROM header to masquerade as UxROM.
 
 | Boundary | Current implementation | SMB3 requirement |
 | --- | --- | --- |
-| PRG identity | One selected 16 KiB UxROM bank | Independent 8 KiB windows and PRG inversion |
+| PRG identity | Experimental independent 8 KiB banking; legacy UxROM retained | Full-game reachability and safe remapping continuations |
 | Game memory | NES 2 KiB mirror plus runtime/render storage | Additional 8 KiB cartridge work RAM |
 | Graphics | NROM CHR or CV1 CHR RAM | 128 KiB physical CHR, mapped in 1/2 KiB windows |
 | Raster timing | Existing SMS split machinery | Qualified MMC3 IRQ events plus a separate SMS presentation strategy |
@@ -74,10 +78,10 @@ specific tested cartridge/emulator contract before claiming feasibility.
 
 ## Ordered implementation and acceptance gates
 
-1. **Compatibility baseline (this delivery).** Pin identity and vectors;
+1. **Compatibility baseline (completed at `5b1ba1e`).** Pin identity and vectors;
    test mapper-4 rejection without creating or modifying output. Publish this
    plan and preserve SMB1/CV1 artifacts.
-2. **Executable 8 KiB banking foundation (next code milestone).** Define
+2. **Executable 8 KiB banking foundation (completed).** Define
    physical-bank/window identity and mapper state separately from the UxROM
    policy. Integrate it with a real consumer and synthetic executable fixture;
    do not land an unused board model. Cover both PRG modes, independent R6/R7,
@@ -108,13 +112,68 @@ Z80 cycles/tick, mapper overhead, CHR bytes uploaded/frame, peak tile residency,
 and dropped/repeated presentations. SMB3 full speed is an experiment, not a
 promise. Game-specific facts stay in profiles/runtime, not Rust hand-ports.
 
+### Code-size-for-speed candidate: late selective inlining
+
+The user proposed retaining calls/jumps in the intermediate representation
+while emitting inlined final code. Keep canonical IR function boundaries for
+discovery and validation; apply selected call-site expansion before final Z80
+bank placement/linking, not by copying already-linked binary bytes. Recompute
+flag liveness and branch labels after expansion. The existing backend already
+inlines flag, addressing and selected hardware helpers, but does not have a
+general translated-function inliner.
+
+Start with measured hot, small leaf routines with known bank identity and no
+observable return-stack manipulation or hardware side effects. Exclude unknown
+dynamic calls, recursive cycles and remapping continuations until their
+contracts are proven. Count eliminated translated-call bookkeeping and far-bank
+transfers, plus newly removable flag/register work; subtract extra bank-crossing
+cost introduced by code growth. Compare actual cycles/tick and emitted size
+under a fixed budget. More banked ROM is a tradeoff, not extra directly mapped
+RAM, and Z80 versus 6502 cycle counts must be normalized by clock frequency.
+This is a candidate for the playability/performance phase, not an implemented
+optimizer or a reason to delay the current banking/graphics foundation.
+
+The [LLVM-style optimization research](ir-optimization-research.md) recommends
+CFG-wide value/flag/effect analysis, then one measured region optimization and
+selective inlining. It inventories existing passes, legal transformation
+boundaries, target costs and required A/B evidence. Adopting individual passes
+does not imply replacing the backend with LLVM or promising a speedup.
+
+### Experimental banking contract
+
+`MMC3_BANKING_EXPERIMENT` opts a synthetic profile into the new path. A separate
+Sharp MMC3 board model supplies 8 KiB PRG / 1 KiB CHR identities and qualified
+A12/M2 IRQ semantics. The runtime currently executes PRG banking only: cartridge
+RAM, banked CHR rendering, IRQ delivery and unsafe remapping continuations
+remain rejected or trapped. The SMB3 profile does not opt in yet.
+Computed indirect jumps and indirect pointer accesses remain outside this
+bounded contract; helper tests alone do not establish their pipeline support.
+
+Raw PRG pages are packed in pairs into SMS banks starting at 96; translated
+code is temporarily limited to banks 4–31 in a 2 MiB image. The existing
+software-return frame packs bank identity and flags into one byte; expanding
+code placement requires separating those fields first. This cartridge size is tested in Genesis
+Plus GX, not claimed compatible with every historical cartridge mapper.
+Assembled fixtures cover both PRG modes, all physical pages, mapped-window
+calls/returns, aliases, indexed boundaries and mapping/register preservation.
+The generic `--validate` harness explicitly skips MMC3 until its bus supports
+the mapper; these skips are not passing differential results.
+
+An absolute-zero-page lowering omission was fixed with differential coverage.
+A separate pre-existing stack-page RMW omission remains deferred: changing it
+altered SMB1/CV1 artifacts, so it needs its own behavioral review. MMC3 rejects
+that unsupported form explicitly instead of silently emitting incorrect code.
+
 ## Evidence and preservation
 
-Local evidence is under ignored `out/smb3-baseline.bo9UiK/`. Original-NES
-capture remains open: the existing FCEUX 2.5.0 Docker image aborted at startup
-under Xvfb, including with audio disabled. Offscreen attempts did not yield
-captures. No original-NES or SMS screenshot is claimed. The temporary Lua
-input schedule and failure logs are retained; no emulator dependency was added.
+Initial evidence is under ignored `out/smb3-baseline.bo9UiK/`. Original-NES
+capture is now working under `out/smb3-reference.jncimG/`: FCEUX 2.5.0 renders
+the title, map and 1-1 on an input-only 1,601-frame route. This is original
+NES evidence, not SMS output or a level-clear route. `PROVENANCE.md` records
+ROM/emulator hashes, inputs and reproduction. The CLI Lua loader's fortified
+`realpath` call caused the original abort; loading Lua through the existing UI
+bypasses that branch without changing the emulator or adding a dependency.
+The ignored runner is `bash out/smb3-reference.jncimG/run.sh`.
 
 Current `frame-diff` is **not** an MMC3 ground-truth oracle: it has no PPU
 fetch/A12 stream, uses an instruction-based frame allowance, and does not
@@ -150,3 +209,27 @@ Phase 0 verification:
 - Independent plan and implementation reviews accepted this as a compatibility
   baseline; the required regression gates subsequently passed. No production
   module boundaries or runtime code changed.
+
+Banking foundation verification (reviewed final candidate):
+
+- Workspace **564 passed, 118 ignored**; formatting and Clippy pass with
+  existing warnings visible. All 13 assembled legacy IRQ tests pass.
+- Nine MMC3 pipeline tests including Docker assembly/execution pass; assembled
+  runtime helpers pass 240 seeded ABI combinations. Seeded helper tests are
+  not gameplay evidence.
+- The 2 MiB fixture completes in Genesis Plus GX at stock clock after 33
+  physical frames, passing 25 RAM checks without guest-state writes.
+- Isolated SMB1/CV1 rebuilds remain byte-identical. All three SMB differential
+  routes pass; the 301-million-step trace passes its terminal, no-trap and
+  BGV gates, with seven checkpoint images identical to the accepted baseline.
+- Alter Ego's existing generated project still assembles; the original ROM
+  remains unavailable for fresh generation. Logs are under ignored
+  `out/smb3-banking.9Xi1aK/`.
+
+The first independent implementation review reproduced bank-ambiguous flag
+analysis, a computed-transfer remapping bypass and an incorrectly admitted
+indirect jump. Added regression fixtures and conservative capability checks
+resolve those findings; the second review accepted the bounded foundation and
+independently reran its assembled tests. A separate structure review found no
+module or dependency-direction blocker. All required legacy gates subsequently
+passed on the final candidate. This completes banking, not SMB3 playability.

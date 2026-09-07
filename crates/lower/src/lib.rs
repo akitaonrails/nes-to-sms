@@ -679,6 +679,7 @@ fn emit_ldxy_mem(
     region: ir::MemRegion,
     target: IdxReg,
     guarded_mapper_window: bool,
+    mmc3_banking: bool,
 ) {
     use ir::{AddrExpr, MemRegion};
     // Keep translated LDX/LDY memory loads off the native Z80 stack. The old
@@ -687,72 +688,89 @@ fn emit_ldxy_mem(
     // does not alter flags, so the N/Z result from emit_set_nz_inline remains
     // live for a following 6502 branch.
     program.ld_abs_a(sms_layout::LOWER_SAVED_A);
-    match (addr, region) {
-        (AddrExpr::ZpConst(z), MemRegion::ZeroPage) => {
-            program.ld_a_abs(sms_layout::NES_ZP_BASE + *z as u16);
-        }
-        (AddrExpr::Const(a), MemRegion::Ram | MemRegion::RamMirror | MemRegion::Stack) => {
-            program.ld_a_abs(nes_ram_addr_to_sms(*a));
-        }
-        (AddrExpr::Const(a), MemRegion::PpuReg | MemRegion::PpuMirror) => {
-            if (*a & 0x0007) == 2 {
-                emit_ppu_status_read_inline(program);
-            } else {
-                program.ld_b_imm((*a & 0x0007) as u8);
-                program.call(runtime_symbols::PPU_READ);
+    if mmc3_banking && region == MemRegion::PrgRom {
+        emit_mmc3_prg_read(program, addr);
+    } else {
+        match (addr, region) {
+            (AddrExpr::ZpConst(z), MemRegion::ZeroPage) => {
+                program.ld_a_abs(sms_layout::NES_ZP_BASE + *z as u16);
             }
-        }
-        (AddrExpr::Const(a), MemRegion::PrgRom) if *a < 0xC000 => {
-            program.ld_a_abs(*a);
-        }
-        (AddrExpr::Const(a), MemRegion::PrgRom) => {
-            emit_prg_high_read_direct(program, *a, guarded_mapper_window);
-        }
-        (AddrExpr::AbsIndexedX(base), _) => {
-            if let Some(sms) = indexed_direct_base(*base, region) {
-                emit_indexed_read_direct(program, sms, IdxReg::X);
-            } else {
-                if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                    emit_prg_high_indexed_direct(program, *base, IdxReg::X, guarded_mapper_window);
+            (
+                AddrExpr::Const(a),
+                MemRegion::ZeroPage | MemRegion::Ram | MemRegion::RamMirror | MemRegion::Stack,
+            ) => {
+                program.ld_a_abs(nes_ram_addr_to_sms(*a));
+            }
+            (AddrExpr::Const(a), MemRegion::PpuReg | MemRegion::PpuMirror) => {
+                if (*a & 0x0007) == 2 {
+                    emit_ppu_status_read_inline(program);
                 } else {
-                    program.ld_hl_imm(indexed_base_to_sms(*base, region));
-                    program.ld_a_d();
-                    program.ld_b_a();
-                    program.call(indexed_read_runtime(*base, region));
+                    program.ld_b_imm((*a & 0x0007) as u8);
+                    program.call(runtime_symbols::PPU_READ);
                 }
             }
-        }
-        (AddrExpr::AbsIndexedY(base), _) => {
-            if let Some(sms) = indexed_direct_base(*base, region) {
-                emit_indexed_read_direct(program, sms, IdxReg::Y);
-            } else {
-                if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                    emit_prg_high_indexed_direct(program, *base, IdxReg::Y, guarded_mapper_window);
+            (AddrExpr::Const(a), MemRegion::PrgRom) if *a < 0xC000 => {
+                program.ld_a_abs(*a);
+            }
+            (AddrExpr::Const(a), MemRegion::PrgRom) => {
+                emit_prg_high_read_direct(program, *a, guarded_mapper_window);
+            }
+            (AddrExpr::AbsIndexedX(base), _) => {
+                if let Some(sms) = indexed_direct_base(*base, region) {
+                    emit_indexed_read_direct(program, sms, IdxReg::X);
                 } else {
-                    program.ld_hl_imm(indexed_base_to_sms(*base, region));
-                    program.ld_a_e_reg();
-                    program.ld_b_a();
-                    program.call(indexed_read_runtime(*base, region));
+                    if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
+                        emit_prg_high_indexed_direct(
+                            program,
+                            *base,
+                            IdxReg::X,
+                            guarded_mapper_window,
+                        );
+                    } else {
+                        program.ld_hl_imm(indexed_base_to_sms(*base, region));
+                        program.ld_a_d();
+                        program.ld_b_a();
+                        program.call(indexed_read_runtime(*base, region));
+                    }
                 }
             }
-        }
-        (AddrExpr::ZpIndexedX(zp), _) => {
-            program.ld_a_d();
-            program.add_a_imm(*zp);
-            program.ld_l_a();
-            program.ld_h_imm((sms_layout::NES_ZP_BASE >> 8) as u8);
-            program.ld_a_hl_ptr();
-        }
-        (AddrExpr::ZpIndexedY(zp), _) => {
-            program.ld_a_e_reg();
-            program.add_a_imm(*zp);
-            program.ld_l_a();
-            program.ld_h_imm((sms_layout::NES_ZP_BASE >> 8) as u8);
-            program.ld_a_hl_ptr();
-        }
-        _ => {
-            program.comment("WARN: unresolved LDX/LDY addressing mode");
-            program.ld_a_imm(0x00);
+            (AddrExpr::AbsIndexedY(base), _) => {
+                if let Some(sms) = indexed_direct_base(*base, region) {
+                    emit_indexed_read_direct(program, sms, IdxReg::Y);
+                } else {
+                    if region == ir::MemRegion::PrgRom && *base >= 0xC000 {
+                        emit_prg_high_indexed_direct(
+                            program,
+                            *base,
+                            IdxReg::Y,
+                            guarded_mapper_window,
+                        );
+                    } else {
+                        program.ld_hl_imm(indexed_base_to_sms(*base, region));
+                        program.ld_a_e_reg();
+                        program.ld_b_a();
+                        program.call(indexed_read_runtime(*base, region));
+                    }
+                }
+            }
+            (AddrExpr::ZpIndexedX(zp), _) => {
+                program.ld_a_d();
+                program.add_a_imm(*zp);
+                program.ld_l_a();
+                program.ld_h_imm((sms_layout::NES_ZP_BASE >> 8) as u8);
+                program.ld_a_hl_ptr();
+            }
+            (AddrExpr::ZpIndexedY(zp), _) => {
+                program.ld_a_e_reg();
+                program.add_a_imm(*zp);
+                program.ld_l_a();
+                program.ld_h_imm((sms_layout::NES_ZP_BASE >> 8) as u8);
+                program.ld_a_hl_ptr();
+            }
+            _ => {
+                program.comment("WARN: unresolved LDX/LDY addressing mode");
+                program.ld_a_imm(0x00);
+            }
         }
     }
     target.store_from_a(program);
@@ -807,7 +825,10 @@ fn emit_stxy_mem(
             src.load_into_a(program);
             program.ld_abs_a(sms_layout::NES_ZP_BASE + *z as u16);
         }
-        (AddrExpr::Const(a), MemRegion::Ram | MemRegion::RamMirror | MemRegion::Stack) => {
+        (
+            AddrExpr::Const(a),
+            MemRegion::ZeroPage | MemRegion::Ram | MemRegion::RamMirror | MemRegion::Stack,
+        ) => {
             src.load_into_a(program);
             program.ld_abs_a(nes_ram_addr_to_sms(*a));
         }
@@ -1376,6 +1397,9 @@ fn const_addr_to_sms(addr: &ir::AddrExpr, region: ir::MemRegion) -> Option<u16> 
     use ir::{AddrExpr, MemRegion};
     match (addr, region) {
         (AddrExpr::ZpConst(z), MemRegion::ZeroPage) => Some(sms_layout::NES_ZP_BASE + *z as u16),
+        (AddrExpr::Const(a), MemRegion::ZeroPage) if *a < 0x100 => {
+            Some(sms_layout::NES_ZP_BASE + *a)
+        }
         (AddrExpr::Const(a), MemRegion::Ram) => Some(nes_ram_addr_to_sms(*a)),
         (AddrExpr::Const(a), MemRegion::RamMirror) => Some(nes_ram_addr_to_sms(*a)),
         (AddrExpr::Const(a), MemRegion::Stack) => Some(nes_ram_addr_to_sms(*a)),
@@ -1391,10 +1415,19 @@ fn emit_mem_to_b_with_mode(
     addr: &ir::AddrExpr,
     region: ir::MemRegion,
     guarded_mapper_window: bool,
+    mmc3_banking: bool,
 ) {
     use ir::{AddrExpr, MemRegion};
     use runtime_symbols::*;
     use sms_layout::*;
+
+    if mmc3_banking && region == MemRegion::PrgRom {
+        p.ld_c_a();
+        emit_mmc3_prg_read(p, addr);
+        p.ld_b_a();
+        p.ld_a_c();
+        return;
+    }
 
     if let Some(sms) = const_addr_to_sms(addr, region) {
         // CRITICAL: must NOT clobber A. ALU ops use the current A as
@@ -1544,6 +1577,10 @@ fn emit_mem_to_b_with_mode(
 /// Note: this function is permitted to clobber A for indexed modes
 /// (caller brackets with push/pop AF).  IndirectX/Y are not yet
 /// implemented; they fall to a no-op marker that writes nothing.
+/// Known legacy gap: absolute Stack-region RMW (for example INC $0109)
+/// reaches the unresolved-address fallback. Correcting that changes accepted
+/// SMB/CV1 ROM bytes and requires a separate behavior/regression review.
+/// MMC3 preflight rejects Stack RMW rather than inheriting the fallback.
 /// TODO: many SMB routines use `INC $xxxx,X` for in-RAM counters and
 /// the indexed lowering here makes the NMI ~10x slower than the
 /// unfixed version because translated code now does the real work.
@@ -1555,7 +1592,12 @@ fn emit_hl_for_rw_mem(p: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir
         AddrExpr::ZpConst(z) if region == MemRegion::ZeroPage => {
             p.ld_hl_imm(NES_ZP_BASE + *z as u16);
         }
-        AddrExpr::Const(a) if region == MemRegion::Ram || region == MemRegion::RamMirror => {
+        AddrExpr::Const(a)
+            if matches!(
+                region,
+                MemRegion::ZeroPage | MemRegion::Ram | MemRegion::RamMirror
+            ) =>
+        {
             p.ld_hl_imm(nes_ram_addr_to_sms(*a));
         }
         AddrExpr::AbsIndexedX(base) => {
@@ -3000,6 +3042,144 @@ fn emit_read_zp_ptr_y_inline(p: &mut z80_emit::Program, zp: u8) {
     p.label(&done);
 }
 
+/// MMC3 has no permanently readable PRG window at the SMS CPU address.
+/// The runtime resolves the effective NES address against all four 8 KiB
+/// windows, reads through slot 1, and restores its exact translated-code bank.
+/// C and DE survive both helpers so ALU operands can preserve the accumulator.
+fn emit_mmc3_prg_read(p: &mut z80_emit::Program, addr: &ir::AddrExpr) {
+    match addr {
+        ir::AddrExpr::Const(addr) => emit_prg_high_read_direct(p, *addr, true),
+        ir::AddrExpr::AbsIndexedX(base) => {
+            emit_prg_high_indexed_direct(p, *base, IdxReg::X, true);
+        }
+        ir::AddrExpr::AbsIndexedY(base) => {
+            emit_prg_high_indexed_direct(p, *base, IdxReg::Y, true);
+        }
+        // Other address expressions must be rejected by the pipeline's
+        // address/region contract, rather than silently reading SMS RAM.
+        _ => p.call(runtime_symbols::UNRESOLVED_JSR),
+    }
+}
+
+/// Keep the experimental mapper path out of legacy placeholder lowering.
+/// This gate precedes optimization so unsupported accesses cannot disappear
+/// into a fused loop or become zero-valued/no-op instructions.
+/// Indirect data accesses and JMP are not yet a supported executable contract:
+/// their pointer-region tags do not establish the target bus/address semantics.
+fn check_mmc3_memory_forms(routine: &ir::Routine) -> Result<(), LowerError> {
+    use ir::{AddrExpr as A, MemRegion as R, Op, ValueSrc};
+    let mut pc = Some(routine.entry);
+    for op in &routine.ops {
+        if let Op::Source { pc: source, .. } = op {
+            pc = Some(*source);
+        }
+        let memory = match op {
+            Op::LdaMem { addr, region }
+            | Op::LdxMem { addr, region }
+            | Op::LdyMem { addr, region }
+            | Op::StaMem { addr, region }
+            | Op::StxMem { addr, region }
+            | Op::StyMem { addr, region }
+            | Op::SaxMem { addr, region }
+            | Op::AdcMem { addr, region }
+            | Op::SbcMem { addr, region }
+            | Op::AndMem { addr, region }
+            | Op::OraMem { addr, region }
+            | Op::EorMem { addr, region }
+            | Op::CmpMem { addr, region }
+            | Op::CpxMem { addr, region }
+            | Op::CpyMem { addr, region }
+            | Op::BitMem { addr, region }
+            | Op::AslMem { addr, region }
+            | Op::LsrMem { addr, region }
+            | Op::RolMem { addr, region }
+            | Op::RorMem { addr, region }
+            | Op::IncMem { addr, region }
+            | Op::DecMem { addr, region } => Some((addr, *region)),
+            _ => None,
+        };
+        let supported = if let Some((addr, region)) = memory {
+            let read = matches!(
+                op,
+                Op::LdaMem { .. }
+                    | Op::LdxMem { .. }
+                    | Op::LdyMem { .. }
+                    | Op::AdcMem { .. }
+                    | Op::SbcMem { .. }
+                    | Op::AndMem { .. }
+                    | Op::OraMem { .. }
+                    | Op::EorMem { .. }
+                    | Op::CmpMem { .. }
+                    | Op::CpxMem { .. }
+                    | Op::CpyMem { .. }
+                    | Op::BitMem { .. }
+            );
+            match (addr, region) {
+                (A::IndirectY(_), _) => false,
+                (_, R::Stack)
+                    if matches!(
+                        op,
+                        Op::AslMem { .. }
+                            | Op::LsrMem { .. }
+                            | Op::RolMem { .. }
+                            | Op::RorMem { .. }
+                            | Op::IncMem { .. }
+                            | Op::DecMem { .. }
+                    ) =>
+                {
+                    false
+                }
+                (A::Const(a), R::ZeroPage) => *a < 0x100,
+                (A::Const(a), R::Ram | R::RamMirror | R::Stack) => *a < 0x2000,
+                (A::ZpConst(_), R::ZeroPage) => true,
+                (A::ZpIndexedX(_) | A::ZpIndexedY(_), R::ZeroPage) => true,
+                (
+                    A::AbsIndexedX(base) | A::AbsIndexedY(base),
+                    R::ZeroPage | R::Ram | R::RamMirror | R::Stack,
+                ) => *base < 0x1f01,
+                (A::Const(addr), R::PrgRom) => read && *addr >= 0x8000,
+                (A::AbsIndexedX(base) | A::AbsIndexedY(base), R::PrgRom) => {
+                    *base >= 0x8000
+                        && (read || (matches!(op, Op::StaMem { .. }) && *base <= 0xff00))
+                }
+                (A::Const(addr), R::PpuReg | R::PpuMirror) => {
+                    matches!(op, Op::LdxMem { .. } | Op::LdyMem { .. })
+                        && (0x2000..0x4000).contains(addr)
+                }
+                (A::AbsIndexedX(0x4016), R::ApuIo) => matches!(op, Op::LdaMem { .. }),
+                _ => false,
+            }
+        } else {
+            match op {
+                Op::PpuWrite {
+                    value: ValueSrc::Mem { addr, region },
+                    ..
+                }
+                | Op::ApuWrite {
+                    value: ValueSrc::Mem { addr, region },
+                    ..
+                }
+                | Op::MapperWrite {
+                    value: ValueSrc::Mem { addr, region },
+                    ..
+                }
+                | Op::OamDmaWrite {
+                    value: ValueSrc::Mem { addr, region },
+                } => const_addr_to_sms(addr, *region).is_some(),
+                Op::JmpIndirect { .. } => false,
+                _ => true,
+            }
+        };
+        if !supported {
+            return Err(LowerError::UnsupportedOp {
+                pc,
+                reason: format!("MMC3 memory semantics are not implemented for {op:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// S1.3e: memory rotate chain (SMB's PRNG shape):
 ///   L: ROR base,X ; INX ; DEY ; BNE L
 /// The 6502 carry threads through the chain of bytes; the lift loads
@@ -3220,9 +3400,13 @@ pub fn lower_routine(
     // only layout whose low PRG window is immutable and can use the accepted
     // inline fixed-high read sequence; mapper 2 restores an exact live bank.
     let guarded_mapper_window = opts.profile.is_none_or(|profile| profile.rom.mapper != 0);
+    let mmc3_banking = opts.profile.is_some_and(|profile| profile.rom.mapper == 4);
+    if mmc3_banking {
+        check_mmc3_memory_forms(routine)?;
+    }
     let emit_mem_to_b =
         |program: &mut z80_emit::Program, addr: &ir::AddrExpr, region: ir::MemRegion| {
-            emit_mem_to_b_with_mode(program, addr, region, guarded_mapper_window)
+            emit_mem_to_b_with_mode(program, addr, region, guarded_mapper_window, mmc3_banking)
         };
 
     // Pre-compute flag liveness: for each op whose result sets N/Z,
@@ -3317,6 +3501,11 @@ pub fn lower_routine(
     // Copy loops first — they span the most ops (init + label + body +
     // back-branch) and subsume the inner LDA/STA/INC fusions.
     for i in 0..ops_slice.len() {
+        // This optimization assumes direct low-PRG reads. Retain ordinary
+        // lowering until copy-loop plans carry a mapper-safe source contract.
+        if mmc3_banking {
+            continue;
+        }
         if let Some(plan) = match_copy_loop(ops_slice, i, routine, opts.routine_flag_reads) {
             for slot in fuse_consumed.iter_mut().take(plan.end).skip(i + 1) {
                 *slot = true;
@@ -3655,87 +3844,99 @@ pub fn lower_routine(
             }
 
             Op::LdaMem { addr, region } => {
-                match (addr, region) {
-                    (AddrExpr::ZpConst(z), MemRegion::ZeroPage) => {
-                        program.ld_a_abs(NES_ZP_BASE + *z as u16);
-                    }
-                    (
-                        AddrExpr::Const(a),
-                        MemRegion::Ram | MemRegion::RamMirror | MemRegion::Stack,
-                    ) => {
-                        program.ld_a_abs(nes_ram_addr_to_sms(*a));
-                    }
-                    (AddrExpr::Const(a), MemRegion::PrgRom) if *a < 0xC000 => {
-                        program.ld_a_abs(*a);
-                    }
-                    (AddrExpr::Const(a), MemRegion::PrgRom) => {
-                        emit_prg_high_read_direct(program, *a, guarded_mapper_window);
-                    }
-                    (AddrExpr::AbsIndexedX(0x4016), MemRegion::ApuIo) => {
-                        emit_controller_read_indexed_x_inline(program);
-                    }
-                    (AddrExpr::AbsIndexedX(base), _) => {
-                        if let Some(sms) = indexed_direct_base(*base, *region) {
-                            emit_indexed_read_direct(program, sms, IdxReg::X);
-                        } else if *region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                            emit_prg_high_indexed_direct(
-                                program,
-                                *base,
-                                IdxReg::X,
-                                guarded_mapper_window,
-                            );
-                        } else {
-                            program.ld_hl_imm(indexed_base_to_sms(*base, *region));
+                if mmc3_banking && *region == MemRegion::PrgRom {
+                    emit_mmc3_prg_read(program, addr);
+                } else {
+                    match (addr, region) {
+                        (AddrExpr::ZpConst(z), MemRegion::ZeroPage) => {
+                            program.ld_a_abs(NES_ZP_BASE + *z as u16);
+                        }
+                        (
+                            AddrExpr::Const(a),
+                            MemRegion::ZeroPage
+                            | MemRegion::Ram
+                            | MemRegion::RamMirror
+                            | MemRegion::Stack,
+                        ) => {
+                            program.ld_a_abs(nes_ram_addr_to_sms(*a));
+                        }
+                        (AddrExpr::Const(a), MemRegion::PrgRom) if *a < 0xC000 => {
+                            program.ld_a_abs(*a);
+                        }
+                        (AddrExpr::Const(a), MemRegion::PrgRom) => {
+                            emit_prg_high_read_direct(program, *a, guarded_mapper_window);
+                        }
+                        (AddrExpr::AbsIndexedX(0x4016), MemRegion::ApuIo) => {
+                            emit_controller_read_indexed_x_inline(program);
+                        }
+                        (AddrExpr::AbsIndexedX(base), _) => {
+                            if let Some(sms) = indexed_direct_base(*base, *region) {
+                                emit_indexed_read_direct(program, sms, IdxReg::X);
+                            } else if *region == ir::MemRegion::PrgRom && *base >= 0xC000 {
+                                emit_prg_high_indexed_direct(
+                                    program,
+                                    *base,
+                                    IdxReg::X,
+                                    guarded_mapper_window,
+                                );
+                            } else {
+                                program.ld_hl_imm(indexed_base_to_sms(*base, *region));
+                                program.ld_a_d();
+                                program.ld_b_a();
+                                program.call(indexed_read_runtime(*base, *region));
+                            }
+                        }
+                        (AddrExpr::AbsIndexedY(base), _) => {
+                            if let Some(sms) = indexed_direct_base(*base, *region) {
+                                emit_indexed_read_direct(program, sms, IdxReg::Y);
+                            } else if *region == ir::MemRegion::PrgRom && *base >= 0xC000 {
+                                emit_prg_high_indexed_direct(
+                                    program,
+                                    *base,
+                                    IdxReg::Y,
+                                    guarded_mapper_window,
+                                );
+                            } else {
+                                program.ld_hl_imm(indexed_base_to_sms(*base, *region));
+                                program.ld_a_e_reg();
+                                program.ld_b_a();
+                                program.call(indexed_read_runtime(*base, *region));
+                            }
+                        }
+                        (AddrExpr::ZpIndexedX(zp), _) => {
+                            // 6502 zp,X wraps within zero page: (zp + X) & $FF.
+                            // rt_read_indexed adds 16-bit, no wrap, so do the
+                            // wrap inline.
                             program.ld_a_d();
-                            program.ld_b_a();
-                            program.call(indexed_read_runtime(*base, *region));
+                            program.add_a_imm(*zp);
+                            program.ld_l_a();
+                            program.ld_h_imm((NES_ZP_BASE >> 8) as u8);
+                            program.ld_a_hl_ptr();
                         }
-                    }
-                    (AddrExpr::AbsIndexedY(base), _) => {
-                        if let Some(sms) = indexed_direct_base(*base, *region) {
-                            emit_indexed_read_direct(program, sms, IdxReg::Y);
-                        } else if *region == ir::MemRegion::PrgRom && *base >= 0xC000 {
-                            emit_prg_high_indexed_direct(
-                                program,
-                                *base,
-                                IdxReg::Y,
-                                guarded_mapper_window,
-                            );
-                        } else {
-                            program.ld_hl_imm(indexed_base_to_sms(*base, *region));
+                        (AddrExpr::ZpIndexedY(zp), _) => {
                             program.ld_a_e_reg();
-                            program.ld_b_a();
-                            program.call(indexed_read_runtime(*base, *region));
+                            program.add_a_imm(*zp);
+                            program.ld_l_a();
+                            program.ld_h_imm((NES_ZP_BASE >> 8) as u8);
+                            program.ld_a_hl_ptr();
                         }
-                    }
-                    (AddrExpr::ZpIndexedX(zp), _) => {
-                        // 6502 zp,X wraps within zero page: (zp + X) & $FF.
-                        // rt_read_indexed adds 16-bit, no wrap, so do the
-                        // wrap inline.
-                        program.ld_a_d();
-                        program.add_a_imm(*zp);
-                        program.ld_l_a();
-                        program.ld_h_imm((NES_ZP_BASE >> 8) as u8);
-                        program.ld_a_hl_ptr();
-                    }
-                    (AddrExpr::ZpIndexedY(zp), _) => {
-                        program.ld_a_e_reg();
-                        program.add_a_imm(*zp);
-                        program.ld_l_a();
-                        program.ld_h_imm((NES_ZP_BASE >> 8) as u8);
-                        program.ld_a_hl_ptr();
-                    }
-                    (AddrExpr::IndirectY(zp), _) => {
-                        emit_read_zp_ptr_y_inline(program, *zp);
-                    }
-                    (AddrExpr::IndirectX(zp), _) => {
-                        program.comment("WARN: IndirectX LDA not fully implemented");
-                        program.ld_b_imm(*zp);
-                        program.call(READ_ZP_PTR_Y);
-                    }
-                    _ => {
-                        program.comment("WARN: unresolved LdaMem addressing mode");
-                        program.ld_a_imm(0x00);
+                        (AddrExpr::IndirectY(zp), _) => {
+                            if mmc3_banking {
+                                program.ld_b_imm(*zp);
+                                program.call(READ_ZP_PTR_Y);
+                            } else {
+                                emit_read_zp_ptr_y_inline(program, *zp);
+                            }
+                        }
+                        (AddrExpr::IndirectX(zp), _) => {
+                            program.comment("WARN: IndirectX LDA not fully implemented");
+                            program.ld_b_imm(*zp);
+                            program.call(READ_ZP_PTR_Y);
+                        }
+                        _ => {
+                            program.comment("WARN: unresolved LdaMem addressing mode");
+                            program.ld_a_imm(0x00);
+                        }
                     }
                 }
                 if let Some(end) = fuse_nz_end[op_idx] {
@@ -3771,7 +3972,14 @@ pub fn lower_routine(
             }
 
             Op::LdxMem { addr, region } => {
-                emit_ldxy_mem(program, addr, *region, IdxReg::X, guarded_mapper_window);
+                emit_ldxy_mem(
+                    program,
+                    addr,
+                    *region,
+                    IdxReg::X,
+                    guarded_mapper_window,
+                    mmc3_banking,
+                );
             }
 
             Op::LdyImm(v) => {
@@ -3787,7 +3995,14 @@ pub fn lower_routine(
             }
 
             Op::LdyMem { addr, region } => {
-                emit_ldxy_mem(program, addr, *region, IdxReg::Y, guarded_mapper_window);
+                emit_ldxy_mem(
+                    program,
+                    addr,
+                    *region,
+                    IdxReg::Y,
+                    guarded_mapper_window,
+                    mmc3_banking,
+                );
             }
 
             // ------------------------------------------------------------------
@@ -3830,7 +4045,10 @@ pub fn lower_routine(
                         }
                         (
                             AddrExpr::Const(a),
-                            MemRegion::Ram | MemRegion::RamMirror | MemRegion::Stack,
+                            MemRegion::ZeroPage
+                            | MemRegion::Ram
+                            | MemRegion::RamMirror
+                            | MemRegion::Stack,
                         ) => {
                             program.ld_abs_a(nes_ram_addr_to_sms(*a));
                         }
@@ -4864,7 +5082,7 @@ pub fn lower_routine(
                 stack_return_bytes,
                 target_entry_a,
             } => {
-                let banked_mapper = opts.profile.is_some_and(|p| p.rom.mapper == 2);
+                let banked_mapper = opts.profile.is_some_and(|p| matches!(p.rom.mapper, 2 | 4));
                 let native_calls = opts.profile.is_some_and(|p| p.native_calls());
                 if targets.is_empty() {
                     program.comment("JumpEngineCall with empty targets — unreachable".to_string());
@@ -5096,7 +5314,14 @@ fn emit_jump_engine_target(
             .strip_prefix("L_")
             .filter(|hex| !hex.contains('_'))
             .and_then(|hex| u16::from_str_radix(hex, 16).ok())
-            .filter(|addr| (0x8000..0xC000).contains(addr))
+            .filter(|addr| {
+                let end = if profile.is_some_and(|p| p.rom.mapper == 4) {
+                    0xe000
+                } else {
+                    0xc000
+                };
+                (0x8000..end).contains(addr)
+            })
     } else {
         None
     };
@@ -5397,6 +5622,215 @@ mod tests {
             assert!(!build.asm.contains("data_prg_high"));
             assert!(!build.asm.contains("rt_restore_prg_window"));
         }
+    }
+
+    fn lower_mmc3_ops(ops: Vec<Op>) -> z80_emit::Build {
+        let prof = profile::load_from_str(
+            "[rom]\nname=\"mapper-test\"\nmapper=4\nprg_kib=256\nchr_kib=8\n",
+        )
+        .unwrap();
+        let opts = LowerOptions {
+            profile: Some(&prof),
+            ..LowerOptions::default()
+        };
+        let mut program = z80_emit::Program::new();
+        define_runtime_stubs(&mut program);
+        lower_routine(&mut program, &make_routine("mmc3_test", ops), &opts).unwrap();
+        program.finish().unwrap()
+    }
+
+    #[test]
+    fn mmc3_routes_all_prg_windows_and_operand_types_through_guarded_reads() {
+        for base in [
+            0x8000, 0x9fff, 0xa000, 0xbfff, 0xc000, 0xdfff, 0xe000, 0xff00,
+        ] {
+            for addr in [
+                AddrExpr::Const(base),
+                AddrExpr::AbsIndexedX(base),
+                AddrExpr::AbsIndexedY(base),
+            ] {
+                let helper = if matches!(addr, AddrExpr::Const(_)) {
+                    "call rt_read_prg_high\n"
+                } else {
+                    "call rt_read_prg_high_indexed\n"
+                };
+                for op in [
+                    Op::LdaMem {
+                        addr: addr.clone(),
+                        region: MemRegion::PrgRom,
+                    },
+                    Op::LdxMem {
+                        addr: addr.clone(),
+                        region: MemRegion::PrgRom,
+                    },
+                    Op::LdyMem {
+                        addr: addr.clone(),
+                        region: MemRegion::PrgRom,
+                    },
+                    Op::AdcMem {
+                        addr: addr.clone(),
+                        region: MemRegion::PrgRom,
+                    },
+                    Op::SbcMem {
+                        addr: addr.clone(),
+                        region: MemRegion::PrgRom,
+                    },
+                    Op::CmpMem {
+                        addr: addr.clone(),
+                        region: MemRegion::PrgRom,
+                    },
+                    Op::AndMem {
+                        addr: addr.clone(),
+                        region: MemRegion::PrgRom,
+                    },
+                    Op::OraMem {
+                        addr: addr.clone(),
+                        region: MemRegion::PrgRom,
+                    },
+                    Op::EorMem {
+                        addr: addr.clone(),
+                        region: MemRegion::PrgRom,
+                    },
+                    Op::BitMem {
+                        addr: addr.clone(),
+                        region: MemRegion::PrgRom,
+                    },
+                ] {
+                    let build = lower_mmc3_ops(vec![op.clone()]);
+                    assert!(build.asm.contains(helper), "{op:?}: {}", build.asm);
+                    assert!(!build.asm.contains("ld ($FFFF),a"));
+                    assert!(!build.asm.contains("data_prg_high"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mmc3_indirect_forms_fail_closed_regardless_of_pointer_region() {
+        let prof = profile::load_from_str(
+            "[rom]\nname=\"mapper-test\"\nmapper=4\nprg_kib=256\nchr_kib=8\n",
+        )
+        .unwrap();
+        let opts = LowerOptions {
+            profile: Some(&prof),
+            ..LowerOptions::default()
+        };
+        let mut ops = Vec::new();
+        for zp in [0, 0x42, 0xff] {
+            for region in [MemRegion::ZeroPage, MemRegion::Unknown, MemRegion::PrgRom] {
+                let addr = AddrExpr::IndirectY(zp);
+                ops.extend([
+                    Op::LdaMem {
+                        addr: addr.clone(),
+                        region,
+                    },
+                    Op::StaMem {
+                        addr: addr.clone(),
+                        region,
+                    },
+                    Op::AdcMem { addr, region },
+                ]);
+            }
+        }
+        for addr in [0, 0x42, 0xff, 0x1fff, 0x6000, 0x8000, 0xffff] {
+            ops.push(Op::JmpIndirect { addr });
+        }
+        for op in ops {
+            let mut program = z80_emit::Program::new();
+            let err = lower_routine(&mut program, &make_routine("bad_indirect", vec![op]), &opts)
+                .unwrap_err();
+            assert!(err.to_string().contains("MMC3 memory semantics"));
+            assert!(program.finish().unwrap().bytes.is_empty());
+        }
+    }
+
+    #[test]
+    fn mmc3_rejects_placeholder_memory_forms_before_emission() {
+        let prof = profile::load_from_str(
+            "[rom]\nname=\"mapper-test\"\nmapper=4\nprg_kib=256\nchr_kib=8\n",
+        )
+        .unwrap();
+        for op in [
+            Op::StaMem {
+                addr: AddrExpr::Const(0x6000),
+                region: MemRegion::Unknown,
+            },
+            Op::LdaMem {
+                addr: AddrExpr::Const(0x6000),
+                region: MemRegion::PrgRam,
+            },
+            Op::LdaMem {
+                addr: AddrExpr::IndirectX(0x10),
+                region: MemRegion::Unknown,
+            },
+            Op::LdxMem {
+                addr: AddrExpr::IndirectY(0x10),
+                region: MemRegion::Unknown,
+            },
+            Op::AdcMem {
+                addr: AddrExpr::Const(0x5000),
+                region: MemRegion::Unknown,
+            },
+            Op::AslMem {
+                addr: AddrExpr::Const(0x8000),
+                region: MemRegion::PrgRom,
+            },
+            Op::IncMem {
+                addr: AddrExpr::Const(0x0109),
+                region: MemRegion::Stack,
+            },
+            Op::MapperWrite {
+                addr: 0x8000,
+                value: ValueSrc::Mem {
+                    addr: AddrExpr::IndirectX(0),
+                    region: MemRegion::Unknown,
+                },
+            },
+        ] {
+            let mut p = z80_emit::Program::new();
+            let opts = LowerOptions {
+                profile: Some(&prof),
+                ..LowerOptions::default()
+            };
+            let error = lower_routine(&mut p, &make_routine("bad", vec![op]), &opts).unwrap_err();
+            assert!(error.to_string().contains("MMC3 memory semantics"));
+            assert!(p.finish().unwrap().bytes.is_empty());
+        }
+    }
+
+    #[test]
+    fn absolute_zero_page_sta_emits_real_store() {
+        let build = lower_and_finish(vec![Op::StaMem {
+            addr: AddrExpr::Const(0x003f),
+            region: MemRegion::ZeroPage,
+        }]);
+        assert!(build.bytes.windows(3).any(|w| w == [0x32, 0x3f, 0xc0]));
+        assert!(!build.asm.contains("WARN"));
+    }
+
+    #[test]
+    fn mmc3_copy_loop_cannot_bypass_banked_prg_reads() {
+        let build = lower_mmc3_ops(vec![
+            Op::LdxImm(0),
+            Op::Label("copy".into()),
+            Op::LdaMem {
+                addr: AddrExpr::AbsIndexedX(0x8000),
+                region: MemRegion::PrgRom,
+            },
+            Op::StaMem {
+                addr: AddrExpr::AbsIndexedX(0x0200),
+                region: MemRegion::Ram,
+            },
+            Op::Inx,
+            Op::CpxImm(16),
+            Op::BranchIf {
+                cond: Cond::NoCarry,
+                target: "copy".into(),
+            },
+            Op::Rts,
+        ]);
+        assert!(build.asm.contains("call rt_read_prg_high_indexed"));
+        assert!(!build.asm.contains("ldir"));
     }
 
     #[test]

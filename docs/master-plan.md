@@ -182,6 +182,14 @@ they never recycle displayed slots or silently truncate a packet. Safe
 preparation yield points restore guest registers and close mapper/VDP state.
 These allocations are CV1-specific; NROM retains its existing renderer.
 
+The experimental MMC3 banking runtime instead reserves `$C810-$C81E` for
+register selection, eight bank registers, four physical PRG-window identities,
+dispatch scratch and RAM-protect state; `$C820-$C821` holds inactive IRQ
+latch/reload intent. `$C800` remains zero. This allocation is exclusive of
+CV1's frame backend; enabling its hooks is not a valid way to add MMC3 graphics.
+Cartridge work RAM and CHR/IRQ presentation remain subsequent contracts in
+[smb3-plan.md](smb3-plan.md).
+
 Full raw NES CIRAM source-of-truth needs 2 KiB (`$CC00-$D3FF` if stored in
 internal RAM), including 1920 tile bytes plus the 128 compact attribute bytes
 already mirrored at `$CB80-$CBFF`. That storage does not fit in current
@@ -216,6 +224,14 @@ Bank 2+ ($8000-$BFFF): Translated code overflow + data, slot 2
 
 Code-size blow-up of 3–6× is expected. SMB's 32 KB PRG may need 96–192 KB of
 Z80. SMS supports up to ~4 MB cart; SMB will fit comfortably.
+
+Current MMC3 experiment: a 2 MiB image tested in Genesis Plus GX, raw NES PRG
+pages paired into SMS banks starting at 96, and translated code limited to
+banks 4–31. The code limit protects the existing software-return frame's packed
+bank/flag byte; free ROM alone does not remove that ABI constraint. Historical
+cartridge mapper capacity varies, so the older general 4 MiB statement is not
+a universal hardware compatibility claim. NROM/UxROM output layouts stay
+unchanged.
 
 ## Phases
 

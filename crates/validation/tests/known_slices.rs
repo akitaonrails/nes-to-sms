@@ -28,6 +28,7 @@ fn smb_9ca6_pointer_increment_validates_green() {
         &LiftOptions {
             window_label_prefix: None,
             start: 0x9CA6,
+            window_label_range: 0x8000..0xC000,
             end: 0x9CA6 + bytes.len() as u16,
             entry_name: "AdvancePointer".into(),
             jump_engine_sites: Vec::new(),
@@ -58,6 +59,7 @@ fn smb_b1b4_branch_store_validates_green() {
         &LiftOptions {
             window_label_prefix: None,
             start: 0xB1B4,
+            window_label_range: 0x8000..0xC000,
             end: 0xB1B4 + bytes.len() as u16,
             entry_name: "BranchStore".into(),
             jump_engine_sites: Vec::new(),
@@ -86,6 +88,7 @@ fn smb_aef9_compare_branch_skips_external() {
         &LiftOptions {
             window_label_prefix: None,
             start: 0xAEF9,
+            window_label_range: 0x8000..0xC000,
             end: 0xAEF9 + bytes.len() as u16,
             entry_name: "CompareBranch".into(),
             jump_engine_sites: Vec::new(),
@@ -131,6 +134,7 @@ fn smb_b1b4_with_intentional_lower_bug_validates_red() {
         &LiftOptions {
             window_label_prefix: None,
             start: 0x9100,
+            window_label_range: 0x8000..0xC000,
             end: 0x9100 + bytes.len() as u16,
             entry_name: "TwoStores".into(),
             jump_engine_sites: Vec::new(),

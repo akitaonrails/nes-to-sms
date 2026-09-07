@@ -870,7 +870,12 @@ _btd_check_bank:
   cp   $ff
   jr   z, _btd_hit
   ld   c, a
+.ifdef NES_MMC3
+  ld   a, b
+  call rt_mmc3_bank_for_a
+.else
   ld   a, ($cb62)
+.endif
   cp   c
   jr   z, _btd_hit
 _btd_skip:
@@ -936,6 +941,11 @@ _btd_jump_di:
   .endif
   jp   (hl)
 _btd_miss:
+.ifdef NES_MMC3
+  ; Unknown MMC3 transfers must not inherit UxROM's fixed-bank realignment
+  ; or BRK byte-walk approximation: a wrong bank identity is a hard failure.
+  jp _btd_trap_flash
+.endif
   ; Misaligned-return realignment (NES semantics): an RTI/RTS-dispatch
   ; target with no table entry is a return into the MIDDLE of a lifted
   ; instruction (junk-BRK recovery returns to BRK+2; a real 6502
@@ -1123,6 +1133,8 @@ _btd_trap_flash:
 ; current UxROM bank shadow ($CB62) to match. Hit -> far-gate jump (bank
 ; restore on return included). Miss -> loud trap ($CB1D=$E2, target in
 ; $CB1B/1C) — fail closed, never run raw NES bytes.
+; MMC3 entries instead use the physical 8 KiB bank currently visible at the
+; requested CPU address, including independently switched $A000/$C000 windows.
 rt_banked_dispatch:
   ; Entry A is the 6502 accumulator the callee expects: the transfer gate
   ; restored it from the pushed call frame before jumping to the stub.
@@ -1146,7 +1158,12 @@ rt_banked_dispatch:
   jr   nz, _bd_slow
   ld   a, ($ca0a)
   ld   l, a
+.ifdef NES_MMC3
+  ld   a, b
+  call rt_mmc3_bank_for_a
+.else
   ld   a, ($cb62)
+.endif
   cp   l
   jr   nz, _bd_slow
   ld   a, ($ca0c)
@@ -1208,7 +1225,12 @@ _bd_check_bank:
   cp   $ff
   jr   z, _bd_hit
   ld   e, a
+.ifdef NES_MMC3
+  ld   a, b
+  call rt_mmc3_bank_for_a
+.else
   ld   a, ($cb62)
+.endif
   cp   e
   jr   z, _bd_hit
 _bd_skip:
@@ -1225,7 +1247,12 @@ _bd_hit:
   ld   a, b
   ld   ($cb7b), a
   ld   ($ca09), a
+.ifdef NES_MMC3
+  ld   a, b
+  call rt_mmc3_bank_for_a
+.else
   ld   a, ($cb62)
+.endif
   ld   ($ca0a), a           ; keyed on the LIVE bank (what the fast path compares)
   ld   a, (hl)
   ld   ($cb7c), a           ; matched entry's NES bank ($FF = fixed)
@@ -1475,7 +1502,11 @@ rt_read_indexed:
 ; ─── rt_read_prg_high ─────────────────────────────────────────────────────────
 ; Entry HL = effective NES $C000-$FFFF. Exit A = byte; preserves C/DE.
 ; The fixed high image is mapped only for this outer transaction.
+; MMC3 redirects this entry to an all-PRG ($8000-$FFFF) physical-bank read.
 rt_read_prg_high:
+.ifdef NES_MMC3
+  jp rt_mmc3_read_prg
+.endif
   ld   a, h
   cp   $c0
   jp   c, _rph_bad
@@ -1545,6 +1576,8 @@ _rph_halt:
 ; Entry: HL = NES base address in $C000-$FFFF, B = unsigned offset.
 ; Exit:  A = byte at (HL + B). Preserves C/DE; clobbers B/HL/native flags.
 ;        Slot-2 mapper state is restored exactly.
+; MMC3 accepts any PRG base and resolves the effective 8 KiB window after
+; addition, including $FFFF wrap into NES RAM; slot 2 remains untouched.
 rt_read_prg_high_indexed:
   ld   a, l
   add  a, b
@@ -1617,6 +1650,9 @@ _wi_ppu:
 ;
 ; Zero page is mirrored at SMS $C000-$C0FF.
 ; Pointer target is remapped to SMS space if it falls in NES RAM.
+; MMC3 currently exposes this only as a private helper ABI: translated
+; IndirectY instructions are rejected until complete bus routing is supported.
+; Its partial ABI may read RAM/PRG, but unsupported $2000-$7FFF targets trap.
 rt_read_zp_ptr_y:
   ld   c, e                 ; Phase R: capture resident Y without touching DE
   ; Read pointer from zero page.
@@ -1635,8 +1671,16 @@ rt_read_zp_ptr_y:
   ; dereferenced via (zp),Y — reading the SMS RAM mirror here fed garbage
   ; notes to the translated sound engine).
   ld   a, h
+.ifdef NES_MMC3
+  cp   $80
+.else
   cp   $c0
+.endif
   jr   nc, _rzpy_prg_high
+.ifdef NES_MMC3
+  cp   $20
+  jp   nc, rt_mmc3_unsupported
+.endif
   ; Remap NES RAM/mirrors to SMS RAM in HL without clobbering resident DE.
   cp   $08
   jr   c, _rzpy_remap_ram
@@ -1684,6 +1728,19 @@ rt_write_zp_ptr_y:
   jr   nc, _wzy_addr_ready
   inc  h
 _wzy_addr_ready:
+.ifdef NES_MMC3
+  ; This path still carries a raw NES address (unlike rt_write_indexed's
+  ; already-remapped RAM bases), so mapper aliases can be identified safely.
+  ld   a, h
+  cp   $80
+  jr   c, _wzy_mmc3_not_prg
+  ld   a, c
+  call rt_mmc3_write
+  pop  bc
+  pop  hl
+  ret
+_wzy_mmc3_not_prg:
+.endif
   ; Hardware windows: forward APU/PPU targets to the shims (see
   ; rt_write_indexed).
   ld   a, h
