@@ -590,6 +590,9 @@ _nt_project_col:
   ld   a, 28
   ld   ($cb79), a
 _npc_row:
+.ifdef SMB_RUNTIME_HOOKS
+  call rt_smb_hud_poll
+.endif
   ; DE = NES tile address for (row, col)
   ld   a, ($cb2b)
   and  $1f
@@ -713,6 +716,9 @@ _npc_top_remap_done:
   xor  a
   ld   ($cb2c), a            ; attr group row 0..7
 _npc_attr:
+.ifdef SMB_RUNTIME_HOOKS
+  call rt_smb_hud_poll
+.endif
   ; DE = NES attr address $23C0 | page<<10 | gy*8 | groupx
   ld   a, ($cb2b)
   and  $1f

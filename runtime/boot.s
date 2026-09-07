@@ -54,7 +54,7 @@
 ;   $CB76-$CB77  Translated-call return stack next-free pointer (dispatch.s)
 ;   $D3FC-$D3FD  rt_ppu_write_cont continuation pointer; $D3FE cont-mode flag
 ;   $D46C-$D471  Stackless rotate-memory helper scratch (runtime/flags.s)
-;   $D472-$D473  IRQ saved BC (keeps one word off native stack)
+;   $D472-$D473  SMB frozen playfield X / pending HUD split (otherwise reserved)
 ;   $D474        IRQ VDP status scratch (keeps ready check off native stack)
 ;   $D475-$D476  IRQ saved HL (keeps one word off native stack)
 ;   $D477-$D478  IRQ saved AF (keeps one word off native stack after save)
@@ -788,6 +788,10 @@ _present_wait_vblank:
   cp  :data_prg_low
 .endif
   jp  nz, _present_slot2_bad
+.ifdef SMB_RUNTIME_HOOKS
+  ; Before variable-cost SAT/column work, while the beam is still in blank.
+  call _apply_frame_scroll
+.endif
   ; A CHR-RAM game can replace an entire screen in raw CIRAM while rendering
   ; is disabled. Rebuild the folded SMS nametable before applying the deferred
   ; display-enable write, so no stale cells from the previous scene are shown.
@@ -912,7 +916,11 @@ _irq_proj_go:
   jp _present_skip_all
 _cv1_committed_now:
 .endif
+.ifndef SMB_RUNTIME_HOOKS
   call _apply_frame_scroll
+.else
+  call rt_smb_hud_poll
+.endif
 .ifdef CV1_RUNTIME_HOOKS
   call rt_cv1_frame_end
 .else
@@ -1232,21 +1240,33 @@ _irq_skip_translated_nmi:
   ;
   ; The read also tells us whether THIS handler overran (bit 7 = a frame INT
   ; is already pending again). $CB29 is a STICKY overrun counter: an overrun
-  ; sets it to 60; a fit frame decrements it. The scroll presentation only
+  ; sets it to 60; a fit frame decrements it. Legacy scroll presentation only
   ; arms the sprite-0 split when the counter is zero. Without hysteresis,
   ; frames alternating right at the budget line flip-flopped between split
   ; mode (whose swallowed line IRQ rendered the whole frame at the status-
   ; bar scroll) and direct mode — a fast blink between two scroll states
   ; (field report: 'interleaving frames from way behind/ahead').
+  ; SMB now services delayed splits before acknowledgment and rearms consumed
+  ; VBlanks below, so it no longer needs the legacy split suppression.
 .ifdef CV1_COHERENT_BG
   call rt_cv1_hud_tail_ack
   ld hl, $d474
   or (hl)                     ; audio polls may already have acknowledged VINT
 .else
+.ifdef SMB_RUNTIME_HOOKS
+  ; Service a split delayed by DI audio before the pacing read clears HINT.
+  call rt_smb_hud_poll
+.endif
   in  a, ($bf)
 .endif
   and $80
   jr  z, _pace_fit
+.ifdef SMB_RUNTIME_HOOKS
+  ; The pacing acknowledgment consumes this physical VBlank without another
+  ; frame IRQ. Repeat the committed HUD now; otherwise its next top band
+  ; inherits the previous playfield scroll for one whole video frame.
+  call rt_smb_hud_repeat
+.endif
   ld  a, 60
   ld  ($cb29), a
   jr  _pace_done
@@ -1290,8 +1310,12 @@ _irq_line_scroll_split:
 .ifdef CV1_COHERENT_BG
   call rt_cv1_hud_line
 .else
+.ifdef SMB_RUNTIME_HOOKS
+  call rt_smb_hud_line
+.else
   call _apply_post_scroll
   call _disable_line_irq
+.endif
 .endif
 
   ld  a, ($cb00)
@@ -1340,14 +1364,17 @@ _apply_frame_scroll:
   in  a, ($7e)              ; V-counter
   cp  $e0
   jr  c, _apply_playfield_direct
-  ; Adaptive split suppression: if the previous handler overran, this one
+  ; Legacy adaptive split suppression: if the previous handler overran, this one
   ; almost certainly will too, and its armed split would be swallowed.
   ; Present the playfield scroll directly instead (HUD scrolls with the
   ; camera on those frames — stable, no double image). At full speed the
   ; flag stays clear and the fixed-HUD split path returns automatically.
+  ; SMB instead polls blocked splits and repeats its HUD on consumed VBlanks.
+.ifndef SMB_RUNTIME_HOOKS
   ld  a, ($cb29)
   or  a
   jr  nz, _apply_playfield_direct
+.endif
   ld  a, ($cb20)
   bit 2, a
   jr  nz, _apply_frame_split_scroll
@@ -1380,6 +1407,27 @@ _apply_frame_split_scroll:
   ; pending line IRQs into a storm that starved the frame handler on CV1).
   jp  _apply_playfield_direct
 .else
+.ifdef SMB_RUNTIME_HOOKS
+  ; SMB's first playfield row is 32. Presentation remains DI; service the
+  ; horizontal split at closed VRAM transactions, or via IRQ after EI.
+  ; This avoids both late-arm HUD wobble and a swallowed hardware line IRQ.
+  ; Freeze the scroll that column projection and SAT are presenting together.
+  ld a, ($cb23)
+  ld ($d472), a
+_smb_hud_rearm:
+  call _disable_line_irq
+  ; Bit1 is cleared before each translated NMI. A physical frame can arrive
+  ; before that NMI has rewritten its pre pair; the live latch is then still
+  ; the playfield scroll. Sticky post-valid implies SMB already supplied a
+  ; complete split, so retain its previous pre pair instead of the live latch.
+  call _apply_pre_scroll
+  ld a, 1
+  ld ($d473), a
+  ld a, 31
+  ld b, 10
+  call vdp_set_register
+  jp _enable_line_irq
+.else
   call _apply_pre_or_live_scroll
 
   ; Use NES sprite 0's Y coordinate as the generic split marker. The interrupt
@@ -1392,6 +1440,7 @@ _apply_frame_split_scroll:
   ld  b, 10
   call vdp_set_register
   jp  _enable_line_irq
+.endif
 .endif
 
 _apply_pre_or_live_scroll:
@@ -1438,6 +1487,10 @@ _apply_scroll_pair_then_disable:
   ; Tail target for direct/out-of-vblank presentation: write the playfield
   ; scroll pair and restore VDP reg0 without spending another return slot.
   ld  e, a
+.ifdef SMB_RUNTIME_HOOKS
+  xor a
+  ld ($d473), a
+.endif
   ld  a, c
   neg
   out ($bf), a
@@ -1467,6 +1520,10 @@ _disable_line_irq:
   ; line counter at $FF: the VDP decrements it every scanline regardless
   ; of IE1 and LATCHES pending on underflow — a small parked value made
   ; some emulators (GPGX) re-fire immediately at the next enable.
+.ifdef SMB_RUNTIME_HOOKS
+  xor a
+  ld ($d473), a
+.endif
   ld  a, VDP_R0_BASE
   out ($bf), a
   ld  a, $80                ; VDP reg 0
@@ -1476,6 +1533,48 @@ _disable_line_irq:
   ld  a, $8a                ; VDP reg 10 = line counter reload
   out ($bf), a
   ret
+
+.ifdef SMB_RUNTIME_HOOKS
+; DI, closed VDP transaction, no live VRAM stream. Clobbers AF only: callers
+; poll between cells/attributes or sprite variants, before setting an address.
+; R8 written during line31 takes effect for the playfield starting at line32.
+rt_smb_hud_poll:
+  ld a, ($d473)
+  or a
+  ret z
+  in a, ($7e)
+  cp 31
+  ret c
+  cp $e0
+  ret nc
+rt_smb_hud_line:
+  ld a, ($d473)
+  or a
+  ret z
+_smb_hud_post:
+  ld a, ($d472)
+  neg
+  out ($bf), a
+  ld a, $88
+  out ($bf), a
+  jp _disable_line_irq
+
+; Pacing consumed a VINT, but no new SAT/columns have been presented. Rearm
+; only in blank and retain D472: installing a newer live post pair would tear
+; that old playfield. Never restart pre-scroll halfway through active video.
+rt_smb_hud_repeat:
+.ifndef NO_SCROLL_SPLIT
+  in a, ($7e)
+  cp $e0
+  ret c
+  ld a, ($cb20)
+  bit 2, a
+  ret z
+  jp _smb_hud_rearm
+.else
+  ret
+.endif
+.endif
 
 .ends
 

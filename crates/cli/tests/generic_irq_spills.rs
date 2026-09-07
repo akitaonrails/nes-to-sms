@@ -20,6 +20,8 @@ struct Machine {
     pad1: u8,
     min_sp: u16,
     post_save: u16,
+    vcounter: u8,
+    ports: Vec<(u8, u8)>,
 }
 
 impl Machine {
@@ -62,6 +64,8 @@ impl Machine {
             pad1: 0xff,
             min_sp: 0xffff,
             post_save: 0,
+            vcounter: 0xe0,
+            ports: Vec::new(),
         };
         assert_eq!(m.labels.contains_key("data_prg_bank_0"), uxrom);
         m.ram[0xdffe] = 1;
@@ -227,9 +231,102 @@ impl Bus for Machine {
     fn in_port(&mut self, port: u8) -> u8 {
         match port {
             0xbf => self.status,
-            0x7e => 0xe0,
+            0x7e => self.vcounter,
             0xdc => self.pad1,
             _ => 0xff,
+        }
+    }
+    fn out_port(&mut self, port: u8, value: u8) {
+        self.ports.push((port, value));
+    }
+}
+
+#[test]
+#[ignore = "requires IRQ_NROM_PROJECT assembled with Docker"]
+fn smb_installs_frozen_hud_before_column_projection_even_after_a_previous_overrun() {
+    for (overrun, split) in [(0, 6), (60, 6), (0, 4), (60, 4)] {
+        let mut m = Machine::assembled(false);
+        m.ram[0xcb20] = split;
+        m.ram[0xcb0c] = 0x47; // pre pair not rewritten yet on a lag frame
+        m.ram[0xcb23] = 0x47;
+        m.ram[0xcb29] = overrun;
+        let mut cpu = m.cpu("_present_wait_vblank");
+        cpu.iff1 = false;
+        cpu.iff2 = false;
+        m.run_until(&mut cpu, m.labels["_irq_proj_go"].1);
+        assert_eq!(cpu.c, 0x47, "projection must retain the playfield X");
+        assert_eq!(m.ram[0xd472], 0x47);
+        assert_eq!(m.ram[0xd473], 1);
+        assert!(m.ports.windows(2).any(|p| p == [(0xbf, 0), (0xbf, 0x88)]));
+        assert!(m.ports.windows(2).any(|p| p == [(0xbf, 31), (0xbf, 0x8a)]));
+    }
+}
+
+#[test]
+#[ignore = "requires IRQ_NROM_PROJECT assembled with Docker"]
+fn smb_hud_poll_is_one_shot_frozen_horizontal_only_and_preserves_live_registers() {
+    for line in [0, 16, 30, 31, 32, 100, 223, 224, 255] {
+        let mut m = Machine::assembled(false);
+        m.ram[0xd472] = 0x47;
+        m.ram[0xd473] = 1;
+        m.ram[0xcb23] = 0x91; // next producer must not affect this frame
+        m.ram[0xcb24] = 0x38; // no mid-frame R9 update
+        m.vcounter = line;
+        let mut cpu = m.cpu("rt_smb_hud_poll");
+        cpu.iff1 = false;
+        cpu.iff2 = false;
+        let live = (cpu.b, cpu.c, cpu.d, cpu.e, cpu.h, cpu.l, m.mapping());
+        m.run_until(&mut cpu, 7);
+        assert_eq!(
+            (cpu.b, cpu.c, cpu.d, cpu.e, cpu.h, cpu.l, m.mapping()),
+            live
+        );
+        assert_eq!((cpu.iff1, cpu.iff2), (false, false));
+        if (31..224).contains(&line) {
+            assert_eq!(
+                m.ports,
+                [
+                    (0xbf, 0xb9),
+                    (0xbf, 0x88),
+                    (0xbf, 0x46),
+                    (0xbf, 0x80),
+                    (0xbf, 0xff),
+                    (0xbf, 0x8a)
+                ]
+            );
+            assert_eq!(m.ram[0xd473], 0);
+            m.ports.clear();
+            let mut cpu = m.cpu("rt_smb_hud_line");
+            m.run_until(&mut cpu, 7);
+            assert!(
+                m.ports.is_empty(),
+                "stale line IRQ must not apply scroll again"
+            );
+        } else {
+            assert!(m.ports.is_empty());
+            assert_eq!(m.ram[0xd473], 1);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires IRQ_NROM_PROJECT assembled with Docker"]
+fn smb_consumed_vblank_repeats_committed_scroll_without_late_active_rearm() {
+    for line in [0, 16, 32, 223, 224, 240, 255] {
+        let mut m = Machine::assembled(false);
+        m.ram[0xcb20] = 4;
+        m.ram[0xcb23] = 0x91;
+        m.ram[0xcb0c] = 0x91;
+        m.ram[0xd472] = 0x47;
+        m.vcounter = line;
+        let mut cpu = m.cpu("rt_smb_hud_repeat");
+        m.run_until(&mut cpu, 7);
+        assert_eq!(m.ram[0xd472], 0x47);
+        assert_eq!(m.ram[0xd473], u8::from(line >= 224));
+        if line < 224 {
+            assert!(m.ports.is_empty());
+        } else {
+            assert!(m.ports.windows(2).any(|p| p == [(0xbf, 0), (0xbf, 0x88)]));
         }
     }
 }

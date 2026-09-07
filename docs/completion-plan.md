@@ -12,6 +12,17 @@ re-order, add, remove. Do not throw it away and replace it with a
 different list; the document's value is in being the durable record of
 what we decided to do next and why.
 
+## SMB motion-only HUD follow-up (2026-09-07)
+
+The user's moving-scoreboard report takes priority over further optimization.
+[Investigation and verification](smb-hud-motion.md) record consecutive actual
+GPGX video captures, the early/frozen split correction, lag-frame handling,
+and regression gates. Static checkpoint parity alone did not expose this bug.
+Completed: zero displaced HUD regions in the measured moving-frame captures
+at 300/500, all three NES differential routes and the 1-1-clear checkpoint/cache
+gates pass, and CV1's ROM is byte-identical. The corrected SMB project replaces
+`out/smb` after preserving the old ROM and symbols in the evidence directory.
+
 ## Current CV1 performance follow-up (2026-09-06)
 
 The mapper-2 weapon-return correctness checkpoint is `b9fc51f`; SMB remains

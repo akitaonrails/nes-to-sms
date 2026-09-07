@@ -139,6 +139,9 @@ $DFFC-$DFFF   RAM aliases of Sega mapper registers ($FFFC-$FFFF)
 
 The runtime initializes Z80 SP to `$DFFC`; pushes pre-decrement below the
 mapper aliases. Native Z80 stack and emulated 6502 stack are separate.
+For `SMB_RUNTIME_HOOKS`, the retired fixed IRQ-save bytes `$D472-$D473`
+hold the committed playfield X and pending HUD-split flag. IRQ register saves
+remain reentrant on the native stack; `$D474` still owns the status scratch.
 `chrmap.s::BGV_REFCNT` already occupies `$DD80-$DE3F`; this is an existing
 allocation, not a new reservation. Native SP must not cross below `$DE40`.
 

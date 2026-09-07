@@ -52,7 +52,7 @@
 ;   $D469        round-robin variant-cache victim cursor
 ;   $D46A-$D46B  rt_oam_dma DE save (keeps helper off native stack)
 ;   $D46C-$D471  stackless rotate-memory helper scratch (flags.s)
-;   $D472-$D478  IRQ saved BC/status/HL/AF scratch (boot.s)
+;   $D472-$D478  SMB HUD / IRQ status / reserved scratch (boot.s)
 ;   $D479-$D47C  rt_oam_dma AF/HL save (keeps helper off native stack)
 ;   $D47D-$D47E  far slot-1 bank stack next-free pointer (dispatch.s)
 ;   $D480-$D4BF  compacted OAM attr byte per visible SAT entry (64 bytes)
@@ -646,6 +646,10 @@ _res_store_common:           ; A = resolved value; L at the entry's Y byte
   djnz _res_loop
   ret
 _res_visible:
+.ifdef SMB_RUNTIME_HOOKS
+  ; Hidden entries do no VDP work; poll before each variable-cost variant.
+  call rt_smb_hud_poll
+.endif
   push bc                    ; B is the loop counter; calls below need B/C
   inc  l                     ; -> tile
   ld   a, (hl)               ; A = NES tile
