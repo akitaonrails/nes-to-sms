@@ -1,5 +1,9 @@
 # Mapper support plan — from NROM to the major mappers
 
+Current priority (2026-09-07): the user selected **SMB3 / MMC3** next, ahead
+of the older ascending-difficulty ladder. See [SMB3 plan](smb3-plan.md) for
+the current baseline and acceptance gates; mapper 4 still fails closed.
+
 Goal: run the bulk of the NES library through the pipeline. Target
 ladder, each rung a shippable milestone with its own stress ROM:
 
@@ -12,13 +16,13 @@ ascending difficulty:
 | M1 | 2 (UxROM) | Castlevania (USA) (Rev 1) | 9 games |
 | M2 | 3 (CNROM) | Gradius (USA) | 3 games |
 | M3 | 1 (MMC1) | Blaster Master (USA) | 17 games |
-| M4 | 4 (MMC3) | Bonk's Adventure / Adventure Island II | 22 games |
+| M4 (active next) | 4 (MMC3) | Super Mario Bros. 3 (USA) (Rev 1) | 22 games |
 | M5 | 7 (AxROM) | Marble Madness (then Battletoads, the torture test) | 2 games |
 | M6 | 5 (MMC5) | Castlevania III | 1 game, hardest |
 | Later | 23/25 (VRC2/4), 69 (FME-7) | Kid Dracula, Gradius II, Batman RotJ | 3 games |
 
 **Hard regression rule (user directive): every mapper-phase commit
-must pass the FULL SMB gate (three routes byte-for-byte, 375 tests,
+must pass the FULL SMB gate (three routes byte-for-byte, full workspace tests,
 route expectations) and keep Alter Ego building. No exceptions, no
 quick-gates on commit.**
 
@@ -78,8 +82,10 @@ parity gate, so it lands FIRST in every milestone.
   runtime lookup of (current bank, addr) in a generated table, then
   far-gate; misses trap with diagnostics.
 
-**SMS bank budget**: 256KB NES PRG × ~3-4× translation expansion
-exceeds the 512KB SMS mapper ceiling for the biggest games. Plan:
+**SMS bank budget**: 256KB NES PRG × ~3-4× estimated translation expansion
+exceeds the current 512KB project layout for the biggest games. This is not
+a universal Sega-mapper hardware ceiling; capacity varies by implementation.
+Measure expansion and verify the intended cartridge/emulator capacity. Plan:
 translation is per-NES-bank sections, so cold banks can stay
 UNTRANSLATED until proven reachable (discovery already only lifts
 reached code; expansion factor applies to reached bytes, not the
@@ -248,7 +254,7 @@ data-walk stubs (mis-rooted lifts up to 90 KiB get loud trap stubs),
 wrap-safe + post-emit section rotation, snapshot keys for banked
 units, indirect-landing ground-truth harvest (136 entries).
 
-## M2 — MMC1
+## M3 — MMC1
 
 Serial 5-write register protocol (shim buffers the shift register),
 PRG mode variants (16KB switch low/high, 32KB), CHR 4KB banking,
@@ -256,22 +262,23 @@ mirroring control (the materializer already parametrizes vertical/
 horizontal; MMC1 switches it at runtime → the fold/projector
 mirroring define becomes a runtime flag).
 
-## M3 — MMC3 (SMB3, Kirby)
+## M4 — MMC3 (SMB3, Kirby)
 
-8KB PRG banking (two switchable + two fixed windows — the label
-space and dispatch generalize from 16KB to window-granularity),
-2KB/1KB CHR banking (CHR-ROM again, but banked: the build-time
-converter emits per-bank tile sets; the runtime CHR window state
-selects which SMS tile base the BG/sprite mappers use — this is the
-big one for the CHR pipeline), and the **scanline IRQ**: map the
-MMC3 counter onto the SMS VDP line interrupt (the split machinery
-already drives it; MMC3 games configure a line and flip scroll/banks
-there — same shape as the SMB sprite-0 split, now data-driven).
+See [SMB3 / MMC3 effort](smb3-plan.md). PRG mapping needs independent 8KB
+windows and mode inversion; only the final 8KB window is permanently fixed
+in CPU space. SMB3 also needs 8KB cartridge work RAM. Banked 2KB/1KB CHR
+requires physical tile identity and residency, not just a tile-base offset.
 
-## M4 — MMC5 (Castlevania III)
+The earlier direct-counter proposal was too optimistic: MMC3 clocks on
+qualified PPU A12 edges, whereas the SMS line counter and scroll limitations
+have different semantics. Verify NES IRQ behavior separately from the SMS
+raster adaptation. Existing frame-diff lacks the timing/fetch model needed
+to be an MMC3 oracle. Do not enable mapper 4 through the UxROM policy.
+
+## M6 — MMC5 (Castlevania III)
 
 Everything above plus ExRAM modes, fill mode, vertical split,
-8×16-attribute mode, multiplier, PCM. Scoped only after M3 ships;
+8×16-attribute mode, multiplier, PCM. Scoped only after MMC3 ships;
 several MMC5 features (extended attributes per tile) map poorly to
 Mode 4 and may need per-game compromises. Honest flag: this rung
 may land as "CV3-specific subset of MMC5".

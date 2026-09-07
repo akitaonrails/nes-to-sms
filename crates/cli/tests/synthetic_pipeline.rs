@@ -471,6 +471,83 @@ fn pipeline_rejects_unsupported_mapper_before_analysis() {
 }
 
 #[test]
+fn pipeline_rejects_mmc3_without_creating_or_modifying_output_even_in_debug_mode() {
+    const PRG_SIZE: usize = 256 * 1024;
+    const CHR_SIZE: usize = 128 * 1024;
+    let mut rom = vec![0u8; 16 + PRG_SIZE + CHR_SIZE];
+    rom[..4].copy_from_slice(b"NES\x1a");
+    rom[4] = 16;
+    rom[5] = 16;
+    rom[6] = 0x40; // Mapper 4, no battery or trainer.
+    rom[7] = 0x08; // NES 2.0, submapper 0.
+    rom[10] = 0x07; // 8 KiB volatile PRG-RAM, no NVRAM.
+    for offset in [PRG_SIZE - 6, PRG_SIZE - 4, PRG_SIZE - 2] {
+        rom[16 + offset..16 + offset + 2].copy_from_slice(&0xe000u16.to_le_bytes());
+    }
+    let image = nes_rom::parse(&rom).unwrap();
+    assert_eq!(image.header.kind, nes_rom::HeaderKind::Nes2);
+    assert_eq!(image.prg.len(), PRG_SIZE);
+    assert_eq!(image.chr.len(), CHR_SIZE);
+    assert_eq!(image.header.prg_ram_size, 8 * 1024);
+    assert_eq!(image.header.prg_nvram_size, 0);
+    assert_eq!(
+        nes_rom::resolve_mapper_policy(&image.header, image.prg.len()),
+        Err(nes_rom::MapperPolicyError::UnsupportedMapper { mapper: 4 })
+    );
+
+    for debug in [false, true] {
+        for existing in [false, true] {
+            let work = tmp(&format!("mmc3-rejection-debug-{debug}-existing-{existing}"));
+            let rom_path = work.join("rom.nes");
+            let prof_path = work.join("profile.toml");
+            let out_path = work.join("out");
+            std::fs::write(&rom_path, &rom).unwrap();
+            write_minimal_profile(&prof_path, 0xe000, 0xe000, 0xe000);
+            set_mapper(&prof_path, 4);
+            set_rom_size(&prof_path, "prg_kib", 256);
+            set_rom_size(&prof_path, "chr_kib", 128);
+            if existing {
+                std::fs::create_dir(&out_path).unwrap();
+                std::fs::write(out_path.join("sms.asm"), b"existing project sentinel\n").unwrap();
+            }
+
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_nes-to-sms"));
+            command.arg(&rom_path).arg(&prof_path).arg(&out_path);
+            if debug {
+                command.arg("--debug-unresolved-stubs");
+            }
+            let output = command.output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "debug={debug}, existing={existing}"
+            );
+            for diagnostic in [
+                "unsupported mapper 4 (MMC3)",
+                "8-KiB PRG windows",
+                "banked CHR",
+                "cartridge-RAM mapping",
+                "PPU-A12-qualified IRQ support",
+            ] {
+                assert!(
+                    stderr.contains(diagnostic),
+                    "missing {diagnostic}: {stderr}"
+                );
+            }
+            if existing {
+                assert_eq!(
+                    std::fs::read(out_path.join("sms.asm")).unwrap(),
+                    b"existing project sentinel\n"
+                );
+                assert_eq!(std::fs::read_dir(&out_path).unwrap().count(), 1);
+            } else {
+                assert!(!out_path.exists());
+            }
+        }
+    }
+}
+
+#[test]
 fn pipeline_rejects_profile_prg_and_chr_size_mismatches_before_generation() {
     let rom = build_nrom_rom(&[0x60], 0x8000, 0x8000, 0x8000);
     for (field, declared, diagnostic) in [

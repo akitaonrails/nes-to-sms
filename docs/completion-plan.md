@@ -12,6 +12,17 @@ re-order, add, remove. Do not throw it away and replace it with a
 different list; the document's value is in being the durable record of
 what we decided to do next and why.
 
+## SMB3 / MMC3 exploration (2026-09-07)
+
+The user selected Super Mario Bros. 3 as the next compatibility effort.
+[SMB3 plan](smb3-plan.md) records the pinned target, architectural blockers,
+ordered implementation and acceptance gates. The first delivery is a tested
+compatibility baseline, not translated boot or mapper support. Next is the
+executable 8 KiB banking foundation; cartridge RAM, CHR residency and actual
+IRQ/reference timing are separate required milestones. Preserve SMB1/CV1
+and their current performance while exploring this path. The CV1 optimization
+queue below remains unfinished, but SMB3 is now the active priority.
+
 ## SMB motion-only HUD follow-up (2026-09-07)
 
 The user's moving-scoreboard report takes priority over further optimization.

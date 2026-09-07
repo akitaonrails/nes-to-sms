@@ -1040,6 +1040,25 @@ dest = 0x100
 "#;
 
     #[test]
+    fn parses_smb3_exploration_profile_without_translation_annotations() {
+        let p = load_from_str(include_str!("../../../profiles/smb3.toml")).unwrap();
+        assert_eq!(p.rom.mapper, 4);
+        assert_eq!(p.rom.prg_kib, 256);
+        assert_eq!(p.rom.chr_kib, 128);
+        assert!(p.rom.payload_sha256.is_some());
+        let vectors = p.vectors.unwrap();
+        assert!(vectors.nmi >= 0xe000);
+        assert!(vectors.reset >= 0xe000);
+        assert!(vectors.irq >= 0xe000);
+        assert!(p.functions.is_empty());
+        assert!(p.bank_entries.is_empty());
+        assert!(p.bank_calls.is_empty());
+        assert!(p.replacements.is_empty());
+        assert!(p.chr_packs.is_empty());
+        assert!(p.translation.runtime_defines.is_empty());
+    }
+
+    #[test]
     fn parses_full_profile() {
         let p = load_from_str(SAMPLE).expect("load");
         assert_eq!(p.rom.mapper, 0);

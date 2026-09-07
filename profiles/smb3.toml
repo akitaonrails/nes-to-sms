@@ -1,0 +1,17 @@
+# Super Mario Bros. 3 (USA) (Rev 1) — unsupported mapper-4 exploration.
+# This pins the baseline ROM, not a working SMS conversion. Generation must
+# reject MMC3 until its banking, cartridge RAM, CHR mapping, and IRQ runtime
+# are implemented. See docs/smb3-plan.md for the staged acceptance gates.
+# The payload hash covers PRG followed by CHR, excluding the NES header.
+[rom]
+name = "Super Mario Bros. 3 (USA) (Rev 1)"
+mapper = 4
+prg_kib = 256
+chr_kib = 128
+payload_sha256 = "959fdd32c71735d6fb2bd16a646d39f4ee65623273dd035e6a968e991bd13ef8"
+
+# Physical vectors in the final, fixed 8-KiB PRG bank.
+[vectors]
+nmi = 0xf486
+reset = 0xff40
+irq = 0xf795

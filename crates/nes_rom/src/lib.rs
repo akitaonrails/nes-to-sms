@@ -232,6 +232,10 @@ pub enum MapperPolicyError {
 impl fmt::Display for MapperPolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedMapper { mapper: 4 } => write!(
+                f,
+                "unsupported mapper 4 (MMC3); translation requires independently mapped 8-KiB PRG windows, banked CHR, cartridge-RAM mapping, and PPU-A12-qualified IRQ support; only mapper 0 (NROM) and mapper 2 (UxROM) are supported"
+            ),
             Self::UnsupportedMapper { mapper } => {
                 write!(
                     f,
