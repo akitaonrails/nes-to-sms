@@ -8,6 +8,17 @@
 .define M3G_PACKET_CHANGED $c8f4
 .define M3G_BG_CHANGED $c8ec
 .define M3G_COMPARE_BG $c8ed
+.define M3C_DIRTY $dc00
+.define M3C_OLD $dd00
+.define M3C_VALID $dd33
+.define M3C_OLD_SPLIT $dd34
+.define M3C_FRAME $dd35
+.define M3C_ROW $dd36
+.define M3C_OLD_X $dd37
+.define M3C_OLD_PAGE $dd38
+.define M3C_COPY_CURSOR $dd39
+.define M3C_CAPTURE_READY $dd3e
+.define M3C_ANCHORED $dd3f ;frozen PF source matches completed committed NT
 .section "frame_mmc3" free
 
 rt_mmc3_sms_interrupt:
@@ -286,10 +297,39 @@ _m3f_push_guest_frame:
 ; 48 IRQ v-low,49 IRQ v-high,50 explicit IRQ reload-present (0/1).
 ; All three IRQ fields are zero when no explicit IRQ-time reload occurred.
 rt_mmc3_capture_playfield:
+  ; READY says the old display exists, not that the latest captured PF was
+  ; committed: cancellation can discard a pending split without publishing.
+  ; ANCHORED is granted only after publication/shadow completion or exact
+  ; packet reuse. BUSY still excludes capture during an in-flight publisher.
+  ld a, 8
+  ld ($fffc), a
+  ld a, (M3G_READY)
+  or a
+  jr z, _m3f_capture_anchor
+  ld a, (M3C_ANCHORED)
+_m3f_capture_anchor:
+  ld (M3C_CAPTURE_READY), a
+  xor a
+  ld (M3C_VALID), a
+  ld (M3C_ANCHORED), a
+  ld a, (M3R_SPLIT)
+  ld (M3C_OLD_SPLIT), a
+  ld hl, M3G_RECORD
+  ld de, M3C_OLD
+  ld bc, 32
+  ldir
+  ei
+  nop
+  di
+  ld bc, 19
+  ldir
+  ei
+  nop
+  di
   xor a
   ld (M3G_PACKET_CHANGED), a
   ld (M3G_BG_CHANGED), a
-  ld a, (M3G_READY)
+  ld a, (M3C_CAPTURE_READY)
   or a
   jr nz, _m3f_capture_existing
   inc a
@@ -302,8 +342,7 @@ _m3f_capture_existing:
   ld ($fffc), a
   ld hl, $8000
   ld de, $8800
-  ld bc, $0800
-  call _m3f_compare_copy
+  call _m3c_capture_ciram
   xor a
   ld (M3G_COMPARE_BG), a
   ld hl, $c900
@@ -311,7 +350,10 @@ _m3f_capture_existing:
   ld bc, $0100
   call _m3f_compare_copy
   ld de, M3G_RECORD
-  jp _m3f_capture_record
+  call _m3f_capture_record
+  ld a, (M3C_CAPTURE_READY)
+  ld (M3C_VALID), a
+  ret
 rt_mmc3_capture_hud:
   ld a, 1
   ld (M3G_COMPARE_BG), a
@@ -436,7 +478,7 @@ rt_mmc3_frame_present:
   ld b, a
   ld a, (M3R_SPLIT)
   cp b
-  ret z
+  jp z, rt_mmc3_source_committed
 _m3f_rebuild:
   ld a, 2
   ld (M3G_BUSY), a
@@ -453,6 +495,13 @@ _m3f_rebuild:
   jp z, rt_mmc3_frame_render_bg_stable
   jp rt_mmc3_frame_render
 
+; Exact packet reuse or a renderer return AFTER all native shadow copies.
+; No early READY store inside publication grants this source/NT relationship.
+rt_mmc3_source_committed:
+  ld a, (M3G_READY)
+  ld (M3C_ANCHORED), a
+  ret
+
 ; This experimental renderer publishes both layers or a fully blank packet.
 ; Reject partial-layer records before either reuse or visible VDP mutation.
 ; SRAM bank0 must be mapped. AF scratch, all other registers preserved.
@@ -466,6 +515,106 @@ _m3f_validate_mask:
   cp $18
   ret z
   jp rt_mmc3_raster_unsupported
+
+; Exact PF bitmap: all256 bytes are assigned anew every capture, including
+; clean groups. Source remains immutable while BUSY excludes guest reentry.
+; Eight-byte groups bound changed-data work before each host-service point.
+; HL=8000/DE=8800 on entry, HL=8800/DE=9000 on return; AF/BC scratch.
+_m3c_capture_ciram:
+  push hl
+  ld hl, M3C_DIRTY
+  ld (M3C_COPY_CURSOR), hl
+  pop hl
+_m3c_copy_group:
+  ld c, 0
+  ld a, (de)
+  cp (hl)
+  jr z, _m3c_copy_equal0
+  set 0, c
+_m3c_copy_equal0:
+  ld a, (hl)
+  ld (de), a
+  inc hl
+  inc de
+  ld a, (de)
+  cp (hl)
+  jr z, _m3c_copy_equal1
+  set 1, c
+_m3c_copy_equal1:
+  ld a, (hl)
+  ld (de), a
+  inc hl
+  inc de
+  ld a, (de)
+  cp (hl)
+  jr z, _m3c_copy_equal2
+  set 2, c
+_m3c_copy_equal2:
+  ld a, (hl)
+  ld (de), a
+  inc hl
+  inc de
+  ld a, (de)
+  cp (hl)
+  jr z, _m3c_copy_equal3
+  set 3, c
+_m3c_copy_equal3:
+  ld a, (hl)
+  ld (de), a
+  inc hl
+  inc de
+  ld a, (de)
+  cp (hl)
+  jr z, _m3c_copy_equal4
+  set 4, c
+_m3c_copy_equal4:
+  ld a, (hl)
+  ld (de), a
+  inc hl
+  inc de
+  ld a, (de)
+  cp (hl)
+  jr z, _m3c_copy_equal5
+  set 5, c
+_m3c_copy_equal5:
+  ld a, (hl)
+  ld (de), a
+  inc hl
+  inc de
+  ld a, (de)
+  cp (hl)
+  jr z, _m3c_copy_equal6
+  set 6, c
+_m3c_copy_equal6:
+  ld a, (hl)
+  ld (de), a
+  inc hl
+  inc de
+  ld a, (de)
+  cp (hl)
+  jr z, _m3c_copy_equal7
+  set 7, c
+_m3c_copy_equal7:
+  ld a, (hl)
+  ld (de), a
+  inc hl
+  inc de
+  push hl
+  ld hl, (M3C_COPY_CURSOR)
+  ld (hl), c
+  inc hl
+  ld (M3C_COPY_CURSOR), hl
+  pop hl
+  ld a, c
+  or a
+  call nz, _m3f_mark_changed
+  ei
+  nop
+  di
+  ld a, h
+  cp $88
+  jp nz, _m3c_copy_group
+  ret
 
 ; Exact compare-before-overwrite, at most64 bytes between host-service
 ; boundaries. BUSY excludes guest reentry, so sources remain immutable.

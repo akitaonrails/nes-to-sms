@@ -176,14 +176,19 @@ transfers cost more, but blanket inlining is still not a 2× explanation.
 [Zilog manual](https://www.zilog.com/docs/z80/um0080.pdf),
 [existing IR/inlining research](ir-optimization-research.md).
 
-### 5. ROM-for-compute tradeoffs, only after a measured census
+### 5. Prefer ROM-for-compute tradeoffs when measured faster
 
-Pre-expand frequently converted CHR identities or native lookup tables where
-fetch/setup is cheaper than computation. Avoid blanket four-subpalette expansion:
+The user explicitly prioritizes speed over cartridge size and accepts using
+available storage for tables, expanded graphics and duplicated/inlined code.
+Historical cartridge cost is not a rejection criterion. Pre-expand CHR identities
+or native lookup tables where fetch/setup is cheaper than computation:
 128 KiB of 2bpp CHR becomes 1 MiB at 4bpp with four variants, before other output.
-The current image is already 2 MiB, with only 96 KiB after its last linked
-section. Other gaps exist, but fixed/banked placement must be proven before
-treating them as usable capacity. Compression adds runtime cost too.
+At the research baseline the image is 2 MiB, with 96 KiB after its last linked
+section. That is a placement observation, not a user-imposed size ceiling.
+Use other gaps or a larger supported output where worthwhile; prove actual
+mapper addressability and fixed/banked placement. Compression adds runtime cost.
+Existing N/Z results already use the pinned `$3E00` lookup table; existing
+bit/planar lookup acceleration must not be counted as a newly implemented gain.
 
 Sega's VDP has 16 KiB VRAM, 32-byte patterns, two 16-color palette banks and
 background flip attributes. More cartridge ROM does not add VRAM or automatic
@@ -211,7 +216,12 @@ measured optimization result.
 - [x] Implement one bounded frozen-row/address kernel; retain mixed-row fallback.
   [Accepted result](mmc3-row-address-kernel.md): 3.66% full-traversal gain,
   matching checkpoints and no gameplay flashes on the measured route.
-- [ ] Add exact source-dependency invalidation and resolved-cell reuse on the ring.
+- [x] Add exact source-dependency invalidation and resolved-cell reuse on the ring.
+  [Accepted result](mmc3-cell-reuse.md): another 5.04% full-traversal gain,
+  8.88% cumulatively, with explicit committed-source anchoring after cancellation.
+- [ ] Replace dispatch binary search with a precomputed 64 KiB ROM pointer index,
+  preserving the existing bank-constraint scan and failure behavior. Price the
+  complete lookup and bank switching before accepting the measured result.
 - [ ] Admit proven internal-RAM lowering, then one safe full-mode fusion/loop case.
 - [ ] Profile remaining dynamic edges before selecting direct continuation/cache/inlining.
 - [ ] Consider selective CHR pre-expansion only if conversion becomes significant.

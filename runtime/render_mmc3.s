@@ -69,9 +69,15 @@ _m3r_begin:
   and $18
   jr nz, _m3r_enabled
   ld (M3G_READY), a         ; rendering-off frames publish blank immediately
+  ld (M3C_VALID), a
+  ld (M3C_ANCHORED), a
   jp rt_mmc3_blank_display
 _m3r_enabled:
   call rt_mmc3_prepare_display
+  call _m3c_frame_eligibility
+  ei
+  nop
+  di
   ld a, (M3G_COMPARE_BG)
   or a
   jp nz, _m3r_bg_done
@@ -199,12 +205,21 @@ _m3r_row_vertical_ready:
   ld h, a
   ld (M3R_V), hl
   call _m3r_row_addresses
+  call _m3c_row_eligibility
   ei
   nop
   di
   xor a
   ld (M3R_COL), a
 _m3r_cell:
+  call _m3c_reuse_cell
+  jr c, _m3r_resolve_cell
+  ei
+  nop
+  di
+  call rt_mmc3_reserve_slot
+  jp _m3r_write_cell
+_m3r_resolve_cell:
   xor a
   ld (M3R_CUT), a
   ld (M3R_SECOND), a
@@ -459,6 +474,7 @@ _m3r_bg_ready:
   di
   call _m3r_bg_slot
   jp c, _m3r_restart_reserve
+_m3r_write_cell:
   ld hl, (M3R_NT)
   ld (hl), a
   inc hl
@@ -607,7 +623,212 @@ _m3r_reg1:
   ld a, $06
 _m3r_reg0:
   ld (M3P_REG0), a
-  jp rt_mmc3_commit_display
+  ; Keep one additional native return word only during publication. The
+  ; source anchor cannot become valid until its NT/SAT shadow copy returns.
+  call rt_mmc3_commit_display
+  jp rt_mmc3_source_committed
+
+; Exact PF-only reuse metadata occupies DC00..DD3F, separate from queue,
+; CPU frames and native stack. Capture owns bitmap/old-record/validity; these
+; guards and every reserve restart only READ that frozen source evidence.
+; AF/BC/DE/HL scratch throughout. No helper leaves a frame open on restart.
+_m3c_frame_eligibility:
+  xor a
+  ld (M3C_FRAME), a
+  ld (M3C_ROW), a
+  ld a, (M3C_VALID)
+  or a
+  ret z
+  ld a, (M3G_READY)
+  or a
+  ret z
+  ld a, (M3C_OLD_SPLIT)
+  ld b, a
+  ld a, (M3G_SPLIT)
+  cp b
+  ret nz
+  ld a, (M3C_OLD+9)
+  and $18
+  cp $18
+  ret nz
+  ld a, (M3G_RECORD+9)
+  and $18
+  cp $18
+  ret nz
+  ld a, (M3C_OLD+12)
+  ld b, a
+  and 31
+  ld (M3C_OLD_X), a
+  ld a, (M3G_RECORD+12)
+  xor b
+  and $e0
+  ret nz
+  ld a, (M3C_OLD+13)
+  ld b, a
+  and 4
+  ld (M3C_OLD_PAGE), a
+  ld a, (M3G_RECORD+13)
+  xor b
+  and $7b
+  ret nz
+  ld a, (M3C_OLD+15)
+  ld b, a
+  ld a, (M3G_RECORD+15)
+  cp b
+  ret nz
+  ld a, (M3C_OLD+50)
+  ld b, a
+  ld a, (M3G_RECORD+50)
+  or b
+  ret nz                  ; no inference across explicit source reloads
+  ld a, (M3C_OLD+8)
+  ld b, a
+  ld a, (M3G_RECORD+8)
+  xor b
+  and $10
+  ret nz
+  ld a, b
+  and $10
+  rrca
+  rrca
+  ld l, a
+  ld h, $99
+  ld e, a
+  ld d, $dd
+  ld b, 4
+_m3c_map_compare:
+  ld a, (de)
+  cp (hl)
+  ret nz
+  inc hl
+  inc de
+  djnz _m3c_map_compare
+  ld a, 1
+  ld (M3C_FRAME), a
+  ret
+
+; Admit only complete unshifted PF rows. Exclude the cropped first row and
+; mixed/HUD rows; equal old/new vertical origin+split implies equal ownership.
+_m3c_row_eligibility:
+  xor a
+  ld (M3C_ROW), a
+  ld a, (M3C_FRAME)
+  or a
+  ret z
+  ld a, (M3R_RECORD)
+  or a
+  ret nz
+  ld a, (M3R_OFFSET1)
+  or a
+  ret nz
+  ld a, (M3R_ROW)
+  or a
+  ret z
+  add a, a
+  add a, a
+  add a, a
+  ld b, a
+  ld a, (M3R_FINE_Y)
+  ld c, a
+  ld a, b
+  sub c
+  ret c
+  add a, 8
+  ld b, a
+  ld a, (M3G_SPLIT)
+  or a
+  jr z, _m3c_row_yes
+  cp b
+  ret c
+_m3c_row_yes:
+  ld a, 1
+  ld (M3C_ROW), a
+  ret
+
+; NC/A=committed slot on exact hit; C=miss. No NEEDED mutation here: caller
+; reserves hits in ALL passes, including restarted reserve/build passes.
+_m3c_reuse_cell:
+  ld a, (M3C_ROW)
+  or a
+  jr z, _m3c_cell_miss
+  ld a, (M3G_RECORD+15)
+  or a
+  jr nz, _m3c_cell_address  ; horizontal mirroring ignores nametable bit10
+  ld a, (M3R_V)
+  and 31
+  ld b, a
+  ld a, (M3C_OLD_X)
+  ld c, a
+  ld a, b
+  cp c
+  ld a, (M3C_OLD_PAGE)
+  jr nc, _m3c_old_page
+  xor 4
+_m3c_old_page:
+  ld b, a
+  ld a, (M3R_V+1)
+  and 4
+  cp b
+  jr nz, _m3c_cell_miss
+_m3c_cell_address:
+  ld hl, (M3R_V)
+  ld a, (M3R_ROW_NT_HIGH)
+  ld h, a
+  call _m3c_byte_dirty
+  jr nz, _m3c_cell_miss
+  ld a, (M3R_V)
+  rrca
+  rrca
+  and 7
+  ld b, a
+  ld a, (M3R_ROW_ATTR_LOW)
+  or b
+  ld l, a
+  ld a, (M3R_ROW_ATTR_HIGH)
+  ld h, a
+  call _m3c_byte_dirty
+  jr nz, _m3c_cell_miss
+  ld hl, (M3R_NT)
+  ld a, h
+  sub $a0
+  add a, $cc
+  cp $d3
+  jr c, _m3c_committed_high
+  add a, 3                ; committed tail D600..D6FF, not CPU-frame D300
+_m3c_committed_high:
+  ld h, a
+  ld a, (hl)
+  or a
+  ret
+_m3c_cell_miss:
+  scf
+  ret
+
+; HL is mapped frozen PF address8800..8FFF. Z means this exact source byte
+; equals the previously committed PF source; byte changes are conservative
+; for attributes (all quadrants invalidated). AF/BC/HL scratch, DE preserved.
+_m3c_byte_dirty:
+  ld c, l
+  ld b, >rt_mmc3_bit_masks
+  ld a, (bc)
+  ld b, a
+  ld a, h
+  and 7
+  rrca
+  rrca
+  rrca
+  ld h, a
+  ld a, l
+  rrca
+  rrca
+  rrca
+  and 31
+  or h
+  ld l, a
+  ld h, $dc
+  ld a, (hl)
+  and b
+  ret
 
 ; Four primary-row address bytes occupy previously unused renderer-owned
 ; C85B/C85C/C8EE/C8EF. Set at every row and horizontal nametable wrap,

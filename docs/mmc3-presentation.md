@@ -54,6 +54,9 @@ All new code is full-mode-only. NROM/UxROM emit their existing runtime paths.
 Frozen CIRAM comparison/copy admits host service at most every 64 bytes. The
 previous 128-byte equal-data loop could delay stock-clock palette rearm into
 active display; the shorter boundary retains exact bytes and change flags.
+Playfield capture now compares in eight-byte groups, also producing the exact
+byte-change bitmap used by [committed-cell reuse](mmc3-cell-reuse.md). HUD capture
+retains the generic comparison path and cannot overwrite playfield evidence.
 
 The physical cartridge remains 32 KiB SRAM. Bank-1 guest `$8000–$9FFF` is
 untouched; its distinct upper half stages BG data. There is no added emulator
@@ -69,6 +72,10 @@ memory or altered guest hardware capacity.
 | D9B0–D9EF | Pending playfield and HUD palettes |
 | D9F0–D9FF | Pending registers, publication state and queue scratch |
 | DA00–DBFF | 64 eight-byte upload descriptors |
+| DC00–DCFF | Exact 2048-bit previous/current frozen PF byte differences |
+| DD00–DD32 | Previous 51-byte frozen PF record |
+| DD33–DD3E | Prior validity/split and cell-reuse scratch/reserve |
+| DD3F | Frozen source is anchored to the committed NT |
 | SRAM bank 1 A000–BFFF | 256 staged BG patterns |
 | SRAM bank 0 9980–9FFF, B600–BF7F | 128 staged sprite patterns |
 
@@ -76,6 +83,21 @@ Bank-0 live/frozen CIRAM, OAM, records, keys and prepared NT/SAT retain their
 documented locations. Native D300–D5FF belongs to CPU continuations; neither
 the publisher nor its shadow copy writes there. The legacy `DIAG_WILDJUMP`
 canary clear is excluded in full mode because those bytes now have an owner.
+
+Cell reuse is anchored to the completed native NT shadow, never the pending
+SRAM NT. The serialized PF producer saves the old record and committed split,
+assigns every bitmap byte afresh, and only then validates the evidence. Validity
+requires both prior `READY` and the explicit source anchor. Capture clears the
+anchor before overwrite; an unanchored capture forces packet/BG resolution even
+if its new bytes equal a discarded pending packet. Thus cancellation never
+confuses an unpublished source with the still-visible committed frame. `BUSY`
+excludes another producer during publication and its native shadow copy, after
+which the anchor is restored. Exact-packet return also restores the equivalent
+anchor; source-off clears it. The renderer's completion callback adds two native
+stack bytes during the publisher call, without enlarging the stack allocation.
+HUD capture leaves PF evidence alone, and initialization does not clear it.
+Every reused slot enters `NEEDED`, including reserve-pass restarts; old-live
+protection remains unchanged.
 
 SMS VRAM remains 16 KiB: BG `$0000–$1FFF`, fixed sprites `$2000–$2FFF`, NT
 `$3700–$3EFF`, and SAT `$3F00–$3FFF` with its hardware gap. No pattern slot

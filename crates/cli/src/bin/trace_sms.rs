@@ -11009,12 +11009,14 @@ mod tests {
         ] {
             capture(&mut bus);
             assert_eq!(bus.read(0xc8f4), 0);
+            invoke(&mut bus, "rt_mmc3_frame_present"); // complete exact packet before next producer
             let old = bus.read(address);
             bus.write(address, old ^ 1);
             capture(&mut bus);
             assert_eq!(bus.read(0xc8f4), 1, "identity {address:04X} ignored");
             bus.write(address, old);
             capture(&mut bus);
+            invoke(&mut bus, "rt_mmc3_frame_present"); // restored source is committed, not merely captured
         }
         capture(&mut bus);
         // A HUD-only producer write must be observed after playfield freeze.
@@ -11023,12 +11025,15 @@ mod tests {
         assert_eq!(bus.read(0xc8f4), 1);
         bus.write(0x87fe, 0);
         capture(&mut bus);
+        invoke(&mut bus, "rt_mmc3_frame_present");
         capture(&mut bus);
+        invoke(&mut bus, "rt_mmc3_frame_present");
         for (before, after) in [(0x1b00u16, 0x1b01u16), (0x1b00, 0x2b00)] {
             bus.write(0xc8f7, 3);
             bus.write(0xcb0f, (before >> 8) as u8);
             bus.write(0xcb10, before as u8);
             invoke(&mut bus, "rt_mmc3_capture_hud");
+            invoke(&mut bus, "rt_mmc3_frame_present");
             bus.write(0xc8f7, 0);
             invoke(&mut bus, "rt_mmc3_capture_playfield");
             assert_eq!(bus.read(0xc8f4), 0);
@@ -11037,6 +11042,7 @@ mod tests {
             bus.write(0xcb10, after as u8);
             invoke(&mut bus, "rt_mmc3_capture_hud");
             assert_eq!(bus.read(0xc8f4), 1, "IRQ live-v identity must participate");
+            invoke(&mut bus, "rt_mmc3_frame_present");
         }
         bus.write(0xc8f7, 0);
         invoke(&mut bus, "rt_mmc3_capture_playfield");
@@ -12708,6 +12714,847 @@ mod tests {
 
     #[test]
     #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_cell_capture_tracks_exact_physical_bytes() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let invoke = |bus: &mut SmsBus, label: &str| {
+            let mut cpu = Cpu::new();
+            cpu.pc = defs[label].1;
+            cpu.sp = 0xdff0;
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            let mut prefix_span = 0;
+            let mut prefix_yields = 0;
+            let mut prefix_max = 0;
+            for _ in 0..500_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                if label == "rt_mmc3_capture_playfield" && prefix_yields < 3 {
+                    if cpu.iff1 && cpu.ei_pending == 0 {
+                        prefix_max = prefix_max.max(prefix_span);
+                        prefix_span = 0;
+                        prefix_yields += 1;
+                    }
+                    if prefix_yields < 3 {
+                        prefix_span += mmc3_row_nominal(&cpu, bus);
+                    }
+                }
+                cpu.step(bus).unwrap();
+                assert_eq!(bus.read(0xcb1d), 0, "{label}");
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+            }
+            assert_eq!((cpu.pc, cpu.sp), (7, 0xdff2), "{label}");
+            assert!(!cpu.iff1, "capture returns DI");
+            if label == "rt_mmc3_capture_playfield" {
+                assert_eq!(prefix_yields, 3, "old-record32/19 and first8-byte group");
+                assert!(
+                    prefix_max <= 831,
+                    "full capture prefix={prefix_max} nominal T"
+                );
+            }
+            prefix_max
+        };
+        // Each physical byte changes in one of the eight sparse passes.
+        // Dense/no-change passes also detect early-exit and stale-bit bugs.
+        for pattern in 0..10 {
+            for (ready, anchored) in [(0u8, 0u8), (0, 1), (1, 0), (1, 1)] {
+                let mut bus = SmsBus::new(rom.clone(), 0xff);
+                bus.write(0xfffc, 8);
+                bus.write(0xc831, 1);
+                bus.write(0xc833, ready);
+                bus.write(0xd9f6, 2); // no old-display service in this direct test
+                bus.write(0xcb08, 0xa8);
+                bus.write(0xcb09, 0x18);
+                bus.write(0xc824, 1);
+                bus.write(0xc834, 0x23);
+                bus.write(0xc835, 0x9f);
+                bus.write(0xc836, 5);
+                bus.write(0xc8f0, 0xc1); // last committed split, not pending C837
+                bus.write(0xc837, 0xc0);
+                bus.ram[..0x800].fill(0x65);
+                bus.ram[0x1300..0x1600].fill(0x76);
+                bus.ram[0x1c00..0x1d40].fill(0xa5);
+                bus.write(0xdd3f, anchored);
+                bus.ram[0x1d40..0x1d80].fill(0x87);
+                bus.cart_ram[0x4000..0x6000].fill(0x98);
+                let old_record: Vec<u8> = (0..51u8).map(|i| i.wrapping_mul(37)).collect();
+                bus.cart_ram[0x1900..0x1933].copy_from_slice(&old_record);
+                for index in 0..8u16 {
+                    bus.write(0xc850 + index, index as u8);
+                }
+                let mut expected = [0u8; 256];
+                for offset in 0..2048usize {
+                    let old = (offset as u8).wrapping_mul(29);
+                    let changed = pattern == 8 || (pattern < 8 && offset % 8 == pattern);
+                    bus.cart_ram[0x800 + offset] = old;
+                    // A live write restored before capture is clean; dirty
+                    // history must not replace exact frozen-byte comparison.
+                    bus.cart_ram[offset] = old ^ 0x40;
+                    bus.cart_ram[offset] = old ^ u8::from(changed);
+                    if changed {
+                        expected[offset / 8] |= 1 << (offset % 8);
+                    }
+                }
+                let live = bus.cart_ram[..0x800].to_vec();
+                let prefix = invoke(&mut bus, "rt_mmc3_capture_playfield");
+                if pattern == 8 && ready == 0 {
+                    assert_eq!(prefix, 823, "dense ready0 capture-entry worst case");
+                    eprintln!(
+                        "READY0 PF capture entry:823 nominal T between closed service points"
+                    );
+                }
+                assert_eq!(&bus.ram[0x1c00..0x1d00], &expected);
+                if pattern == 8 && ready == 1 && anchored == 1 {
+                    assert_eq!(prefix, 831, "READY1+ANCHOR1 capture-entry worst case");
+                    eprintln!(
+                        "READY1+ANCHOR1 PF capture entry:831 nominal T between closed service points"
+                    );
+                }
+                assert_eq!(&bus.ram[0x1d00..0x1d33], &old_record);
+                assert_eq!(
+                    bus.read(0xdd33),
+                    ready & anchored,
+                    "validity requires committed source anchor"
+                );
+                assert_eq!(
+                    bus.read(0xdd3f),
+                    0,
+                    "pending capture is not a committed source"
+                );
+                assert_eq!(bus.read(0xdd34), 0xc1, "old committed split identity");
+                assert_eq!(&bus.cart_ram[..0x800], &live);
+                assert_eq!(&bus.cart_ram[0x800..0x1000], &live);
+                assert_eq!(bus.read(0xc8f4), 1, "the seeded record changed too");
+                let evidence = bus.ram[0x1c00..0x1d40].to_vec();
+                invoke(&mut bus, "rt_mmc3_capture_hud");
+                assert_eq!(&bus.ram[0x1c00..0x1d40], &evidence);
+                invoke(&mut bus, "rt_mmc3_capture_single");
+                assert_eq!(&bus.ram[0x1c00..0x1d40], &evidence);
+                assert!(bus.ram[..0x800].iter().all(|&b| b == 0x65));
+                assert!(bus.ram[0x1300..0x1600].iter().all(|&b| b == 0x76));
+                assert!(bus.ram[0x1d40..0x1d80].iter().all(|&b| b == 0x87));
+                assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x98));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_cell_reuse_matches_forced_resolution_lifetime() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let reuse = defs["_m3c_reuse_cell"].1;
+        let mut outcomes = Vec::new();
+        for forced in [false, true] {
+            let mut bus = SmsBus::new(rom.clone(), 0xff);
+            bus.write(0xfffc, 8);
+            bus.write(0xc831, 2);
+            bus.write(0xcb08, 0xa8);
+            bus.write(0xcb09, 0x18);
+            bus.write(0xc824, 1);
+            for page in 0..2usize {
+                for offset in 0..0x3c0 {
+                    bus.cart_ram[page * 1024 + offset] = ((offset + page * 3) & 7) as u8;
+                }
+                bus.cart_ram[page * 1024 + 0x3c0..page * 1024 + 0x400].fill(0xe4);
+            }
+            for offset in 0..256 {
+                bus.write(0xc900 + offset, 0xe0);
+            }
+            for index in 0..8 {
+                bus.write(0xc850 + index, index as u8);
+            }
+            bus.cart_ram[0x4000..0x6000].fill(0x96);
+            let mut hits = 0;
+            let mut frames = Vec::new();
+            for frame in 0..12 {
+                // Captured producer changes, not direct edits to committed
+                // record metadata: exact -> stable -> ordinary changed cells
+                // -> mapping/geometry changes -> off/re-enable -> split.
+                match frame {
+                    2 => bus.write(0xc861, 0x21),
+                    3 => bus.cart_ram[5] ^= 1,
+                    4 => bus.write(0xc835, 1),
+                    5 => bus.write(0xc824, 0),
+                    6 => bus.write(0xc850, 4),
+                    7 => bus.write(0xcb09, 0),
+                    8 => bus.write(0xcb09, 0x18),
+                    9 => bus.cart_ram[0x3c0] ^= 3,
+                    10 => bus.write(0xc835, 0x21),
+                    _ => {}
+                }
+                for label in [
+                    "rt_mmc3_capture_playfield",
+                    "rt_mmc3_capture_single",
+                    "rt_mmc3_frame_present",
+                ] {
+                    bus.write(0xc831, 2);
+                    if frame == 11 && label == "rt_mmc3_frame_present" {
+                        bus.write(0xc837, 0xc1);
+                        bus.write(0x994e, 5); // independent HUD fine-X
+                    }
+                    let mut cpu = Cpu::new();
+                    cpu.pc = defs[label].1;
+                    cpu.sp = 0xdff0;
+                    bus.write(cpu.sp, 7);
+                    bus.write(cpu.sp + 1, 0);
+                    let mut result_pc = None;
+                    let mut publishing = false;
+                    let mut host_fired = false;
+                    let mut min_sp = cpu.sp;
+                    for _ in 0..4_000_000 {
+                        if cpu.pc == 7 {
+                            break;
+                        }
+                        if result_pc == Some(cpu.pc) {
+                            hits += usize::from(cpu.f & 1 == 0);
+                            result_pc = None;
+                        }
+                        if cpu.pc == reuse {
+                            let ret = u16::from_le_bytes([bus.read(cpu.sp), bus.read(cpu.sp + 1)]);
+                            if forced {
+                                // Test-only SCF/RET affordance. The helper's
+                                // strict-miss ABI leaves all registers scratch
+                                // and performs no NEEDED/publication writes.
+                                cpu.f |= 1;
+                                cpu.pc = ret;
+                                cpu.sp += 2;
+                                continue;
+                            }
+                            result_pc = Some(ret);
+                        }
+                        if cpu.pc == defs["rt_mmc3_commit_display"].1 {
+                            publishing = true;
+                            let ret = u16::from_le_bytes([bus.read(cpu.sp), bus.read(cpu.sp + 1)]);
+                            assert_eq!(
+                                bus.read(ret),
+                                0xc3,
+                                "publisher return precedes anchor completion"
+                            );
+                        }
+                        if frame == 3
+                            && publishing
+                            && !host_fired
+                            && cpu.iff1
+                            && cpu.ei_pending == 0
+                        {
+                            assert_eq!(bus.read(0xdd3f), 0, "not anchored during publisher");
+                            bus.write(0xcb28, 1);
+                            let saved = (cpu.pc, cpu.af(), cpu.bc(), cpu.de(), cpu.hl(), cpu.sp);
+                            cpu.sp -= 2;
+                            bus.write(cpu.sp, cpu.pc as u8);
+                            bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                            cpu.pc = 0x38;
+                            cpu.iff1 = false;
+                            cpu.iff2 = false;
+                            bus.frame_int_pending = true;
+                            for _ in 0..4000 {
+                                if cpu.pc == saved.0 {
+                                    break;
+                                }
+                                cpu.step(&mut bus).unwrap();
+                                min_sp = min_sp.min(cpu.sp);
+                                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                            }
+                            assert_eq!(
+                                (cpu.pc, cpu.af(), cpu.bc(), cpu.de(), cpu.hl(), cpu.sp),
+                                saved
+                            );
+                            assert_eq!(bus.read(0xdd3f), 0);
+                            assert_eq!(bus.read(0xc8f9), 0, "host cannot enter guest");
+                            host_fired = true;
+                        }
+                        cpu.step(&mut bus).unwrap();
+                        min_sp = min_sp.min(cpu.sp);
+                        assert_eq!(bus.read(0xcb1d), 0, "frame{frame} {label}");
+                        assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                    }
+                    assert_eq!((cpu.pc, cpu.sp), (7, 0xdff2), "frame{frame} {label}");
+                    if frame == 3 && label == "rt_mmc3_frame_present" {
+                        assert!(host_fired, "host IRQ while extra publisher return is live");
+                        eprintln!("publisher return + host IRQ minimumSP={min_sp:04X}");
+                    }
+                }
+                if frame == 7 {
+                    assert_eq!(bus.read(0xc833), 0);
+                    assert_eq!(bus.read(0xdd33), 0, "source-off invalidates reuse");
+                    assert_eq!(bus.read(0xdd3f), 0);
+                } else {
+                    assert_mmc3_needed_covers_committed_nt(&bus);
+                    assert_eq!(
+                        bus.read(0xdd3f),
+                        1,
+                        "full/stable/exact completion anchors source"
+                    );
+                }
+                // Slot numbers can differ without changing pixels. Resolve
+                // all28 rendered rows to actual32-byte patterns plus attribute
+                // bits, independently of cache/hash metadata. The remaining
+                // rows are padding cell0, not additional source pixels.
+                let mut patterns = Vec::new();
+                for cell in bus.vram[0x3700..0x3e00].as_chunks::<2>().0 {
+                    let entry = u16::from_le_bytes([cell[0], cell[1]]);
+                    let slot = usize::from(entry & 511);
+                    patterns.extend_from_slice(&bus.vram[slot * 32..slot * 32 + 32]);
+                    patterns.push(cell[1] & !1);
+                }
+                assert!(bus.vram[0x3e00..0x3f00].iter().all(|&b| b == 0));
+                frames.push((patterns, bus.cram, bus.vdp_regs));
+                assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x96));
+            }
+            if !forced {
+                assert!(hits > 0, "the sequence must exercise successful reuse");
+                eprintln!("cell lifetime sequence successful reuse hits={hits}");
+            }
+            outcomes.push(frames);
+        }
+        assert_eq!(
+            outcomes[0], outcomes[1],
+            "captured reuse vs forced resolution"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_cell_reuse_rejects_cancelled_unpublished_capture() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let asm = std::fs::read_to_string(path.join("sms.asm")).unwrap();
+        let chr = asm
+            .lines()
+            .find_map(|line| line.strip_prefix(".define MMC3_CHR_DATA_BASE "))
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            * BANK_SIZE;
+        let mut rom = std::fs::read(path.join("sms.sms")).unwrap();
+        rom[chr..chr + 48].fill(0);
+        rom[chr + 16..chr + 24].fill(0xff); // tile1=color1 on every pixel
+        rom[chr + 40..chr + 48].fill(0xff); // tile2=color2, independently dirty
+        let mut outcomes = Vec::new();
+        for (forced, change_y) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut bus = SmsBus::new(rom.clone(), 0xff);
+            bus.write(0xfffc, 8);
+            bus.write(0xc831, 2);
+            bus.write(0xcb28, 1);
+            bus.write(0xcb08, 0x28); // NMI disabled: no game handler is substituted
+            bus.write(0xcb09, 0x18);
+            bus.write(0xc824, 1);
+            bus.write(0xcb03, 0x24);
+            for index in 0..8 {
+                bus.write(0xc850 + index, index as u8);
+            }
+            for index in 0..256 {
+                bus.write(0xc900 + index, 0xe0);
+            }
+            let invoke = |bus: &mut SmsBus, label: &str, ppu: Option<u8>| {
+                let mut cpu = Cpu::new();
+                cpu.pc = defs[label].1;
+                cpu.sp = 0xdff0;
+                if let Some(mask) = ppu {
+                    cpu.b = 1;
+                    cpu.a = mask;
+                }
+                bus.write(cpu.sp, 7);
+                bus.write(cpu.sp + 1, 0);
+                for _ in 0..3_000_000 {
+                    if cpu.pc == 7 {
+                        break;
+                    }
+                    if forced && cpu.pc == defs["_m3c_reuse_cell"].1 {
+                        cpu.pc = u16::from_le_bytes([bus.read(cpu.sp), bus.read(cpu.sp + 1)]);
+                        cpu.sp += 2;
+                        cpu.f |= 1;
+                        continue;
+                    }
+                    cpu.step(bus).unwrap();
+                    assert_eq!(bus.read(0xcb1d), 0, "{label}");
+                    assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                }
+                assert_eq!((cpu.pc, cpu.sp), (7, 0xdff2), "{label}");
+            };
+            // A is coherently published, with an ordinary PF row at y=5.
+            invoke(&mut bus, "rt_mmc3_capture_playfield", None);
+            invoke(&mut bus, "rt_mmc3_capture_single", None);
+            bus.write(0xc837, 0xc0);
+            invoke(&mut bus, "rt_mmc3_frame_present", None);
+            let committed_a = bus.vram;
+            const X: usize = 5 * 32 + 4;
+            const Y: usize = 5 * 32 + 8;
+            bus.cart_ram[X] = 1;
+            invoke(&mut bus, "rt_mmc3_capture_playfield", None); // pending B
+            assert_eq!(bus.vram, committed_a, "captureB was not publication");
+            bus.write(0xc832, 1); // pending split, not yet asserted IRQ
+            bus.write(0xc822, 1);
+            bus.write(0xc823, 0);
+            bus.write(0xc831, 0); // main owns producer again
+            invoke(&mut bus, "rt_ppu_write", Some(0));
+            invoke(&mut bus, "rt_ppu_write", Some(0x18));
+            assert_eq!(bus.read(0xc8f6), 1, "real MASK off/on cancellation intent");
+            bus.write(0xc825, 1); // actual cooperative-wait scheduler admission
+            bus.frame_int_pending = true;
+            invoke(&mut bus, "rt_mmc3_sms_interrupt", None);
+            assert_eq!((bus.read(0xc832), bus.read(0xc8f6)), (0, 0));
+            assert_eq!(bus.vram, committed_a, "cancelledB was never committed");
+            if change_y {
+                bus.cart_ram[Y] = 2;
+            }
+            bus.write(0xc831, 2);
+            invoke(&mut bus, "rt_mmc3_capture_playfield", None); // source C
+            assert_eq!(
+                bus.ram[0x1c00 + X / 8] & (1 << (X & 7)),
+                0,
+                "X is clean relative to abandonedB, NOT committedA"
+            );
+            invoke(&mut bus, "rt_mmc3_capture_single", None);
+            bus.write(0xc837, 0xc0);
+            invoke(&mut bus, "rt_mmc3_frame_present", None);
+            assert_mmc3_needed_covers_committed_nt(&bus);
+            let slot = usize::from(bus.vram[0x3700 + X * 2]);
+            let pattern: [u8; 32] = bus.vram[slot * 32..slot * 32 + 32].try_into().unwrap();
+            assert_eq!(bus.read(0xdd3f), 1, "corrected publication anchors sourceC");
+            bus.write(0xc831, 1);
+            invoke(&mut bus, "rt_mmc3_capture_playfield", None);
+            invoke(&mut bus, "rt_mmc3_capture_single", None);
+            bus.write(0xc837, 0xc0);
+            assert_eq!(bus.read(0xdd33), 1, "next capture can use committedC");
+            assert_eq!(bus.read(0xc8f4), 0);
+            invoke(&mut bus, "rt_mmc3_frame_present", None);
+            assert_eq!(
+                bus.read(0xc831),
+                1,
+                "exact reuse resumes after corrected publication"
+            );
+            assert_eq!(bus.read(0xdd3f), 1);
+            outcomes.push(pattern);
+        }
+        let expected = std::array::from_fn(|index| if index % 4 == 0 { 0xff } else { 0 });
+        assert_eq!(
+            outcomes[2], expected,
+            "independent currentNES color1 pattern"
+        );
+        assert_eq!(
+            outcomes[3], expected,
+            "forced full with independently changedY"
+        );
+        assert_eq!(
+            outcomes[0], expected,
+            "cancelled pending source must not permit exact-packet reuse"
+        );
+        assert_eq!(
+            outcomes[1], expected,
+            "cancelled pending source must not anchor committed-cell reuse"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_cell_eligibility_matches_physical_dependencies() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let invoke = |bus: &mut SmsBus, label: &str| {
+            let mut cpu = Cpu::new();
+            cpu.pc = defs[label].1;
+            cpu.sp = 0xdff0;
+            cpu.a = 0x93;
+            cpu.set_bc(0x2468);
+            cpu.set_de(0x3579);
+            cpu.set_hl(0x468a);
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            for _ in 0..3000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                cpu.step(bus).unwrap();
+                assert_eq!(bus.read(0xcb1d), 0);
+            }
+            assert_eq!((cpu.pc, cpu.sp), (7, 0xdff2), "{label}");
+            cpu
+        };
+        let seed = |bus: &mut SmsBus| {
+            bus.write(0xfffc, 8);
+            bus.write(0xc831, 2);
+            bus.write(0xc833, 1);
+            bus.ram[0x1c00..0x1d40].fill(0);
+            bus.cart_ram[0x1900..0x1980].fill(0);
+            for base in [0x9900, 0xdd00] {
+                for index in 0..8 {
+                    bus.write(base + index, index as u8);
+                }
+                bus.write(base + 8, 0xa8);
+                bus.write(base + 9, 0x18);
+                bus.write(base + 15, 1);
+            }
+            bus.write(0xdd33, 1);
+            bus.write(0xdd34, 0xc0);
+            bus.write(0xc837, 0xc0);
+            bus.write(0xc842, 5);
+            bus.write(0xc848, 0);
+            bus.write(0xc849, 0);
+            bus.write(0xc8ea, 0);
+        };
+        let mut bus = SmsBus::new(rom, 0xff);
+        // Each meaningful frame dependency changes alone. Nonselected CHR,
+        // fine-X/raw-scroll/palette are deliberately NOT pattern dependencies.
+        for (address, xor, expected) in [
+            (0xdd33, 1, false),
+            (0xc833, 1, false),
+            (0xdd34, 1, false),
+            (0x9909, 0x18, false),
+            (0xdd09, 0x18, false),
+            (0x990c, 0x20, false),
+            (0x990d, 0x10, false),
+            (0x990d, 8, false),
+            (0x990f, 1, false),
+            (0xdd32, 1, false),
+            (0x9932, 1, false),
+            (0x9908, 0x10, false),
+            (0x9900, 1, false),
+            (0x9901, 1, false),
+            (0x9902, 1, false),
+            (0x9903, 1, false),
+            (0x9904, 1, true),
+            (0x9907, 1, true),
+            (0x990a, 7, true),
+            (0x990b, 7, true),
+            (0x990e, 7, true),
+            (0x9911, 7, true),
+            (0x990c, 31, true),
+            (0x990d, 4, true),
+        ] {
+            seed(&mut bus);
+            let old = bus.read(address);
+            bus.write(address, old ^ xor);
+            invoke(&mut bus, "_m3c_frame_eligibility");
+            assert_eq!(bus.read(0xdd35) != 0, expected, "dependency{address:04X}");
+        }
+        for (record, row, fine, offset, split, expected) in [
+            (0, 0, 0, 0, 0xc0, false),
+            (0x40, 5, 0, 0, 0xc0, false),
+            (0, 5, 0, 1, 0xc0, false),
+            (0, 23, 0, 0, 0xc0, true),
+            (0, 24, 0, 0, 0xc1, false),
+            (0, 24, 7, 0, 0xc1, true),
+            (0, 28, 7, 0, 0, true),
+        ] {
+            seed(&mut bus);
+            bus.write(0xdd35, 1);
+            bus.write(0xc849, record);
+            bus.write(0xc842, row);
+            bus.write(0xc848, fine);
+            bus.write(0xc8ea, offset);
+            bus.write(0xc837, split);
+            invoke(&mut bus, "_m3c_row_eligibility");
+            assert_eq!(bus.read(0xdd36) != 0, expected, "row{row}/fine{fine}");
+        }
+        let physical = |v: u16, mirror: u8| -> usize {
+            let page = if mirror == 0 {
+                (v >> 10) & 1
+            } else {
+                (v >> 11) & 1
+            };
+            usize::from(page * 1024 + (v & 1023))
+        };
+        let mut cells = 0;
+        for mirror in [0u8, 1] {
+            for old_x in [0u16, 1, 31] {
+                for new_x in [0u16, 1, 31] {
+                    for old_page in [0u16, 1] {
+                        for new_page in [0u16, 1] {
+                            seed(&mut bus);
+                            bus.write(0xdd0c, old_x as u8);
+                            bus.write(0xdd0d, (old_page << 2) as u8);
+                            bus.write(0x990c, new_x as u8);
+                            bus.write(0x990d, (new_page << 2) as u8);
+                            bus.write(0xdd0f, mirror);
+                            bus.write(0x990f, mirror);
+                            invoke(&mut bus, "_m3c_frame_eligibility");
+                            invoke(&mut bus, "_m3c_row_eligibility");
+                            assert_eq!(bus.read(0xdd36), 1);
+                            for col in 0..32u16 {
+                                let old_v =
+                                    0xa0 | col | ((old_page ^ u16::from(col < old_x)) << 10);
+                                let new_v =
+                                    0xa0 | col | ((new_page ^ u16::from(col < new_x)) << 10);
+                                let tile = physical(new_v, mirror);
+                                let attr_v = (new_v & 0x0c00)
+                                    | 0x3c0
+                                    | ((new_v >> 4) & 0x38)
+                                    | ((new_v >> 2) & 7);
+                                let attr = physical(attr_v, mirror);
+                                let nt = 5 * 64 + col * 2;
+                                bus.write(0xc846, new_v as u8);
+                                bus.write(0xc847, (new_v >> 8) as u8);
+                                bus.write(0xc858, nt as u8);
+                                bus.write(0xc859, 0xa0 + (nt >> 8) as u8);
+                                bus.write(0xcc00 + nt, col as u8 ^ 0xb7);
+                                invoke(&mut bus, "_m3r_row_addresses");
+                                for dirty in [None, Some(tile), Some(attr)] {
+                                    bus.ram[0x1c00..0x1d00].fill(0);
+                                    if let Some(index) = dirty {
+                                        bus.ram[0x1c00 + index / 8] |= 1 << (index & 7);
+                                    }
+                                    let evidence = bus.ram[0x1c00..0x1d40].to_vec();
+                                    let needed = bus.ram[0x17e0..0x1800].to_vec();
+                                    let cpu = invoke(&mut bus, "_m3c_reuse_cell");
+                                    let hit = physical(old_v, mirror) == tile && dirty.is_none();
+                                    assert_eq!(
+                                        cpu.f & 1 == 0,
+                                        hit,
+                                        "old{old_v:04X} new{new_v:04X} mirror{mirror} dirty{dirty:?}"
+                                    );
+                                    if hit {
+                                        assert_eq!(cpu.a, col as u8 ^ 0xb7);
+                                    }
+                                    assert_eq!(&bus.ram[0x1c00..0x1d40], &evidence);
+                                    assert_eq!(&bus.ram[0x17e0..0x1800], &needed);
+                                    assert_eq!(
+                                        u16::from_le_bytes([bus.read(0xc846), bus.read(0xc847)]),
+                                        new_v
+                                    );
+                                    assert_eq!(bus.read(0xc849), 0);
+                                    cells += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The final fine-Y row's committed bytes skip the software stack:
+        // A6xx mapsD2xx; A7xx mapsD6xx, neverD3xx. Exercise both ends directly.
+        for row in [27u16, 28] {
+            for col in [0u16, 31] {
+                seed(&mut bus);
+                bus.ram[0x1300..0x1600].fill(0x76);
+                bus.write(0xc842, row as u8);
+                bus.write(0xc848, 7);
+                bus.write(0xc837, 0);
+                bus.write(0xdd34, 0);
+                bus.write(0xdd0d, 0x70);
+                bus.write(0x990d, 0x70);
+                invoke(&mut bus, "_m3c_frame_eligibility");
+                invoke(&mut bus, "_m3c_row_eligibility");
+                assert_eq!(bus.read(0xdd36), 1);
+                let v = row * 32 + col;
+                let nt = row * 64 + col * 2;
+                let native = if nt < 0x700 {
+                    0xcc00 + nt
+                } else {
+                    0xd600 + nt - 0x700
+                };
+                bus.write(0xc846, v as u8);
+                bus.write(0xc847, (v >> 8) as u8);
+                bus.write(0xc858, nt as u8);
+                bus.write(0xc859, 0xa0 + (nt >> 8) as u8);
+                bus.write(native, 0xb7);
+                invoke(&mut bus, "_m3r_row_addresses");
+                let cpu = invoke(&mut bus, "_m3c_reuse_cell");
+                assert_eq!((cpu.f & 1, cpu.a), (0, 0xb7), "committed{native:04X}");
+                assert!(bus.ram[0x1300..0x1600].iter().all(|&b| b == 0x76));
+            }
+        }
+        eprintln!("cell dependency vectors={cells}, frame dependencies=24, row boundaries=7");
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_cell_capture_bounds_host_and_pause_service() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let entry = defs["_m3c_capture_ciram"].1;
+        let group = defs["_m3c_copy_group"].1;
+        let mut points = std::collections::BTreeSet::new();
+        let mut max_span = 0u64;
+        // Baseline covers every possible dirty mask in one2048-byte capture.
+        // Then Pause interrupts each executed opcode boundary in that kernel.
+        let mut injections = vec![None];
+        let mut run = 0;
+        while run < injections.len() {
+            let pause = injections[run];
+            let mut bus = SmsBus::new(rom.clone(), 0xff);
+            bus.write(0xfffc, 8);
+            bus.write(0xfffe, 6);
+            bus.write(0xffff, 9);
+            bus.write(0xcb14, 6);
+            bus.write(0xcb28, 1);
+            bus.write(0xcb03, 0xa5);
+            bus.write(0xc831, 1);
+            bus.write(0xc833, 1);
+            bus.write(0xd9f6, 2);
+            bus.write(0xc8ed, 1);
+            bus.ram[0x1c00..0x1d80].fill(0x87);
+            bus.ram[0x1300..0x1600].fill(0x76);
+            bus.cart_ram[0x4000..0x6000].fill(0x96);
+            for index in 0..2048usize {
+                let mask = (index / 8) as u8 ^ 0xff;
+                let value = (index as u8).wrapping_mul(29);
+                bus.cart_ram[index] = value;
+                bus.cart_ram[0x800 + index] = value ^ ((mask >> (index & 7)) & 1);
+            }
+            let guest = bus.ram[..0x800].to_vec();
+            let mut cpu = Cpu::new();
+            cpu.pc = entry;
+            cpu.sp = 0xdff0;
+            cpu.set_hl(0x8000);
+            cpu.set_de(0x8800);
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            let mut span = 0;
+            let mut interrupted: Option<[u16; 6]> = None;
+            let mut fired = false;
+            let mut host_calls = 0;
+            let mut last_copied = 0;
+            for _ in 0..200_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                if let Some([pc, af, bc, de, hl, sp]) = interrupted
+                    && cpu.pc == pc
+                    && cpu.sp == sp
+                {
+                    assert_eq!(
+                        (
+                            u16::from_be_bytes([cpu.a, cpu.f]),
+                            cpu.bc(),
+                            cpu.de(),
+                            cpu.hl()
+                        ),
+                        (af, bc, de, hl)
+                    );
+                    interrupted = None;
+                }
+                if interrupted.is_none() {
+                    if run == 0 {
+                        points.insert(cpu.pc);
+                    }
+                    let host = run == 0
+                        && cpu.iff1
+                        && cpu.ei_pending == 0
+                        && cpu.de() - 0x8800 > last_copied;
+                    let nmi = !fired && pause == Some(cpu.pc);
+                    if host || nmi {
+                        if host {
+                            let copied = cpu.de() - 0x8800;
+                            assert_eq!(copied - last_copied, 8);
+                            last_copied = copied;
+                            max_span = max_span.max(span);
+                            span = 0;
+                            host_calls += 1;
+                        } else {
+                            fired = true;
+                        }
+                        interrupted = Some([
+                            cpu.pc,
+                            u16::from_be_bytes([cpu.a, cpu.f]),
+                            cpu.bc(),
+                            cpu.de(),
+                            cpu.hl(),
+                            cpu.sp,
+                        ]);
+                        cpu.sp -= 2;
+                        bus.write(cpu.sp, cpu.pc as u8);
+                        bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                        cpu.iff2 = cpu.iff1;
+                        cpu.iff1 = false;
+                        cpu.pc = if host { 0x38 } else { 0x66 };
+                        if host {
+                            bus.frame_int_pending = true;
+                        }
+                    }
+                }
+                if interrupted.is_none() && run == 0 {
+                    span += mmc3_row_nominal(&cpu, &mut bus);
+                }
+                cpu.step(&mut bus).unwrap();
+                assert_eq!(bus.read(0xcb1d), 0);
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+            }
+            assert_eq!(
+                (cpu.pc, cpu.sp, cpu.hl(), cpu.de()),
+                (7, 0xdff2, 0x8800, 0x9000)
+            );
+            assert!(!cpu.iff1);
+            for byte in 0..256usize {
+                assert_eq!(bus.ram[0x1c00 + byte], byte as u8 ^ 0xff);
+            }
+            assert_eq!(&bus.cart_ram[..0x800], &bus.cart_ram[0x800..0x1000]);
+            assert_eq!(&bus.ram[..0x800], &guest);
+            assert!(bus.ram[0x1300..0x1600].iter().all(|&b| b == 0x76));
+            assert!(bus.ram[0x1d00..0x1d39].iter().all(|&b| b == 0x87));
+            assert!(bus.ram[0x1d3b..0x1d80].iter().all(|&b| b == 0x87));
+            assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x96));
+            assert_eq!(
+                (bus.slot_bank[1], bus.slot_bank[2], bus.read(0xfffc)),
+                (6, 9, 8)
+            );
+            assert_eq!(bus.read(0xcb03), 0xa5);
+            assert_eq!(bus.read(0xc8f9), 0);
+            if run == 0 {
+                assert_eq!((host_calls, last_copied), (256, 2048));
+                assert!(points.contains(&group));
+                injections.extend(points.iter().copied().map(Some));
+            } else {
+                assert!(fired);
+                assert_eq!(bus.read(0xcb2e), 4);
+            }
+            run += 1;
+        }
+        // Bound only the new capture's closed service interval, excluding
+        // handler execution; the actual stock-core observer owns raster proof.
+        assert!(
+            max_span <= 658,
+            "new capture service interval={max_span} nominal T"
+        );
+        eprintln!(
+            "capture256dirty masks/256host services/{}Pause sites; max closed span={max_span} nominal T",
+            injections.len() - 1
+        );
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
     fn mmc3_full_renderer_accepts_256_keys_and_traps_the_257th() {
         let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
         let path = if path.is_absolute() {
@@ -12799,6 +13646,8 @@ mod tests {
             let mut first_pass = true;
             let mut restarts = 0;
             let mut retained = None;
+            let mut reuse_return = None;
+            let mut reuse_hits = 0;
             for _ in 0..4_000_000 {
                 if cpu.pc == 7 {
                     break;
@@ -12824,11 +13673,32 @@ mod tests {
                         bus.cart_ram[0x6000..0x8000].to_vec(),
                     ));
                 }
+                if reuse_return == Some(cpu.pc) {
+                    reuse_hits += usize::from(cpu.f & 1 == 0);
+                    reuse_return = None;
+                }
+                if defs
+                    .get("_m3c_reuse_cell")
+                    .is_some_and(|&(_, pc)| cpu.pc == pc)
+                {
+                    let ret = u16::from_le_bytes([bus.read(cpu.sp), bus.read(cpu.sp + 1)]);
+                    if force_reserve {
+                        cpu.pc = ret;
+                        cpu.sp += 2;
+                        cpu.f |= 1; // independent reserve/full-resolution reference
+                        continue;
+                    }
+                    reuse_return = Some(ret);
+                }
                 cpu.step(bus).unwrap();
                 assert_eq!(bus.read(0xcb1d), 0, "{label}");
                 assert!(cpu.sp >= NATIVE_STACK_FLOOR);
             }
             assert_eq!(cpu.pc, 7);
+            if label == "rt_mmc3_frame_render" && !force_reserve && bus.read(0xdd35) != 0 {
+                assert!(reuse_hits > 0, "restart sequence must actually reuse cells");
+                eprintln!("restarts={restarts}, successful cell reuse hits={reuse_hits}");
+            }
             restarts
         };
         let mut bus = SmsBus::new(rom.clone(), 0xff);
@@ -12884,6 +13754,30 @@ mod tests {
             assert_eq!(bus.cram, reference.cram);
             assert_eq!(bus.vdp_regs, reference.vdp_regs);
             assert_eq!(&bus.cart_ram[0x800..0x1980], producer);
+        }
+        if defs.contains_key("_m3c_reuse_cell") {
+            // Keep the selected CHR map identical: sparse attribute changes
+            // force allocation/restart while clean later PF rows still reuse
+            // committed slots. The reference resolves every cell in reserve.
+            for attribute in [0x55, 0xaa] {
+                bus.write(0x83c0, attribute);
+                invoke(&mut bus, "rt_mmc3_capture_playfield", false);
+                invoke(&mut bus, "rt_mmc3_capture_single", false);
+                let mut reference = SmsBus::new(rom.clone(), 0xff);
+                reference.ram = bus.ram;
+                reference.cart_ram = bus.cart_ram;
+                reference.vram = bus.vram;
+                reference.vdp_regs = bus.vdp_regs;
+                reference.cram = bus.cram;
+                reference.write(0xfffc, 8);
+                invoke(&mut reference, "rt_mmc3_frame_render", true);
+                assert_eq!(invoke(&mut bus, "rt_mmc3_frame_render", false), 1);
+                assert_eq!(bus.read(0xdd35), 1, "selected source map remains reusable");
+                assert_mmc3_needed_covers_committed_nt(&bus);
+                assert_eq!(bus.vram, reference.vram, "attribute={attribute:02X}");
+                assert_eq!(bus.cram, reference.cram);
+                assert_eq!(bus.vdp_regs, reference.vdp_regs);
+            }
         }
     }
 
@@ -13224,7 +14118,8 @@ mod tests {
             0x01 | 0x11 | 0x21 => 10,
             0x06 | 0x0e | 0x16 | 0x1e | 0x26 | 0x2e | 0x3e | 0xe6 | 0xee | 0xf6 | 0xfe | 0xc6
             | 0xd6 => 7,
-            0x23 => 6,
+            0x13 | 0x23 => 6,
+            0x12 | 0x1a => 7,
             0x04 | 0x0c | 0x14 | 0x1c | 0x24 | 0x2c | 0x3c => 4,
             0x09 | 0x19 | 0x29 => 11,
             0x22 | 0x2a => 16,
@@ -13250,6 +14145,13 @@ mod tests {
             0xc5 | 0xd5 | 0xe5 | 0xf5 => 11,
             0xc1 | 0xd1 | 0xe1 | 0xf1 | 0xc9 => 10,
             0xcd => 17,
+            0xc4 => {
+                if cpu.f & 0x40 == 0 {
+                    17
+                } else {
+                    10
+                }
+            }
             0xc0 | 0xc8 | 0xd0 | 0xd8 => {
                 let taken = match op {
                     0xc0 => cpu.f & 0x40 == 0,
@@ -13261,8 +14163,17 @@ mod tests {
             }
             0xcb => {
                 let sub = bus.read(cpu.pc.wrapping_add(1));
-                assert!((0x40..0x80).contains(&sub), "unaccounted CB{sub:02X}");
-                if sub & 7 == 6 { 12 } else { 8 }
+                assert!(sub >= 0x40, "unaccounted CB{sub:02X}");
+                if sub & 7 == 6 {
+                    if sub < 0x80 { 12 } else { 15 }
+                } else {
+                    8
+                }
+            }
+            0xed => {
+                let sub = bus.read(cpu.pc.wrapping_add(1));
+                assert_eq!(sub, 0xb0, "unaccounted ED{sub:02X}");
+                if cpu.bc() == 1 { 16 } else { 21 }
             }
             _ => panic!("unaccounted row opcode{op:02X} at{:04X}", cpu.pc),
         }

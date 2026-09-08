@@ -190,6 +190,20 @@ CV1's frame backend; enabling its hooks is not a valid way to add MMC3 graphics.
 Cartridge work RAM and CHR/IRQ presentation remain subsequent contracts in
 [smb3-plan.md](smb3-plan.md).
 
+With `MMC3_FULL_RUNTIME`, the separate ownership map in
+[mmc3-presentation.md](mmc3-presentation.md) replaces the legacy graphics ranges.
+In particular, `$DC00-$DD3F` holds exact playfield cell-reuse evidence: a
+256-byte frozen-source change bitmap, the previous 51-byte record, and validity,
+committed-split and lookup scratch. `$DD3F` explicitly records whether the
+previous frozen source is committed. Capture consumes and clears that anchor;
+successful publication restores it only after the native NT shadow copy.
+Cancellation may discard a pending packet without blanking the valid display,
+so `READY` alone cannot validate source reuse. `BUSY` excludes capture during
+publication; initialization must not clear freshly captured evidence. No stack
+region or cartridge capacity is added; the post-publication anchor callback
+uses two additional native stack bytes during the publisher call. This backend
+is absent from NROM/UxROM.
+
 Full raw NES CIRAM source-of-truth needs 2 KiB (`$CC00-$D3FF` if stored in
 internal RAM), including 1920 tile bytes plus the 128 compact attribute bytes
 already mirrored at `$CB80-$CBFF`. That storage does not fit in current
