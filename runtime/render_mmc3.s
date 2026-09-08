@@ -25,6 +25,8 @@
 .define M3R_ATTR   $c84f
 .define M3R_NT     $c858 ; word: prepared SMS NT cursor
 .define M3R_HASH   $c85a
+.define M3R_ROW_NT_HIGH $c85b
+.define M3R_ROW_ATTR_HIGH $c85c
 .define M3R_OAM    $c85d
 .define M3R_PIXEL  $c85e
 .define M3R_SPRITE_TILE $c85f
@@ -40,6 +42,8 @@
 .define M3R_SECOND   $c8e9
 .define M3R_OFFSET1  $c8ea ; source row = (output row + offset) & 7
 .define M3R_OFFSET2  $c8eb
+.define M3R_ROW_ATTR_LOW $c8ee
+.define M3R_ROW_QUADRANT $c8ef
 .define M3R_SPLIT    $c8f0
 .define M3R_REG1     $c8f1
 .define M3R_REG0     $c8f2
@@ -194,6 +198,10 @@ _m3r_row_vertical_ready:
   or h
   ld h, a
   ld (M3R_V), hl
+  call _m3r_row_addresses
+  ei
+  nop
+  di
   xor a
   ld (M3R_COL), a
 _m3r_cell:
@@ -201,9 +209,25 @@ _m3r_cell:
   ld (M3R_CUT), a
   ld (M3R_SECOND), a
 _m3r_cell_source:
+  ld a, (M3R_SECOND)
+  or a
+  jr nz, _m3r_secondary_tile
+_m3r_primary_tile:
+  ld hl, (M3R_V)
+  ld a, (M3R_ROW_NT_HIGH)
+  ld h, a
+  ld c, (hl)
+  jr _m3r_tile_ready
+_m3r_secondary_tile:
+  ; A secondary source may have different record/mirroring/vertical origin.
+  ; Keep the ordinary calculation, without modifying the primary row cache.
+  ei
+  nop
+  di
   ld hl, (M3R_V)
   call _m3r_nt_read
   ld c, a
+_m3r_tile_ready:
   ld a, (M3R_RECORD)
   add a, 8
   ld l, a
@@ -224,6 +248,30 @@ _m3r_cell_source:
   or b
   call _m3r_physical_key     ; C=logicaltile, A=map index
   ld (M3R_KEY), hl
+  ld a, (M3R_SECOND)
+  or a
+  jr nz, _m3r_secondary_attribute
+_m3r_primary_attribute:
+  ld a, (M3R_V)
+  ld b, a
+  and 2
+  ld c, a
+  ld a, (M3R_ROW_QUADRANT)
+  or c
+  ld c, a
+  ld a, b
+  rrca
+  rrca
+  and 7
+  ld b, a
+  ld a, (M3R_ROW_ATTR_LOW)
+  or b
+  ld l, a
+  ld a, (M3R_ROW_ATTR_HIGH)
+  ld h, a
+  ld a, (hl)
+  jr _m3r_attribute_ready
+_m3r_secondary_attribute:
   ld hl, (M3R_V)
   ld a, l
   and $42
@@ -258,6 +306,7 @@ _m3r_cell_source:
   push bc
   call _m3r_nt_read
   pop bc
+_m3r_attribute_ready:
   bit 6, c
   jr z, _m3r_attr_bottom_done
   rrca
@@ -438,11 +487,17 @@ _m3r_nt_ring_ready:
   ld a, h
   xor 4
   ld h, a
-  jr _m3r_x_done
+  ld (M3R_V), hl
+  call _m3r_row_addresses
+  ei
+  nop
+  di
+  jr _m3r_x_advanced
 _m3r_next_x:
   inc l
 _m3r_x_done:
   ld (M3R_V), hl
+_m3r_x_advanced:
   ld a, (M3R_COL)
   inc a
   ld (M3R_COL), a
@@ -553,6 +608,50 @@ _m3r_reg1:
 _m3r_reg0:
   ld (M3P_REG0), a
   jp rt_mmc3_commit_display
+
+; Four primary-row address bytes occupy previously unused renderer-owned
+; C85B/C85C/C8EE/C8EF. Set at every row and horizontal nametable wrap,
+; including each reserve restart; never valid across rows/frames by inference.
+; Source is frozen RECORD/V, not live PPU or mapper state. Secondary reads
+; bypass this cache and restore RECORD/V without changing these four bytes.
+; AF/BC/DE/HL scratch; no open stack frame or retained general registers.
+; Host-only IRQ/Pause preserves these bytes and exact SRAM mapping while BUSY2.
+_m3r_row_addresses:
+  ld hl, (M3R_V)
+  call _m3r_nt_read
+  ld a, h
+  ld (M3R_ROW_NT_HIGH), a
+  ld hl, (M3R_V)
+  ld a, l
+  and $40
+  ld (M3R_ROW_QUADRANT), a
+  ld a, h
+  and $0c
+  or $23
+  ld b, a
+  ld a, h
+  and 3
+  rlca
+  rlca
+  rlca
+  rlca
+  ld d, a
+  ld a, l
+  rrca
+  rrca
+  rrca
+  rrca
+  and 8
+  or d
+  or $c0
+  ld l, a
+  ld h, b
+  call _m3r_nt_read
+  ld a, h
+  ld (M3R_ROW_ATTR_HIGH), a
+  ld a, l
+  ld (M3R_ROW_ATTR_LOW), a
+  ret
 
 ; Read a frozen CIRAM source selected by M3R_RECORD. HL=NES nametable addr.
 _m3r_nt_read:

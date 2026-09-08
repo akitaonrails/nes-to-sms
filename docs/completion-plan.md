@@ -14,6 +14,15 @@ what we decided to do next and why.
 
 ## SMB3 / MMC3 exploration (2026-09-07)
 
+The next optimization work is guided by the
+[post-blinking performance measurements and ordered experiments](smb3-performance-strategy.md).
+Do not assume the existing SMB1 compiler optimizations are enabled in full MMC3
+mode. The [collection-verified mapper roadmap](mapper-roadmap.md) is the queue
+**after** SMB3 performance/playability work, not permission to switch targets now.
+The first [frozen-row address optimization](mmc3-row-address-kernel.md) passes
+independent review with a measured 3.66% full-traversal gain and no regression
+in the accepted graphics/gameplay checks. Exact playfield cell reuse is next.
+
 The user selected Super Mario Bros. 3 as the next compatibility effort.
 [SMB3 plan](smb3-plan.md) records the pinned target, architectural blockers,
 ordered implementation and acceptance gates. The compatibility baseline is
