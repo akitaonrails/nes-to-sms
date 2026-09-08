@@ -247,6 +247,17 @@ cartridge mapper capacity varies, so the older general 4 MiB statement is not
 a universal hardware compatibility claim. NROM/UxROM output layouts stay
 unchanged.
 
+Full MMC3 uses the wide continuation ABI and permits translated code in banks
+4–95. Its experimental ROM dispatch index reserves four contiguous slot-1 data
+banks after the actual packed PRG, boot assets and physical CHR. For the current
+SMB3 layout those are banks 122–125 within the existing 128-bank image. The
+pipeline emits ordinary relocatable record pointers; emitter section metadata
+carries relative project-data bank placement through sizing and final output.
+The project writer validates full-mode ownership and total capacity before
+writing project files. CLI setup may already have created an empty directory.
+Insufficient room fails closed; this allocation does not imply arbitrary mapper
+capacity. The index is immutable and allocates no additional RAM or VRAM.
+
 ## Phases
 
 Each phase has explicit exit criteria. A phase is **not** complete until the

@@ -219,9 +219,10 @@ measured optimization result.
 - [x] Add exact source-dependency invalidation and resolved-cell reuse on the ring.
   [Accepted result](mmc3-cell-reuse.md): another 5.04% full-traversal gain,
   8.88% cumulatively, with explicit committed-source anchoring after cancellation.
-- [ ] Replace dispatch binary search with a precomputed 64 KiB ROM pointer index,
-  preserving the existing bank-constraint scan and failure behavior. Price the
-  complete lookup and bank switching before accepting the measured result.
+- [x] Replace dispatch binary search with a precomputed 64 KiB ROM pointer index,
+  preserving the existing bank-constraint scan and failure behavior.
+  [Accepted result](mmc3-dispatch-index.md): another 6.98% full-traversal gain,
+  16.48% cumulatively, with the complete lookup and bank switching measured.
 - [ ] Admit proven internal-RAM lowering, then one safe full-mode fusion/loop case.
 - [ ] Profile remaining dynamic edges before selecting direct continuation/cache/inlining.
 - [ ] Consider selective CHR pre-expansion only if conversion becomes significant.

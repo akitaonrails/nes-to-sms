@@ -111,6 +111,32 @@ fn mmc3_dispatch_page_counts(records: &[(u8, u16, String)]) -> Result<[u8; 128],
     Ok(counts.map(|count| u8::try_from(count).unwrap_or(0)))
 }
 
+/// Exact outputs of the current page-local lower_bound helper, expressed as
+/// record indices so WLA-DX can relocate each pointer after placing the table.
+/// Count zero deliberately returns the page base, including oversized pages.
+fn mmc3_dispatch_pointer_indices(records: &[(u8, u16, String)], counts: &[u8; 128]) -> Vec<usize> {
+    let mut indices = Vec::with_capacity(0x8000);
+    let mut start = 0;
+    for (page, &count) in counts.iter().enumerate() {
+        let high = page as u16 + 0x80;
+        let mut end = start;
+        while end < records.len() && records[end].1 >> 8 == high {
+            end += 1;
+        }
+        let mut lower = start;
+        for low in 0..=255 {
+            if count != 0 {
+                while lower < end && (records[lower].1 & 0xff) < low {
+                    lower += 1;
+                }
+            }
+            indices.push(lower);
+        }
+        start = end;
+    }
+    indices
+}
+
 /// A mapped unit cannot keep executing its old translation after changing
 /// that window. Until remapping continuations are modeled, reject all mapped
 /// writers, including an indirect store that could address mapper registers
@@ -2035,9 +2061,15 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 && (dispatch_records[next_record].1 >> 8) == page
             {
                 let (bank, addr, label) = &dispatch_records[next_record];
+                if page_counts.is_some() {
+                    program.label(format!("rt_dispatch_record_{next_record}"));
+                }
                 program.dispatch_entry(*addr, *bank, label);
                 next_record += 1;
             }
+        }
+        if page_counts.is_some() {
+            program.label(format!("rt_dispatch_record_{next_record}"));
         }
         program.data(None, &[0x00, 0x00]); // terminator: addr $0000
         if page_counts.is_some() {
@@ -2055,6 +2087,16 @@ pub fn run(args: &Args) -> Result<String, Error> {
             program.data(Some("rt_dispatch_page_counts"), &counts);
             program.label("rt_dispatch_directory_end");
             assert_eq!(program.current_section_len(), 256 + 128);
+            let indices = mmc3_dispatch_pointer_indices(&dispatch_records, &counts);
+            for (bank_offset, chunk) in indices.as_chunks::<0x2000>().0.iter().enumerate() {
+                program.section(&format!("rt_dispatch_index_{bank_offset}_sec"));
+                program.set_section_project_data_placement(bank_offset as u8, 1);
+                program.label(format!("rt_dispatch_index_{bank_offset}"));
+                for index in chunk {
+                    program.word_label(&format!("rt_dispatch_record_{index}"));
+                }
+                assert_eq!(program.current_section_len(), 0x4000);
+            }
         }
 
         Ok((program, lower_failures, unresolved, assigned_sections))
@@ -3485,5 +3527,59 @@ mod tests {
             1
         );
         assert_eq!(&build.bytes[..5], [0x3E, 0xEE, 0x32, 0x1B, 0xCB]);
+    }
+
+    #[test]
+    fn dense_dispatch_indices_preserve_original_page_fallbacks() {
+        let mut records = Vec::new();
+        for (page, count) in [
+            (0x80u16, 1usize),
+            (0x9f, 255),
+            (0xa0, 256),
+            (0xc0, 257),
+            (0xfe, 3),
+            (0xff, 1),
+        ] {
+            for i in 0..count {
+                // Repeated lows preserve wildcard/concrete first-match order.
+                records.push((
+                    i as u8,
+                    (page << 8) | (i * 251 / count) as u16,
+                    String::new(),
+                ));
+            }
+        }
+        let original = records.clone();
+        let counts = mmc3_dispatch_page_counts(&records).unwrap();
+        let indices = mmc3_dispatch_pointer_indices(&records, &counts);
+        assert_eq!(indices.len(), 32768);
+        for target in 0x8000u16..=0xffff {
+            let page = target >> 8;
+            let start = records
+                .iter()
+                .position(|r| r.1 >> 8 >= page)
+                .unwrap_or(records.len());
+            let expected = if counts[usize::from(page - 0x80)] == 0 {
+                start
+            } else {
+                records
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .find(|(_, r)| r.1 >= target)
+                    .map_or(records.len(), |(i, _)| i)
+            };
+            assert_eq!(
+                indices[usize::from(target - 0x8000)],
+                expected,
+                "PC{target:04X}"
+            );
+        }
+        assert_eq!(records, original);
+        assert_eq!(*indices.last().unwrap(), records.len(), "final terminator");
+        assert_eq!(
+            mmc3_dispatch_pointer_indices(&[], &[0; 128]),
+            vec![0; 32768]
+        );
     }
 }

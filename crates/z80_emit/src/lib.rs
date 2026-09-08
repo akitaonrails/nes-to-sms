@@ -42,6 +42,7 @@ struct Section {
 struct SectionPlacement {
     bank: u8,
     slot: u8,
+    project_data: bool,
 }
 
 impl Section {
@@ -143,7 +144,22 @@ impl Program {
     /// $4000+ for slot 1). Otherwise the section is `superfree` and the
     /// linker picks any bank — but symbols inside use in-bank offsets.
     pub fn set_section_placement(&mut self, bank: u8, slot: u8) {
-        self.sections[self.current].placement = Some(SectionPlacement { bank, slot });
+        self.sections[self.current].placement = Some(SectionPlacement {
+            bank,
+            slot,
+            project_data: false,
+        });
+    }
+
+    /// Place linker-owned data in a bank reserved after the project's assets.
+    /// The project writer supplies PROJECT_ROM_DATA_BANK_BASE and validates
+    /// the complete contiguous reservation before emitting any files.
+    pub fn set_section_project_data_placement(&mut self, bank_offset: u8, slot: u8) {
+        self.sections[self.current].placement = Some(SectionPlacement {
+            bank: bank_offset,
+            slot,
+            project_data: true,
+        });
     }
 
     /// Set the base address for the current section.
@@ -1650,6 +1666,7 @@ impl Program {
 
         // Build assembly listing.
         let mut asm = String::new();
+        let mut project_data_bank_count = 0u16;
         for sec in &self.sections {
             if sec.name == "__default__" && sec.bytes.is_empty() && sec.asm.is_empty() {
                 continue;
@@ -1666,7 +1683,15 @@ impl Program {
                 // WLA-DX place the section anywhere in the bank that
                 // fits (without forcing a specific origin). Symbols
                 // inside resolve to slot-relative logical addresses.
-                asm.push_str(&format!(".bank {} slot {}\n", p.bank, p.slot));
+                if p.project_data {
+                    project_data_bank_count = project_data_bank_count.max(u16::from(p.bank) + 1);
+                    asm.push_str(&format!(
+                        ".bank (PROJECT_ROM_DATA_BANK_BASE + {}) slot {}\n",
+                        p.bank, p.slot
+                    ));
+                } else {
+                    asm.push_str(&format!(".bank {} slot {}\n", p.bank, p.slot));
+                }
                 asm.push_str(&format!(".section \"{}\" free\n", sec.name));
             } else {
                 asm.push_str(&format!(".section \"{}\" superfree\n", sec.name));
@@ -1697,6 +1722,7 @@ impl Program {
             bytes: all_bytes,
             sections: sections_out,
             asm,
+            project_data_bank_count,
         })
     }
 }
@@ -1707,6 +1733,8 @@ pub struct Build {
     pub bytes: Vec<u8>,
     pub sections: Vec<SectionOut>,
     pub asm: String,
+    /// Contiguous linker-owned data banks to reserve after project assets.
+    pub project_data_bank_count: u16,
 }
 
 pub struct SectionOut {
@@ -2379,5 +2407,35 @@ mod tests {
         assert_eq!(b.bytes.len(), 5);
         assert_eq!(&b.bytes[1..4], &[0x00, 0x00, 0x00]);
         assert_eq!(b.bytes[4], 0x00);
+    }
+
+    #[test]
+    fn project_data_sections_reserve_banks_without_resolving_linker_addresses() {
+        let mut p = Program::new();
+        p.section("record");
+        p.set_section_placement(2, 1);
+        p.label("record_target");
+        p.data(None, &[0; 6]);
+        for bank in 0..4 {
+            p.section(&format!("index_{bank}"));
+            p.set_section_project_data_placement(bank, 1);
+            for _ in 0..8192 {
+                p.word_label("record_target");
+            }
+        }
+        let build = p.finish().unwrap();
+        assert_eq!(build.project_data_bank_count, 4);
+        assert_eq!(build.asm.matches(".dw record_target").count(), 32768);
+        for bank in 0..4 {
+            assert!(build.asm.contains(&format!(
+                ".bank (PROJECT_ROM_DATA_BANK_BASE + {bank}) slot 1"
+            )));
+        }
+        let mut legacy = Program::new();
+        legacy.section("legacy");
+        legacy.ret();
+        let legacy = legacy.finish().unwrap();
+        assert_eq!(legacy.project_data_bank_count, 0);
+        assert!(!legacy.asm.contains("PROJECT_ROM_DATA_BANK_BASE"));
     }
 }

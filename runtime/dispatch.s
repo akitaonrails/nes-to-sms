@@ -1172,66 +1172,33 @@ _btd_trap_flash:
   jp   rt_unresolved_jsr_flash
 
 .ifdef MMC3_FULL_RUNTIME
-; HL=page base. Find its first record whose low byte is >= the target.
-; A zero count retains the old scan for empty or >255-record pages. DE is
-; resident X/Y: preserve it beneath the page base. DI throughout; no RAM.
+; CB1B/C=absolute NES PC admitted >=8000; HL=page base (unused here).
+; Four immutable ROM banks contain exactly the old lower_bound result for
+; every PC, including page-base fallback for zero/>255 record counts.
+; Return HL into the original dispatch table BEFORE its ordered bank scan.
+; DI throughout, DE/resident X/Y and slot2/SRAM/shadow P untouched; AF/BC
+; scratch. No temporary native frame beyond the caller's return word.
 _btd_lower_bound:
-  push hl
   ld   a, ($cb1c)
-  sub  $80
-  ld   l, a
-  ld   h, 0
-  ld   bc, rt_dispatch_page_counts
-  add  hl, bc
-  ld   a, (hl)
-  pop  hl
-  or   a
-  ret  z
-  push de
-  push hl
-  ld   c, a                  ; exclusive upper record index
-  ld   b, 0                  ; lower record index
-_btd_binary_loop:
-  ld   a, b
-  cp   c
-  jr   z, _btd_binary_done
-  add  a, c
-  rra                        ; carry preserves the ninth bit of lower+upper
-  ld   l, a
-  ld   h, 0
+  and  $60
+  rlca
+  rlca
+  rlca
+  add  a, :rt_dispatch_index_0
+  ld   ($fffe), a
+  ld   hl, ($cb1b)
   add  hl, hl
-  ld   e, l
-  ld   d, h
-  add  hl, hl
-  add  hl, de                ; six-byte record offset; A still holds midpoint
-  ex   (sp), hl
-  pop  de
-  push hl                    ; restore page base before comparing
-  add  hl, de
-  ld   e, a
-  ld   a, ($cb1b)
-  ld   d, a
-  ld   a, (hl)
-  cp   d
-  jr   nc, _btd_binary_upper
-  ld   b, e
-  inc  b
-  jr   _btd_binary_loop
-_btd_binary_upper:
-  ld   c, e
-  jr   _btd_binary_loop
-_btd_binary_done:
-  ld   a, b
-  ld   l, a
-  ld   h, 0
-  add  hl, hl
-  ld   e, l
-  ld   d, h
-  add  hl, hl
-  add  hl, de
-  pop  de
-  add  hl, de
-  pop  de
+  ld   a, h
+  and  $3f
+  or   $40
+  ld   h, a
+  ld   c, (hl)
+  inc  hl
+  ld   b, (hl)
+  ld   a, :rt_dispatch_table
+  ld   ($fffe), a
+  ld   h, b
+  ld   l, c
   ret
 _btd_lower_bound_end:
 .endif

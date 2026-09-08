@@ -23,9 +23,10 @@ The first [frozen-row address optimization](mmc3-row-address-kernel.md) passes
 independent review with a measured 3.66% full-traversal gain and no regression
 in the accepted graphics/gameplay checks. [Exact playfield cell reuse](mmc3-cell-reuse.md)
 also passes independent review after fixing cancellation invalidation: another
-5.04% full-traversal gain, 8.88% cumulatively. Next is a 64 KiB ROM index replacing
-dispatch binary search while retaining bank matching and traps, followed by
-proven internal-RAM lowering. Speed takes priority over cartridge size; use
+5.04% full-traversal gain, 8.88% cumulatively. The accepted
+[64 KiB ROM dispatch index](mmc3-dispatch-index.md) retains bank matching and
+traps and adds another 6.98% full-traversal gain, 16.48% cumulatively.
+Next is proven internal-RAM lowering. Speed takes priority over cartridge size; use
 precomputation and code duplication when complete access costs justify them.
 
 The user selected Super Mario Bros. 3 as the next compatibility effort.

@@ -436,6 +436,83 @@ fn mmc3_full_dispatch_directory_cannot_spill_out_of_fixed_bank() {
 }
 
 #[test]
+#[ignore = "requires Docker WLA-DX; checks full-bank relocated index placement"]
+fn mmc3_dense_index_cannot_spill_into_an_unreserved_bank() {
+    let (rom, profile) = full_bus_fixture();
+    let (work, result) = generated_fixture("dispatch-index-placement", &rom, &profile);
+    assert!(result.status.success());
+    let project = work.join("sms");
+    let generated = std::fs::read_to_string(project.join("generated/translated.asm")).unwrap();
+    let header = ".bank (PROJECT_ROM_DATA_BANK_BASE + 0) slot 1\n.section \"rt_dispatch_index_0_sec\" free\n";
+    let index = generated
+        .split_once(header)
+        .unwrap()
+        .1
+        .split_once(".ends")
+        .unwrap()
+        .0;
+    let labels: std::collections::BTreeSet<_> = index
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(".dw "))
+        .collect();
+    assert!(!labels.is_empty());
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let uid = std::process::Command::new("id").arg("-u").output().unwrap();
+    let gid = std::process::Command::new("id").arg("-g").output().unwrap();
+    let user = format!(
+        "{}:{}",
+        String::from_utf8_lossy(&uid.stdout).trim(),
+        String::from_utf8_lossy(&gid.stdout).trim()
+    );
+    for occupied in [0, 1] {
+        // Exact generated 16KiB section: a spare bank must not rescue even
+        // one byte of accidental overlap in its explicitly reserved bank.
+        let mut asm = String::from(
+            ".memorymap\n defaultslot 0\n slotsize $4000\n slot 0 $0000\n slot 1 $4000\n.endme\n.rombankmap\n bankstotal 3\n banksize $4000\n banks 3\n.endro\n.define PROJECT_ROM_DATA_BANK_BASE 1\n",
+        );
+        if occupied != 0 {
+            asm.push_str(".bank 1 slot 1\n.org 0\n.section \"occupied\" force\n.db $ff\n.ends\n");
+        }
+        for label in &labels {
+            asm.push_str(&format!(".define {label} $4567\n"));
+        }
+        asm.push_str(header);
+        asm.push_str(index);
+        asm.push_str(".ends\n");
+        std::fs::write(project.join("sms.asm"), asm).unwrap();
+        let output = std::process::Command::new("docker")
+            .args(["run", "--rm", "--network", "none", "--user", &user, "-v"])
+            .arg(format!("{}:/work", root.display()))
+            .args(["nes-to-sms-poc", "make", "-B", "-C"])
+            .arg(PathBuf::from("/work").join(project.strip_prefix(&root).unwrap()))
+            .output()
+            .unwrap();
+        std::fs::write(
+            work.join(format!("placement-{occupied}.log")),
+            [&output.stdout[..], &output.stderr[..]].concat(),
+        )
+        .unwrap();
+        assert_eq!(
+            output.status.success(),
+            occupied == 0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if occupied == 0 {
+            let linked = std::fs::read(project.join("sms.sms")).unwrap();
+            for word in linked[0x4000..0x8000].as_chunks::<2>().0 {
+                assert_eq!(word, &[0x67, 0x45]);
+            }
+        } else {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("rt_dispatch_index_0_sec"));
+        }
+    }
+}
+
+#[test]
 fn mmc3_cooperative_wait_requires_exact_physical_setup_and_poll() {
     let (mut rom, profile) = full_bus_fixture();
     let wait = [

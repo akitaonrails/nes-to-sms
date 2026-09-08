@@ -8688,6 +8688,233 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled dense MMC3 dispatch project"]
+    fn mmc3_dense_dispatch_pointers_match_original_lower_bound() {
+        // Generic 69-byte binary-search helper from runtime/dispatch.s at
+        // 388a7ef, independently assembled in b8443236. Only LD BC,counts
+        // needs relocation; all branches are relative. No game bytes.
+        // PUSH HL; load counts[target.high-80]; POP HL; OR A; RET Z;
+        // PUSH DE/HL; binary lower_bound using six-byte records; POP DE; RET.
+        const OLD: [u8; 69] = [
+            0xe5, 0x3a, 0x1c, 0xcb, 0xd6, 0x80, 0x6f, 0x26, 0, 0x01, 0x51, 0x2b, 0x09, 0x7e, 0xe1,
+            0xb7, 0xc8, 0xd5, 0xe5, 0x4f, 0x06, 0, 0x78, 0xb9, 0x28, 0x1e, 0x81, 0x1f, 0x6f, 0x26,
+            0, 0x29, 0x5d, 0x54, 0x29, 0x19, 0xe3, 0xd1, 0xe5, 0x19, 0x5f, 0x3a, 0x1b, 0xcb, 0x57,
+            0x7e, 0xba, 0x30, 0x04, 0x43, 0x04, 0x18, 0xe1, 0x4b, 0x18, 0xde, 0x78, 0x6f, 0x26, 0,
+            0x29, 0x5d, 0x54, 0x29, 0x19, 0xd1, 0x19, 0xd1, 0xc9,
+        ];
+        let project = |variable| {
+            let path = PathBuf::from(std::env::var(variable).unwrap());
+            if path.is_absolute() {
+                path
+            } else {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join(path)
+            }
+        };
+        if std::env::var_os("TRACE_BASELINE_PROJECT").is_some() {
+            let path = project("TRACE_BASELINE_PROJECT");
+            let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+            let rom = std::fs::read(path.join("sms.sms")).unwrap();
+            let (bank, pc) = defs["_btd_lower_bound"];
+            assert_eq!(bank, 0);
+            let mut expected = OLD;
+            expected[10..12].copy_from_slice(&defs["rt_dispatch_page_counts"].1.to_le_bytes());
+            assert_eq!(&rom[usize::from(pc)..usize::from(pc) + 69], expected);
+        }
+        let path = project("TRACE_FUNCTIONAL_PROJECT");
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let physical = |name: &str| {
+            let (bank, pc) = defs[name];
+            usize::from(bank) * BANK_SIZE + usize::from(pc & 0x3fff)
+        };
+        let table = physical("rt_dispatch_table");
+        let end = physical("rt_dispatch_table_end");
+        let records: Vec<u16> = rom[table..end - 2]
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .map(|r| u16::from_le_bytes([r[0], r[1]]))
+            .collect();
+        let directory = physical("rt_dispatch_page_table");
+        let counts = physical("rt_dispatch_page_counts");
+        let mut bases = [0usize; 4];
+        for (window, base) in bases.iter_mut().enumerate() {
+            let name = format!("rt_dispatch_index_{window}");
+            let (bank, pc) = defs[&name];
+            assert_eq!(pc, 0x4000);
+            assert_eq!(bank, defs["rt_dispatch_index_0"].0 + window as u8);
+            *base = physical(&name);
+            assert!(*base + BANK_SIZE <= rom.len());
+        }
+        assert_eq!(defs["_btd_lower_bound"].0, 0);
+        assert_eq!(defs["_btd_lower_bound_end"].0, 0);
+        assert!(defs["_btd_lower_bound_end"].1 - defs["_btd_lower_bound"].1 + 3 <= 96);
+        let mut old = SmsBus::new(rom.clone(), 0xff);
+        let mut new = SmsBus::new(rom.clone(), 0xff);
+        let mut code = OLD;
+        code[10..12].copy_from_slice(&defs["rt_dispatch_page_counts"].1.to_le_bytes());
+        for (i, byte) in code.iter().enumerate() {
+            old.write(0xcc00 + i as u16, *byte);
+        }
+        let initialize = |bus: &mut SmsBus, target: u16, entry: u16, page_base: u16| {
+            for (addr, value) in [
+                (0xfffe, defs["rt_dispatch_table"].0),
+                (0xffff, 104),
+                (0xfffc, 12),
+                (0xcb14, 95),
+                (0xcb03, 0xa5),
+                (0xcb02, 0xf7),
+                (0xcb1b, target as u8),
+                (0xcb1c, (target >> 8) as u8),
+                (0xdff0, 7),
+                (0xdff1, 0),
+            ] {
+                bus.write(addr, value);
+            }
+            let mut cpu = Cpu::new();
+            cpu.pc = entry;
+            cpu.sp = 0xdff0;
+            cpu.a = 0x69;
+            cpu.f = target as u8;
+            cpu.set_bc(0x9527);
+            cpu.set_de(target ^ 0x52a9);
+            cpu.set_hl(page_base);
+            cpu.af_shadow = 0x1234;
+            cpu.bc_shadow = 0x5678;
+            cpu.de_shadow = 0x9abc;
+            cpu.hl_shadow = 0xdef0;
+            cpu
+        };
+        let mut instruction_count = 0;
+        for target in 0x8000u16..=0xffff {
+            let page = usize::from((target >> 8) - 0x80);
+            let start = records
+                .iter()
+                .position(|&addr| addr >> 8 >= target >> 8)
+                .unwrap_or(records.len());
+            let selected = if rom[counts + page] == 0 {
+                start
+            } else {
+                records
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .find(|(_, addr)| **addr >= target)
+                    .map_or(records.len(), |(i, _)| i)
+            };
+            let expected = defs["rt_dispatch_table"].1 + selected as u16 * 6;
+            let offset =
+                bases[usize::from((target - 0x8000) >> 13)] + usize::from(target & 0x1fff) * 2;
+            assert_eq!(
+                u16::from_le_bytes([rom[offset], rom[offset + 1]]),
+                expected,
+                "PC{target:04X}"
+            );
+            let page_base =
+                u16::from_le_bytes([rom[directory + page * 2], rom[directory + page * 2 + 1]]);
+            for (bus, entry) in [(&mut old, 0xcc00), (&mut new, defs["_btd_lower_bound"].1)] {
+                let mut cpu = initialize(bus, target, entry, page_base);
+                let mut ticks = 0;
+                let mut steps = 0;
+                while cpu.pc != 7 && steps < 512 {
+                    if entry != 0xcc00 {
+                        assert!((entry..defs["_btd_lower_bound_end"].1).contains(&cpu.pc));
+                        ticks += mmc3_row_nominal(&cpu, bus);
+                    }
+                    assert!(!cpu.iff1 && !cpu.iff2);
+                    cpu.step(bus).unwrap();
+                    steps += 1;
+                }
+                assert_eq!(
+                    (cpu.pc, cpu.hl(), cpu.de(), cpu.sp),
+                    (7, expected, target ^ 0x52a9, 0xdff2)
+                );
+                assert_eq!(bus.slot_bank, [0, defs["rt_dispatch_table"].0, 104]);
+                assert_eq!(
+                    (
+                        bus.read(0xfffc),
+                        bus.read(0xcb14),
+                        bus.read(0xcb03),
+                        bus.read(0xcb02)
+                    ),
+                    (12, 95, 0xa5, 0xf7)
+                );
+                assert_eq!(
+                    (cpu.af_shadow, cpu.bc_shadow, cpu.de_shadow, cpu.hl_shadow),
+                    (0x1234, 0x5678, 0x9abc, 0xdef0)
+                );
+                if entry != 0xcc00 {
+                    assert_eq!(ticks, 159);
+                    instruction_count = steps;
+                }
+            }
+        }
+        // Entry is DI; Pause can interrupt any lookup instruction, including
+        // while slot 1 exposes a LUT bank. No maskable IRQ is admitted here.
+        let mut interrupts = 0;
+        for target in [
+            0x8000, 0x9fff, 0xa000, 0xbfff, 0xc000, 0xdfff, 0xe000, 0xffff,
+        ] {
+            let page = usize::from((target >> 8) - 0x80);
+            let page_base =
+                u16::from_le_bytes([rom[directory + page * 2], rom[directory + page * 2 + 1]]);
+            let offset =
+                bases[usize::from((target - 0x8000) >> 13)] + usize::from(target & 0x1fff) * 2;
+            let expected = u16::from_le_bytes([rom[offset], rom[offset + 1]]);
+            for boundary in 0..instruction_count {
+                let mut cpu = initialize(&mut new, target, defs["_btd_lower_bound"].1, page_base);
+                let guest = new.ram[..0x800].to_vec();
+                let cart = new.cart_ram;
+                for step in 0..instruction_count {
+                    if step == boundary {
+                        let before = cpu;
+                        let mapping = new.slot_bank;
+                        cpu.sp -= 2;
+                        new.write(cpu.sp, cpu.pc as u8);
+                        new.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                        cpu.pc = 0x66;
+                        for _ in 0..1000 {
+                            cpu.step(&mut new).unwrap();
+                            if cpu.pc == before.pc && cpu.sp == before.sp {
+                                break;
+                            }
+                        }
+                        assert_eq!(
+                            (cpu.pc, cpu.sp, cpu.a, cpu.f, cpu.bc(), cpu.de(), cpu.hl()),
+                            (
+                                before.pc,
+                                before.sp,
+                                before.a,
+                                before.f,
+                                before.bc(),
+                                before.de(),
+                                before.hl()
+                            )
+                        );
+                        assert_eq!(new.slot_bank, mapping);
+                        assert!(!cpu.iff1 && !cpu.iff2);
+                        interrupts += 1;
+                    }
+                    cpu.step(&mut new).unwrap();
+                }
+                assert_eq!(
+                    (cpu.pc, cpu.hl(), cpu.de(), cpu.sp),
+                    (7, expected, target ^ 0x52a9, 0xdff2)
+                );
+                assert_eq!(&new.ram[..0x800], guest);
+                assert_eq!(new.cart_ram, cart);
+                assert_eq!(new.slot_bank, [0, defs["rt_dispatch_table"].0, 104]);
+                assert_eq!(new.read(0xcb03), 0xa5);
+            }
+        }
+        eprintln!(
+            "32768 original/new/linear pointer cases; {interrupts} Pause boundaries; {instruction_count} instructions,159 nominal T + unchanged CALL17"
+        );
+    }
+
+    #[test]
     #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME project"]
     fn mmc3_full_dispatch_count_edges_and_pending_irq() {
         let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
@@ -8741,6 +8968,26 @@ mod tests {
             rom[directory..directory + 2].copy_from_slice(&base.to_le_bytes());
             rom[symbol_physical("rt_dispatch_page_counts") + page] =
                 u8::try_from(count).unwrap_or(0);
+            if let Some(&(bank, pc)) = defs.get("rt_dispatch_index_1") {
+                // Keep the synthetic immutable index consistent with these
+                // synthetic records. Independent linear predicate, not the
+                // production generator or binary-search implementation.
+                for low in 0..=255usize {
+                    let index = if count == 0 || count > 255 {
+                        0
+                    } else {
+                        records
+                            .iter()
+                            .position(|r| usize::from(r.0 & 255) >= low)
+                            .unwrap_or(records.len())
+                    };
+                    let offset = usize::from(bank) * BANK_SIZE
+                        + usize::from(pc & 0x3fff)
+                        + (0x800 + low) * 2;
+                    rom[offset..offset + 2]
+                        .copy_from_slice(&(base + index as u16 * 6).to_le_bytes());
+                }
+            }
             let mut bus = SmsBus::new(rom, 0xff);
             for low in 0..=255u16 {
                 for bank in 0..=4u8 {

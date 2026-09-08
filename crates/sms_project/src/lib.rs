@@ -390,6 +390,14 @@ fn validate_config(
         }
     }
     let bank_count = cfg.rom_kib / 16;
+    if build.project_data_bank_count != 0 {
+        if !mmc3_full {
+            return Err(EmitError::InvalidMmc3Config(
+                "project data-bank reservation currently requires full MMC3".into(),
+            ));
+        }
+        required_bank += u32::from(build.project_data_bank_count);
+    }
     if required_bank >= bank_count {
         return Err(EmitError::LayoutExceedsRomCapacity {
             required_bank,
@@ -508,6 +516,7 @@ fn sms_asm_content(
     assets: &ProjectAssets,
     has_nametable: bool,
     runtime_s_files: &[PathBuf],
+    project_data_bank_count: u16,
 ) -> String {
     let rom_banks = cfg.rom_kib / 16;
     let mmc3_full = cfg
@@ -533,6 +542,13 @@ fn sms_asm_content(
         24
     };
     let mut mapper_define = format!(".define NES_MAPPER {}", cfg.mapper);
+    if project_data_bank_count != 0 {
+        // validate_config admits this only for full MMC3 and proves the
+        // reservation fits after all packed PRG, boot assets and raw CHR.
+        let data_base =
+            asset_base + 2 + (assets.chr_nes.as_ref().unwrap().len() as u32).div_ceil(0x4000);
+        mapper_define.push_str(&format!("\n.define PROJECT_ROM_DATA_BANK_BASE {data_base}"));
+    }
     if cfg.input_action {
         mapper_define.push_str("\n.define INPUT_MODE_ACTION 1");
     }
@@ -869,7 +885,13 @@ pub fn emit_project(
     fs::write(out_dir.join("link.cfg"), link_cfg_content(&s_files))?;
 
     // sms.asm
-    let sms_asm = sms_asm_content(cfg, assets, assets.nametable.is_some(), &s_files);
+    let sms_asm = sms_asm_content(
+        cfg,
+        assets,
+        assets.nametable.is_some(),
+        &s_files,
+        build.project_data_bank_count,
+    );
     fs::write(out_dir.join("sms.asm"), sms_asm)?;
 
     // runtime/
@@ -1721,5 +1743,40 @@ mod tests {
                 "case {case}"
             );
         }
+    }
+
+    #[test]
+    fn project_data_reservation_follows_assets_and_fails_at_image_boundary() {
+        let (mut assets, mut cfg) = mmc3_assets_and_cfg(32);
+        cfg.runtime_defines = vec!["MMC3_FULL_RUNTIME".into()];
+        cfg.raw_ciram_backend = RawCiramBackend::SramSlot2;
+        assets.chr_nes = Some(vec![0; 0x20000]);
+        let mut build = minimal_build();
+        build.project_data_bank_count = 4;
+        let out = unique_dir("sms_proj_dense_index");
+        emit_project(&out, &build, &assets, &cfg, None).unwrap();
+        let asm = fs::read_to_string(out.join("sms.asm")).unwrap();
+        assert!(asm.contains(".define PROJECT_ROM_DATA_BANK_BASE 122"));
+        fs::remove_dir_all(out).unwrap();
+        build.project_data_bank_count = 6;
+        assert!(
+            validate_config(&cfg, &assets, &build).is_ok(),
+            "banks122..127 exactly fit"
+        );
+        build.project_data_bank_count = 7;
+        assert!(matches!(
+            validate_config(&cfg, &assets, &build),
+            Err(EmitError::LayoutExceedsRomCapacity {
+                required_bank: 128,
+                bank_count: 128
+            })
+        ));
+        build.project_data_bank_count = 4;
+        cfg.runtime_defines = vec!["MMC3_BANKING_EXPERIMENT".into()];
+        assets.chr_nes = Some(vec![0; 8192]);
+        assert!(
+            validate_config(&cfg, &assets, &build).is_err(),
+            "no experimental/legacy reservation"
+        );
     }
 }
