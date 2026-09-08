@@ -328,7 +328,24 @@ RAM and reduced rebuild blanking. This is dependency-based runtime reuse,
 not evidence that a general IR pass or inliner has been implemented.
 The updated moving profile assigns 37.7% to rendering and 20.0% to page-local
 dispatch; the latter's absolute cost remains 912,673 T-states/update. It is
-the next bounded lookup investigation, not a reason to inline every call.
+the next bounded lookup opportunity, not a reason to inline every call.
+
+That lookup experiment is now implemented for full MMC3 only: binary
+lower-bound search selects the first possible address, then the existing
+bank-aware scan retains wildcard precedence and strict misses. It preserves
+all six-byte records and adds 128 page-count bytes, plus a 72-byte helper/call
+with no new RAM. Empty or oversized pages use the original scan. This trades
+a little ROM space for a better search algorithm, rather than cloning guest
+functions. A larger direct index was rejected because the existing table
+already occupies 16,080 of its 16,384-byte mapped window.
+
+The measured moving window drops from 913,194,013 to 798,537,065 T-states
+(12.56% less total work). Search **including the new helper and call** falls
+from 182,534,638 to 68,058,369 T-states. The full input-only level-clear route
+improves 4.594 → 5.366 updates/sec (+16.79%), with matching full guest/cart
+RAM at seven checkpoints. Absolute blanking remains unchanged. This is a
+verified lookup optimization, not a general SSA optimizer, LLVM integration
+or proof of full-speed playability.
 
 A source audit also rejected a tempting duplicate optimization: the MMC3
 tile converter already emits NES bitplanes directly and derives the upper

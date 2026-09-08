@@ -88,6 +88,31 @@ fn lower_error_is_fatal(error: &lower::LowerError) -> bool {
     matches!(error, lower::LowerError::UnsupportedMapperStore { .. })
 }
 
+/// The full-mode directory and six-byte records share one mapped ROM slot.
+/// Zero counts preserve the original scan for empty or oversized pages.
+fn mmc3_dispatch_page_counts(records: &[(u8, u16, String)]) -> Result<[u8; 128], Error> {
+    let bytes = records
+        .len()
+        .saturating_mul(6)
+        .saturating_add(2 + 256 + 128);
+    if bytes > 0x4000 {
+        return Err(Error::Diagnostic(format!(
+            "MMC3 dispatch table exceeds its single 16 KiB slot: {bytes} bytes for {} records and directories",
+            records.len()
+        )));
+    }
+    let mut counts = [0usize; 128];
+    for &(_, addr, _) in records {
+        let Some(page) = (addr >> 8).checked_sub(0x80) else {
+            return Err(Error::Diagnostic(format!(
+                "MMC3 dispatch target ${addr:04X} is outside PRG ROM"
+            )));
+        };
+        counts[usize::from(page)] += 1;
+    }
+    Ok(counts.map(|count| u8::try_from(count).unwrap_or(0)))
+}
+
 /// A mapped unit cannot keep executing its old translation after changing
 /// that window. Until remapping continuations are modeled, reject all mapped
 /// writers, including an indirect store that could address mapper registers
@@ -2001,6 +2026,10 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 },
             )
         });
+        let page_counts = prof
+            .mmc3_full_runtime()
+            .then(|| mmc3_dispatch_page_counts(&dispatch_records))
+            .transpose()?;
         let mut next_record = 0usize;
         for page in 0x80u16..=0xFF {
             program.label(format!("rt_dispatch_page_{page:02X}"));
@@ -2016,6 +2045,9 @@ pub fn run(args: &Args) -> Result<String, Error> {
         program.label("rt_dispatch_page_table");
         for page in 0x80u16..=0xFF {
             program.word_label(&format!("rt_dispatch_page_{page:02X}"));
+        }
+        if let Some(counts) = page_counts {
+            program.data(Some("rt_dispatch_page_counts"), &counts);
         }
 
         Ok((program, lower_failures, unresolved, assigned_sections))
@@ -2880,6 +2912,52 @@ const RUNTIME_SYMBOLS: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mmc3_dispatch_counts_preserve_page_edges_and_oversized_fallback() {
+        let mut records = Vec::new();
+        for (page, count) in [
+            (0x80u16, 1),
+            (0x81, 3),
+            (0xa8, 167),
+            (0xfe, 255),
+            (0xff, 256),
+        ] {
+            for index in 0..count {
+                records.push((index as u8 % 32, (page << 8) | index as u16, String::new()));
+            }
+        }
+        let original = records.clone();
+        let counts = super::mmc3_dispatch_page_counts(&records).unwrap();
+        assert_eq!(
+            records, original,
+            "counting must not reorder duplicate precedence"
+        );
+        for page in 0x80u16..=0xff {
+            let expected = match page {
+                0x80 => 1,
+                0x81 => 3,
+                0xa8 => 167,
+                0xfe => 255,
+                _ => 0,
+            };
+            assert_eq!(counts[usize::from(page - 0x80)], expected);
+        }
+        assert!(super::mmc3_dispatch_page_counts(&[(0, 0x7fff, String::new())]).is_err());
+    }
+
+    #[test]
+    fn mmc3_dispatch_capacity_includes_both_directories_and_terminator() {
+        let mut records = vec![(0, 0x8000, String::new()); 2666];
+        assert!(super::mmc3_dispatch_page_counts(&records).is_ok());
+        records.push((0, 0x8000, String::new()));
+        assert!(
+            super::mmc3_dispatch_page_counts(&records)
+                .unwrap_err()
+                .to_string()
+                .contains("single 16 KiB slot: 16388 bytes")
+        );
+    }
+
     use super::*;
 
     #[test]

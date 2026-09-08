@@ -880,6 +880,9 @@ _btd_target_ok:
   inc  hl
   ld   h, (hl)
   ld   l, a
+.ifdef MMC3_FULL_RUNTIME
+  call _btd_lower_bound
+.endif
   xor  a
   ld   ($cb7d), a
 _btd_loop:
@@ -1167,6 +1170,71 @@ _btd_trap_flash:
   ld   a, $e2
   ld   ($cb1d), a
   jp   rt_unresolved_jsr_flash
+
+.ifdef MMC3_FULL_RUNTIME
+; HL=page base. Find its first record whose low byte is >= the target.
+; A zero count retains the old scan for empty or >255-record pages. DE is
+; resident X/Y: preserve it beneath the page base. DI throughout; no RAM.
+_btd_lower_bound:
+  push hl
+  ld   a, ($cb1c)
+  sub  $80
+  ld   l, a
+  ld   h, 0
+  ld   bc, rt_dispatch_page_counts
+  add  hl, bc
+  ld   a, (hl)
+  pop  hl
+  or   a
+  ret  z
+  push de
+  push hl
+  ld   c, a                  ; exclusive upper record index
+  ld   b, 0                  ; lower record index
+_btd_binary_loop:
+  ld   a, b
+  cp   c
+  jr   z, _btd_binary_done
+  add  a, c
+  rra                        ; carry preserves the ninth bit of lower+upper
+  ld   l, a
+  ld   h, 0
+  add  hl, hl
+  ld   e, l
+  ld   d, h
+  add  hl, hl
+  add  hl, de                ; six-byte record offset; A still holds midpoint
+  ex   (sp), hl
+  pop  de
+  push hl                    ; restore page base before comparing
+  add  hl, de
+  ld   e, a
+  ld   a, ($cb1b)
+  ld   d, a
+  ld   a, (hl)
+  cp   d
+  jr   nc, _btd_binary_upper
+  ld   b, e
+  inc  b
+  jr   _btd_binary_loop
+_btd_binary_upper:
+  ld   c, e
+  jr   _btd_binary_loop
+_btd_binary_done:
+  ld   a, b
+  ld   l, a
+  ld   h, 0
+  add  hl, hl
+  ld   e, l
+  ld   d, h
+  add  hl, hl
+  add  hl, de
+  pop  de
+  add  hl, de
+  pop  de
+  ret
+_btd_lower_bound_end:
+.endif
 
 ; ─── rt_banked_dispatch ───────────────────────────────────────────────────────
 ; BC = NES ROM target address. Look it up through the generated high-byte page

@@ -311,6 +311,36 @@ fn mmc3_full_bus_reference_covers_cart_ram_and_indirect_boundaries() {
 }
 
 #[test]
+fn mmc3_pipeline_rejects_dispatch_table_larger_than_one_mapped_slot() {
+    let (mut rom, profile) = two_bank_fixture(&[0x4c, 0, 0xe1], &[0x60], &[0x60]);
+    let mut profile = profile.replace(
+        "MMC3_BANKING_EXPERIMENT",
+        "MMC3_FULL_RUNTIME','SMB3_MMC3_SINGLE_SPLIT",
+    );
+    // Many tiny legal routines fit the translated code budget but their
+    // bank-qualified dispatch records do not fit the one mapped table slot.
+    for bank in 0..3usize {
+        rom[16 + bank * 0x2000..16 + bank * 0x2000 + 901].fill(0x60);
+        for offset in 1..=900u16 {
+            profile.push_str(&format!(
+                "[[bank_entry]]\nbank={bank}\naddr={}\n",
+                0x8000 + offset
+            ));
+        }
+    }
+    let (work, result) = generated_fixture("dispatch-capacity", &rom, &profile);
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("MMC3 dispatch table exceeds its single 16 KiB slot")
+    );
+    assert!(
+        !work.join("sms").exists(),
+        "capacity error must precede project emission"
+    );
+}
+
+#[test]
 fn mmc3_cooperative_wait_requires_exact_physical_setup_and_poll() {
     let (mut rom, profile) = full_bus_fixture();
     let wait = [

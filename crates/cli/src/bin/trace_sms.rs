@@ -8487,6 +8487,371 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME project"]
+    fn mmc3_full_dispatch_matches_sorted_first_match() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let physical = |name: &str| {
+            let (bank, addr) = defs[name];
+            usize::from(bank) * BANK_SIZE + usize::from(addr & 0x3fff)
+        };
+        let table = physical("rt_dispatch_table");
+        let directory = physical("rt_dispatch_page_table");
+        let counts = physical("rt_dispatch_page_counts");
+        assert_eq!(counts, directory + 256);
+        assert!(counts + 128 <= (table / BANK_SIZE + 1) * BANK_SIZE);
+        assert_eq!(&rom[directory - 2..directory], &[0, 0]);
+        assert_eq!((directory - 2 - table) % 6, 0);
+        let records: Vec<_> = rom[table..directory - 2]
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .map(|r| {
+                (
+                    u16::from_le_bytes([r[0], r[1]]),
+                    r[2],
+                    r[3],
+                    u16::from_le_bytes([r[4], r[5]]),
+                )
+            })
+            .collect();
+        for page in 0..128usize {
+            let address = ((page + 128) as u16) << 8;
+            let index = records.partition_point(|r| r.0 < address);
+            let count = records.iter().filter(|r| r.0 >> 8 == address >> 8).count();
+            assert_eq!(rom[counts + page], u8::try_from(count).unwrap_or(0));
+            let pointer =
+                u16::from_le_bytes([rom[directory + page * 2], rom[directory + page * 2 + 1]]);
+            assert_eq!(usize::from(pointer), (table & 0x3fff) + 0x4000 + index * 6);
+        }
+        assert!(records.windows(2).all(|r| {
+            let key = |v: &(u16, u8, u8, u16)| {
+                (
+                    v.0,
+                    if v.1 == 0xff {
+                        0u16
+                    } else {
+                        u16::from(v.1) + 1
+                    },
+                )
+            };
+            key(&r[0]) <= key(&r[1])
+        }));
+        let bank_count: u8 = std::fs::read_to_string(path.join("sms.asm"))
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix(".define NES_MMC3_PRG_BANK_COUNT "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut queries = std::collections::BTreeSet::from([0x0000u16, 0x7fff, 0x8000, 0xffff]);
+        for record in &records {
+            queries.extend([
+                record.0.saturating_sub(1),
+                record.0,
+                record.0.saturating_add(1),
+            ]);
+        }
+        for page in 0x80u16..=0xff {
+            queries.extend([page << 8, (page << 8) | 0xff]);
+        }
+        let mut bus = SmsBus::new(rom, 0xff);
+        let mut calls = 0usize;
+        let mut hits = 0usize;
+        let mut min_sp = 0xdff0;
+        for target in queries {
+            for bank in 0..bank_count {
+                // Independent old first-match rule, including wildcard-first
+                // precedence. Never derive the expected record by binary search.
+                let expected = records
+                    .iter()
+                    .find(|r| r.0 == target && (r.1 == 0xff || r.1 == bank));
+                for iff in [false, true] {
+                    let control = [0, 8, 12][calls % 3];
+                    for (addr, value) in [
+                        (0xfffe, 95),
+                        (0xcb14, 95),
+                        (0xffff, 104),
+                        (0xfffc, control),
+                        (0xcb03, 0xa5),
+                        (0xcb02, 0xf7),
+                        (0xcb7e, u8::from(!iff)),
+                        (0xcb1d, 0),
+                        (0xcb76, 0),
+                        (0xcb77, 0xd3),
+                        (0xd47d, 0xc0),
+                        (0xd47e, 0xd4),
+                    ] {
+                        bus.write(addr, value);
+                    }
+                    for window in 0..4 {
+                        bus.write(0xc819 + window, bank);
+                    }
+                    let mut cpu = Cpu::new();
+                    cpu.pc = defs["rt_banked_tail_dispatch"].1;
+                    cpu.sp = 0xdff0;
+                    cpu.a = 0x69;
+                    cpu.f = 0x95;
+                    cpu.set_bc(target);
+                    cpu.set_de(0x52a9);
+                    cpu.iff1 = iff;
+                    cpu.iff2 = iff;
+                    let mut arrived = false;
+                    for _ in 0..20000 {
+                        if let Some(record) = expected
+                            && cpu.pc == record.3
+                            && (record.2 == 0 || bus.slot_bank[1] == record.2)
+                        {
+                            arrived = true;
+                            break;
+                        }
+                        if bus.read(0xcb1d) != 0 {
+                            break;
+                        }
+                        if (defs["_btd_lower_bound"].1..defs["_btd_lower_bound_end"].1)
+                            .contains(&cpu.pc)
+                        {
+                            assert!(!cpu.iff1, "binary transaction must stay DI");
+                        }
+                        cpu.step(&mut bus).unwrap();
+                        min_sp = min_sp.min(cpu.sp);
+                    }
+                    if let Some(record) = expected {
+                        assert!(arrived, "target={target:04x} bank={bank} pc={:04x}", cpu.pc);
+                        assert_eq!((cpu.a, cpu.de(), cpu.sp), (0x69, 0x52a9, 0xdff0));
+                        assert_eq!((cpu.iff1, cpu.iff2, cpu.ei_pending), (iff, iff, 0));
+                        assert_eq!(
+                            (bus.read(0xcb14), bus.slot_bank[1], bus.read(0xcb7c)),
+                            (record.2, record.2, record.1)
+                        );
+                        let first = records.iter().position(|r| r.0 == target).unwrap();
+                        let selected = records
+                            .iter()
+                            .position(|r| std::ptr::eq(r, record))
+                            .unwrap();
+                        let page_count = records.iter().filter(|r| r.0 >> 8 == target >> 8).count();
+                        let start = if page_count > 255 {
+                            records
+                                .iter()
+                                .position(|r| r.0 >> 8 == target >> 8)
+                                .unwrap()
+                        } else {
+                            first
+                        };
+                        assert_eq!(
+                            bus.read(0xcb7d),
+                            (selected - start + 1) as u8,
+                            "visit diagnostic counts only residual equal-address scan"
+                        );
+                        hits += 1;
+                    } else {
+                        assert_eq!(bus.read(0xcb1d), 0xe2, "target={target:04x} bank={bank}");
+                        assert_eq!(cpu.sp, 0xdff0, "miss must retire search scratch");
+                    }
+                    assert_eq!((bus.read(0xcb03), bus.read(0xcb02)), (0xa5, 0xf7));
+                    assert_eq!(
+                        (
+                            bus.read(0xcb76),
+                            bus.read(0xcb77),
+                            bus.read(0xd47d),
+                            bus.read(0xd47e)
+                        ),
+                        (0, 0xd3, 0xc0, 0xd4)
+                    );
+                    assert_eq!((bus.slot_bank[2], bus.read(0xfffc)), (104, control));
+                    calls += 1;
+                }
+            }
+        }
+        assert!(
+            min_sp >= 0xdfea,
+            "helper exceeds six extra native stack bytes"
+        );
+        assert!(defs["_btd_lower_bound_end"].1 - defs["_btd_lower_bound"].1 + 3 <= 96);
+        eprintln!(
+            "{} sorted records; {calls} bank/address/IFF cases; {hits} hits; minSP={min_sp:04x}",
+            records.len()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME project"]
+    fn mmc3_full_dispatch_count_edges_and_pending_irq() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let original = std::fs::read(path.join("sms.sms")).unwrap();
+        let table_bank = defs["rt_dispatch_table"].0;
+        let physical = |addr: u16| usize::from(table_bank) * BANK_SIZE + usize::from(addr & 0x3fff);
+        let base = 0x5000u16;
+        let page = 0x28usize;
+        let mut calls = 0;
+        let mut irq_cases = 0;
+        for count in [0usize, 1, 3, 127, 128, 167, 254, 255, 256, 257] {
+            let mut rom = original.clone();
+            // Synthetic records use the actual assembled search, including
+            // conflicting wildcard/concrete records and six-byte strides.
+            let mut records: Vec<_> = (0..count)
+                .map(|i| {
+                    (
+                        0xa800 | ((i * 256 / count) as u16),
+                        if i % 7 == 0 { 0xff } else { (i % 4) as u8 },
+                        (4 + i % 16) as u8,
+                        0x4007u16,
+                    )
+                })
+                .collect();
+            records.sort_by_key(|r| (r.0, if r.1 == 0xff { 0 } else { u16::from(r.1) + 1 }));
+            for (i, &(addr, bank, sms_bank, label)) in records.iter().enumerate() {
+                let offset = physical(base) + i * 6;
+                rom[offset..offset + 6].copy_from_slice(&[
+                    addr as u8,
+                    (addr >> 8) as u8,
+                    bank,
+                    sms_bank,
+                    label as u8,
+                    (label >> 8) as u8,
+                ]);
+            }
+            rom[physical(base) + count * 6..physical(base) + count * 6 + 2].fill(0);
+            let directory = physical(defs["rt_dispatch_page_table"].1) + page * 2;
+            rom[directory..directory + 2].copy_from_slice(&base.to_le_bytes());
+            rom[physical(defs["rt_dispatch_page_counts"].1) + page] =
+                u8::try_from(count).unwrap_or(0);
+            let mut bus = SmsBus::new(rom, 0xff);
+            for low in 0..=255u16 {
+                for bank in 0..=4u8 {
+                    let target = 0xa800 | low;
+                    let expected = records
+                        .iter()
+                        .find(|r| r.0 == target && (r.1 == 0xff || r.1 == bank));
+                    for iff in [false, true] {
+                        for (addr, value) in [
+                            (0xfffe, 95),
+                            (0xcb14, 95),
+                            (0xffff, 104),
+                            (0xfffc, 12),
+                            (0xcb03, 0xa5),
+                            (0xcb7e, u8::from(!iff)),
+                            (0xcb1d, 0),
+                            (0xc81a, bank),
+                            (0xcb28, 1),
+                            (0xc831, 2),
+                        ] {
+                            bus.write(addr, value);
+                        }
+                        let mut cpu = Cpu::new();
+                        cpu.pc = defs["rt_banked_tail_dispatch"].1;
+                        cpu.sp = 0xdff0;
+                        cpu.a = 0x69;
+                        cpu.f = 0x95;
+                        cpu.set_bc(target);
+                        cpu.set_de(0x52a9);
+                        cpu.iff1 = iff;
+                        cpu.iff2 = iff;
+                        let inject = |cpu: &mut Cpu, bus: &mut SmsBus| {
+                            let interrupted = *cpu;
+                            cpu.sp -= 1;
+                            bus.write(cpu.sp, (cpu.pc >> 8) as u8);
+                            cpu.sp -= 1;
+                            bus.write(cpu.sp, cpu.pc as u8);
+                            cpu.pc = 0x38;
+                            cpu.iff1 = false;
+                            cpu.iff2 = false;
+                            cpu.ei_pending = 0;
+                            bus.frame_int_pending = true;
+                            for _ in 0..20000 {
+                                cpu.step(bus).unwrap();
+                                if cpu.pc == interrupted.pc && cpu.sp == interrupted.sp {
+                                    break;
+                                }
+                            }
+                            assert_eq!(
+                                (cpu.pc, cpu.sp, cpu.a, cpu.f, cpu.bc(), cpu.de(), cpu.hl()),
+                                (
+                                    interrupted.pc,
+                                    interrupted.sp,
+                                    interrupted.a,
+                                    interrupted.f,
+                                    interrupted.bc(),
+                                    interrupted.de(),
+                                    interrupted.hl()
+                                )
+                            );
+                            assert!(cpu.iff1 && cpu.iff2);
+                        };
+                        let with_irq = iff && bank == 0 && [0, 127, 128, 255].contains(&low);
+                        if with_irq {
+                            inject(&mut cpu, &mut bus);
+                            irq_cases += 1;
+                        }
+                        // A request pending during search cannot enter the DI
+                        // transaction; deliver only after the original EI/JP.
+                        bus.frame_int_pending = with_irq;
+                        for _ in 0..20000 {
+                            if expected.is_some_and(|r| cpu.pc == r.3 && bus.slot_bank[1] == r.2)
+                                || bus.read(0xcb1d) != 0
+                            {
+                                break;
+                            }
+                            if (defs["_btd_lower_bound"].1..defs["_btd_lower_bound_end"].1)
+                                .contains(&cpu.pc)
+                                || (defs["_btd_loop"].1..defs["_btd_hit"].1).contains(&cpu.pc)
+                            {
+                                assert!(!cpu.iff1, "search must not admit the pending IRQ");
+                            }
+                            cpu.step(&mut bus).unwrap();
+                            assert!(cpu.sp >= 0xdfea);
+                        }
+                        if let Some(record) = expected {
+                            assert_eq!(
+                                (cpu.pc, bus.slot_bank[1], bus.read(0xcb7c)),
+                                (record.3, record.2, record.1),
+                                "count={count} low={low} bank={bank}"
+                            );
+                            assert_eq!((cpu.a, cpu.de(), cpu.sp), (0x69, 0x52a9, 0xdff0));
+                            assert_eq!((cpu.iff1, cpu.iff2, cpu.ei_pending), (iff, iff, 0));
+                            if with_irq {
+                                inject(&mut cpu, &mut bus);
+                                irq_cases += 1;
+                            }
+                        } else {
+                            assert_eq!(
+                                bus.read(0xcb1d),
+                                0xe2,
+                                "count={count} low={low} bank={bank}"
+                            );
+                            assert_eq!(cpu.sp, 0xdff0);
+                        }
+                        assert_eq!(
+                            (bus.read(0xcb03), bus.read(0xfffc), bus.slot_bank[2]),
+                            (0xa5, 12, 104)
+                        );
+                        calls += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "{calls} synthetic count/duplicate/miss cases; {irq_cases} real IRQ entry/exit injections"
+        );
+    }
+
+    #[test]
     fn native_stack_guard_rejects_existing_bg_refcounts_but_accepts_floor() {
         assert_eq!(NATIVE_STACK_FLOOR, 0xDD80 + 192);
         for sp in [0, 0xDD7F, 0xDD80, 0xDE3F] {
