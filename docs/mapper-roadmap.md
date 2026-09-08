@@ -12,7 +12,7 @@ VRC6 is explicitly deferred. Additional speed optimization is deferred too.
 
 - [x] Preserve the accepted SMB3 checkpoint (`68b439a`) and its measured limits.
   More SMB3 speed work is **not a prerequisite** for Adventure Island.
-- [ ] Start Adventure Island as the only active new game. Preserve SMB3's
+- [x] Start Adventure Island as the only active new game. Preserve SMB3's
   inventory, level-clear, death/return, controller and presentation checks,
   and the SMB1/Castlevania I regression floor throughout the queue.
   See [SMB3 plan](smb3-plan.md) and [completion plan](completion-plan.md).
@@ -42,7 +42,10 @@ The current [mapper policy](../crates/nes_rom/src/lib.rs) implements NROM (0)
 and bounded NES 2.0 UxROM (2, submappers 1/2). The
 [pipeline](../crates/cli/src/pipeline.rs) separately admits experimental MMC3 (4)
 through explicit profile capabilities. That is not universal MMC3 compatibility.
-CNROM is **not implemented**. The existing
+CNROM has a tested [board-model foundation](../crates/nes_rom/src/cnrom.rs),
+but **runtime admission and game conversion remain unfinished**. The
+[Adventure Island reference](adventure-island-reference.md) pins the target,
+records native execution evidence and tracks full-content acceptance. The existing
 [CV3 profile](../profiles/cv3.toml) is a mapper-5 rejection probe, not MMC5 support.
 
 ## What is actually available

@@ -6,6 +6,7 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 
+pub mod cnrom;
 pub mod mmc3;
 
 pub const INES_MAGIC: [u8; 4] = [b'N', b'E', b'S', 0x1a];
@@ -133,7 +134,12 @@ pub fn parse_header(rom: &[u8]) -> Result<Header, ParseError> {
     };
     let mapper_lo = (flags6 >> 4) as u16;
     let mapper_hi = (flags7 & 0xf0) as u16;
-    let mapper = mapper_hi | mapper_lo;
+    let mapper_ext = if kind == HeaderKind::Nes2 {
+        u16::from(rom[8] & 0x0f) << 8
+    } else {
+        0
+    };
+    let mapper = mapper_ext | mapper_hi | mapper_lo;
     let mirroring = if flags6 & 0x08 != 0 {
         Mirroring::FourScreen
     } else if flags6 & 0x01 != 0 {
@@ -705,6 +711,44 @@ mod tests {
                 Err(MapperPolicyError::UnsupportedUxromSubmapper { submapper })
             );
         }
+    }
+
+    #[test]
+    fn nes2_extended_mapper_bits_do_not_alias_supported_boards() {
+        let mut bytes = [0; HEADER_SIZE];
+        bytes[..4].copy_from_slice(&INES_MAGIC);
+        bytes[4] = 2;
+        bytes[5] = 4;
+        bytes[6] = 0x30;
+        bytes[7] = 0x08;
+        bytes[8] = 0x21; // Submapper 2, mapper $103, not CNROM $003.
+        let h = parse_header(&bytes).unwrap();
+        assert_eq!(h.mapper, 0x103);
+        assert_eq!(h.submapper, 2);
+        assert_eq!(
+            cnrom::Cnrom::new(&h, h.prg_len(), h.chr_len(), 0),
+            Err(cnrom::CnromError::UnsupportedMapper { mapper: 0x103 })
+        );
+        for low_mapper in [0, 2, 3, 4] {
+            bytes[6] = low_mapper << 4;
+            let h = parse_header(&bytes).unwrap();
+            let extended_mapper = 0x100 | u16::from(low_mapper);
+            assert_eq!(h.mapper, extended_mapper);
+            assert_eq!(
+                resolve_mapper_policy(&h, h.prg_len()),
+                Err(MapperPolicyError::UnsupportedMapper {
+                    mapper: extended_mapper
+                })
+            );
+        }
+        bytes[6] = 0xf0;
+        bytes[7] = 0xf8;
+        bytes[8] = 0xaf;
+        let h = parse_header(&bytes).unwrap();
+        assert_eq!(h.mapper, 0xfff);
+        assert_eq!(h.submapper, 10);
+        bytes[7] = 0xf0; // Legacy byte 8 is RAM size, never mapper bits.
+        assert_eq!(parse_header(&bytes).unwrap().mapper, 0xff);
     }
 
     #[test]
