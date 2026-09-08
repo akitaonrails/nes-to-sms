@@ -1,7 +1,7 @@
 ; Coherent, deliberately conservative full-frame MMC3 bring-up renderer.
-; Only this module writes visible patterns/NT/SAT/CRAM. It blanks while
-; rebuilding, services host IRQs at closed tile boundaries, and publishes
-; a complete frame. No visible cache entry is evicted. Pattern exhaustion
+; Pattern conversion targets cartridge SRAM; present_mmc3 owns guarded
+; uploads/publication while this module builds an immutable next packet.
+; No visible cache entry is overwritten during preparation. Pattern exhaustion
 ; traps instead of silently substituting another physical CHR tile.
 ;
 ; Bank0 SRAM: raw8000..87FF, frozen8800..97FF, OAM9800..98FF,
@@ -9,7 +9,8 @@
 ; preparedSAT AB00..ABBF, hashheadsAC00..ADFF, chainsAE00..AFFF,
 ; mixed-raster secondary keys/palette/cut/row offsets B000..B5FF.
 ; The extra NT row is required for fine-Y scroll in 224-line mode's
-; 256-pixel-high tilemap. Physical patterns stop at $3700: 440 slots.
+; 256-pixel-high tilemap. BG uses256 slots at $0000..$1fff; fixed sprites
+; use128 at $2000..$2fff. NT starts at $3700; the intervening VRAM is unused.
 .ifdef MMC3_FULL_RUNTIME
 .define M3R_COUNT   $c840
 .define M3R_ROW     $c842
@@ -50,8 +51,8 @@ rt_mmc3_frame_render:
   xor a
   jr _m3r_begin
 ; Caller proved both frozen BG sources, selected physical maps and raster
-; geometry equal to the committed frame. Sprite patterns still rebuild
-; while blank; no live pattern eviction or partial-frame publication.
+; geometry equal to the committed frame. Changed sprite patterns are staged;
+; the publisher retains visible-slot ownership until its guarded transaction.
 rt_mmc3_frame_render_bg_stable:
   ld a, 1
 _m3r_begin:
@@ -60,41 +61,23 @@ _m3r_begin:
   ld a, 8
   ld ($fffc), a
   call rt_mmc3_validate_layers
-  ld a, $b0
-  ld b, 1
-  call vdp_set_register      ; blank; host VINT stays enabled
-  ld a, $06
-  ld b, 0
-  call vdp_set_register      ; no HINT while mutable packet is being rebuilt
-  ld a, 8
-  ld ($fffc), a
   ld a, (M3G_RECORD+9)
   and $18
   jr nz, _m3r_enabled
   ld (M3G_READY), a         ; rendering-off frames publish blank immediately
-  ret
+  jp rt_mmc3_blank_display
 _m3r_enabled:
+  call rt_mmc3_prepare_display
   ld a, (M3G_COMPARE_BG)
   or a
   jp nz, _m3r_bg_done
-  ld hl, $ac00
-  ld de, $ac01
-  ld (hl), $ff
-  ld bc, $03ff
-  ldir
-  ei
-  nop
-  di
+  ld a, 2
+  ld (M3P_PASS), a           ; normal path protects ALL old-live slots
+_m3r_pass:
   ld hl, $a000
-  ld de, $a001
-  ld (hl), 0
-  ld bc, $07ff
-  ldir
-  ei
-  nop
-  di
-  ld hl, 0
-  ld (M3R_COUNT), hl
+  ld bc, $0800
+  xor a
+  call rt_mmc3_fill_closed
   ld a, (M3G_RECORD+12)
   ld l, a
   ld a, (M3G_RECORD+13)
@@ -105,22 +88,39 @@ _m3r_enabled:
   rrca
   rrca
   ld (M3R_FINE_Y), a
-  ld (M3G_PRESENT_Y), a
+  ld (M3P_Y), a
   ld a, h
   and $0f
   ld h, a
   ld (M3R_Y), hl
   ld a, (M3G_RECORD+14)
   neg
-  ld (M3G_PRESENT_X), a
+  ld (M3P_X), a
   ld a, (M3G_RECORD+$40+14)
   neg
-  ld (M3G_HUD_X), a
+  ld (M3P_HUD_X), a
   ld hl, $a000
   ld (M3R_NT), hl
   xor a
   ld (M3R_ROW), a
 _m3r_row:
+  ; Common coarse-X ring for BOTH raster records. Source-column and mixed
+  ; pattern construction stay screen-relative; only their NT destination is
+  ; permuted. Both committed scroll values cancel this same permutation.
+  ld a, (M3R_ROW)
+  ld l, a
+  ld h, 0
+  .rept 6
+  add hl, hl
+  .endr
+  ld de, $a000
+  add hl, de
+  ld a, (M3G_RECORD+12)
+  and 31
+  add a, a
+  add a, l
+  ld l, a
+  ld (M3R_NT), hl
   xor a
   ld (M3R_RECORD), a
   ld a, (M3G_SPLIT)
@@ -403,12 +403,24 @@ _m3r_second_source_done:
   pop hl
   ld (M3R_KEY), hl
 _m3r_bg_ready:
+  ; A full source-cell/loopy calculation can precede this lookup. Admit
+  ; committed display service before adding any hash traversal latency.
+  ei
+  nop
+  di
   call _m3r_bg_slot
+  jp c, _m3r_restart_reserve
   ld hl, (M3R_NT)
   ld (hl), a
   inc hl
   ld (hl), 0
   inc hl
+  ld a, l
+  and 63
+  jr nz, _m3r_nt_ring_ready
+  ld de, -64               ; wrap inside this row, never into the next row
+  add hl, de
+_m3r_nt_ring_ready:
   ld (M3R_NT), hl
   ; Host service is admitted only after both VRAM ports and mapper access
   ; are complete. A nested host VINT never reenters guest/render production.
@@ -480,96 +492,67 @@ _m3r_row_limit:
   ld (M3R_ROW), a
   cp b
   jp c, _m3r_row
+  ld a, (M3P_PASS)
+  cp 1
+  jr nz, _m3r_bg_done
+  xor a
+  ld (M3P_PASS), a
+  jp _m3r_pass
+_m3r_restart_reserve:
+  ; Fast-pass allocations modified ONLY old-nonlive slots. Preserve their
+  ; exact hash/count, staged payload and DIRTY bits: the reserve pass may
+  ; reuse these keys without reconverting them. Clear only current-needed.
+  ; No helper/native call frame is open here; restart the ordinary geometry.
+  ld hl, M3P_NEEDED
+  ld bc, 32
+  xor a
+  call rt_mmc3_fill_closed
+  ld a, 1
+  ld (M3P_PASS), a
+  jp _m3r_pass
 _m3r_bg_done:
-  ; Fine X changes only SMS scroll, not physical tile/row identities.
+  ; Both raster segments use the PLAYFIELD coarse-X destination rotation.
+  ; Their own fine-X remains independent, as do all source loopy addresses.
+  ld a, (M3G_RECORD+12)
+  and 31
+  add a, a
+  add a, a
+  add a, a
+  ld b, a
   ld a, (M3G_RECORD+14)
+  add a, b
   neg
-  ld (M3G_PRESENT_X), a
+  ld (M3P_X), a
   ld a, (M3G_RECORD+$40+14)
+  add a, b
   neg
-  ld (M3G_HUD_X), a
+  ld (M3P_HUD_X), a
   call _m3r_sprites
   xor a
   ld (M3R_RECORD), a
-  ld de, M3R_CRAM
+  ld de, M3P_CRAM
   call _m3r_palette
   ld a, $40
   ld (M3R_RECORD), a
-  ld de, M3R_HUD_CRAM
+  ld de, M3P_HUD_CRAM
   call _m3r_palette
-  ld a, (M3G_COMPARE_BG)
-  or a
-  jr nz, _m3r_upload_sat
-  ; The complete NT and SAT are uploaded while still blanked. Each bounded
-  ; block returns to an interruptible, closed-port boundary.
-  ld hl, $a000
-  ld de, $3700
-  ld b, 4
-_m3r_upload_nt:
-  push bc
-  push de
-  ld a, e
-  call vdp_set_vram_addr
-  ld bc, $0200
-  call vdp_write_block
-  pop de
-  pop bc
-  ei
-  nop
-  di
-  ld a, d
-  add a, 2
-  ld d, a
-  djnz _m3r_upload_nt
-_m3r_upload_sat:
-  ld a, 0
-  ld d, $3f
-  call vdp_set_vram_addr
-  ld hl, $ab00
-  ld bc, 64
-  call vdp_write_block
-  ld a, $80
-  ld d, $3f
-  call vdp_set_vram_addr
-  ld hl, $ab40
-  ld bc, 128
-  call vdp_write_block
   ld a, (M3G_SPLIT)
-  ld (M3R_SPLIT), a
+  ld (M3P_SPLIT), a
   ld a, (M3G_RECORD+8)
   and $20
   ld a, $f0
   jr z, _m3r_reg1
   or 2
 _m3r_reg1:
-  ld (M3R_REG1), a
+  ld (M3P_REG1), a
   ld a, (M3G_RECORD+9)
   bit 1, a
   ld a, $26
   jr z, _m3r_reg0
   ld a, $06
 _m3r_reg0:
-  ld (M3R_REG0), a
-  ; VDP vertical scroll is latched once per frame. Publish during VBlank.
-_m3r_wait_blank:
-  ei
-  nop
-  in a, ($7e)
-  cp $e0
-  jr c, _m3r_wait_blank
-  di
-  ld a, 1
-  ld (M3G_READY), a
-  call rt_mmc3_display_rearm
-  ld a, (M3G_RECORD+9)
-  and $18
-  ld a, (M3R_REG1)
-  jr nz, _m3r_show
-  and $bf
-_m3r_show:
-  ld b, 1
-  call vdp_set_register
-  ret
+  ld (M3P_REG0), a
+  jp rt_mmc3_commit_display
 
 ; Read a frozen CIRAM source selected by M3R_RECORD. HL=NES nametable addr.
 _m3r_nt_read:
@@ -645,6 +628,9 @@ _m3r_hud_vertical_step:
   push bc
   call rt_mmc3_vertical_increment
   pop bc
+  ei
+  nop
+  di
   djnz _m3r_hud_vertical_step
 _m3r_hud_vertical_done:
   ld a, h
@@ -662,6 +648,16 @@ _m3r_hud_vertical_done:
 ; Exact physical-source/palette/row-offset hash chains. Every slot0..255 is usable;
 ; FFFF is the sentinel, distinct from valid slot00FF.
 _m3r_bg_slot:
+  call _m3r_find_slot
+  jr c, _m3r_missing
+  jp rt_mmc3_reserve_slot
+_m3r_missing:
+  ld a, (M3P_PASS)
+  cp 1
+  ld a, 0
+  ret z
+  jp _m3r_allocate
+_m3r_find_slot:
   ld hl, (M3R_KEY)
   ld a, (M3R_PAL)
   xor l
@@ -677,7 +673,10 @@ _m3r_lookup:
   inc hl
   ld a, (hl)
   cp $ff
-  jr z, _m3r_allocate
+  jr nz, _m3r_candidate
+  scf
+  ret
+_m3r_candidate:
   ld l, c
   ld h, $a8
   ld a, (M3R_KEY)
@@ -701,7 +700,7 @@ _m3r_lookup:
   jr nz, _m3r_chain
   or a
   ld a, c
-  ret z
+  jr z, _m3r_found
   ld h, $b0
   ld a, (M3R_KEY2)
   cp (hl)
@@ -718,26 +717,29 @@ _m3r_lookup:
   ld a, (M3R_OFFSET2)
   cp (hl)
   ld a, c
-  ret z
+  jr nz, _m3r_chain
+_m3r_found:
+  or a                      ; clear carry: slotFF is a valid successful hit
+  ret
 _m3r_chain:
   ld l, c
   ld h, 0
   add hl, hl
   ld de, $ae00
   add hl, de
+  ; Frozen hash traversal is a closed host-service boundary, even for a
+  ; deliberately colliding 256-key chain. Producer/guest remain excluded.
+  ei
+  nop
+  di
   jr _m3r_lookup
 _m3r_allocate:
-  ld hl, (M3R_COUNT)
-  ld a, h
-  or a
-  jr z, _m3r_slot_available
-  ld a, $eb
-  jp rt_mmc3_graphics_trap
-_m3r_slot_available:
-  ld a, l
+  call rt_mmc3_choose_slot
+  ret c
   ld (M3R_SLOT), a
-  inc hl
-  ld (M3R_COUNT), hl
+  call rt_mmc3_unlink_slot
+  ld a, (M3R_SLOT)
+  call rt_mmc3_reserve_slot
   ld l, a
   ld h, $a8
   ld a, (M3R_KEY)
@@ -801,10 +803,12 @@ _m3r_slot_available:
   ld b, a
   call _m3r_convert_tile
   ld a, (M3R_SLOT)
+  or a
   ret
 
 ; HL=physicaltile, DE=SMS VRAM destination, B=NES pal/XYflip bits.
-; Bank0 SRAM restored before return; A/BC/DE/HL scratch. DI throughout.
+; Bank0 SRAM restored before return; A/BC/DE/HL scratch. Host service occurs
+; only at closed SRAM row boundaries; guest producer remains excluded.
 _m3r_convert_tile:
   ld a, b
   ld (M3R_ATTR), a
@@ -819,8 +823,7 @@ _m3r_convert_tile:
   call _m3r_fetch_tile
 _m3r_tile_source_ready:
   pop de
-  ld a, e
-  call vdp_set_vram_addr
+  call rt_mmc3_pattern_stage
   xor a
   ld (M3R_PIXEL), a
   jr _m3r_pattern_row
@@ -847,6 +850,11 @@ _m3r_fetch_tile:
   ld ($fffc), a
   ret
 _m3r_pattern_row:
+  ; Converted bytes are SRAM-only. Every row is a closed host-service
+  ; boundary even while the old committed raster remains visible.
+  ei
+  nop
+  di
   ld a, (M3R_ATTR)
   ld (M3R_ROW_ATTR), a
   ld b, 0
@@ -902,9 +910,11 @@ _m3r_pattern_y:
 _m3r_pattern_x:
   ld a, (M3R_P0)
   ld c, a
-  out ($be), a
+  ld (de), a
+  inc de
   ld a, (M3R_P1)
-  out ($be), a
+  ld (de), a
+  inc de
   or c
   ld c, a
   ld a, (M3R_ROW_ATTR)
@@ -912,18 +922,22 @@ _m3r_pattern_x:
   jr z, _m3r_plane2
   ld a, c
 _m3r_plane2:
-  out ($be), a
+  ld (de), a
+  inc de
   ld a, (M3R_ROW_ATTR)
   and 2
   jr z, _m3r_plane3
   ld a, c
 _m3r_plane3:
-  out ($be), a
+  ld (de), a
+  inc de
   ld a, (M3R_PIXEL)
   inc a
   ld (M3R_PIXEL), a
   cp 8
   jp c, _m3r_pattern_row
+  ld a, 8
+  ld ($fffc), a
   ret
 _m3r_reverse:
   ld b, 8
@@ -1039,7 +1053,8 @@ _m3r_sprite_key:
   pop hl
   ld a, (M3R_ATTR)
   ld b, a
-  call _m3r_convert_tile
+  call rt_mmc3_sprite_changed
+  call nz, _m3r_convert_tile
   ld a, (M3G_RECORD+8)
   bit 5, a
   jr z, _m3r_sprite_next
@@ -1090,12 +1105,20 @@ _m3r_palette_source:
   ld (de), a
   inc de
   inc c
+  ; Pending palettes are SRAM/native preparation, not an open CRAM write.
+  ; Do not concatenate two 32-color DI loops while old display is serviced.
+  ei
+  nop
+  di
   ld a, c
   cp 32
   jr c, _m3r_palette_color
   ret
 
 rt_mmc3_display_rearm:
+  ld a, (M3P_STATE)
+  or a
+  ret nz
   ld a, (M3G_READY)
   or a
   ret z
@@ -1126,9 +1149,9 @@ _m3r_display_no_split:
   jp vdp_set_register
 
 rt_mmc3_display_line:
-  ld a, (M3G_BUSY)
-  cp 2
-  ret z
+  ld a, (M3P_STATE)
+  or a
+  ret nz
   ld a, (M3G_READY)
   or a
   ret z

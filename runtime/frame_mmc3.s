@@ -46,9 +46,7 @@ rt_mmc3_sms_interrupt:
   ld ($c83e), a
   ld ($c83c), de
 _m3f_service:
-  ld a, (M3G_BUSY)
-  cp 2
-  call nz, rt_mmc3_display_rearm
+  call rt_mmc3_display_rearm
   call rt_controller_latch
   call apu_frame_tick
   ld a, ($cb04)
@@ -469,22 +467,22 @@ _m3f_validate_mask:
   ret z
   jp rt_mmc3_raster_unsupported
 
-; Exact compare-before-overwrite, at most128 bytes between host-service
+; Exact compare-before-overwrite, at most64 bytes between host-service
 ; boundaries. BUSY excludes guest reentry, so sources remain immutable.
 _m3f_compare_copy:
   ld a, b
   or a
   jr nz, _m3f_copy_chunk
   ld a, c
-  cp 129
+  cp 65
   jr c, _m3f_copy_last
 _m3f_copy_chunk:
   push bc
-  ld bc, 128
+  ld bc, 64
   call _m3f_copy_part
   pop bc
   ld a, c
-  sub 128
+  sub 64
   ld c, a
   jr nc, _m3f_copy_count
   dec b

@@ -10641,6 +10641,28 @@ mod tests {
             bus.write(0xcb28, 1);
             let mut fired = false;
             let ticks = bus.read(0xcb04);
+            let committed = bus.vram;
+            let guest_cart = bus.cart_ram[0x4000..0x6000].to_vec();
+            let frozen = bus.cart_ram[0x800..0x1980].to_vec();
+            let mut protected = [false; 0x4000];
+            protected[0x3700..0x4000].fill(true);
+            for cell in committed[0x3700..0x3f00].chunks_exact(2) {
+                let tile = usize::from(u16::from_le_bytes([cell[0], cell[1]]) & 511);
+                protected[tile * 32..tile * 32 + 32].fill(true);
+            }
+            for entry in 0..64 {
+                if committed[0x3f00 + entry] == 0xe0 {
+                    continue;
+                }
+                let tile = usize::from(committed[0x3f81 + entry * 2]);
+                let (tile, count) = if bus.vdp_regs[1] & 2 != 0 {
+                    (tile & !1, 2)
+                } else {
+                    (tile, 1)
+                };
+                protected[0x2000 + tile * 32..0x2000 + (tile + count) * 32].fill(true);
+            }
+            let mut committing = false;
             for _ in 0..3_000_000 {
                 if cpu.pc == 7 {
                     break;
@@ -10656,13 +10678,25 @@ mod tests {
                     bus.frame_int_pending = true;
                     fired = true;
                 }
+                let writes = bus.vram_writes;
+                let address =
+                    (usize::from(bus.vdp_addr_high) << 8 | usize::from(bus.vdp_addr_low)) & 0x3fff;
                 cpu.step(bus).unwrap();
+                committing |= bus.read(0xd9f6) != 0;
+                if !committing && bus.vram_writes != writes && protected[address] {
+                    assert_eq!(
+                        bus.vram[address], committed[address],
+                        "preparation changed committed visible byte {address:04X}"
+                    );
+                }
                 assert_eq!(bus.read(0xcb1d), 0);
                 assert!(cpu.sp >= NATIVE_STACK_FLOOR);
             }
             assert!(fired);
             assert_eq!(cpu.pc, 7);
             assert_eq!(bus.read(0xcb04), ticks.wrapping_add(1));
+            assert_eq!(&bus.cart_ram[0x4000..0x6000], guest_cart);
+            assert_eq!(&bus.cart_ram[0x800..0x1980], frozen);
             assert_eq!(
                 (bus.read(0xc070), bus.read(0xc071)),
                 (0, 0),
@@ -11110,6 +11144,1570 @@ mod tests {
 
     #[test]
     #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_publication_bursts_and_queue_are_bounded() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let invoke = |bus: &mut SmsBus,
+                      name: &str,
+                      a: u8,
+                      bc: u16,
+                      de: u16,
+                      hl: u16,
+                      pause_step: Option<usize>| {
+            let mut cpu = Cpu::new();
+            cpu.pc = defs[name].1;
+            cpu.sp = 0xdff0;
+            cpu.a = a;
+            cpu.set_bc(bc);
+            cpu.set_de(de);
+            cpu.set_hl(hl);
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            let mut host_irq = false;
+            for step in 0..200_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                if pause_step == Some(step) {
+                    cpu.sp -= 1;
+                    bus.write(cpu.sp, (cpu.pc >> 8) as u8);
+                    cpu.sp -= 1;
+                    bus.write(cpu.sp, cpu.pc as u8);
+                    cpu.pc = 0x66;
+                    cpu.iff2 = cpu.iff1;
+                    cpu.iff1 = false;
+                }
+                if name == "_m3p_diff"
+                    && bus.ram[0xb28] == 1
+                    && !host_irq
+                    && cpu.iff1
+                    && cpu.ei_pending == 0
+                {
+                    cpu.sp -= 2;
+                    bus.write(cpu.sp, cpu.pc as u8);
+                    bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                    cpu.pc = 0x38;
+                    cpu.iff1 = false;
+                    cpu.iff2 = false;
+                    bus.frame_int_pending = true;
+                    host_irq = true;
+                }
+                cpu.step(bus).unwrap();
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                assert_eq!(bus.read(0xcb1d), 0);
+            }
+            assert_eq!(cpu.pc, 7, "{name}");
+            cpu
+        };
+        // Every legal suffix length, plus pause at every instruction of
+        // representative short/medium/full bursts. This tests the real
+        // stack-entered OUTI suffix, not a Rust replacement for it.
+        for length in 1..=128u8 {
+            let pauses: Vec<_> = if [1, 16, 64, 128].contains(&length) {
+                std::iter::once(None)
+                    .chain((0..usize::from(length) + 15).map(Some))
+                    .collect()
+            } else {
+                vec![None]
+            };
+            for pause in pauses {
+                let mut bus = SmsBus::new(rom.clone(), 0xff);
+                bus.write(0xfffc, 12);
+                bus.write(0xcb03, 0xa5);
+                bus.cart_ram[0x4000..0x6000].fill(0x96);
+                for i in 0..128usize {
+                    bus.cart_ram[0x6000 + i] = (i as u8).wrapping_mul(29);
+                }
+                bus.out_port(0xbf, 0x80);
+                bus.out_port(0xbf, 0x40);
+                let cpu = invoke(
+                    &mut bus,
+                    "_m3p_copy_burst",
+                    length,
+                    0x1234,
+                    0x5678,
+                    0xa000,
+                    pause,
+                );
+                assert_eq!(cpu.hl(), 0xa000 + u16::from(length));
+                assert_eq!(bus.read(0xd9ff), length, "old writer owns consumed count");
+                assert_eq!(
+                    &bus.vram[0x80..0x80 + usize::from(length)],
+                    &bus.cart_ram[0x6000..0x6000 + usize::from(length)]
+                );
+                assert_eq!(bus.vram_writes, u32::from(length));
+                assert_eq!(bus.read(0xfffc), 12);
+                assert_eq!(bus.read(0xcb03), 0xa5);
+                assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x96));
+                bus.out_port(0xbf, 0x80);
+                bus.out_port(0xbf, 0x40);
+                bus.write(0xd9ff, 0x93);
+                let streamed = invoke(
+                    &mut bus,
+                    "_m3p_stream_copy",
+                    length,
+                    0x1234,
+                    0x5678,
+                    0xa000,
+                    pause,
+                );
+                assert_eq!(streamed.de(), 0x5678, "stream remaining-count ABI");
+                assert_eq!(
+                    bus.read(0xd9ff),
+                    0x93,
+                    "stream does not own old count scratch"
+                );
+                assert_eq!(streamed.hl(), 0xa000 + u16::from(length));
+                assert_eq!(bus.vram_writes, u32::from(length) * 2);
+                assert_eq!(
+                    &bus.vram[0x80..0x80 + usize::from(length)],
+                    &bus.cart_ram[0x6000..0x6000 + usize::from(length)]
+                );
+                assert_eq!(bus.read(0xcb03), 0xa5);
+                assert_eq!(bus.read(0xfffc), 12);
+            }
+        }
+        // Queue source/destination/count and bank are all part of adjacency;
+        // a bank change must not merge SRAM aliases into a wrong-bank upload.
+        let mut bus = SmsBus::new(rom.clone(), 0xff);
+        invoke(&mut bus, "_m3p_queue_reset", 0, 0, 0, 0, None);
+        for i in 0..32u16 {
+            invoke(
+                &mut bus,
+                "_m3p_enqueue",
+                8,
+                32,
+                i * 32,
+                0xa000 + i * 32,
+                None,
+            );
+        }
+        assert_eq!((bus.read(0xd9f8), bus.read(0xd9f9)), (8, 0xda));
+        assert_eq!((bus.read(0xda04), bus.read(0xda05)), (0, 4));
+        invoke(&mut bus, "_m3p_enqueue", 12, 32, 1024, 0xa400, None);
+        assert_eq!(bus.read(0xd9f8), 16);
+        assert_eq!(bus.read(0xda0e), 12);
+        // Force the conservative final-queue overflow path after all64
+        // records are occupied. The65th command must survive the flush;
+        // the old display is disabled before any protected byte changes.
+        let mut bus = SmsBus::new(rom.clone(), 0xff);
+        bus.write(0xfffc, 8);
+        bus.write(0xd9f6, 0);
+        bus.write(0xd9fd, 1);
+        bus.vdp_regs[1] = 0xf0;
+        bus.vram.fill(0x91);
+        invoke(&mut bus, "_m3p_queue_reset", 0, 0, 0, 0, None);
+        for index in 0..65u16 {
+            bus.write(0xa000 + index * 2, (index as u8).wrapping_mul(17));
+            invoke(
+                &mut bus,
+                "_m3p_enqueue",
+                8,
+                1,
+                index * 2,
+                0xa000 + index * 2,
+                None,
+            );
+            if index < 64 {
+                assert_eq!(bus.vram_writes, 0);
+                assert_ne!(bus.vdp_regs[1] & 0x40, 0);
+            }
+        }
+        assert_eq!(bus.read(0xd9f6), 2);
+        assert_eq!(bus.vdp_regs[1] & 0x40, 0);
+        assert_eq!(bus.vram_writes, 64);
+        assert_eq!((bus.read(0xd9f8), bus.read(0xd9f9)), (8, 0xda));
+        invoke(&mut bus, "_m3p_flush", 0, 0, 0, 0, None);
+        assert_eq!(bus.vram_writes, 65);
+        for index in 0..65usize {
+            assert_eq!(bus.vram[index * 2], (index as u8).wrapping_mul(17));
+            assert_eq!(bus.vram[index * 2 + 1], 0x91);
+        }
+        for gap in [0usize, 1, 3, 4, 8, 16, 24, 25, 63] {
+            let mut bus = SmsBus::new(rom.clone(), 0xff);
+            bus.write(0xfffc, 8);
+            bus.write(0xd9f6, 2);
+            bus.write(0xd9fd, 1);
+            bus.write(0xc844, 0);
+            bus.write(0xc845, 0x97);
+            bus.vram.fill(0x91);
+            for offset in 0..257u16 {
+                bus.write(0xcc00 + offset, 0x91);
+                bus.write(
+                    0xa000 + offset,
+                    if usize::from(offset) % (gap + 1) == 0 {
+                        0x37
+                    } else {
+                        0x91
+                    },
+                );
+            }
+            invoke(&mut bus, "_m3p_queue_reset", 0, 0, 0, 0, None);
+            invoke(&mut bus, "_m3p_diff", 0, 257, 0xcc00, 0xa000, None);
+            let entries =
+                (u16::from(bus.read(0xd9f9)) * 256 + u16::from(bus.read(0xd9f8)) - 0xda00) / 8;
+            if gap <= 24 {
+                assert_eq!(entries, 1, "gap={gap}");
+            } else {
+                assert!(entries > 1, "gap={gap}");
+            }
+            invoke(&mut bus, "_m3p_flush", 0, 0, 0, 0, None);
+            for offset in 0..257u16 {
+                let expected = bus.read(0xa000 + offset);
+                assert_eq!(
+                    bus.vram[0x3700 + usize::from(offset)],
+                    expected,
+                    "gap={gap}"
+                );
+            }
+            assert!(bus.vram[..0x3700].iter().all(|&b| b == 0x91));
+            assert!(bus.vram[0x3801..].iter().all(|&b| b == 0x91));
+        }
+        // Exact diff endpoints, zero-length admission and overflow after
+        // >64 separated runs. No native shadow is updated by preparation.
+        for length in [0u16, 1, 16, 256, 257, 1792] {
+            for pattern in 0..6 {
+                let mut bus = SmsBus::new(rom.clone(), 0xff);
+                bus.write(0xfffc, 8);
+                bus.write(0xd9f6, 2);
+                bus.write(0xd9fd, 1);
+                bus.write(0xcb28, 1);
+                bus.write(0xcb03, 0xa5);
+                bus.write(0xc831, 2);
+                bus.write(0xc844, 0);
+                bus.write(0xc845, 0x97);
+                bus.vram.fill(0x91);
+                bus.cart_ram[0x4000..0x6000].fill(0x96);
+                let mut expected = bus.vram;
+                for offset in 0..length {
+                    let different = match pattern {
+                        0 => false,
+                        1 => true,
+                        2 => offset == 0,
+                        3 => offset + 1 == length,
+                        4 => offset == 0 || offset + 1 == length,
+                        _ => offset % 26 == 0,
+                    };
+                    let value = if different { 0x37 } else { 0x91 };
+                    bus.write(0xcc00 + offset, 0x91);
+                    bus.write(0xa000 + offset, value);
+                    expected[0x3700 + usize::from(offset)] = value;
+                }
+                invoke(&mut bus, "_m3p_queue_reset", 0, 0, 0, 0, None);
+                invoke(&mut bus, "_m3p_diff", 0, length, 0xcc00, 0xa000, None);
+                invoke(&mut bus, "_m3p_flush", 0, 0, 0, 0, None);
+                assert_eq!(bus.vram, expected, "diff length={length} pattern={pattern}");
+                assert!(
+                    bus.ram[0xc00..0xc00 + usize::from(length)]
+                        .iter()
+                        .all(|&b| b == 0x91)
+                );
+                assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x96));
+                assert_eq!(bus.read(0xcb03), 0xa5);
+                if length >= 16 {
+                    assert_eq!(bus.read(0xcb04), 1);
+                }
+                if pattern == 0 || length == 0 {
+                    assert_eq!(bus.vram_writes, 0);
+                }
+            }
+        }
+        for (commands, length) in [(1u16, 1u16), (1, 128), (1, 256), (54, 8)] {
+            let mut bus = SmsBus::new(rom.clone(), 0xff);
+            bus.write(0xd9f6, 1);
+            bus.write(0xd9fd, 1);
+            let end = 0xda00 + 8 * commands;
+            bus.write(0xd9f8, end as u8);
+            bus.write(0xd9f9, (end >> 8) as u8);
+            for index in 0..commands {
+                let entry = 0xda00 + index * 8;
+                let source = 0xa000 + index * 256;
+                let destination = index * 256;
+                for (offset, value) in [
+                    source as u8,
+                    (source >> 8) as u8,
+                    destination as u8,
+                    (destination >> 8) as u8,
+                    length as u8,
+                    (length >> 8) as u8,
+                    8,
+                    0,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    bus.write(entry + offset as u16, value);
+                }
+            }
+            let cpu = invoke(&mut bus, "_m3p_flush", 0, 0, 0, 0, None);
+            assert_eq!(bus.vram_writes, u32::from(commands) * u32::from(length));
+            println!(
+                "static E0 flush: commands={commands} length={length} interpreterT={}",
+                cpu.cycles
+            );
+        }
+        // Static beam inputs establish branching only, not cycle/deadline
+        // proof. Actual-core scanline events own that separate claim.
+        for (counter, expected, blank) in [
+            (0xe0, 128, false),
+            (0xe5, 128, false),
+            (0xea, 128, false),
+            (0xf0, 128, false),
+            (0xf1, 64, false),
+            (0xf6, 64, false),
+            (0xf7, 16, false),
+            (0xf9, 16, false),
+            (0xfa, 1, false),
+            (0xfb, 128, true),
+            (0xff, 128, true),
+        ] {
+            let mut bus = SmsBus::new(rom.clone(), 0xff);
+            let mut clock = FunctionalVideo::new(262);
+            let offset = if counter <= 0xea {
+                usize::from(counter - 0xe0)
+            } else {
+                usize::from(counter - 0xe5) + 11
+            };
+            clock.advance_to(offset);
+            assert_eq!(clock.vcounter(), counter);
+            bus.functional_video = Some(clock);
+            bus.write(0xd9fd, 1);
+            bus.write(0xd9f6, 1);
+            bus.vdp_regs[1] = 0xf0;
+            let cpu = invoke(&mut bus, "_m3p_admit", 0, 256, 0x4000, 0xc000, None);
+            assert_eq!(cpu.a, expected);
+            assert_eq!((cpu.bc(), cpu.de(), cpu.hl()), (256, 0x4000, 0xc000));
+            assert_eq!(bus.vdp_regs[1] & 0x40 == 0, blank);
+            assert_eq!(bus.read(0xd9f6), if blank { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT LUT; optional TRACE_BASELINE_PROJECT checks old bytes"]
+    fn mmc3_full_bitmap_lut_matches_original_helper() {
+        // Generic pre-LUT runtime helper, not extracted commercial ROM data.
+        // Pinned candidate06 runtime (ROM SHA77ea8eeb) assembled these23 bytes;
+        // the optional baseline check and real-core opcode fixture verify it.
+        //   ld c,a / and7 / ld b,a / ld a,1 / jr z,ready
+        // shift: add a,a / djnz shift
+        // ready: ld b,a / ld a,c / rrca / rrca / rrca / and31
+        //   add a,l / ld l,a / ret nc / inc h / ret
+        const ORIGINAL_HELPER: [u8; 23] = [
+            0x4f, 0xe6, 7, 0x47, 0x3e, 1, 0x28, 3, 0x87, 0x10, 0xfd, 0x47, 0x79, 0x0f, 0x0f, 0x0f,
+            0xe6, 31, 0x85, 0x6f, 0xd0, 0x24, 0xc9,
+        ];
+        const ORIGINAL_PC: u16 = 0xcc00;
+        let project = |variable| {
+            let path = PathBuf::from(std::env::var(variable).unwrap());
+            if path.is_absolute() {
+                path
+            } else {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join(path)
+            }
+        };
+        let new = project("TRACE_FUNCTIONAL_PROJECT");
+        if std::env::var_os("TRACE_BASELINE_PROJECT").is_some() {
+            let old = project("TRACE_BASELINE_PROJECT");
+            let symbols = load_wla_symbol_defs(&old.join("sms.sym"));
+            let (bank, pc) = symbols["_m3p_bit"];
+            assert_eq!(bank, 0);
+            let rom = std::fs::read(old.join("sms.sms")).unwrap();
+            assert_eq!(&rom[usize::from(pc)..usize::from(pc) + 23], ORIGINAL_HELPER);
+        }
+        let current = load_wla_symbol_defs(&new.join("sms.sym"));
+        let mut original = current.clone();
+        original.insert("_m3p_bit".into(), (0, ORIGINAL_PC));
+        let defs = [original, current];
+        let rom = std::fs::read(new.join("sms.sms")).unwrap();
+        let roms = [rom.clone(), rom];
+        let table = defs[1]["rt_mmc3_bit_masks"];
+        let end = defs[1]["rt_mmc3_bit_masks_end"];
+        assert_eq!(table.0, 0);
+        assert_eq!(end.0, 0);
+        assert_eq!(table.1 & 255, 0);
+        assert_eq!(end.1 - table.1, 256);
+        assert!(end.1 <= 0x4000);
+        for input in 0..256usize {
+            assert_eq!(roms[1][usize::from(table.1) + input], 1 << (input & 7));
+        }
+        assert_eq!(defs[1]["_m3p_bit"].0, 0);
+        assert!(defs[1]["_m3p_bit"].1 < 0x4000);
+        // Same address/flag tail, different mask prefix. These checks also
+        // prevent a baseline accidentally regenerated with the optimization.
+        let new_pc = usize::from(defs[1]["_m3p_bit"].1);
+        assert_eq!(
+            &roms[1][new_pc..new_pc + 5],
+            &[0x4f, 0x06, (table.1 >> 8) as u8, 0x0a, 0x47]
+        );
+        assert_eq!(&ORIGINAL_HELPER[12..], &roms[1][new_pc + 5..new_pc + 16]);
+
+        // Nominal T states from pinned GPGX cc_op/cc_ex, not Cpu.cycles.
+        // Whitelisting the actual helper instructions also excludes memory
+        // writes, mapper changes, stack pushes and interrupt-state changes.
+        fn nominal(cpu: &Cpu, bus: &mut SmsBus) -> u64 {
+            match bus.read(cpu.pc) {
+                0x4f | 0x47 | 0x79 | 0x0f | 0x85 | 0x6f | 0x24 | 0x87 => 4,
+                0xe6 | 0x06 | 0x3e | 0x0a => 7,
+                0x28 => {
+                    if cpu.f & 0x40 != 0 {
+                        12
+                    } else {
+                        7
+                    }
+                }
+                0x10 => {
+                    if cpu.b == 1 {
+                        8
+                    } else {
+                        13
+                    }
+                }
+                0xd0 => {
+                    if cpu.f & 1 == 0 {
+                        11
+                    } else {
+                        5
+                    }
+                }
+                0xc9 => 10,
+                op => panic!("unaccounted bitmap opcode {op:02X} at {:04X}", cpu.pc),
+            }
+        }
+        fn expected(input: u8, base: u16) -> (u8, u8, u16, u16) {
+            let offset = input >> 3;
+            let low = base as u8;
+            let sum = u16::from(low) + u16::from(offset);
+            let a = sum as u8;
+            let carry = sum > 255;
+            let mut f = (a & 0xa8)
+                | (u8::from(a == 0) << 6)
+                | (u8::from((low & 15) + (offset & 15) > 15) << 4)
+                | (u8::from((!(offset ^ low) & (offset ^ a)) & 0x80 != 0) << 2)
+                | u8::from(carry);
+            if carry {
+                let high = (base >> 8) as u8;
+                let next = high.wrapping_add(1);
+                f = (next & 0xa8)
+                    | (u8::from(next == 0) << 6)
+                    | (u8::from(high & 15 == 15) << 4)
+                    | (u8::from(high == 0x7f) << 2)
+                    | 1;
+            }
+            (
+                a,
+                f,
+                (u16::from(1u8 << (input & 7)) << 8) | u16::from(input),
+                base.wrapping_add(u16::from(offset)),
+            )
+        }
+        let mut buses = roms.map(|rom| {
+            let mut bus = SmsBus::new(rom, 0xff);
+            for (offset, byte) in ORIGINAL_HELPER.iter().enumerate() {
+                bus.write(ORIGINAL_PC + offset as u16, *byte);
+            }
+            bus
+        });
+        let bases = [0xd7c0, 0xd7e0, 0xd980, 0x00ff, 0x7ff8, 0xfff8];
+        let mut vectors = 0usize;
+        for base in bases {
+            for input in 0..=255u8 {
+                for flags in 0..=255u8 {
+                    for iff in 0..4u8 {
+                        let control = [0, 8, 12][usize::from(input.wrapping_add(flags)) % 3];
+                        let mapping = [0, 4 + (flags % 90), 96 + (input % 32)];
+                        let mut results = Vec::with_capacity(2);
+                        for (index, bus) in buses.iter_mut().enumerate() {
+                            bus.write(0xfffc, control);
+                            bus.write(0xfffe, mapping[1]);
+                            bus.write(0xffff, mapping[2]);
+                            bus.write(0xcb03, 0xa5);
+                            let mut cpu = Cpu::new();
+                            cpu.pc = defs[index]["_m3p_bit"].1;
+                            cpu.a = input;
+                            cpu.f = flags;
+                            cpu.set_bc(u16::from(flags) * 257);
+                            cpu.set_de(base ^ (u16::from(flags) << 8) ^ u16::from(input));
+                            cpu.set_hl(base);
+                            cpu.sp = 0xdff0;
+                            cpu.iff1 = iff & 1 != 0;
+                            cpu.iff2 = iff & 2 != 0;
+                            cpu.af_shadow = 0x1973;
+                            cpu.bc_shadow = 0x4268;
+                            cpu.de_shadow = 0xa35f;
+                            cpu.hl_shadow = 0x8012;
+                            bus.write(cpu.sp, 7);
+                            bus.write(cpu.sp + 1, 0);
+                            let mut ticks = 0;
+                            for _ in 0..64 {
+                                if cpu.pc == 7 {
+                                    break;
+                                }
+                                ticks += nominal(&cpu, bus);
+                                cpu.step(bus).unwrap();
+                            }
+                            assert_eq!(cpu.pc, 7);
+                            assert_eq!((cpu.a, cpu.f, cpu.bc(), cpu.hl()), expected(input, base));
+                            assert_eq!(cpu.de(), base ^ (u16::from(flags) << 8) ^ u16::from(input));
+                            assert_eq!(cpu.sp, 0xdff2);
+                            assert_eq!(
+                                (cpu.iff1, cpu.iff2, cpu.ei_pending),
+                                (iff & 1 != 0, iff & 2 != 0, 0)
+                            );
+                            assert_eq!(
+                                (cpu.af_shadow, cpu.bc_shadow, cpu.de_shadow, cpu.hl_shadow),
+                                (0x1973, 0x4268, 0xa35f, 0x8012)
+                            );
+                            assert_eq!(bus.slot_bank, mapping);
+                            assert_eq!(bus.read(0xfffc), control);
+                            assert_eq!(bus.read(0xcb03), 0xa5);
+                            let carry = u16::from(base as u8) + u16::from(input >> 3) > 255;
+                            let old_cost = if input & 7 == 0 {
+                                80
+                            } else {
+                                70 + 17 * u64::from(input & 7)
+                            };
+                            assert_eq!(
+                                ticks,
+                                if index == 0 { old_cost } else { 64 } + if carry { 8 } else { 0 }
+                            );
+                            results.push((cpu.a, cpu.f, cpu.bc(), cpu.de(), cpu.hl(), cpu.sp));
+                        }
+                        assert_eq!(results[0], results[1]);
+                        vectors += 1;
+                    }
+                }
+            }
+        }
+        println!(
+            "bitmap LUT: {vectors} original/new/formula vectors; old80/87/104/121/138/155/172/189T, new64T, both+8 on carry"
+        );
+
+        // Actual Pause and full host handlers interrupt every helper boundary.
+        // No guest reentry is allowed while the renderer owns the main context.
+        // Reject even transient handler writes to the RAM-resident oracle.
+        struct ProtectedHelper<'a>(&'a mut SmsBus);
+        impl Bus for ProtectedHelper<'_> {
+            fn read(&mut self, address: u16) -> u8 {
+                self.0.read(address)
+            }
+            fn write(&mut self, address: u16, value: u8) {
+                let canonical = if address >= 0xe000 {
+                    address - 0x2000
+                } else {
+                    address
+                };
+                assert!(
+                    !(ORIGINAL_PC..ORIGINAL_PC + 23).contains(&canonical),
+                    "handler overwrote helper"
+                );
+                self.0.write(address, value);
+            }
+            fn in_port(&mut self, port: u8) -> u8 {
+                self.0.in_port(port)
+            }
+            fn out_port(&mut self, port: u8, value: u8) {
+                self.0.out_port(port, value);
+            }
+        }
+        let mut interrupt_vectors = 0usize;
+        for (index, bus) in buses.iter_mut().enumerate() {
+            for input in 0..=255u8 {
+                for base in [0xd7c0, 0x7ff8, 0xfff8] {
+                    for kind in 0..3 {
+                        let mut boundary = 0;
+                        loop {
+                            bus.write(0xfffc, 12);
+                            bus.write(0xfffe, 23);
+                            bus.write(0xffff, 101);
+                            bus.write(0xcb14, 23);
+                            bus.write(0xcb28, 1);
+                            bus.write(0xc831, 2);
+                            bus.write(0xc833, 1);
+                            bus.write(0xc8f2, 0x26);
+                            bus.write(0xd9f6, 0);
+                            bus.write(0xd9fd, 0);
+                            bus.write(0xcb03, 0xa5);
+                            bus.write(0xcb04, 0);
+                            bus.write(0xcb05, 0);
+                            bus.write(0xcb2e, 0);
+                            bus.frame_int_pending = false;
+                            let guest = bus.ram[..0x800].to_vec();
+                            let cart = bus.cart_ram;
+                            let mut cpu = Cpu::new();
+                            cpu.pc = defs[index]["_m3p_bit"].1;
+                            cpu.a = input;
+                            cpu.f = input ^ 0xa5;
+                            cpu.set_bc(0x9763);
+                            cpu.set_de(0xb25e);
+                            cpu.set_hl(base);
+                            cpu.sp = 0xdff0;
+                            cpu.iff1 = kind != 0;
+                            cpu.iff2 = kind != 0;
+                            bus.write(cpu.sp, 7);
+                            bus.write(cpu.sp + 1, 0);
+                            let mut steps = 0;
+                            let mut injected = false;
+                            while cpu.pc != 7 && steps < 64 {
+                                if steps == boundary {
+                                    cpu.sp -= 2;
+                                    bus.write(cpu.sp, cpu.pc as u8);
+                                    bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                                    let resume = cpu.pc;
+                                    cpu.pc = if kind == 2 { 0x38 } else { 0x66 };
+                                    cpu.iff2 = cpu.iff1;
+                                    cpu.iff1 = false;
+                                    if kind == 2 {
+                                        cpu.iff2 = false;
+                                        bus.frame_int_pending = true;
+                                    }
+                                    for _ in 0..20_000 {
+                                        cpu.step(&mut ProtectedHelper(bus)).unwrap();
+                                        assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                                        assert_eq!(bus.read(0xcb1d), 0);
+                                        if cpu.pc == resume {
+                                            break;
+                                        }
+                                    }
+                                    assert_eq!(cpu.pc, resume);
+                                    injected = true;
+                                }
+                                nominal(&cpu, bus);
+                                cpu.step(bus).unwrap();
+                                steps += 1;
+                            }
+                            assert_eq!(cpu.pc, 7);
+                            assert_eq!((cpu.a, cpu.f, cpu.bc(), cpu.hl()), expected(input, base));
+                            assert_eq!((cpu.de(), cpu.sp), (0xb25e, 0xdff2));
+                            assert_eq!((cpu.iff1, cpu.iff2), (kind != 0, kind != 0));
+                            assert_eq!(bus.slot_bank, [0, 23, 101]);
+                            assert_eq!(bus.read(0xfffc), 12);
+                            assert_eq!(bus.read(0xcb03), 0xa5);
+                            assert_eq!(bus.read(0xcb04), u8::from(injected && kind == 2));
+                            assert_eq!(bus.read(0xcb05), u8::from(injected && kind == 2));
+                            assert_eq!(bus.read(0xcb2e), if injected && kind != 2 { 4 } else { 0 });
+                            assert_eq!(&bus.ram[..0x800], guest);
+                            assert_eq!(bus.cart_ram, cart);
+                            if !injected {
+                                break;
+                            }
+                            interrupt_vectors += 1;
+                            boundary += 1;
+                        }
+                    }
+                }
+            }
+        }
+        println!("bitmap LUT: {interrupt_vectors} old/new full Pause/host IRQ boundary vectors");
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT LUT and Docker WLA-DX"]
+    fn mmc3_full_bitmap_lut_requires_aligned_fixed_bank_space() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let project = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        let source = std::fs::read_to_string(project.join("runtime/present_mmc3.s")).unwrap();
+        let start = source.find(".section \"mmc3_bit_masks\"").unwrap();
+        let end = start + source[start..].find(".ends").unwrap() + 5;
+        let section = &source[start..end];
+        assert!(
+            section
+                .lines()
+                .next()
+                .unwrap()
+                .contains("BANK 0 SLOT 0 ALIGN 256 FREE RETURNORG")
+        );
+        let work = root.join(format!(
+            "out/tests/mmc3-bit-lut-placement-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::copy(project.join("Makefile"), work.join("Makefile")).unwrap();
+        std::fs::copy(project.join("link.cfg"), work.join("link.cfg")).unwrap();
+        let uid = std::process::Command::new("id").arg("-u").output().unwrap();
+        let gid = std::process::Command::new("id").arg("-g").output().unwrap();
+        assert!(uid.status.success() && gid.status.success());
+        let user = format!(
+            "{}:{}",
+            String::from_utf8_lossy(&uid.stdout).trim(),
+            String::from_utf8_lossy(&gid.stdout).trim()
+        );
+        for (name, occupied, tail, success) in [
+            ("aligned256", 0x3f00, None, true),
+            ("tail255", 0x3f01, None, false),
+            ("unaligned256", 0x3e80, Some(0x3f80), false),
+        ] {
+            let mut asm = format!(
+                ".memorymap\n defaultslot 0\n slotsize $4000\n slot 0 $0000\n slot 1 $4000\n.endme\n.rombankmap\n bankstotal 2\n banksize $4000\n banks 2\n.endro\n.bank 0 slot 0\n.org 0\n.section \"occupied\" force\n.dsb {occupied}, $ff\n.ends\n"
+            );
+            if let Some(address) = tail {
+                asm.push_str(&format!(
+                    ".org {address}\n.section \"occupied_tail\" force\n.dsb {}, $ff\n.ends\n",
+                    0x4000 - address
+                ));
+            }
+            asm.push_str(section);
+            asm.push('\n');
+            std::fs::write(work.join("sms.asm"), asm).unwrap();
+            let output = std::process::Command::new("docker")
+                .args(["run", "--rm", "--network", "none", "--user", &user, "-v"])
+                .arg(format!("{}:/work", root.display()))
+                .args(["nes-to-sms-poc", "make", "-B", "-C"])
+                .arg(PathBuf::from("/work").join(work.strip_prefix(&root).unwrap()))
+                .output()
+                .unwrap();
+            std::fs::write(
+                work.join(format!("{name}.log")),
+                [&output.stdout[..], &output.stderr[..]].concat(),
+            )
+            .unwrap();
+            assert_eq!(
+                output.status.success(),
+                success,
+                "{name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if success {
+                let defs = load_wla_symbol_defs(&work.join("sms.sym"));
+                assert_eq!(defs["rt_mmc3_bit_masks"], (0, 0x3f00));
+            } else {
+                assert!(String::from_utf8_lossy(&output.stderr).contains("mmc3_bit_masks"));
+            }
+        }
+        println!(
+            "bitmap LUT aligned fit / 255-byte tail / unaligned 256-byte hole: {}",
+            work.display()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_publication_stock_guard_instruction_bound() {
+        // Test-only nominal timing, independently checked against pinned
+        // GPGX a7985a9c z80.c cc_op/cc_ed and conditional CC(ex) additions.
+        // This does not execute semantics or use Cpu's approximate cycles;
+        // unknown opcodes fail closed instead of receiving a guessed cost.
+        fn nominal(cpu: &Cpu, bus: &mut SmsBus) -> u64 {
+            let op = bus.read(cpu.pc);
+            let z = cpu.f & 0x40 != 0;
+            let c = cpu.f & 1 != 0;
+            match op {
+                0x00 | 0xf3 | 0xfb | 0xeb => 4,
+                0x01 | 0x11 | 0x21 | 0x31 => 10,
+                0x06 | 0x0e | 0x16 | 0x1e | 0x26 | 0x2e | 0x3e | 0xfe | 0xf6 | 0xc6 | 0xce => 7,
+                0x03 | 0x13 | 0x23 | 0x33 | 0x0b | 0x1b | 0x2b | 0x3b => 6,
+                0x04 | 0x05 | 0x0c | 0x0d | 0x14 | 0x15 | 0x1c | 0x1d => 4,
+                0x09 | 0x19 | 0x29 | 0x39 => 11,
+                0x22 | 0x2a => 16,
+                0x32 | 0x3a => 13,
+                0x40..=0x75 | 0x77..=0x7f => {
+                    if op & 7 == 6 || (op >> 3) & 7 == 6 {
+                        7
+                    } else {
+                        4
+                    }
+                }
+                0x80..=0xbf => {
+                    if op & 7 == 6 {
+                        7
+                    } else {
+                        4
+                    }
+                }
+                0x18 => 12,
+                0x20 | 0x28 | 0x30 | 0x38 => {
+                    let taken = match op {
+                        0x20 => !z,
+                        0x28 => z,
+                        0x30 => !c,
+                        _ => c,
+                    };
+                    if taken { 12 } else { 7 }
+                }
+                0xc0 | 0xc8 | 0xd0 | 0xd8 => {
+                    let taken = match op {
+                        0xc0 => !z,
+                        0xc8 => z,
+                        0xd0 => !c,
+                        _ => c,
+                    };
+                    if taken { 11 } else { 5 }
+                }
+                0xc3 | 0xc2 | 0xca | 0xd2 | 0xda => 10,
+                0xc5 | 0xd5 | 0xe5 | 0xf5 => 11,
+                0xc1 | 0xd1 | 0xe1 | 0xf1 => 10,
+                0xc9 => 10,
+                0xcd => 17,
+                0xd3 | 0xdb => 11,
+                0xe3 => 19,
+                0xed => match bus.read(cpu.pc.wrapping_add(1)) {
+                    0x44 => 8,
+                    0x45 => 14,
+                    0x52 => 15,
+                    0x5b => 20,
+                    0xa3 => 16,
+                    other => panic!("unaccounted ED {other:02x} at {:04x}", cpu.pc),
+                },
+                _ => panic!("unaccounted opcode {op:02x} at {:04x}", cpu.pc),
+            }
+        }
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let old_sample = defs
+            .get("_m3p_sample_beam")
+            .map_or(defs["_m3p_admit_again"].1 + 7, |entry| entry.1);
+        let stream_sample = defs.get("_m3p_stream_sample_beam").map(|entry| entry.1);
+        let writers = if let Some(sample) = stream_sample {
+            vec![("stream", sample, false), ("old", old_sample, true)]
+        } else {
+            vec![("old", old_sample, false)]
+        };
+        for (writer, sample, direct_old) in writers {
+            assert_eq!(
+                &rom[usize::from(sample)..usize::from(sample) + 2],
+                &[0xdb, 0x7e]
+            );
+            // Measure the rejected-admission path through the actual register-1
+            // control write. One Pause may arrive anywhere in either this path or
+            // the preceding burst; its acceptance/body cost must be counted once.
+            let mut fallback = 0;
+            let mut fallback_pause = 0;
+            for pause in std::iter::once(None).chain((0..40usize).map(Some)) {
+                let mut bus = SmsBus::new(rom.clone(), 0xff);
+                bus.functional_video = Some(FunctionalVideo::new(262 * 228));
+                bus.write(0xd9f6, 1);
+                bus.write(0xd9fd, 1);
+                bus.vdp_regs[1] = 0xf0;
+                let mut cpu = Cpu::new();
+                cpu.pc = sample;
+                cpu.sp = 0xdff0;
+                cpu.set_bc(129);
+                let mut cycles = 0;
+                let mut injected = false;
+                for step in 0..80 {
+                    if pause == Some(step) {
+                        cpu.sp -= 2;
+                        bus.write(cpu.sp, cpu.pc as u8);
+                        bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                        cpu.pc = 0x66;
+                        cpu.iff2 = cpu.iff1;
+                        cpu.iff1 = false;
+                        cycles += 11;
+                        injected = true;
+                    }
+                    cycles += nominal(&cpu, &mut bus);
+                    bus.functional_video
+                        .as_mut()
+                        .unwrap()
+                        .advance_to(33 * 228 + cycles as usize);
+                    cpu.step(&mut bus).unwrap();
+                    if bus.vdp_regs[1] & 0x40 == 0 {
+                        break;
+                    }
+                }
+                assert_eq!(bus.vdp_regs[1] & 0x40, 0);
+                if pause.is_none() {
+                    fallback = cycles;
+                }
+                if injected {
+                    fallback_pause = fallback_pause.max(cycles);
+                }
+            }
+            assert_eq!(
+                (fallback, fallback_pause),
+                if writer == "stream" {
+                    (160, 226)
+                } else {
+                    (184, 250)
+                }
+            );
+            let pause_cost = fallback_pause - fallback;
+            // Account exact nominal instruction outcomes; never Cpu.cycles.
+            // The actual core's scanline/port events remain a separate oracle.
+            // Stream preconditions: final commit phase, interrupts masked,
+            // at most one Pause edge per interval. The old writer instead
+            // enters its actual early phase and waits through VBlank with
+            // closed host-service slots. This is not a timing bound for
+            // arbitrary IRQ work, repeated NMIs, other modes or WAIT states.
+            // FF is checked as a static rejected-admission branch above. Starting
+            // a visible transaction on FF's final T-state is deliberately NOT a
+            // legal entry: no CPU can disable before the immediately next line.
+            // The prior admitted-burst bound makes that late entry unreachable.
+            for counter in [
+                0xeau8, 0xe5, 0xf0, 0xf1, 0xf2, 0xf3, 0xf6, 0xf7, 0xf9, 0xfa, 0xfb,
+            ] {
+                let physical = if counter <= 0xea {
+                    usize::from(counter)
+                } else {
+                    usize::from(counter) + 6
+                };
+                let mut worst = 0;
+                let mut worst_no_pause = 0;
+                let mut worst_enabled_write = 0;
+                for length in [1u16, 16, 64, 128, 129, 256, 257] {
+                    for destination in [0u8, 0xff] {
+                        for pause in std::iter::once(None).chain((0..230usize).map(Some)) {
+                            let mut bus = SmsBus::new(rom.clone(), 0xff);
+                            bus.functional_video = Some(FunctionalVideo::new(262 * 228));
+                            bus.write(0xd9f6, 1);
+                            bus.write(0xd9fd, 1);
+                            bus.write(0xd9f8, 16);
+                            bus.write(0xd9f9, 0xda);
+                            bus.vdp_regs[1] = 0xf0;
+                            for index in 0..2u16 {
+                                let entry = 0xda00 + index * 8;
+                                for (offset, value) in [
+                                    0,
+                                    0xa0,
+                                    destination,
+                                    0,
+                                    length as u8,
+                                    (length >> 8) as u8,
+                                    8,
+                                    0,
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                {
+                                    bus.write(entry + offset as u16, value);
+                                }
+                            }
+                            let mut cpu = Cpu::new();
+                            cpu.pc = defs["_m3p_flush"].1;
+                            cpu.sp = 0xdff0;
+                            bus.write(cpu.sp, 7);
+                            bus.write(cpu.sp + 1, 0);
+                            if direct_old {
+                                // Enter the old writer with its documented source,
+                                // destination/count and next-descriptor stack word.
+                                // The next command's actual early-writer setup
+                                // is included in the next-sample bound.
+                                cpu.pc = defs["_m3p_burst"].1;
+                                cpu.set_hl(0xa000);
+                                cpu.set_de(u16::from(destination));
+                                cpu.set_bc(length);
+                                cpu.sp -= 2;
+                                bus.write(cpu.sp, 8);
+                                bus.write(cpu.sp + 1, 0xda);
+                                bus.write(0xfffc, 8);
+                                bus.write(0xd9f6, 0);
+                                bus.write(0xd9fd, 0);
+                            }
+                            let mut anchor = None;
+                            let mut sample_step = 0;
+                            let mut second_sample = None;
+                            let mut blank_at = None;
+                            let mut injected = false;
+                            let mut first_sample_done = false;
+                            let mut exact_cycles = 0u64;
+                            let mut last_first_interval_write = 0;
+                            let mut host_service_slots = 0;
+                            // At most514 data bytes: an initial partial blank
+                            // plus two complete blank intervals suffice. Count
+                            // at most three physical frames at the minimum4T
+                            // opcode cost, plus setup. Early waiting is real
+                            // execution, not a skipped/fast-forwarded timeout.
+                            let max_steps = if direct_old {
+                                3 * 262 * 228 / 4 + 1000
+                            } else {
+                                4000
+                            };
+                            for step in 0..max_steps {
+                                if cpu.pc == 7 {
+                                    break;
+                                }
+                                if cpu.pc == old_sample || Some(cpu.pc) == stream_sample {
+                                    if anchor.is_none() {
+                                        assert_eq!(cpu.pc, sample);
+                                        anchor = Some(exact_cycles);
+                                        sample_step = step;
+                                    } else if second_sample.is_none() {
+                                        second_sample = Some(exact_cycles - anchor.unwrap());
+                                        assert!(
+                                            step - sample_step < 230,
+                                            "Pause positions must cover the complete first interval"
+                                        );
+                                    }
+                                }
+                                if anchor.is_some() {
+                                    if !injected && pause == Some(step - sample_step) {
+                                        cpu.sp -= 2;
+                                        bus.write(cpu.sp, cpu.pc as u8);
+                                        bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                                        cpu.pc = 0x66;
+                                        cpu.iff2 = cpu.iff1;
+                                        cpu.iff1 = false;
+                                        exact_cycles += 11; // NMI acceptance, separate from ISR body.
+                                        injected = true;
+                                    }
+                                }
+                                let writes = bus.vram_writes;
+                                let enabled = bus.vdp_regs[1] & 0x40 != 0;
+                                if direct_old && bus.read(cpu.pc) == 0xfb {
+                                    assert_eq!(
+                                        (bus.read(cpu.pc + 1), bus.read(cpu.pc + 2)),
+                                        (0, 0xf3),
+                                        "old writer must close each host-service opportunity with NOP/DI"
+                                    );
+                                    host_service_slots += 1;
+                                }
+                                exact_cycles += nominal(&cpu, &mut bus);
+                                if let Some(start) = anchor {
+                                    // GPGX charges the instruction before its port
+                                    // callback. Place the first IN at the sampled line's
+                                    // final T, then conservatively retain its whole cost
+                                    // in every later event's time (and in the bound).
+                                    let elapsed = if !first_sample_done {
+                                        first_sample_done = cpu.pc == sample;
+                                        0
+                                    } else {
+                                        exact_cycles - start
+                                    };
+                                    bus.functional_video.as_mut().unwrap().advance_to(
+                                        (physical - 224) * 228 + 227 + elapsed as usize,
+                                    );
+                                }
+                                let vc = bus.functional_video.as_ref().unwrap().vcounter();
+                                cpu.step(&mut bus).unwrap();
+                                if writes != bus.vram_writes && enabled {
+                                    assert!(
+                                        vc >= 0xe0,
+                                        "active upload counter={counter:02x} pause={pause:?} VC={vc:02x}"
+                                    );
+                                    if second_sample.is_none() {
+                                        last_first_interval_write = exact_cycles - anchor.unwrap();
+                                    }
+                                }
+                                if enabled && bus.vdp_regs[1] & 0x40 == 0 {
+                                    assert!(vc >= 0xe0, "late blank");
+                                    blank_at = Some(exact_cycles - anchor.unwrap());
+                                }
+                                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                                assert_eq!(bus.read(0xcb1d), 0);
+                            }
+                            assert_eq!(cpu.pc, 7);
+                            assert_eq!(cpu.sp, 0xdff2);
+                            assert_eq!(bus.vram_writes, 2 * u32::from(length));
+                            if direct_old {
+                                assert!(host_service_slots > 0);
+                                assert!(!cpu.iff1);
+                            }
+                            worst_enabled_write =
+                                worst_enabled_write.max(last_first_interval_write);
+                            let elapsed = second_sample.or(blank_at).unwrap();
+                            worst = worst.max(elapsed);
+                            if pause.is_none() {
+                                worst_no_pause = worst_no_pause.max(elapsed);
+                            }
+                        }
+                    }
+                }
+                assert!(worst <= worst_no_pause + pause_cost);
+                if counter < 0xfb && !direct_old {
+                    assert!(
+                        worst_no_pause + pause_cost + fallback < ((261 - physical) * 228) as u64,
+                        "{counter:02x}: {worst_no_pause}T + {pause_cost}T Pause + {fallback}T fallback"
+                    );
+                }
+                if direct_old {
+                    assert!(
+                        worst_enabled_write < ((261 - physical) * 228) as u64,
+                        "old enabled write crossed into active display"
+                    );
+                }
+                println!(
+                    "{writer} last-T sample VC={counter:02X}: next-guard/blank={worst_no_pause}T + one Pause={pause_cost}T; rejected admission to blank={fallback}T; last enabled first-interval write={worst_enabled_write}T"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_stream_transactions_preserve_bytes_and_fallback_position() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let source = std::fs::read_to_string(path.join("runtime/present_mmc3.s")).unwrap();
+        let operations: Vec<String> = source
+            .lines()
+            .map(|line| line.split(';').next().unwrap().split_whitespace().collect())
+            .filter(|line: &String| !line.is_empty())
+            .collect();
+        // These private entries are not a state0/2 API. The only initial
+        // stream edge is the flush state1 branch; fallback exits permanently
+        // to the old writer. Keep both that branch and the post-admit check.
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|op| *op == "call_m3p_stream_admit")
+                .count(),
+            1
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|op| *op == "call_m3p_stream_copy")
+                .count(),
+            1
+        );
+        let text = operations.join("\n");
+        assert!(text.contains("lda,(M3P_STATE)\ncp1\njrnz,_m3p_burst"));
+        assert!(text.contains(
+            "call_m3p_stream_admit\nldb,a\nlda,(M3P_STATE)\ncp1\njrnz,_m3p_stream_fallback"
+        ));
+        assert!(text.contains("pophl\npopbc\njp_m3p_burst"));
+        assert_eq!(defs["_m3p_stream_admit"], defs["_m3p_stream_sample_beam"]);
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|op| *op == "ld(M3P_BYTE),a")
+                .count(),
+            1
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|op| *op == "lda,(M3P_BYTE)")
+                .count(),
+            2
+        );
+        let old_copy = usize::from(defs["_m3p_copy_burst"].1);
+        let stream_copy = usize::from(defs["_m3p_stream_copy"].1);
+        assert_eq!(&rom[old_copy..old_copy + 3], &[0x32, 0xff, 0xd9]);
+        assert_eq!(&rom[stream_copy..stream_copy + 3], &[0x47, 0x0e, 0xbe]);
+        let old_sample = defs
+            .get("_m3p_sample_beam")
+            .map_or(defs["_m3p_admit_again"].1 + 7, |entry| entry.1);
+        let stream_sample = defs.get("_m3p_stream_sample_beam").map(|entry| entry.1);
+        let mut vectors = 0;
+        for length in [1u16, 16, 64, 128, 129, 256, 257] {
+            // Different physical SRAM banks share CPU addresses. The first
+            // descriptor wraps VRAM; the final descriptor uses native RAM and
+            // the encoded CRAM destination. Expected bytes come from the
+            // descriptors, never from the writer's private remaining count.
+            let commands = [
+                (8u8, 0xa000u16, 0x3ff0u16, length),
+                (12, 0xa400, 0x10ff, length),
+                (0, 0xcc00, 0xc000, 32),
+            ];
+            for reject_after in [None, Some(1usize), Some(2), Some(3), Some(5)] {
+                let run = |pause: Option<usize>| {
+                    let mut bus = SmsBus::new(rom.clone(), 0xff);
+                    bus.functional_video = Some(FunctionalVideo::new(262 * 228));
+                    bus.vram.fill(0x91);
+                    bus.cram.fill(0x2a);
+                    bus.cart_ram[0x4000..0x6000].fill(0x96);
+                    bus.write(0xfffe, 13);
+                    bus.write(0xffff, 17);
+                    bus.write(0xcb03, 0xa5);
+                    bus.write(0xd9f6, 1);
+                    bus.write(0xd9fd, 1);
+                    bus.write(0xd9f8, 24);
+                    bus.write(0xd9f9, 0xda);
+                    bus.write(0xd9ff, 0x93);
+                    bus.vdp_regs[1] = 0xf0;
+                    let mut expected_vram = bus.vram;
+                    let mut expected_cram = bus.cram;
+                    for (index, &(bank, source, destination, count)) in commands.iter().enumerate()
+                    {
+                        bus.write(0xfffc, bank);
+                        for offset in 0..count {
+                            let mut value = (offset as u8).wrapping_mul(29) ^ (index as u8 * 71);
+                            if destination & 0xc000 == 0xc000 {
+                                value &= 0x3f;
+                            }
+                            bus.write(source + offset, value);
+                            if destination & 0xc000 == 0xc000 {
+                                expected_cram[usize::from(destination.wrapping_add(offset) & 31)] =
+                                    value;
+                            } else {
+                                expected_vram
+                                    [usize::from(destination.wrapping_add(offset) & 0x3fff)] =
+                                    value;
+                            }
+                        }
+                        for (offset, value) in [
+                            source as u8,
+                            (source >> 8) as u8,
+                            destination as u8,
+                            (destination >> 8) as u8,
+                            count as u8,
+                            (count >> 8) as u8,
+                            bank,
+                            0,
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            bus.write(0xda00 + index as u16 * 8 + offset as u16, value);
+                        }
+                    }
+                    let mut cpu = Cpu::new();
+                    cpu.pc = defs["_m3p_flush"].1;
+                    cpu.sp = 0xdff0;
+                    bus.write(cpu.sp, 7);
+                    bus.write(cpu.sp + 1, 0);
+                    let mut samples = 0;
+                    let mut injected = false;
+                    let mut steps = 0;
+                    let mut scratch_expected = 0x93;
+                    let mut old_copy_started = false;
+                    // Static beam control proves transaction semantics only.
+                    // The adjacent exact-timing test owns deadline claims.
+                    while cpu.pc != 7 && steps < 5000 {
+                        if !injected && pause == Some(steps) {
+                            cpu.sp -= 2;
+                            bus.write(cpu.sp, cpu.pc as u8);
+                            bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                            cpu.pc = 0x66;
+                            cpu.iff2 = cpu.iff1;
+                            cpu.iff1 = false;
+                            injected = true;
+                        }
+                        if cpu.pc == defs["_m3p_stream_admit"].1
+                            || cpu.pc == defs["_m3p_stream_copy"].1
+                        {
+                            assert_eq!(bus.read(0xd9f6), 1, "stream entry requires STATE1");
+                            assert!(!cpu.iff1, "stream entry requires DI");
+                        }
+                        if cpu.pc == defs["_m3p_stream_fallback"].1 {
+                            assert_eq!(bus.read(0xd9f6), 2);
+                            assert_eq!(bus.vdp_regs[1] & 0x40, 0);
+                        }
+                        if cpu.pc == defs["_m3p_burst"].1 {
+                            assert_ne!(bus.read(0xd9f6), 1);
+                            old_copy_started = false;
+                        }
+                        if cpu.pc == defs["_m3p_copy_burst"].1 {
+                            scratch_expected = cpu.a;
+                            old_copy_started = true;
+                        }
+                        if bus.read(cpu.pc) == 0x3a
+                            && bus.read(cpu.pc + 1) == 0xff
+                            && bus.read(cpu.pc + 2) == 0xd9
+                        {
+                            assert!(old_copy_started, "old writer read stale stream scratch");
+                        }
+                        if cpu.pc == old_sample || Some(cpu.pc) == stream_sample {
+                            samples += 1;
+                            if reject_after == Some(samples) {
+                                bus.functional_video.as_mut().unwrap().advance_to(33 * 228);
+                            }
+                        }
+                        let writes = bus.vdp_data_writes;
+                        cpu.step(&mut bus).unwrap();
+                        assert_eq!(
+                            bus.read(0xd9ff),
+                            scratch_expected,
+                            "only the old copy may update scratch"
+                        );
+                        if reject_after.is_some_and(|at| samples >= at)
+                            && writes != bus.vdp_data_writes
+                        {
+                            assert_eq!(
+                                bus.vdp_regs[1] & 0x40,
+                                0,
+                                "fallback must blank before resumed writes"
+                            );
+                        }
+                        assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                        assert_eq!(bus.read(0xcb1d), 0);
+                        steps += 1;
+                    }
+                    assert_eq!(
+                        cpu.pc, 7,
+                        "length={length} reject={reject_after:?} pause={pause:?}"
+                    );
+                    assert_eq!(cpu.sp, 0xdff2);
+                    assert_eq!(
+                        bus.vram, expected_vram,
+                        "VRAM length={length} reject={reject_after:?} pause={pause:?}"
+                    );
+                    assert_eq!(bus.cram, expected_cram);
+                    assert_eq!(bus.vram_writes, 2 * u32::from(length));
+                    assert_eq!(bus.cram_writes, 32);
+                    assert_eq!(bus.read(0xcb03), 0xa5);
+                    assert_eq!(
+                        (bus.read(0xfffc), bus.read(0xfffe), bus.read(0xffff)),
+                        (0, 13, 17)
+                    );
+                    assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&v| v == 0x96));
+                    assert_eq!((bus.read(0xd9f8), bus.read(0xd9f9)), (0, 0xda));
+                    if reject_after.is_none() {
+                        assert_eq!(
+                            bus.vdp_control_writes,
+                            2 * commands.len() as u32,
+                            "continuous STATE1 stream must set the VDP address once per command"
+                        );
+                        assert_eq!(bus.read(0xd9f6), 1);
+                        assert!(!cpu.iff1);
+                    } else if samples >= reject_after.unwrap() {
+                        assert_eq!(bus.read(0xd9f6), 2);
+                    }
+                    if pause.is_some() {
+                        assert!(injected);
+                        assert_eq!(bus.read(0xcb2e), 4);
+                    }
+                    steps
+                };
+                let steps = run(None);
+                vectors += 1;
+                for pause in 0..steps {
+                    run(Some(pause));
+                    vectors += 1;
+                }
+            }
+        }
+        println!("stream descriptor/fallback/Pause vectors={vectors}");
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_residency_search_services_pending_host_irq() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        for label in [
+            "rt_mmc3_choose_slot",
+            "_m3r_find_slot",
+            "rt_mmc3_unlink_slot",
+            "rt_mmc3_fill_closed",
+            "_m3r_hud_vertical",
+        ] {
+            let mut bus = SmsBus::new(rom.clone(), 0xff);
+            bus.write(0xfffc, 8);
+            bus.write(0xcb28, 1);
+            bus.write(0xc831, 2); // Producer/guest excluded: nested host service only.
+            bus.write(0xc833, 1);
+            bus.write(0xd9f6, 0);
+            bus.write(0xc8f2, 0x26);
+            bus.write(0xcb03, 0xa1);
+            bus.write(0xc840, 0);
+            bus.write(0xc841, 1);
+            bus.write(0xc84d, 255);
+            bus.write(0xc84b, 1); // Every chain key's low byte is zero: miss.
+            bus.write(0xc84c, 0);
+            for index in 0..32u16 {
+                bus.write(0xd7c0 + index, if index == 31 { 0x7f } else { 0xff });
+            }
+            for slot in 0..256u16 {
+                bus.write(0xac00 + slot * 2, 0);
+                bus.write(0xac01 + slot * 2, 0);
+                let next = if slot == 255 { 0xffff } else { slot + 1 };
+                bus.write(0xae00 + slot * 2, next as u8);
+                bus.write(0xae01 + slot * 2, (next >> 8) as u8);
+            }
+            let guest = bus.ram[..0x800].to_vec();
+            let cartridge = bus.cart_ram.clone();
+            let mapping = (bus.slot_bank, bus.read(0xfffc));
+            let mut cpu = Cpu::new();
+            cpu.pc = defs[label].1;
+            cpu.sp = 0xdff0;
+            if label == "_m3r_hud_vertical" {
+                cpu.a = 31;
+            }
+            cpu.set_hl(0xa000);
+            cpu.set_bc(2048);
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            let mut injected = false;
+            let mut first_boundary = None;
+            for _ in 0..200_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                if !injected && cpu.iff1 && cpu.ei_pending == 0 {
+                    first_boundary = Some(cpu.cycles);
+                    cpu.sp -= 2;
+                    bus.write(cpu.sp, cpu.pc as u8);
+                    bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                    cpu.pc = 0x38;
+                    cpu.iff1 = false;
+                    cpu.iff2 = false;
+                    bus.frame_int_pending = true;
+                    injected = true;
+                }
+                cpu.step(&mut bus).unwrap();
+                assert_eq!(bus.read(0xcb1d), 0, "{label}");
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+            }
+            assert_eq!(cpu.pc, 7, "{label}");
+            assert!(
+                first_boundary.unwrap() < 3000,
+                "{label}: {first_boundary:?}"
+            );
+            assert_eq!(bus.read(0xcb04), 1, "host VINT serviced exactly once");
+            assert_eq!(bus.read(0xcb05), 1);
+            assert_eq!(bus.read(0xcb03), 0xa1);
+            assert_eq!(bus.read(0xc831), 2);
+            assert_eq!(bus.read(0xc8f9), 0, "no guest NMI tick");
+            assert_eq!(&bus.ram[..0x800], guest);
+            assert_eq!((bus.slot_bank, bus.read(0xfffc)), mapping);
+            assert_eq!(&bus.cart_ram[0x4000..0x6000], &cartridge[0x4000..0x6000]);
+            if label == "rt_mmc3_choose_slot" {
+                assert_eq!(cpu.a, 255);
+            }
+            if label == "_m3r_find_slot" {
+                assert_ne!(cpu.f & 1, 0);
+            }
+            if label == "_m3r_hud_vertical" {
+                assert_eq!((cpu.hl(), cpu.c), (0x60, 7));
+            }
+            if label == "rt_mmc3_unlink_slot" {
+                assert_eq!((bus.read(0xaffc), bus.read(0xaffd)), (255, 255));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_capture_copy_services_host_every_64_bytes() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        for length in [0u16, 1, 64, 65, 128, 129, 2048] {
+            for changed in [None, Some(0), Some(length.saturating_sub(1))] {
+                for compare_bg in [0u8, 1] {
+                    for (packet, bg) in [(0u8, 0u8), (1, 0), (1, 1)] {
+                        let mut bus = SmsBus::new(rom.clone(), 0xff);
+                        bus.write(0xfffc, 8);
+                        bus.write(0xcb28, 1);
+                        bus.write(0xcb03, 0xa5);
+                        bus.write(0xc831, 2);
+                        bus.write(0xc833, 1);
+                        bus.write(0xc8f4, packet);
+                        bus.write(0xc8ec, bg);
+                        bus.write(0xc8ed, compare_bg);
+                        bus.cart_ram[0x4000..0x6000].fill(0x96);
+                        for offset in 0..2048u16 {
+                            let value = (offset as u8).wrapping_mul(29);
+                            bus.write(0x8000 + offset, value);
+                            bus.write(
+                                0x8800 + offset,
+                                value ^ u8::from(changed == Some(offset) && offset < length),
+                            );
+                        }
+                        let source = bus.cart_ram[..0x800].to_vec();
+                        let destination = bus.cart_ram[0x800..0x1000].to_vec();
+                        let guest = bus.ram[..0x800].to_vec();
+                        let mapping = (bus.slot_bank, bus.read(0xfffc));
+                        let mut cpu = Cpu::new();
+                        cpu.pc = defs["_m3f_compare_copy"].1;
+                        cpu.sp = 0xdff0;
+                        cpu.set_hl(0x8000);
+                        cpu.set_de(0x8800);
+                        cpu.set_bc(length);
+                        bus.write(cpu.sp, 7);
+                        bus.write(cpu.sp + 1, 0);
+                        let mut serviced = std::collections::HashSet::new();
+                        let mut copied = 0u16;
+                        for _ in 0..200_000 {
+                            if cpu.pc == 7 {
+                                break;
+                            }
+                            let boundary = cpu.iff1
+                                && cpu.ei_pending == 0
+                                && cpu.pc >= defs["_m3f_compare_copy"].1
+                                && cpu.pc < defs["_m3f_copy_part"].1;
+                            if boundary && serviced.insert((cpu.pc, cpu.de())) {
+                                let now = cpu.de() - 0x8800;
+                                assert!(now - copied <= 64, "capture host-service byte bound");
+                                copied = now;
+                                cpu.sp -= 2;
+                                bus.write(cpu.sp, cpu.pc as u8);
+                                bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                                cpu.iff1 = false;
+                                cpu.iff2 = false;
+                                cpu.pc = 0x38;
+                                bus.frame_int_pending = true;
+                            }
+                            cpu.step(&mut bus).unwrap();
+                            assert_eq!(bus.read(0xcb1d), 0);
+                            assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                        }
+                        assert_eq!(
+                            (cpu.pc, cpu.sp, cpu.bc(), cpu.hl(), cpu.de()),
+                            (7, 0xdff2, 0, 0x8000 + length, 0x8800 + length)
+                        );
+                        assert_eq!(copied, length);
+                        assert_eq!(serviced.len(), usize::from(length.div_ceil(64)));
+                        assert_eq!(bus.read(0xcb04), serviced.len() as u8);
+                        assert_eq!(bus.read(0xcb03), 0xa5);
+                        assert_eq!(bus.read(0xc8f9), 0, "host service cannot enter guest");
+                        assert!(!cpu.iff1);
+                        let actual_change = changed.is_some() && length != 0;
+                        assert_eq!(bus.read(0xc8f4), packet | u8::from(actual_change));
+                        assert_eq!(
+                            bus.read(0xc8ec),
+                            bg | u8::from(actual_change && compare_bg != 0)
+                        );
+                        assert_eq!(&bus.cart_ram[..0x800], &source);
+                        assert_eq!(
+                            &bus.cart_ram[0x800..0x800 + usize::from(length)],
+                            &source[..usize::from(length)]
+                        );
+                        assert_eq!(
+                            &bus.cart_ram[0x800 + usize::from(length)..0x1000],
+                            &destination[usize::from(length)..]
+                        );
+                        assert_eq!(&bus.ram[..0x800], &guest);
+                        assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x96));
+                        assert_eq!((bus.slot_bank, bus.read(0xfffc)), mapping);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
     fn mmc3_full_renderer_accepts_256_keys_and_traps_the_257th() {
         let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
         let path = if path.is_absolute() {
@@ -11166,6 +12764,9 @@ mod tests {
             invoke(&mut bus, "rt_mmc3_frame_render");
             assert_eq!((bus.read(0xc840), bus.read(0xc841)), (0, 1));
             assert_eq!(bus.read(0xcb1d), if overflow { 0xeb } else { 0 });
+            if !overflow {
+                assert_mmc3_needed_covers_committed_nt(&bus);
+            }
             if overflow {
                 assert_eq!(
                     bus.vdp_regs[1] & 0x40,
@@ -11173,6 +12774,1044 @@ mod tests {
                     "overflow must remain explicitly blanked"
                 );
             }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_fast_residency_restart_retains_staged_payloads() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let invoke = |bus: &mut SmsBus, label: &str, force_reserve: bool| {
+            let mut cpu = Cpu::new();
+            cpu.pc = defs[label].1;
+            cpu.sp = 0xdff0;
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            let mut first_pass = true;
+            let mut restarts = 0;
+            let mut retained = None;
+            for _ in 0..4_000_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                if label == "rt_mmc3_frame_render" && cpu.pc == defs["_m3r_pass"].1 {
+                    if force_reserve && first_pass {
+                        bus.write(0xd9f7, 1);
+                    }
+                    first_pass = false;
+                    if let Some((dirty, staged)) = retained.take() {
+                        assert_eq!(&bus.ram[0x1980..0x19b0], dirty);
+                        assert_eq!(&bus.cart_ram[0x6000..0x8000], staged);
+                    }
+                }
+                if cpu.pc == defs["_m3r_restart_reserve"].1 {
+                    restarts += 1;
+                    assert!(
+                        bus.ram[0x1980..0x19a0].iter().any(|&b| b != 0),
+                        "restart after staged allocation"
+                    );
+                    retained = Some((
+                        bus.ram[0x1980..0x19b0].to_vec(),
+                        bus.cart_ram[0x6000..0x8000].to_vec(),
+                    ));
+                }
+                cpu.step(bus).unwrap();
+                assert_eq!(bus.read(0xcb1d), 0, "{label}");
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+            }
+            assert_eq!(cpu.pc, 7);
+            restarts
+        };
+        let mut bus = SmsBus::new(rom.clone(), 0xff);
+        bus.write(0xfffc, 8);
+        bus.write(0xc831, 2);
+        bus.write(0xcb08, 0xa8);
+        bus.write(0xcb09, 0x18);
+        bus.write(0xc824, 1);
+        for page in 0..2u16 {
+            for offset in 0..0x3c0u16 {
+                bus.write(
+                    0x8000 + page * 0x400 + offset,
+                    if page == 0 && offset < 255 {
+                        offset as u8
+                    } else {
+                        254
+                    },
+                );
+            }
+        }
+        for offset in 0..256 {
+            bus.write(0xc900 + offset, 0xe0);
+        }
+        for index in 0..8 {
+            bus.write(0xc850 + index, index as u8);
+        }
+        invoke(&mut bus, "rt_mmc3_capture_playfield", false);
+        invoke(&mut bus, "rt_mmc3_capture_single", false);
+        assert_eq!(invoke(&mut bus, "rt_mmc3_frame_render", false), 0);
+        assert_mmc3_needed_covers_committed_nt(&bus);
+        assert_eq!((bus.read(0xc840), bus.read(0xc841)), (255, 0));
+        // Only one old-nonlive slot is available. Changing the first1KiB
+        // selects64 new physical keys: one gets staged before exhaustion,
+        // then the ordinary reserve/build restart protects future old keys.
+        // Repeating next packet forces previously staged/live slots to be
+        // replaced with different payloads, without losing retained dirty.
+        for physical_page in [8, 9, 10] {
+            bus.write(0xc850, physical_page);
+            invoke(&mut bus, "rt_mmc3_capture_playfield", false);
+            invoke(&mut bus, "rt_mmc3_capture_single", false);
+            let producer = bus.cart_ram[0x800..0x1980].to_vec();
+            let mut reference = SmsBus::new(rom.clone(), 0xff);
+            reference.ram = bus.ram;
+            reference.cart_ram = bus.cart_ram.clone();
+            reference.vram = bus.vram;
+            reference.vdp_regs = bus.vdp_regs;
+            reference.cram = bus.cram;
+            reference.write(0xfffc, 8);
+            invoke(&mut reference, "rt_mmc3_frame_render", true);
+            assert_eq!(invoke(&mut bus, "rt_mmc3_frame_render", false), 1);
+            assert_mmc3_needed_covers_committed_nt(&bus);
+            assert_eq!(bus.vram, reference.vram, "page={physical_page}");
+            assert_eq!(bus.cram, reference.cram);
+            assert_eq!(bus.vdp_regs, reference.vdp_regs);
+            assert_eq!(&bus.cart_ram[0x800..0x1980], producer);
+        }
+    }
+
+    fn mmc3_committed_live_slots(bus: &SmsBus) -> [u8; 32] {
+        let mut live = [0; 32];
+        for (index, cell) in bus.vram[0x3700..0x3f00].chunks_exact(2).enumerate() {
+            assert_eq!(cell[1] & 1, 0, "BG slot must remain below256");
+            let native = if index < 896 {
+                0xc00 + index * 2
+            } else {
+                0x1600 + (index - 896) * 2
+            };
+            assert_eq!(
+                &bus.ram[native..native + 2],
+                cell,
+                "committed NT shadow cell{index}"
+            );
+            let slot = usize::from(cell[0]);
+            live[slot / 8] |= 1 << (slot & 7);
+        }
+        live
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_common_ring_matches_source_pixels() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let asm = std::fs::read_to_string(path.join("sms.asm")).unwrap();
+        let chr_base = asm
+            .lines()
+            .find_map(|line| line.strip_prefix(".define MMC3_CHR_DATA_BASE "))
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            * BANK_SIZE;
+        let mut rom = std::fs::read(path.join("sms.sms")).unwrap();
+        for page in 0..8usize {
+            for tile in 0..64usize {
+                for row in 0..8usize {
+                    rom[chr_base + page * 1024 + tile * 16 + row] = (page as u8)
+                        .wrapping_mul(29)
+                        .wrapping_add((tile as u8).wrapping_mul(3))
+                        .rotate_left(row as u32);
+                    rom[chr_base + page * 1024 + tile * 16 + row + 8] = (tile as u8)
+                        .wrapping_mul(7)
+                        .wrapping_add(row as u8 * 11)
+                        .wrapping_add(page as u8);
+                }
+            }
+        }
+        let invoke = |bus: &mut SmsBus, label: &str| {
+            let mut cpu = Cpu::new();
+            cpu.pc = defs[label].1;
+            cpu.sp = 0xdff0;
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            for _ in 0..4_000_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                if label == "rt_mmc3_frame_render_bg_stable"
+                    && defs.contains_key("_m3p_shadow_sat")
+                    && (cpu.pc == defs["_m3p_diff"].1 || cpu.pc == defs["_m3p_shadow_copy"].1)
+                {
+                    assert!(
+                        !(0xa000..0xa800).contains(&cpu.hl()),
+                        "stable NT work was not skipped"
+                    );
+                }
+                cpu.step(bus).unwrap();
+                assert_eq!(bus.read(0xcb1d), 0, "{label}");
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+            }
+            assert_eq!(cpu.pc, 7);
+        };
+        // Independent NES vertical address progression. Do not use the trace
+        // framebuffer's modulo224 shortcut: SMS mode224 has32 NT rows.
+        let advance_y = |mut v: u16| {
+            if v & 0x7000 != 0x7000 {
+                return v + 0x1000;
+            }
+            v &= !0x7000;
+            let y = (v >> 5) & 31;
+            v = match y {
+                29 => (v & !0x03e0) ^ 0x0800,
+                31 => v & !0x03e0,
+                _ => v + 32,
+            };
+            v
+        };
+        for coarse in [0u8, 1, 31] {
+            for fine_x in 0..8u8 {
+                for fine_y in [0u8, 7] {
+                    let split = 192 + (fine_x & 1);
+                    let hud_fine = 7 - fine_x;
+                    let hud_coarse = (coarse + 13) & 31;
+                    let reload = fine_x & 2 != 0;
+                    let mirroring = (fine_x >> 2) & 1;
+                    let mask = if fine_x & 4 != 0 { 0x1e } else { 0x18 };
+                    let ctrl = 0xa8 | ((fine_x & 2) << 3); // independent of CHR inversion
+                    let mut bus = SmsBus::new(rom.clone(), 0xff);
+                    bus.write(0xfffc, 8);
+                    bus.write(0xc831, 2);
+                    bus.write(0xcb08, ctrl);
+                    bus.write(0xcb09, mask);
+                    bus.write(0xc824, mirroring);
+                    // Restrict keys to16 patterns per page so exact mixed
+                    // identities stay within256, while rows/columns differ.
+                    for page in 0..2u16 {
+                        for row in 0..30u16 {
+                            for col in 0..32u16 {
+                                bus.write(
+                                    0x8000 + page * 1024 + row * 32 + col,
+                                    ((col + row * 3 + page * 7) & 15) as u8,
+                                );
+                            }
+                        }
+                        for index in 0..64 {
+                            bus.write(
+                                0x83c0 + page * 1024 + index,
+                                0xe4u8.rotate_left(u32::from((index & 3) * 2)),
+                            );
+                        }
+                    }
+                    for index in 0..8u16 {
+                        let mapped = if fine_x & 1 == 0 { index } else { index ^ 4 };
+                        bus.write(0xc850 + index, mapped as u8);
+                    }
+                    for index in 0..32 {
+                        bus.write(0xc860 + index, (index as u8 * 3) & 63);
+                    }
+                    for index in 0..256 {
+                        bus.write(0xc900 + index, 0xe0);
+                    }
+                    for (index, value) in [24, 1, 0, 17].into_iter().enumerate() {
+                        bus.write(0xc900 + index as u16, value);
+                    }
+                    let pf_t = (u16::from(fine_y) << 12) | 0x0340 | u16::from(coarse);
+                    bus.write(0xc834, (pf_t >> 8) as u8);
+                    bus.write(0xc835, pf_t as u8);
+                    bus.write(0xc836, fine_x);
+                    invoke(&mut bus, "rt_mmc3_capture_playfield");
+                    let hud_t = 0x73a0 | u16::from(hud_coarse);
+                    bus.write(0xc834, (hud_t >> 8) as u8);
+                    bus.write(0xc835, hud_t as u8);
+                    bus.write(0xc836, hud_fine);
+                    bus.write(0xc8f7, if reload { 3 } else { 0 });
+                    bus.write(0xcb0f, 0x1b);
+                    bus.write(0xcb10, 0);
+                    for index in 0..32 {
+                        bus.write(0xc860 + index, (index as u8 * 5 + 7) & 63);
+                    }
+                    invoke(&mut bus, "rt_mmc3_capture_hud");
+                    bus.write(0xc837, split);
+                    for (next_coarse, stable, reenable) in [
+                        (coarse, false, false),
+                        (coarse, true, false),
+                        ((coarse + 1) & 31, false, false),
+                        ((coarse + 1) & 31, false, true),
+                    ] {
+                        if reenable {
+                            bus.write(0x9909, 0);
+                            bus.write(0x9949, 0);
+                            invoke(&mut bus, "rt_mmc3_frame_render");
+                            assert_eq!(bus.vdp_regs[1] & 0x40, 0);
+                            bus.write(0x9909, mask);
+                            bus.write(0x9949, mask);
+                        }
+                        let pf_t = (pf_t & !31) | u16::from(next_coarse);
+                        bus.write(0x990c, pf_t as u8);
+                        let frozen = bus.cart_ram[0x800..0x1980].to_vec();
+                        let prior_nt = bus.vram[0x3700..0x3f00].to_vec();
+                        invoke(
+                            &mut bus,
+                            if stable {
+                                "rt_mmc3_frame_render_bg_stable"
+                            } else {
+                                "rt_mmc3_frame_render"
+                            },
+                        );
+                        if stable {
+                            assert_eq!(&bus.vram[0x3700..0x3f00], prior_nt);
+                        }
+                        assert_mmc3_needed_covers_committed_nt(&bus);
+                        assert_eq!(
+                            bus.vdp_regs[0] & 0xc0,
+                            0,
+                            "top horizontal/right vertical locks must stay OFF"
+                        );
+                        assert_eq!(bus.vdp_regs[0] & 0x20 != 0, mask & 2 == 0);
+                        let ring = if defs.contains_key("_m3r_nt_ring_ready") {
+                            next_coarse * 8
+                        } else {
+                            0
+                        };
+                        assert_eq!(bus.vdp_regs[8], ring.wrapping_add(fine_x).wrapping_neg());
+                        let pf_scroll = bus.vdp_regs[8];
+                        let pf_cram = bus.cram;
+                        invoke(&mut bus, "rt_mmc3_display_line");
+                        assert_eq!(bus.vdp_regs[8], ring.wrapping_add(hud_fine).wrapping_neg());
+                        let hud_scroll = bus.vdp_regs[8];
+                        let hud_cram = bus.cram;
+                        assert_eq!(
+                            &bus.vram[0x3f80..0x3f82],
+                            &[17, 0],
+                            "sprite X unaffected by BG ring"
+                        );
+                        assert_eq!(bus.vram[0x3f00], 24);
+                        assert_eq!(&bus.cart_ram[0x800..0x1980], frozen);
+                        let mut pf_v = pf_t;
+                        let mut hud_v = 0x1b00;
+                        for y in 0..224usize {
+                            let hud = y >= usize::from(split);
+                            let rec = if hud { 0x1940 } else { 0x1900 };
+                            let source_v = if hud && reload { hud_v } else { pf_v };
+                            let source_t = if hud { hud_t } else { pf_t };
+                            let fine = if hud { hud_fine } else { fine_x };
+                            let scroll = if hud { hud_scroll } else { pf_scroll };
+                            let palette = if hud { hud_cram } else { pf_cram };
+                            for x in 0..256usize {
+                                let sx = (x + usize::from(fine)) & 255;
+                                let column = usize::from(source_t & 31) + sx / 8;
+                                let v = (source_v & 0x0be0)
+                                    | ((column & 31) as u16)
+                                    | ((source_t ^ if column >= 32 { 0x400 } else { 0 }) & 0x400);
+                                let nt = usize::from(v & 0xfff);
+                                let offset = if mirroring == 0 {
+                                    nt & 0x7ff
+                                } else {
+                                    (nt & 0x3ff) | ((nt & 0x800) >> 1)
+                                };
+                                let base = if hud { 0x1000 } else { 0x800 };
+                                let tile = usize::from(bus.cart_ram[base + offset]);
+                                let pattern = (usize::from(ctrl & 0x10) << 8) + tile * 16;
+                                let page = usize::from(bus.cart_ram[rec + (pattern >> 10)]);
+                                let address = chr_base
+                                    + page * 1024
+                                    + (pattern & 1023)
+                                    + usize::from((source_v >> 12) & 7);
+                                let raw = ((rom[address] >> (7 - sx % 8)) & 1)
+                                    | (((rom[address + 8] >> (7 - sx % 8)) & 1) << 1);
+                                let attr_nt =
+                                    (nt & 0xc00) | 0x3c0 | ((nt >> 4) & 0x38) | ((nt >> 2) & 7);
+                                let attr_offset = if mirroring == 0 {
+                                    attr_nt & 0x7ff
+                                } else {
+                                    (attr_nt & 0x3ff) | ((attr_nt & 0x800) >> 1)
+                                };
+                                let attr = bus.cart_ram[base + attr_offset];
+                                let subpalette = (attr >> (((v >> 4) & 4) | (v & 2))) & 3;
+                                let expected = if raw == 0 { 0 } else { raw | (subpalette << 2) };
+                                // Independent SMS scanout: hardware256-row map,
+                                // screen-fixed mask, actual committed PF/HUD scroll.
+                                let sms_x = x.wrapping_sub(usize::from(scroll)) & 255;
+                                let sms_y = (y + usize::from(fine_y)) & 255;
+                                let entry = 0x3700 + (sms_y / 8 * 32 + sms_x / 8) * 2;
+                                let slot = usize::from(bus.vram[entry])
+                                    | (usize::from(bus.vram[entry + 1] & 1) << 8);
+                                let addr = slot * 32 + (sms_y & 7) * 4;
+                                let actual = (0..4).fold(0u8, |value, plane| {
+                                    value
+                                        | (((bus.vram[addr + plane] >> (7 - sms_x % 8)) & 1)
+                                            << plane)
+                                });
+                                let masked = x < 8 && mask & 2 == 0;
+                                if !masked {
+                                    assert_eq!(
+                                        actual, expected,
+                                        "coarse{coarse} fx{fine_x} fy{fine_y} split{split} reload{reload} at{x},{y}"
+                                    );
+                                }
+                                let color_index = if masked || expected == 0 {
+                                    0
+                                } else {
+                                    usize::from(expected)
+                                };
+                                let nes_color = bus.cart_ram[rec + 16 + color_index];
+                                // The hardware mask uses sprite-palette backdrop
+                                // reg7, not BG index0; this runtime keeps reg7=0
+                                // and mirrors the NES backdrop into CRAM16.
+                                assert_eq!(bus.vdp_regs[7], 0);
+                                let sms_color_index = if masked {
+                                    16 + usize::from(bus.vdp_regs[7] & 15)
+                                } else {
+                                    usize::from(actual)
+                                };
+                                assert_eq!(
+                                    palette[sms_color_index],
+                                    assets::nes_palette_to_sms_color(nes_color)
+                                );
+                            }
+                            pf_v = advance_y(pf_v);
+                            if hud {
+                                hud_v = advance_y(hud_v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn assert_mmc3_needed_covers_committed_nt(bus: &SmsBus) {
+        let live = mmc3_committed_live_slots(bus);
+        let mut needed: [u8; 32] = bus.ram[0x17e0..0x1800].try_into().unwrap();
+        needed[0] |= 1; // all non-rendered rows are explicitly zero-filled
+        assert_eq!(needed, live, "NEEDED plus padding must equal ALL32 rows");
+        let rows = if bus.ram[0x848] == 0 { 28 } else { 29 };
+        let mut rendered = [0; 32];
+        for cell in bus.vram[0x3700..0x3700 + rows * 64].chunks_exact(2) {
+            let slot = usize::from(cell[0]);
+            rendered[slot / 8] |= 1 << (slot & 7);
+        }
+        assert_eq!(&rendered, &bus.ram[0x17e0..0x1800]);
+        assert!(bus.vram[0x3700 + rows * 64..0x3f00].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_needed_lifetime_matches_all_committed_rows() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let invoke = |bus: &mut SmsBus, label: &str| {
+            let render = label.starts_with("rt_mmc3_frame_render");
+            let old = if render && bus.ram[0x833] != 0 {
+                Some(mmc3_committed_live_slots(bus))
+            } else {
+                None
+            };
+            let mut cpu = Cpu::new();
+            cpu.pc = defs[label].1;
+            cpu.sp = 0xdff0;
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            for _ in 0..3_000_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                if cpu.pc == defs["_m3r_pass"].1 {
+                    if let Some(old) = old {
+                        assert_eq!(&bus.ram[0x17c0..0x17e0], &old);
+                    }
+                }
+                cpu.step(bus).unwrap();
+                assert_eq!(bus.read(0xcb1d), 0, "{label}");
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+            }
+            assert_eq!(cpu.pc, 7, "{label}");
+            if render && bus.ram[0x833] != 0 {
+                assert_mmc3_needed_covers_committed_nt(bus);
+                if let Some(old) = old {
+                    assert_eq!(&bus.ram[0x17c0..0x17e0], &old, "old-live immutable");
+                }
+            }
+        };
+        for fine_y in [0, 7] {
+            let mut bus = SmsBus::new(rom.clone(), 0xff);
+            bus.write(0xfffc, 8);
+            bus.write(0xc831, 2);
+            bus.write(0xcb08, 0xa8);
+            bus.write(0xcb09, 0x18);
+            bus.write(0xc824, 1);
+            bus.write(0xc834, fine_y << 4);
+            for offset in 0..256 {
+                bus.write(0xc900 + offset, 0xe0);
+            }
+            for index in 0..8 {
+                bus.write(0xc850 + index, index as u8);
+            }
+            bus.cart_ram[0x4000..0x6000].fill(0x96);
+            // Full -> full(no visible slot0) -> source-off/reinit -> full ->
+            // stable -> stable -> full. Stable packets must not clear the
+            // live bitmap needed by a later full packet's early uploads.
+            for (tile, stable, mask) in [
+                (0, false, 0x18),
+                (1, false, 0x18),
+                (1, false, 0),
+                (3, false, 0x1e),
+                (1, false, 0x18),
+                (1, true, 0x18),
+                (1, true, 0x18),
+                (2, false, 0x18),
+            ] {
+                eprintln!(
+                    "needed lifetime fineY={fine_y} tile={tile} stable={stable} mask={mask:02X}"
+                );
+                bus.write(0xcb09, mask);
+                for (offset, value) in [if tile == 1 { 24 } else { 0xe0 }, 1, 0, 17]
+                    .into_iter()
+                    .enumerate()
+                {
+                    bus.write(0xc900 + offset as u16, value);
+                }
+                for page in 0..2u16 {
+                    for offset in 0..0x3c0 {
+                        bus.write(0x8000 + page * 0x400 + offset, tile);
+                    }
+                }
+                invoke(&mut bus, "rt_mmc3_capture_playfield");
+                invoke(&mut bus, "rt_mmc3_capture_single");
+                invoke(
+                    &mut bus,
+                    if stable {
+                        "rt_mmc3_frame_render_bg_stable"
+                    } else {
+                        "rt_mmc3_frame_render"
+                    },
+                );
+                if mask == 0 {
+                    assert_eq!(bus.ram[0x833], 0);
+                    assert_eq!(bus.vdp_regs[1] & 0x40, 0);
+                } else if tile == 1 {
+                    assert_eq!(bus.ram[0x17e0] & 1, 0, "slot0 is padding ONLY");
+                    assert_eq!(mmc3_committed_live_slots(&bus)[0] & 1, 1);
+                } else if tile == 3 {
+                    // All source cells are one new identity after reset:
+                    // slot0, palette0, so every NT byte must really be zero,
+                    // not merely equal to an invalidated native shadow.
+                    assert!(bus.vram[0x3700..0x3f00].iter().all(|&b| b == 0));
+                    assert!(bus.vram[0x3f00..0x3f40].iter().all(|&b| b == 0xe0));
+                    assert_eq!(&bus.vram[0x3f80..0x3f82], &[17, 0]);
+                    assert!(bus.vram[0x3f82..0x4000].iter().all(|&b| b == 0));
+                }
+                assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x96));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_bulk_copy_fill_preserve_boundaries() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let lengths: Vec<u16> = (0..=33)
+            .chain([63, 64, 65, 255, 256, 257, 1536, 2048])
+            .collect();
+        for fill in [false, true] {
+            for fill_value in [0, 0x5au8] {
+                for destination in [0xccf1u16, 0xd600] {
+                    for &length in &lengths {
+                        for injection in 0..4 {
+                            let mut bus = SmsBus::new(rom.clone(), 0xff);
+                            bus.write(0xfffc, 8);
+                            bus.write(0xcb28, 1);
+                            bus.write(0xcb03, 0xa5);
+                            bus.write(0xc831, 2);
+                            bus.cart_ram[0x4000..0x6000].fill(0x96);
+                            for offset in 0..2048u16 {
+                                bus.write(0xa000 + offset, (offset as u8).wrapping_mul(29));
+                            }
+                            for offset in 0..length {
+                                bus.write(destination + offset, 0x91);
+                            }
+                            bus.write(destination - 1, 0x67);
+                            bus.write(destination + length, 0x89);
+                            let mut cpu = Cpu::new();
+                            cpu.pc = defs[if fill {
+                                "rt_mmc3_fill_closed"
+                            } else {
+                                "_m3p_shadow_copy"
+                            }]
+                            .1;
+                            cpu.sp = 0xdff0;
+                            cpu.a = fill_value;
+                            cpu.f = 0x95;
+                            cpu.set_bc(length);
+                            cpu.set_hl(if fill { destination } else { 0xa000 });
+                            cpu.set_de(if fill { 0x52a9 } else { destination });
+                            bus.write(cpu.sp, 7);
+                            bus.write(cpu.sp + 1, 0);
+                            let zero_ram = bus.ram;
+                            let zero_cart = bus.cart_ram.clone();
+                            let mut fired = false;
+                            for _ in 0..100_000 {
+                                if cpu.pc == 7 {
+                                    break;
+                                }
+                                let bulk = bus.read(cpu.pc) == 0xed && bus.read(cpu.pc + 1) == 0xb0;
+                                let yield_boundary = cpu.iff1 && cpu.ei_pending == 0;
+                                let trigger = !fired
+                                    && ((injection == 1 && bulk)
+                                        || (injection >= 2 && yield_boundary));
+                                if trigger {
+                                    cpu.sp -= 2;
+                                    bus.write(cpu.sp, cpu.pc as u8);
+                                    bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                                    cpu.iff2 = cpu.iff1;
+                                    cpu.iff1 = false;
+                                    cpu.pc = if injection == 2 { 0x38 } else { 0x66 };
+                                    if injection == 2 {
+                                        bus.frame_int_pending = true;
+                                    }
+                                    fired = true;
+                                }
+                                cpu.step(&mut bus).unwrap();
+                                assert_eq!(bus.read(0xcb1d), 0);
+                                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                            }
+                            assert_eq!(
+                                cpu.pc, 7,
+                                "fill{fill} dst{destination:04X} length{length} injection{injection}"
+                            );
+                            assert_eq!(cpu.sp, 0xdff2);
+                            assert_eq!(cpu.bc(), 0);
+                            assert_eq!(
+                                (cpu.a, cpu.f),
+                                if fill { (fill_value, 0x44) } else { (0, 0x44) }
+                            );
+                            assert_eq!(
+                                cpu.hl(),
+                                if fill {
+                                    destination + length
+                                } else {
+                                    0xa000 + length
+                                }
+                            );
+                            assert_eq!(
+                                cpu.de(),
+                                if fill {
+                                    0x5200 | u16::from(fill_value)
+                                } else {
+                                    destination + length
+                                }
+                            );
+                            assert!(!cpu.iff1 && !cpu.iff2);
+                            assert_eq!(bus.read(destination - 1), 0x67);
+                            assert_eq!(bus.read(destination + length), 0x89);
+                            for offset in 0..length {
+                                assert_eq!(
+                                    bus.read(destination + offset),
+                                    if fill {
+                                        fill_value
+                                    } else {
+                                        (offset as u8).wrapping_mul(29)
+                                    }
+                                );
+                            }
+                            assert_eq!(bus.read(0xcb03), 0xa5);
+                            assert_eq!(bus.read(0xfffc), 8);
+                            assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x96));
+                            if length > 0 && injection >= 2 {
+                                assert!(fired);
+                            }
+                            if length > 1 && injection == 1 {
+                                assert!(fired);
+                            }
+                            if length == 0 {
+                                assert!(!fired);
+                                assert_eq!(bus.ram, zero_ram);
+                                assert_eq!(bus.cart_ram, zero_cart);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_dirty_group_skip_preserves_every_payload() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        for ready in [0, 1] {
+            for phase in [0, 1] {
+                for pattern in 0..4 {
+                    let mut bus = SmsBus::new(rom.clone(), 0xff);
+                    bus.write(0xc833, ready);
+                    bus.write(0xc831, 2);
+                    bus.write(0xcb28, 1);
+                    bus.write(0xcb03, 0xa5);
+                    bus.write(0xd9f6, 2);
+                    bus.write(0xd9fd, phase);
+                    bus.write(0xc8f1, 2);
+                    bus.vram.fill(0x91);
+                    bus.cart_ram[0x4000..0x6000].fill(0x96);
+                    for index in 0..32 {
+                        bus.write(0xd7c0 + index, 0x55);
+                    }
+                    for index in 0..64 {
+                        bus.write(0xd700 + index, if index & 1 == 0 { 0xe0 } else { 24 });
+                    }
+                    let mut dirty = [0u8; 48];
+                    for (index, byte) in dirty.iter_mut().enumerate() {
+                        *byte = match pattern {
+                            0 => 0,
+                            1 => {
+                                if index % 3 == 0 {
+                                    0x81
+                                } else {
+                                    0
+                                }
+                            }
+                            2 => 0xff,
+                            _ => {
+                                if [0, 31, 32, 47].contains(&index) {
+                                    0x81
+                                } else {
+                                    0
+                                }
+                            }
+                        };
+                        bus.write(0xd980 + index as u16, *byte);
+                    }
+                    let mut expected = bus.vram;
+                    for slot in 0..384usize {
+                        let live = ready != 0
+                            && if slot < 256 {
+                                slot & 1 == 0
+                            } else {
+                                ((slot - 256) / 2) & 1 != 0
+                            };
+                        let selected =
+                            dirty[slot / 8] & (1 << (slot & 7)) != 0 && u8::from(live) == phase;
+                        let (control, address) = if slot < 256 {
+                            (12, 0xa000 + slot * 32)
+                        } else if slot < 308 {
+                            (8, 0x9980 + (slot - 256) * 32)
+                        } else {
+                            (8, 0xb600 + (slot - 308) * 32)
+                        };
+                        bus.write(0xfffc, control);
+                        for byte in 0..32usize {
+                            let value = (slot as u8).wrapping_mul(29).wrapping_add(byte as u8 * 7);
+                            bus.write((address + byte) as u16, value);
+                            if selected {
+                                expected[slot * 32 + byte] = value;
+                            }
+                        }
+                    }
+                    bus.write(0xfffc, 8);
+                    let mut visits = 0;
+                    let mut fired = false;
+                    for label in ["_m3p_queue_reset", "_m3p_collect_patterns", "_m3p_flush"] {
+                        let mut cpu = Cpu::new();
+                        cpu.pc = defs[label].1;
+                        cpu.sp = 0xdff0;
+                        bus.write(cpu.sp, 7);
+                        bus.write(cpu.sp + 1, 0);
+                        for _ in 0..1_000_000 {
+                            if cpu.pc == 7 {
+                                break;
+                            }
+                            if cpu.pc == defs["_m3p_collect_selected"].1 {
+                                visits += 1;
+                            }
+                            if !fired
+                                && label == "_m3p_collect_patterns"
+                                && cpu.iff1
+                                && cpu.ei_pending == 0
+                            {
+                                cpu.sp -= 2;
+                                bus.write(cpu.sp, cpu.pc as u8);
+                                bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                                cpu.pc = 0x38;
+                                cpu.iff1 = false;
+                                cpu.iff2 = false;
+                                bus.frame_int_pending = true;
+                                fired = true;
+                            }
+                            cpu.step(&mut bus).unwrap();
+                            assert_eq!(
+                                &bus.ram[0x1980..0x19b0],
+                                &dirty,
+                                "collection cannot create/clear DIRTY bits"
+                            );
+                            assert_eq!(bus.read(0xcb1d), 0);
+                            assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                        }
+                        assert_eq!(cpu.pc, 7);
+                        assert_eq!(cpu.sp, 0xdff2);
+                    }
+                    assert!(fired);
+                    assert_eq!(bus.read(0xcb04), 1);
+                    assert_eq!(visits, dirty.iter().filter(|&&b| b != 0).count() * 8);
+                    assert_eq!(
+                        bus.vram, expected,
+                        "ready{ready} phase{phase} pattern{pattern}"
+                    );
+                    assert_eq!(bus.read(0xcb03), 0xa5);
+                    assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x96));
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_palette_copy_flags_match_always_copy() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        for ready in [0, 1] {
+            for changes in 0..4u8 {
+                for edge in [0, 31u16] {
+                    let mut outcomes = Vec::new();
+                    for force_copy in [false, true] {
+                        let mut bus = SmsBus::new(rom.clone(), 0xff);
+                        bus.write(0xfffc, 8);
+                        bus.write(0xcb28, 1);
+                        bus.write(0xcb03, 0xa5);
+                        bus.write(0xc833, ready);
+                        bus.write(0xc831, 2);
+                        bus.write(0xd9f6, 2);
+                        for index in 0..32u16 {
+                            for (old, pending, value) in [
+                                (0xc8c0, 0xd9b0, index as u8),
+                                (0xc8a0, 0xd9d0, 63 - index as u8),
+                            ] {
+                                bus.write(old + index, value);
+                                bus.write(pending + index, value);
+                            }
+                        }
+                        if changes & 1 != 0 {
+                            let value = bus.read(0xd9b0 + edge) ^ 1;
+                            bus.write(0xd9b0 + edge, value);
+                        }
+                        if changes & 2 != 0 {
+                            let value = bus.read(0xd9d0 + edge) ^ 1;
+                            bus.write(0xd9d0 + edge, value);
+                        }
+                        for (address, value) in [
+                            (0xd9f0, 7),
+                            (0xd9f1, 3),
+                            (0xd9f2, 5),
+                            (0xd9f3, 192),
+                            (0xd9f4, 0xf2),
+                            (0xd9f5, 0x26),
+                        ] {
+                            bus.write(address, value);
+                        }
+                        let pending = bus.ram[0x19b0..0x19f0].to_vec();
+                        let mut cpu = Cpu::new();
+                        cpu.pc = defs["rt_mmc3_commit_display"].1;
+                        cpu.sp = 0xdff0;
+                        bus.write(cpu.sp, 7);
+                        bus.write(cpu.sp + 1, 0);
+                        let mut fired = false;
+                        let mut copies = 0;
+                        let mut sampled = false;
+                        for _ in 0..1_000_000 {
+                            if cpu.pc == 7 {
+                                break;
+                            }
+                            if cpu.pc == defs["_m3p_commit_state"].1 {
+                                assert_eq!(bus.read(0xd9fc), if ready == 0 { 3 } else { changes });
+                                sampled = true;
+                                if force_copy {
+                                    bus.write(0xd9fc, 3);
+                                }
+                                // Uncaptured live NES palette writes do not change
+                                // this already-completed pending publication.
+                                bus.write(0xc860, 0x2f);
+                                bus.write(0xc87f, 0x11);
+                            }
+                            if defs["_m3p_commit_state"].1 <= cpu.pc
+                                && cpu.pc < defs["_m3p_palette_hud_ready"].1
+                                && bus.read(cpu.pc) == 0xed
+                                && bus.read(cpu.pc + 1) == 0xb0
+                            {
+                                copies += 1;
+                            }
+                            if !fired && cpu.iff1 && cpu.ei_pending == 0 {
+                                cpu.sp -= 2;
+                                bus.write(cpu.sp, cpu.pc as u8);
+                                bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                                cpu.pc = 0x38;
+                                cpu.iff1 = false;
+                                cpu.iff2 = false;
+                                bus.frame_int_pending = true;
+                                fired = true;
+                            }
+                            cpu.step(&mut bus).unwrap();
+                            assert_eq!(bus.read(0xcb1d), 0);
+                            assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                        }
+                        assert_eq!(cpu.pc, 7);
+                        assert!(sampled && fired);
+                        assert_eq!(
+                            copies,
+                            32 * if force_copy || ready == 0 {
+                                2
+                            } else {
+                                changes.count_ones()
+                            }
+                        );
+                        assert_eq!(&bus.ram[0x19b0..0x19f0], pending);
+                        assert_eq!(&bus.ram[0x8c0..0x8e0], &pending[..32]);
+                        assert_eq!(&bus.ram[0x8a0..0x8c0], &pending[32..]);
+                        assert_eq!(&bus.cram, &pending[..32]);
+                        assert_eq!(bus.cram_writes, 32, "mandatory CRAM upload remains");
+                        assert_eq!(bus.read(0xcb04), 1);
+                        assert_eq!(bus.read(0xcb03), 0xa5);
+                        outcomes.push((bus.vram, bus.cram, bus.vdp_regs));
+                    }
+                    assert_eq!(
+                        outcomes[0], outcomes[1],
+                        "ready{ready} changes{changes} edge{edge}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_publication_drains_pending_host_without_late_rearm() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        for state in [1, 2] {
+            let mut bus = SmsBus::new(rom.clone(), 0xff);
+            bus.write(0xfffc, 8);
+            bus.write(0xcb28, 1);
+            bus.write(0xcb03, 0xa1);
+            bus.write(0xc831, 2);
+            bus.write(0xd9f6, state);
+            for (address, value) in [
+                (0xd9f0, 7),
+                (0xd9f1, 3),
+                (0xd9f2, 9),
+                (0xd9f3, 193),
+                (0xd9f4, 0xf2),
+                (0xd9f5, 0x26),
+            ] {
+                bus.write(address, value);
+            }
+            let guest = bus.ram[..0x800].to_vec();
+            let cartridge = bus.cart_ram.clone();
+            let mut cpu = Cpu::new();
+            cpu.pc = defs["rt_mmc3_publish_complete"].1;
+            cpu.sp = 0xdff0;
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            let mut injected = false;
+            for _ in 0..100_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                if !injected && cpu.iff1 && cpu.ei_pending == 0 {
+                    assert_ne!(
+                        bus.read(0xd9f6),
+                        0,
+                        "pending VINT must drain before rearm ownership opens"
+                    );
+                    cpu.sp -= 2;
+                    bus.write(cpu.sp, cpu.pc as u8);
+                    bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                    cpu.pc = 0x38;
+                    cpu.iff1 = false;
+                    cpu.iff2 = false;
+                    bus.frame_int_pending = true;
+                    injected = true;
+                }
+                cpu.step(&mut bus).unwrap();
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                assert_eq!(bus.read(0xcb1d), 0);
+            }
+            assert_eq!(cpu.pc, 7);
+            assert!(injected);
+            assert_eq!(
+                bus.cram_writes, 0,
+                "already committed CRAM is not redundantly replayed"
+            );
+            assert_eq!(bus.read(0xcb04), 1);
+            assert_eq!(bus.read(0xcb05), 1);
+            assert_eq!(bus.read(0xcb03), 0xa1);
+            assert_eq!(bus.read(0xc8f9), 0);
+            assert_eq!(bus.read(0xd9f6), 0);
+            assert_eq!(bus.read(0xc833), 1);
+            assert_eq!(&bus.ram[..0x800], guest);
+            assert_eq!(bus.cart_ram, cartridge);
+            assert_eq!(
+                (
+                    bus.vdp_regs[0],
+                    bus.vdp_regs[1],
+                    bus.vdp_regs[8],
+                    bus.vdp_regs[9],
+                    bus.vdp_regs[10]
+                ),
+                (0x36, 0xf2, 7, 3, 192)
+            );
         }
     }
 

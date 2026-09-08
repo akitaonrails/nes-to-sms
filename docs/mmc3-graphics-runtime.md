@@ -4,6 +4,12 @@ This documents the opt-in `MMC3_FULL_RUNTIME` backend. It is separate from
 the bounded `MMC3_BANKING_EXPERIMENT`, NROM/UxROM rendering, and CV1 hooks.
 It is **not yet a playable-game or normal-speed claim**.
 
+The source/IRQ contract below still applies. Renderer blanking and performance
+sections record earlier bring-up stages; the current
+[pending/committed presentation contract](mmc3-presentation.md) supersedes those
+publication details and adds staging/residency ownership. See
+[current first-level results](smb3-plan.md) for the measured gameplay scope.
+
 ## Source state and assets
 
 The emitter stores physical CHR-ROM in 16 KiB ROM banks after PRG data,
@@ -50,9 +56,10 @@ renderer storage.
 
 The SMS 224-line mode has a 256-pixel-high tilemap. Fine Y therefore needs an
 additional source row; retaining only 28 rows incorrectly wraps the bottom.
-The NT starts at `$3700`, leaving **440 patterns**, partitioned into 256 BG
-and 184 sprite slots. The initial sprite converter uses only 128 of those
-184 slots, enough for 64 independent 8×16 pairs. See the hardware register
+The NT starts at `$3700`. The allocator uses 256 BG patterns at `$0000–$1FFF`
+and 128 fixed sprite patterns at `$2000–$2FFF`, enough for 64 independent
+8×16 pairs. The remaining VRAM before the NT is unused, not extra allocated
+cache capacity. See the hardware register
 and tilemap descriptions in [SMS Power's VDP documentation](https://www.smspower.org/Development/Tilemap).
 
 ## Logical interrupts versus physical display
@@ -126,7 +133,7 @@ the previous frozen record: both CIRAM snapshots, OAM, physical CHR maps,
 palette, control/mask, scroll, t, fine X, mirroring, IRQ reload v/intent, and
 the committed split.
 C8F4 accumulates differences; READY is mandatory for reuse. Exact comparison
-is chunked into at most 128 bytes between host-service opportunities, with
+is chunked into at most 64 bytes between host-service opportunities, with
 BUSY excluding guest producer reentry. Transient rendering-off writes inside
 NMI are source-only; a completed rendering-off packet still blanks.
 

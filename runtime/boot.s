@@ -481,6 +481,7 @@ _sram_halt:
 _sram_ok:
 .endif
 .ifdef DIAG_WILDJUMP
+ .ifndef MMC3_FULL_RUNTIME
   ; Arm the wild-jump canary: fill the nametable sub-palette shadow (the
   ; region a real-emulator run was caught executing, PC $CE0A) with $F7 =
   ; RST $30. Legitimate writers overwrite their cells; readers only use
@@ -489,6 +490,7 @@ _sram_ok:
   ld   bc, $0700
   ld   a, $f7
   call mem_fill
+ .endif
 .endif
   ; Phase R: establish X/Y residency (D = X, E = Y) from the shadows.
   ld   a, ($cb00)

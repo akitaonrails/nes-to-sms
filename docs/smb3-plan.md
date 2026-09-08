@@ -16,15 +16,17 @@ the mushroom question block, collects the mushroom, clears 1-1 and returns to
 the normal map with the panel changed from `$03` to `$00`, lives still four,
 and no trap. A separate no-input death route returns to the map with three lives.
 This establishes functional first-level support, **not full-speed or full-game
-compatibility**. The latest active traversal averages only 5.366 game updates/second
-at `500`; 35.66% of callbacks in the gameplay window are uniform-color frames
-during rebuilding, with a longest run of 11 callbacks. Presentation remains
-visibly slow and intermittent; completing an automated route does not establish
-comfortable human playability. See the measured contract below.
-The compact dispatch search improves traversal by 16.79% over the previous
-4.594-update/sec build. The absolute number of flat callbacks is unchanged;
-their fraction grows because visible execution time becomes shorter, not
-because the renderer does more work.
+compatibility**. The pending/committed publisher now retains a complete image
+during preparation. The latest input-only `500` capture has **zero flat or black
+frames across 26,351 gameplay callbacks**, versus 8,667 flat callbacks and runs
+of up to 11 in the pre-presentation baseline. All seven guest/cart checkpoints
+match at the same logical ticks; matching logical-window images do not imply
+identical physical frames or every intermediate input.
+Active traversal remains only **4.924 game updates/second**, versus 5.366 before
+the presentation change (8.24% slower). Removing blank intervals is not a speed
+gain or comfortable/full-speed playability claim. The earlier compact dispatch
+search remains in place; measured preparation and transfer optimizations reduce
+the cost of the new publisher. See [presentation ownership and verification](mmc3-presentation.md).
 The adapter is not cycle-accurate MMC3/A12 emulation; see
 [the runtime contract and limits](mmc3-graphics-runtime.md).
 
@@ -45,16 +47,17 @@ and mushroom checkpoints. Later adaptive input differs when physical callback
 sampling misses a short wait boundary; the full clear is functional evidence,
 not seven-checkpoint identical-input parity or a new speed measurement.
 
-Continuous blinking is a separate confirmed renderer defect: 1,085 flat-frame
-episodes in the earlier full-route capture, typically lasting 133–184 ms.
-The renderer blanks before CPU-heavy preparation. Simply leaving the display
-enabled would expose partial pattern, palette and raster updates. The next
-change must keep committed presentation separate from pending work, preserve
-live pattern slots, and publish bounded dirty updates during VBlank. Deadline
-overflow must retain a coherent blank fallback rather than drop guest updates
-or introduce new traps. Normal moving-frame blinking must be measured again
-before claiming this presentation problem fixed; the inventory repair alone
-does not change it.
+Continuous blinking was a separate renderer defect: 1,085 flat-frame episodes
+in the earlier full-route capture, typically lasting 133–184 ms. The new
+publisher separates committed presentation from pending work, protects live
+pattern slots, stages changes in existing cartridge SRAM, and publishes dirty
+updates during guarded VBlank intervals. It keeps a coherent blank fallback for
+oversized packets instead of dropping guest updates or relaxing deadlines.
+The latest full route eliminates gameplay flat frames while preserving all
+seven baseline checkpoints. Both short B and held A+B inventory routes still
+open/close inventory and enter 1-1 without traps. Genuine source-rendering-off
+transitions remain distinct from renderer fallback. The separate stock-100
+diagnostic checks physical write deadlines, not normal-speed playability.
 
 The checked local file has a NES 2.0 header, mapper 4/submapper 0, 256 KiB
 PRG ROM, 128 KiB CHR ROM, 8 KiB volatile PRG RAM, no trainer, no battery,

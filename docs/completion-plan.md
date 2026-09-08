@@ -48,10 +48,17 @@ The subsequent human-input hang is reproduced as the map's B/inventory path:
 native-proven profile roots and inline-dispatch sites repair it, with the
 required fixed-bank dispatch directory relocation. Inventory open/close then
 A-entry and another full 1-1 clear pass; SMB1/CV1 bytes remain unchanged.
-Repeated inter-frame blanking is now the immediate priority. The
-[follow-up contract](smb3-plan.md#human-input-follow-up-inventory-trap-and-repeated-blanking)
-requires committed/pending presentation separation, safe live-slot ownership,
-guarded VBlank uploads and actual continuous-video evidence before optimization.
+The subsequent [pending/committed publisher](mmc3-presentation.md) preserves
+the old image while preparing its successor, protects live pattern identities,
+and performs guarded dirty uploads. The latest `500` full-clear capture has
+zero gameplay flat frames (previously 8,667), all seven guest/cart checkpoints
+equal, and successful short/held inventory-to-level routes. Performance remains
+limited: 4.924 updates/second versus the old blinking build's 5.366, an 8.24%
+throughput regression for coherent presentation. Lookup tables, dirty-group
+skips, bulk copies, common NT rotation and redundant stream-work elimination
+reduce the new overhead; they do not establish full-speed playability.
+The [follow-up contract](smb3-plan.md#human-input-follow-up-inventory-trap-and-repeated-blanking)
+retains actual physical-write, stock-clock, source-pixel and regression gates.
 The parallel [LLVM-style optimization
 research](ir-optimization-research.md) is complete; its measured experiments
 follow correctness rather than replacing the playable-ROM work. Preserve SMB1/CV1
