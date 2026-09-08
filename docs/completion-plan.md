@@ -26,8 +26,14 @@ also passes independent review after fixing cancellation invalidation: another
 5.04% full-traversal gain, 8.88% cumulatively. The accepted
 [64 KiB ROM dispatch index](mmc3-dispatch-index.md) retains bank matching and
 traps and adds another 6.98% full-traversal gain, 16.48% cumulatively.
-Next is proven internal-RAM lowering. Speed takes priority over cartridge size; use
-precomputation and code duplication when complete access costs justify them.
+[Proven constant internal-RAM lowering](mmc3-static-ram-lowering.md) also passes
+independent review. Its separate matched stationary workload gains 0.63%; the
+full functional route still completes without gameplay flashes, but changed
+input-sampling history prevents claiming an additional matched traversal gain.
+This optimization batch is complete. Further fusion/inlining is conditional
+research, not an unfinished implementation: much of the latest workload's CPU
+saving becomes synchronization waiting. Speed takes priority over cartridge
+size; use precomputation and code duplication when complete access costs justify them.
 
 The user selected Super Mario Bros. 3 as the next compatibility effort.
 [SMB3 plan](smb3-plan.md) records the pinned target, architectural blockers,

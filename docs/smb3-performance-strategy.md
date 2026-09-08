@@ -223,7 +223,11 @@ measured optimization result.
   preserving the existing bank-constraint scan and failure behavior.
   [Accepted result](mmc3-dispatch-index.md): another 6.98% full-traversal gain,
   16.48% cumulatively, with the complete lookup and bank switching measured.
-- [ ] Admit proven internal-RAM lowering, then one safe full-mode fusion/loop case.
+- [x] Admit proven constant internal-RAM lowering. Its
+  [accepted stationary-workload result](mmc3-static-ram-lowering.md) is +0.63%,
+  with exact starting/completed memory and image sets; do not add this percentage
+  to the traversal result. No extra fusion/loop idiom is justified by this
+  synchronization-limited measurement.
 - [ ] Profile remaining dynamic edges before selecting direct continuation/cache/inlining.
 - [ ] Consider selective CHR pre-expansion only if conversion becomes significant.
 

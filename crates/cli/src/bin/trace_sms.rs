@@ -8487,6 +8487,313 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled264-fragment static RAM fixture"]
+    fn mmc3_compiled_static_ram_preserves_source_writes_and_interrupts() {
+        struct Source {
+            ram: [u8; 0x800],
+            code: [u8; 3],
+            pc: u16,
+            writes: Vec<(u16, u8)>,
+        }
+        impl oracle_6502::Bus for Source {
+            fn read(&mut self, addr: u16) -> u8 {
+                if addr < 0x2000 {
+                    self.ram[usize::from(addr & 0x7ff)]
+                } else {
+                    self.code[usize::from(addr - self.pc)]
+                }
+            }
+            fn write(&mut self, addr: u16, value: u8) {
+                assert!(addr < 0x2000);
+                self.ram[usize::from(addr & 0x7ff)] = value;
+                self.writes.push((addr & 0x7ff, value));
+            }
+        }
+        struct Writes {
+            bus: SmsBus,
+            writes: Vec<(u16, u8)>,
+        }
+        impl Bus for Writes {
+            fn read(&mut self, addr: u16) -> u8 {
+                self.bus.read(addr)
+            }
+            fn write(&mut self, addr: u16, value: u8) {
+                if (0xc000..=0xc7ff).contains(&addr) {
+                    self.writes.push((addr - 0xc000, value));
+                }
+                self.bus.write(addr, value);
+            }
+            fn in_port(&mut self, port: u8) -> u8 {
+                self.bus.in_port(port)
+            }
+            fn out_port(&mut self, port: u8, value: u8) {
+                self.bus.out_port(port, value);
+            }
+        }
+        let project = |variable| {
+            let path = PathBuf::from(std::env::var(variable).unwrap());
+            if path.is_absolute() {
+                path
+            } else {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join(path)
+            }
+        };
+        let path = project("TRACE_FUNCTIONAL_PROJECT");
+        let mut projects = vec![path.clone()];
+        if std::env::var_os("TRACE_BASELINE_PROJECT").is_some() {
+            projects.push(project("TRACE_BASELINE_PROJECT"));
+        }
+        let definitions: Vec<_> = projects
+            .iter()
+            .map(|path| load_wla_symbol_defs(&path.join("sms.sym")))
+            .collect();
+        let mut buses: Vec<_> = projects
+            .iter()
+            .map(|path| Writes {
+                bus: SmsBus::new(std::fs::read(path.join("sms.sms")).unwrap(), 0xff),
+                writes: vec![],
+            })
+            .collect();
+        let source_rom = std::fs::read(path.parent().unwrap().join("fixture.nes")).unwrap();
+        let cases =
+            std::fs::read_to_string(path.parent().unwrap().join("static-cases.tsv")).unwrap();
+        let mut vectors = 0;
+        let mut interrupts = 0;
+        let mut min_sp = 0xdff0;
+        let mut timings = 0;
+        for (case_index, line) in cases.lines().enumerate() {
+            let fields: Vec<_> = line
+                .split('\t')
+                .map(|field| u16::from_str_radix(field, 16).unwrap())
+                .collect();
+            let (entry, stop, address) = (fields[0], fields[1], fields[2]);
+            let code: [u8; 3] = source_rom[16 + usize::from(entry)..19 + usize::from(entry)]
+                .try_into()
+                .unwrap();
+            let op = cpu6502::decode_at(&code, entry, 0).unwrap().mnemonic;
+            let rmw = matches!(
+                op,
+                cpu6502::Mnemonic::ASL
+                    | cpu6502::Mnemonic::LSR
+                    | cpu6502::Mnemonic::ROL
+                    | cpu6502::Mnemonic::ROR
+                    | cpu6502::Mnemonic::INC
+                    | cpu6502::Mnemonic::DEC
+            );
+            let store = matches!(
+                op,
+                cpu6502::Mnemonic::STA
+                    | cpu6502::Mnemonic::STX
+                    | cpu6502::Mnemonic::STY
+                    | cpu6502::Mnemonic::SAX
+            );
+            let setup =
+                |bus: &mut Writes, defs: &HashMap<String, (u8, u16)>, seed: u8, iff: bool| {
+                    bus.bus.ram.fill(0);
+                    bus.bus.cart_ram.fill(0x96);
+                    let mut source = Source {
+                        ram: [0; 0x800],
+                        code,
+                        pc: entry,
+                        writes: vec![],
+                    };
+                    for (i, byte) in source.ram.iter_mut().enumerate() {
+                        *byte = (i as u8).wrapping_mul(37) ^ seed;
+                    }
+                    let edges = [0, 1, 2, 0x7f, 0x80, 0x81, 0xfe, 0xff];
+                    let value = edges[usize::from(seed & 7)];
+                    source.ram[usize::from(address & 0x7ff)] = value;
+                    bus.bus.ram[..0x800].copy_from_slice(&source.ram);
+                    let (bank, pc) = defs[&format!("L_{entry:04X}")];
+                    let a = edges[usize::from((seed + 3) & 7)];
+                    let x = seed.wrapping_mul(17) ^ 0xa5;
+                    let y = seed.wrapping_mul(31) ^ 0x5a;
+                    let s = seed.wrapping_mul(19);
+                    let p = seed.wrapping_mul(73);
+                    for (addr, val) in [
+                        (0xfffc, [0, 8, 12][usize::from(seed % 3)]),
+                        (0xfffe, bank),
+                        (0xffff, 104),
+                        (0xcb14, bank),
+                        (0xcb02, s),
+                        (0xcb03, p),
+                        (0xcb28, 1),
+                        (0xc831, 2),
+                        (0xc833, 1),
+                        (0xc8f2, 0x26),
+                        (0xcb76, 0),
+                        (0xcb77, 0xd3),
+                        (0xd47d, 0xc0),
+                        (0xd47e, 0xd4),
+                    ] {
+                        bus.bus.write(addr, val);
+                    }
+                    bus.bus.frame_int_pending = false;
+                    bus.writes.clear();
+                    let mut oracle = oracle_6502::Cpu::new();
+                    oracle.pc = entry;
+                    oracle.a = a;
+                    oracle.x = x;
+                    oracle.y = y;
+                    oracle.sp = s;
+                    oracle.p = p;
+                    oracle.step(&mut source).unwrap();
+                    // Separate NMOS bus contract: oracle_6502 models only final RMW write.
+                    if rmw {
+                        source.writes.insert(0, (address & 0x7ff, value));
+                    }
+                    let mut cpu = Cpu::new();
+                    cpu.pc = pc;
+                    cpu.sp = 0xdff0;
+                    cpu.a = a;
+                    cpu.f = p ^ 0xff;
+                    cpu.set_bc(0x9527);
+                    cpu.set_de(u16::from(x) << 8 | u16::from(y));
+                    cpu.set_hl(0xa95a);
+                    cpu.iff1 = iff;
+                    cpu.iff2 = iff;
+                    (cpu, oracle, source)
+                };
+            let check =
+                |bus: &Writes, cpu: &Cpu, oracle: &oracle_6502::Cpu, source: &Source, iff: bool| {
+                    assert_eq!(
+                        (cpu.a, cpu.d, cpu.e, bus.bus.ram[0xb02], bus.bus.ram[0xb03]),
+                        (oracle.a, oracle.x, oracle.y, oracle.sp, oracle.p),
+                        "source{entry:04X} {op:?}"
+                    );
+                    assert_eq!(&bus.bus.ram[..0x800], source.ram);
+                    assert_eq!(bus.writes, source.writes);
+                    assert_eq!(cpu.sp, 0xdff0);
+                    assert_eq!((cpu.iff1, cpu.iff2), (iff, iff));
+                    assert_eq!(bus.bus.ram[0xb1d], 0);
+                };
+            let mut steps_for_interrupts = 0;
+            for seed in 0..16u8 {
+                let mut costs = vec![];
+                for (index, (bus, defs)) in buses.iter_mut().zip(&definitions).enumerate() {
+                    let iff = seed & 1 != 0;
+                    let (mut cpu, oracle, source) = setup(bus, defs, seed, iff);
+                    let end = defs[&format!("L_{stop:04X}")];
+                    let mapping = bus.bus.slot_bank;
+                    let ctrl = bus.read(0xfffc);
+                    let cart = bus.bus.cart_ram;
+                    let frames = bus.bus.ram[0x1300..0x1600].to_vec();
+                    let mut ticks = 0;
+                    let mut steps = 0;
+                    while !(cpu.pc == end.1 && bus.bus.slot_bank[1] == end.0) && steps < 1024 {
+                        ticks += match bus.read(cpu.pc) {
+                            0x3d | 0x3f => 4, // DEC A / CCF, nominal pinned Z80 timings
+                            0xcb if bus.read(cpu.pc + 1) < 0x40 => {
+                                assert_ne!(bus.read(cpu.pc + 1) & 7, 6);
+                                8
+                            }
+                            _ => mmc3_row_nominal(&cpu, &mut bus.bus),
+                        };
+                        cpu.step(bus).unwrap();
+                        steps += 1;
+                        min_sp = min_sp.min(cpu.sp);
+                    }
+                    assert_eq!((cpu.pc, bus.bus.slot_bank[1]), (end.1, end.0));
+                    check(bus, &cpu, &oracle, &source, iff);
+                    assert_eq!((bus.bus.slot_bank, bus.read(0xfffc)), (mapping, ctrl));
+                    assert_eq!(bus.bus.cart_ram, cart);
+                    assert_eq!(&bus.bus.ram[0x1300..0x1600], frames);
+                    costs.push(ticks);
+                    if index == 0 {
+                        steps_for_interrupts = steps;
+                    }
+                }
+                if costs.len() == 2 {
+                    assert_eq!(
+                        costs[1] - costs[0],
+                        if rmw {
+                            315
+                        } else if store {
+                            126
+                        } else {
+                            105
+                        },
+                        "{op:?} at{address:04X}"
+                    );
+                    timings += 1;
+                }
+                vectors += 1;
+            }
+            // Every opcode shape at zero-page, stack and last-mirror edges.
+            // Pause is valid with either IFF; host IRQ only with IFF enabled.
+            if [1, 4, 11].contains(&(case_index % 12)) {
+                for kind in 0..3 {
+                    let iff = kind != 0;
+                    for boundary in 0..steps_for_interrupts {
+                        let bus = &mut buses[0];
+                        let defs = &definitions[0];
+                        let (mut cpu, oracle, source) = setup(bus, defs, 15, iff);
+                        let end = defs[&format!("L_{stop:04X}")];
+                        let mapping = bus.bus.slot_bank;
+                        let ctrl = bus.read(0xfffc);
+                        let cart = bus.bus.cart_ram;
+                        let frames = bus.bus.ram[0x1300..0x1600].to_vec();
+                        for step in 0..steps_for_interrupts {
+                            if step == boundary {
+                                let before = cpu;
+                                let writes = bus.writes.clone();
+                                cpu.sp -= 2;
+                                bus.write(cpu.sp, cpu.pc as u8);
+                                bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                                cpu.pc = if kind == 2 { 0x38 } else { 0x66 };
+                                cpu.iff1 = false;
+                                if kind == 2 {
+                                    cpu.iff2 = false;
+                                    bus.bus.frame_int_pending = true;
+                                }
+                                for _ in 0..20000 {
+                                    cpu.step(bus).unwrap();
+                                    min_sp = min_sp.min(cpu.sp);
+                                    if cpu.pc == before.pc && cpu.sp == before.sp {
+                                        break;
+                                    }
+                                }
+                                assert_eq!(
+                                    (cpu.pc, cpu.sp, cpu.a, cpu.f, cpu.bc(), cpu.de(), cpu.hl()),
+                                    (
+                                        before.pc,
+                                        before.sp,
+                                        before.a,
+                                        before.f,
+                                        before.bc(),
+                                        before.de(),
+                                        before.hl()
+                                    )
+                                );
+                                assert_eq!((cpu.iff1, cpu.iff2), (iff, iff));
+                                assert_eq!(
+                                    bus.writes, writes,
+                                    "IRQ must not consume/change pending source writes"
+                                );
+                                assert_eq!(bus.bus.slot_bank, mapping);
+                                interrupts += 1;
+                            }
+                            cpu.step(bus).unwrap();
+                        }
+                        assert_eq!((cpu.pc, bus.bus.slot_bank[1]), (end.1, end.0));
+                        check(bus, &cpu, &oracle, &source, iff);
+                        assert_eq!((bus.bus.slot_bank, bus.read(0xfffc)), (mapping, ctrl));
+                        assert_eq!(bus.bus.cart_ram, cart);
+                        assert_eq!(&bus.bus.ram[0x1300..0x1600], frames);
+                    }
+                }
+            }
+        }
+        assert_eq!(vectors, 4224);
+        assert!(min_sp >= NATIVE_STACK_FLOOR);
+        eprintln!(
+            "264 source fragments;{vectors} original6502/assembled states;{interrupts} actual Pause/IRQ boundaries;{timings} old/new exact cost deltas;minSP{min_sp:04X}"
+        );
+    }
+
+    #[test]
     #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME project"]
     fn mmc3_full_dispatch_matches_sorted_first_match() {
         let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());

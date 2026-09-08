@@ -38,11 +38,14 @@ See [media encoding notes](docs/media/README.md) for sizes and settings.
 - **Super Mario Bros. 3:** experimental MMC3 conversion completes an input-only
   1-1 route: movement, jumping, mushroom pickup, level clear and return to the
   map. Inventory-to-level entry also works. The committed-frame publisher removes
-  rebuild blinking in the measured 1-1 route, but it is still very slow (about
-  4.9 game updates/second at 500% overclock). This is functional first-level
+  rebuild blinking in the measured 1-1 route, but it is still very slow at
+  500% overclock. Row/cell caching and a 64 KiB ROM lookup index improve matched
+  traversal throughput by [16.48%](docs/mmc3-dispatch-index.md); subsequent
+  [direct RAM lowering](docs/mmc3-static-ram-lowering.md) is measured separately.
+  This is functional first-level
   support, not full-speed/full-game support or cycle-accurate IRQ emulation.
   [Plan and limits](docs/smb3-plan.md).
-- **Validation:** 13 Rust crates; the latest workspace run has 582 passing
+- **Validation:** 13 Rust crates; the latest workspace run has 587 passing
   tests, plus separately run assembled-runtime and actual-emulator checks.
   NES APU audio is approximated on the SMS PSG, not reproduced exactly.
 

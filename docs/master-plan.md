@@ -204,6 +204,13 @@ region or cartridge capacity is added; the post-publication anchor callback
 uses two additional native stack bytes during the publisher call. This backend
 is absent from NROM/UxROM.
 
+Full-mode lowering may bypass the bus only for `ZpConst` and absolute constants
+below `$2000`, folded to `$C000 | (address & $07FF)`. The private access policy
+shares the existing opcode/flag implementation and preserves both NMOS RMW
+writes. Indexed/indirect and hardware/banked addresses still use the full bus;
+this does not enable the otherwise suppressed full-mode fusion passes. See
+[direct-RAM verification and measurement limits](mmc3-static-ram-lowering.md).
+
 Full raw NES CIRAM source-of-truth needs 2 KiB (`$CC00-$D3FF` if stored in
 internal RAM), including 1920 tile bytes plus the 128 compact attribute bytes
 already mirrored at `$CB80-$CBFF`. That storage does not fit in current

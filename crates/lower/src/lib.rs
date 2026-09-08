@@ -3469,16 +3469,59 @@ fn emit_full_bus_add_index(p: &mut z80_emit::Program) {
     p.ld_h_a();
 }
 
-/// Conservative full-bus memory lowering. Keep bus effects explicit until
-/// optimizations can prove the effective region and interrupt boundary.
+/// Only constant internal-RAM operands bypass the full bus. Indexed and
+/// indirect expressions retain their original effective-address calculation,
+/// even when a particular execution might land in RAM.
+enum FullBusAccess {
+    NativeRam(u16),
+    Bus,
+}
+
+impl FullBusAccess {
+    fn select(addr: &ir::AddrExpr) -> Self {
+        match addr {
+            ir::AddrExpr::ZpConst(z) => Self::NativeRam(nes_ram_addr_to_sms(u16::from(*z))),
+            ir::AddrExpr::Const(a) if *a < 0x2000 => Self::NativeRam(nes_ram_addr_to_sms(*a)),
+            _ => Self::Bus,
+        }
+    }
+
+    fn emit_address(&self, p: &mut z80_emit::Program, addr: &ir::AddrExpr) {
+        match self {
+            // LD preserves A/native flags, so the raw bus address's AF
+            // save/restore is unnecessary. RAM mirrors are already folded.
+            Self::NativeRam(native) => p.ld_hl_imm(*native),
+            Self::Bus => emit_full_bus_address(p, addr),
+        }
+    }
+
+    fn emit_read(&self, p: &mut z80_emit::Program) {
+        match self {
+            Self::NativeRam(_) => p.ld_a_hl_ptr(),
+            Self::Bus => p.call("rt_mmc3_read_bus"),
+        }
+    }
+
+    fn emit_write(&self, p: &mut z80_emit::Program) {
+        match self {
+            Self::NativeRam(_) => p.ld_hl_ptr_a(),
+            Self::Bus => p.call("rt_mmc3_write_bus"),
+        }
+    }
+}
+
+/// Keep one opcode/flag implementation for direct RAM and dynamic bus access.
+/// Both use scratch HL and preserve resident DE/IFF. RMW saves that address
+/// across flag emission and retains the NMOS old-value and final writes.
 fn emit_full_bus_memory(p: &mut z80_emit::Program, op: &ir::Op) -> bool {
     use ir::Op;
     let Some(addr) = full_bus_operand(op) else {
         return false;
     };
-    emit_full_bus_address(p, addr);
+    let access = FullBusAccess::select(addr);
+    access.emit_address(p, addr);
     match op {
-        Op::StaMem { .. } => p.call("rt_mmc3_write_bus"),
+        Op::StaMem { .. } => access.emit_write(p),
         Op::StxMem { .. } | Op::StyMem { .. } | Op::SaxMem { .. } => {
             p.push_af();
             match op {
@@ -3489,16 +3532,16 @@ fn emit_full_bus_memory(p: &mut z80_emit::Program, op: &ir::Op) -> bool {
                     p.and_b();
                 }
             }
-            p.call("rt_mmc3_write_bus");
+            access.emit_write(p);
             p.pop_af();
         }
         Op::LdaMem { .. } => {
-            p.call("rt_mmc3_read_bus");
+            access.emit_read(p);
             emit_set_nz_inline(p);
         }
         Op::LdxMem { .. } | Op::LdyMem { .. } => {
             p.push_af();
-            p.call("rt_mmc3_read_bus");
+            access.emit_read(p);
             if matches!(op, Op::LdxMem { .. }) {
                 p.ld_d_a_reg();
             } else {
@@ -3514,8 +3557,8 @@ fn emit_full_bus_memory(p: &mut z80_emit::Program, op: &ir::Op) -> bool {
         | Op::IncMem { .. }
         | Op::DecMem { .. } => {
             p.push_af();
-            p.call("rt_mmc3_read_bus");
-            p.call("rt_mmc3_write_bus"); // NMOS RMW dummy write of old value
+            access.emit_read(p);
+            access.emit_write(p); // NMOS RMW dummy write of old value
             p.push_hl();
             match op {
                 Op::AslMem { .. } => emit_asl_a_flags_inline(p),
@@ -3532,12 +3575,12 @@ fn emit_full_bus_memory(p: &mut z80_emit::Program, op: &ir::Op) -> bool {
                 }
             }
             p.pop_hl();
-            p.call("rt_mmc3_write_bus");
+            access.emit_write(p);
             p.pop_af();
         }
         _ => {
             p.push_af();
-            p.call("rt_mmc3_read_bus");
+            access.emit_read(p);
             p.ld_b_a();
             p.pop_af();
             match op {
@@ -7237,5 +7280,234 @@ runtime_label = "rt_replacement"
         // Both ld a,$01 and ld a,$02 should be present.
         assert!(build.bytes.windows(2).any(|w| w == [0x3E, 0x01]));
         assert!(build.bytes.windows(2).any(|w| w == [0x3E, 0x02]));
+    }
+
+    #[test]
+    fn full_static_ram_preserves_all_memory_shapes_and_excluded_addresses() {
+        fn operations(addr: AddrExpr, region: MemRegion) -> Vec<Op> {
+            vec![
+                Op::LdaMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::LdxMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::LdyMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::StaMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::StxMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::StyMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::SaxMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::AdcMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::SbcMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::AndMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::OraMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::EorMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::CmpMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::CpxMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::CpyMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::BitMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::AslMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::LsrMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::RolMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::RorMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::IncMem {
+                    addr: addr.clone(),
+                    region,
+                },
+                Op::DecMem { addr, region },
+            ]
+        }
+        let profile=profile::load_from_str("[rom]\nname='full-static'\nmapper=4\nprg_kib=64\nchr_kib=8\n[translation]\nruntime_defines=['MMC3_FULL_RUNTIME']\n").unwrap();
+        let lower = |op| {
+            let mut p = z80_emit::Program::new();
+            // Structural relocation targets only, never executed. Unlike
+            // legacy unit helpers these contain no permissive RET stubs.
+            p.section("symbols");
+            p.org(0x1000);
+            p.label("rt_mmc3_read_bus");
+            p.org(0x1100);
+            p.label("rt_mmc3_write_bus");
+            p.section("code");
+            p.org(0x4000);
+            lower_routine(
+                &mut p,
+                &make_routine("static_test", vec![op]),
+                &LowerOptions {
+                    profile: Some(&profile),
+                    ..LowerOptions::default()
+                },
+            )
+            .unwrap();
+            assert!(p.unresolved_labels().is_empty());
+            p.finish().unwrap()
+        };
+        let mut static_cases = 0;
+        for addr in [AddrExpr::ZpConst(0), AddrExpr::ZpConst(255)]
+            .into_iter()
+            .chain(
+                [
+                    0, 255, 0x100, 0x7ff, 0x800, 0xfff, 0x1000, 0x17ff, 0x1800, 0x1fff,
+                ]
+                .map(AddrExpr::Const),
+            )
+        {
+            let canonical = 0xc000 | (addr.const_addr().unwrap() & 0x7ff);
+            for region in [MemRegion::Unknown, MemRegion::PrgRom] {
+                for (index, op) in operations(addr.clone(), region).into_iter().enumerate() {
+                    let build = lower(op);
+                    assert_eq!(
+                        &build.bytes[..3],
+                        &[0x21, canonical as u8, (canonical >> 8) as u8]
+                    );
+                    assert!(!build.asm.contains("call rt_mmc3_"));
+                    let stores = if index >= 16 {
+                        2
+                    } else {
+                        usize::from((3..=6).contains(&index))
+                    };
+                    assert_eq!(build.asm.matches("ld (hl),a").count(), stores);
+                    if index >= 16 {
+                        let first = build.asm.find("ld (hl),a").unwrap();
+                        let last = build.asm.rfind("ld (hl),a").unwrap();
+                        assert!(build.asm[first..last].contains("push hl"));
+                        assert!(build.asm[first..last].contains("pop hl"));
+                    }
+                    static_cases += 1;
+                }
+            }
+        }
+        let mut excluded: Vec<_> = [0x2000u16, 0x3fff, 0x4000, 0x6000, 0x8000, 0xffff]
+            .into_iter()
+            .map(|a| {
+                (
+                    AddrExpr::Const(a),
+                    vec![0xf5, 0x21, a as u8, (a >> 8) as u8, 0xf1],
+                )
+            })
+            .collect();
+        excluded.extend([
+            (
+                AddrExpr::ZpIndexedX(255),
+                vec![0xf5, 0x7a, 0xc6, 255, 0x6f, 0x26, 0, 0xf1],
+            ),
+            (
+                AddrExpr::ZpIndexedY(255),
+                vec![0xf5, 0x7b, 0xc6, 255, 0x6f, 0x26, 0, 0xf1],
+            ),
+            (
+                AddrExpr::AbsIndexedX(0x1fff),
+                vec![
+                    0xf5, 0x21, 255, 31, 0x7a, 0x85, 0x6f, 0x7c, 0xce, 0, 0x67, 0xf1,
+                ],
+            ),
+            (
+                AddrExpr::AbsIndexedY(0),
+                vec![
+                    0xf5, 0x21, 0, 0, 0x7b, 0x85, 0x6f, 0x7c, 0xce, 0, 0x67, 0xf1,
+                ],
+            ),
+            (
+                AddrExpr::IndirectX(255),
+                vec![
+                    0xf5, 0x7a, 0xc6, 255, 0x6f, 0x26, 0xc0, 0x4e, 0x2c, 0x66, 0x69, 0xf1,
+                ],
+            ),
+            (
+                AddrExpr::IndirectY(255),
+                vec![
+                    0xf5, 0x21, 255, 0xc0, 0x4e, 0x2c, 0x66, 0x69, 0x7b, 0x85, 0x6f, 0x7c, 0xce, 0,
+                    0x67, 0xf1,
+                ],
+            ),
+        ]);
+        let mut excluded_cases = 0;
+        for (addr, old_ea) in excluded {
+            // Unknown is a legal conservative tag. Do not invent a Ram tag
+            // on MMIO: pre-existing plan construction rejects that invalid IR.
+            for (index, op) in operations(addr, MemRegion::Unknown).into_iter().enumerate() {
+                let build = lower(op);
+                assert_eq!(&build.bytes[..old_ea.len()], old_ea);
+                let reads = usize::from(!(3..=6).contains(&index));
+                let writes = if index >= 16 {
+                    2
+                } else {
+                    usize::from((3..=6).contains(&index))
+                };
+                assert_eq!(
+                    build
+                        .bytes
+                        .windows(3)
+                        .filter(|b| *b == [0xcd, 0, 0x10])
+                        .count(),
+                    reads
+                );
+                assert_eq!(
+                    build
+                        .bytes
+                        .windows(3)
+                        .filter(|b| *b == [0xcd, 0, 0x11])
+                        .count(),
+                    writes
+                );
+                excluded_cases += 1;
+            }
+        }
+        assert_eq!((static_cases, excluded_cases), (528, 264));
     }
 }

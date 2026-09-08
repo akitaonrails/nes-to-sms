@@ -299,6 +299,77 @@ fn full_bus_fixture() -> (Vec<u8>, String) {
 }
 
 #[test]
+#[ignore = "requires existing Docker assembler;264 original-source static RAM fragments"]
+fn mmc3_full_static_ram_fragments_match_original_source() {
+    let ops = [
+        (0xad, 0xa5),
+        (0xae, 0xa6),
+        (0xac, 0xa4),
+        (0x8d, 0x85),
+        (0x8e, 0x86),
+        (0x8c, 0x84),
+        (0x8f, 0x87),
+        (0x6d, 0x65),
+        (0xed, 0xe5),
+        (0x2d, 0x25),
+        (0x0d, 0x05),
+        (0x4d, 0x45),
+        (0xcd, 0xc5),
+        (0xec, 0xe4),
+        (0xcc, 0xc4),
+        (0x2c, 0x24),
+        (0x0e, 0x06),
+        (0x4e, 0x46),
+        (0x2e, 0x26),
+        (0x6e, 0x66),
+        (0xee, 0xe6),
+        (0xce, 0xc6),
+    ];
+    let addresses = [
+        (0u16, true),
+        (255, true),
+        (0, false),
+        (255, false),
+        (0x100, false),
+        (0x7ff, false),
+        (0x800, false),
+        (0xfff, false),
+        (0x1000, false),
+        (0x17ff, false),
+        (0x1800, false),
+        (0x1fff, false),
+    ];
+    let (mut rom, mut profile) = full_bus_fixture();
+    let mut cases = String::new();
+    for (op_index, (absolute, zp)) in ops.into_iter().enumerate() {
+        for (address_index, (address, zero_page)) in addresses.into_iter().enumerate() {
+            let entry = 0xe300 + (op_index * 12 + address_index) as u16 * 8;
+            let end = entry + if zero_page { 2 } else { 3 };
+            let mut code = vec![if zero_page { zp } else { absolute }, address as u8];
+            if !zero_page {
+                code.push((address >> 8) as u8);
+            }
+            // Stop at a real original-source self-loop label, before any
+            // return machinery. No injected RET helpers or patched code.
+            code.extend_from_slice(&[0x4c, end as u8, (end >> 8) as u8]);
+            let offset = 16 + usize::from(entry);
+            rom[offset..offset + code.len()].copy_from_slice(&code);
+            profile.push_str(&format!(
+                "[[function]]\naddr={entry}\nname='static_{op_index}_{address_index}'\n"
+            ));
+            cases.push_str(&format!("{entry:04X}\t{end:04X}\t{address:04X}\n"));
+        }
+    }
+    let (work, project) = assembled_fixture("full-static-ram", &rom, &profile);
+    std::fs::write(work.join("static-cases.tsv"), cases).unwrap();
+    assert!(
+        !project.join("reports/unresolved_labels.txt").exists(),
+        "fixture must have no unresolved targets"
+    );
+    eprintln!("static RAM fixture: {}", project.display());
+}
+
+#[test]
 fn mmc3_full_bus_reference_covers_cart_ram_and_indirect_boundaries() {
     let (rom, _) = full_bus_fixture();
     let ram = reference_ram(&rom);
