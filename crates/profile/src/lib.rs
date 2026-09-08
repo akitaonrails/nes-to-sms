@@ -1218,6 +1218,34 @@ dest = 0x100
     }
 
     #[test]
+    fn pinned_smb3_inventory_roots_preserve_inline_data_and_return_ownership() {
+        let p = load_from_str(include_str!("../../../profiles/smb3.toml")).unwrap();
+        for addr in [
+            0xa070, 0xa092, 0xa0cf, 0xa118, 0xa2c4, 0xa398, 0xa3b1, 0xa3cd, 0xa40e,
+        ] {
+            assert!(
+                p.bank_entries
+                    .iter()
+                    .any(|e| e.bank == 26 && e.addr == addr)
+            );
+            assert!(!p.is_data_byte_in_bank(addr, Some(26)));
+        }
+        for addr in (0xa088..=0xa091).chain(0xa3a1..=0xa3b0) {
+            assert!(p.is_data_byte_in_bank(addr, Some(26)));
+        }
+        let consume = p.return_consume_at(0xfe9b, None).unwrap();
+        assert_eq!(consume.second_pla, Some(0xfe9e));
+        for caller in [0xa085, 0xa39e] {
+            assert!(
+                consume
+                    .calls
+                    .iter()
+                    .any(|c| { c.bank == Some(26) && c.caller == caller && c.target == 0xfe99 })
+            );
+        }
+    }
+
+    #[test]
     fn parses_full_profile() {
         let p = load_from_str(SAMPLE).expect("load");
         assert_eq!(p.rom.mapper, 0);

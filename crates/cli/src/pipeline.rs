@@ -88,16 +88,14 @@ fn lower_error_is_fatal(error: &lower::LowerError) -> bool {
     matches!(error, lower::LowerError::UnsupportedMapperStore { .. })
 }
 
-/// The full-mode directory and six-byte records share one mapped ROM slot.
+/// Full-mode six-byte records and their terminator share one mapped ROM slot.
+/// The two directories are placed separately in always-mapped bank zero.
 /// Zero counts preserve the original scan for empty or oversized pages.
 fn mmc3_dispatch_page_counts(records: &[(u8, u16, String)]) -> Result<[u8; 128], Error> {
-    let bytes = records
-        .len()
-        .saturating_mul(6)
-        .saturating_add(2 + 256 + 128);
+    let bytes = records.len().saturating_mul(6).saturating_add(2);
     if bytes > 0x4000 {
         return Err(Error::Diagnostic(format!(
-            "MMC3 dispatch table exceeds its single 16 KiB slot: {bytes} bytes for {} records and directories",
+            "MMC3 dispatch table exceeds its single 16 KiB slot: {bytes} bytes for {} records and terminator",
             records.len()
         )));
     }
@@ -2042,12 +2040,21 @@ pub fn run(args: &Args) -> Result<String, Error> {
             }
         }
         program.data(None, &[0x00, 0x00]); // terminator: addr $0000
+        if page_counts.is_some() {
+            program.label("rt_dispatch_table_end");
+            // Absolute directory references need no mapper change. Pin this
+            // small section so an exhausted bank zero fails at link time.
+            program.section("rt_dispatch_directory_sec");
+            program.set_section_placement(0, 0);
+        }
         program.label("rt_dispatch_page_table");
         for page in 0x80u16..=0xFF {
             program.word_label(&format!("rt_dispatch_page_{page:02X}"));
         }
         if let Some(counts) = page_counts {
             program.data(Some("rt_dispatch_page_counts"), &counts);
+            program.label("rt_dispatch_directory_end");
+            assert_eq!(program.current_section_len(), 256 + 128);
         }
 
         Ok((program, lower_failures, unresolved, assigned_sections))
@@ -2946,8 +2953,12 @@ mod tests {
     }
 
     #[test]
-    fn mmc3_dispatch_capacity_includes_both_directories_and_terminator() {
-        let mut records = vec![(0, 0x8000, String::new()); 2666];
+    fn mmc3_dispatch_capacity_excludes_fixed_directories_but_includes_terminator() {
+        for count in [2666, 2667, 2726, 2730] {
+            let records = vec![(0, 0x8000, String::new()); count];
+            assert!(super::mmc3_dispatch_page_counts(&records).is_ok());
+        }
+        let mut records = vec![(0, 0x8000, String::new()); 2730];
         assert!(super::mmc3_dispatch_page_counts(&records).is_ok());
         records.push((0, 0x8000, String::new()));
         assert!(

@@ -44,6 +44,14 @@ a 72-byte helper/call, with no new RAM; the same full route gains another
 not an implemented pass. Remaining practical playability work is dominated by
 rendering/presentation; a larger change must preserve frozen-frame ownership
 and visible pattern safety rather than merely lowering instruction count.
+The subsequent human-input hang is reproduced as the map's B/inventory path:
+native-proven profile roots and inline-dispatch sites repair it, with the
+required fixed-bank dispatch directory relocation. Inventory open/close then
+A-entry and another full 1-1 clear pass; SMB1/CV1 bytes remain unchanged.
+Repeated inter-frame blanking is now the immediate priority. The
+[follow-up contract](smb3-plan.md#human-input-follow-up-inventory-trap-and-repeated-blanking)
+requires committed/pending presentation separation, safe live-slot ownership,
+guarded VBlank uploads and actual continuous-video evidence before optimization.
 The parallel [LLVM-style optimization
 research](ir-optimization-research.md) is complete; its measured experiments
 follow correctness rather than replacing the playable-ROM work. Preserve SMB1/CV1

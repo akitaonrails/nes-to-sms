@@ -890,6 +890,9 @@ calls = [
   { bank = 15, caller = 0xA4A2, target = 0xfe99 },
   { bank = 24, caller = 0xA9BC, target = 0xfe99 },
   { bank = 24, caller = 0xAB83, target = 0xfe99 },
+  # Native empty-inventory open/close: actual 20 99 FE calls, all table indices.
+  { bank = 26, caller = 0xA085, target = 0xfe99 },
+  { bank = 26, caller = 0xA39E, target = 0xfe99 },
   { bank = 26, caller = 0xAD6B, target = 0xfe99 },
   { bank = 30, caller = 0x9A20, target = 0xfe99 },
   { bank = 30, caller = 0x9A4C, target = 0xfe99 },
@@ -3112,6 +3115,47 @@ addr = 0xB4FF
 [[bank_entry]]
 bank = 26
 addr = 0xB506
+
+# Native B-open/B-close/A-entry: 14,370,132 original-core instructions, no
+# physical-bank/opcode mismatch. Transfer entries SHA-256 da6748a967958071
+# e77bd38eeac992ae5a139b74ea211480fc9ae7768cb2de26. Southbird prg026.asm
+# Map_DoInventory_And_PoofFX and the two DynJump tables at A088/A3A1 agree
+# with pinned ROM bytes. Keep both inline tables classified as data.
+[[bank_entry]]
+bank = 26
+addr = 0xA070
+
+[[bank_entry]]
+bank = 26
+addr = 0xA092
+
+[[bank_entry]]
+bank = 26
+addr = 0xA0CF
+
+[[bank_entry]]
+bank = 26
+addr = 0xA118
+
+[[bank_entry]]
+bank = 26
+addr = 0xA2C4
+
+[[bank_entry]]
+bank = 26
+addr = 0xA398
+
+[[bank_entry]]
+bank = 26
+addr = 0xA3B1
+
+[[bank_entry]]
+bank = 26
+addr = 0xA3CD
+
+[[bank_entry]]
+bank = 26
+addr = 0xA40E
 
 [[bank_entry]]
 bank = 27

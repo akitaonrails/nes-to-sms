@@ -28,6 +28,34 @@ because the renderer does more work.
 The adapter is not cycle-accurate MMC3/A12 emulation; see
 [the runtime contract and limits](mmc3-graphics-runtime.md).
 
+### Human-input follow-up: inventory trap and repeated blanking
+
+The reported map hang is reproducible by pressing NES B (inventory), including
+held B and A+B. It traps on the undiscovered bank-26 `$A070` inventory routine;
+NES A alone enters 1-1 successfully. Native NES execution establishes the
+inventory roots and two inline-dispatch caller sites now admitted by the
+profile. No button remapping, permissive stub, or replacement game logic is used.
+Inventory opening/closing followed by A now reaches 1-1 in actual GPGX at `500`.
+The extra reachability requires the [fixed-bank dispatch directory
+layout](mmc3-dispatch-search.md); only 26 bytes remain in its record slot.
+
+The corrected candidate also completes the input-only 1-1 route with four lives.
+Full guest/cart snapshots match at the initial map, level-ready, question-block
+and mushroom checkpoints. Later adaptive input differs when physical callback
+sampling misses a short wait boundary; the full clear is functional evidence,
+not seven-checkpoint identical-input parity or a new speed measurement.
+
+Continuous blinking is a separate confirmed renderer defect: 1,085 flat-frame
+episodes in the earlier full-route capture, typically lasting 133–184 ms.
+The renderer blanks before CPU-heavy preparation. Simply leaving the display
+enabled would expose partial pattern, palette and raster updates. The next
+change must keep committed presentation separate from pending work, preserve
+live pattern slots, and publish bounded dirty updates during VBlank. Deadline
+overflow must retain a coherent blank fallback rather than drop guest updates
+or introduce new traps. Normal moving-frame blinking must be measured again
+before claiming this presentation problem fixed; the inventory repair alone
+does not change it.
+
 The checked local file has a NES 2.0 header, mapper 4/submapper 0, 256 KiB
 PRG ROM, 128 KiB CHR ROM, 8 KiB volatile PRG RAM, no trainer, no battery,
 and no four-screen flag. The current

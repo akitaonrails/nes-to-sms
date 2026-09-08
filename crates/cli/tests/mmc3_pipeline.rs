@@ -312,6 +312,15 @@ fn mmc3_full_bus_reference_covers_cart_ram_and_indirect_boundaries() {
 
 #[test]
 fn mmc3_pipeline_rejects_dispatch_table_larger_than_one_mapped_slot() {
+    check_dispatch_capacity(911, false);
+}
+
+#[test]
+fn mmc3_pipeline_accepts_records_beyond_the_old_combined_directory_limit() {
+    check_dispatch_capacity(900, true);
+}
+
+fn check_dispatch_capacity(roots_per_bank: u16, fits: bool) {
     let (mut rom, profile) = two_bank_fixture(&[0x4c, 0, 0xe1], &[0x60], &[0x60]);
     let mut profile = profile.replace(
         "MMC3_BANKING_EXPERIMENT",
@@ -320,15 +329,30 @@ fn mmc3_pipeline_rejects_dispatch_table_larger_than_one_mapped_slot() {
     // Many tiny legal routines fit the translated code budget but their
     // bank-qualified dispatch records do not fit the one mapped table slot.
     for bank in 0..3usize {
-        rom[16 + bank * 0x2000..16 + bank * 0x2000 + 901].fill(0x60);
-        for offset in 1..=900u16 {
+        rom[16 + bank * 0x2000..16 + bank * 0x2000 + usize::from(roots_per_bank) + 1].fill(0x60);
+        for offset in 1..=roots_per_bank {
             profile.push_str(&format!(
                 "[[bank_entry]]\nbank={bank}\naddr={}\n",
                 0x8000 + offset
             ));
         }
     }
-    let (work, result) = generated_fixture("dispatch-capacity", &rom, &profile);
+    let (work, result) = generated_fixture(
+        &format!("dispatch-capacity-{roots_per_bank}"),
+        &rom,
+        &profile,
+    );
+    if fits {
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let asm = std::fs::read_to_string(work.join("sms/generated/translated.asm")).unwrap();
+        assert!(asm.contains(".bank 0 slot 0\n.section \"rt_dispatch_directory_sec\" free"));
+        assert!(asm.contains("rt_dispatch_table_end:"));
+        return;
+    }
     assert!(!result.status.success());
     assert!(
         String::from_utf8_lossy(&result.stderr)
@@ -338,6 +362,77 @@ fn mmc3_pipeline_rejects_dispatch_table_larger_than_one_mapped_slot() {
         !work.join("sms").exists(),
         "capacity error must precede project emission"
     );
+}
+
+#[test]
+#[ignore = "requires Docker WLA-DX; checks the generated fixed-bank directory placement"]
+fn mmc3_full_dispatch_directory_cannot_spill_out_of_fixed_bank() {
+    let (rom, profile) = full_bus_fixture();
+    let (work, result) = generated_fixture("dispatch-fixed-directory", &rom, &profile);
+    assert!(result.status.success());
+    let project = work.join("sms");
+    let generated = std::fs::read_to_string(project.join("generated/translated.asm")).unwrap();
+    let header = ".bank 0 slot 0\n.section \"rt_dispatch_directory_sec\" free\n";
+    let directory = generated
+        .split_once(header)
+        .unwrap()
+        .1
+        .split_once(".ends")
+        .unwrap()
+        .0;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let uid = std::process::Command::new("id").arg("-u").output().unwrap();
+    let gid = std::process::Command::new("id").arg("-g").output().unwrap();
+    assert!(uid.status.success() && gid.status.success());
+    let user = format!(
+        "{}:{}",
+        String::from_utf8_lossy(&uid.stdout).trim(),
+        String::from_utf8_lossy(&gid.stdout).trim()
+    );
+    for available in [384, 383] {
+        // Isolate placement from unrelated runtime occupancy. These are the
+        // exact generated directory bytes/section, with record addresses as
+        // fixed forward references; a second empty bank must not absorb them.
+        let mut asm = format!(
+            ".memorymap\n defaultslot 0\n slotsize $4000\n slot 0 $0000\n slot 1 $4000\n.endme\n.rombankmap\n bankstotal 2\n banksize $4000\n banks 2\n.endro\n.bank 0 slot 0\n.org 0\n.section \"occupied\" force\n.dsb {}, $ff\n.ends\n",
+            0x4000 - available
+        );
+        for page in 0x80..=0xff {
+            asm.push_str(&format!(".define rt_dispatch_page_{page:02X} $4000\n"));
+        }
+        asm.push_str(header);
+        asm.push_str(directory);
+        asm.push_str(".ends\n");
+        std::fs::write(project.join("sms.asm"), asm).unwrap();
+        let output = std::process::Command::new("docker")
+            .args(["run", "--rm", "--network", "none", "--user", &user, "-v"])
+            .arg(format!("{}:/work", root.display()))
+            .args(["nes-to-sms-poc", "make", "-B", "-C"])
+            .arg(PathBuf::from("/work").join(project.strip_prefix(&root).unwrap()))
+            .output()
+            .unwrap();
+        std::fs::write(
+            work.join(format!("placement-{available}.log")),
+            [&output.stdout[..], &output.stderr[..]].concat(),
+        )
+        .unwrap();
+        assert_eq!(
+            output.status.success(),
+            available == 384,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if available == 384 {
+            let symbols = std::fs::read_to_string(project.join("sms.sym")).unwrap();
+            assert!(symbols.contains("00:3e80 rt_dispatch_page_table"));
+            assert!(symbols.contains("00:3f80 rt_dispatch_page_counts"));
+        } else {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("rt_dispatch_directory_sec"));
+        }
+    }
 }
 
 #[test]

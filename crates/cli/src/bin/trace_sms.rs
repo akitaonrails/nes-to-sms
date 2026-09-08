@@ -8504,13 +8504,18 @@ mod tests {
             usize::from(bank) * BANK_SIZE + usize::from(addr & 0x3fff)
         };
         let table = physical("rt_dispatch_table");
+        let table_end = physical("rt_dispatch_table_end");
         let directory = physical("rt_dispatch_page_table");
         let counts = physical("rt_dispatch_page_counts");
+        assert_eq!(defs["rt_dispatch_page_table"].0, 0);
+        assert_eq!(defs["rt_dispatch_page_counts"].0, 0);
         assert_eq!(counts, directory + 256);
-        assert!(counts + 128 <= (table / BANK_SIZE + 1) * BANK_SIZE);
-        assert_eq!(&rom[directory - 2..directory], &[0, 0]);
-        assert_eq!((directory - 2 - table) % 6, 0);
-        let records: Vec<_> = rom[table..directory - 2]
+        assert_eq!(physical("rt_dispatch_directory_end"), counts + 128);
+        assert!(counts + 128 <= BANK_SIZE);
+        assert!(table_end <= (table / BANK_SIZE + 1) * BANK_SIZE);
+        assert_eq!(&rom[table_end - 2..table_end], &[0, 0]);
+        assert_eq!((table_end - 2 - table) % 6, 0);
+        let records: Vec<_> = rom[table..table_end - 2]
             .as_chunks::<6>()
             .0
             .iter()
@@ -8697,6 +8702,10 @@ mod tests {
         let original = std::fs::read(path.join("sms.sms")).unwrap();
         let table_bank = defs["rt_dispatch_table"].0;
         let physical = |addr: u16| usize::from(table_bank) * BANK_SIZE + usize::from(addr & 0x3fff);
+        let symbol_physical = |name: &str| {
+            let (bank, addr) = defs[name];
+            usize::from(bank) * BANK_SIZE + usize::from(addr & 0x3fff)
+        };
         let base = 0x5000u16;
         let page = 0x28usize;
         let mut calls = 0;
@@ -8728,9 +8737,9 @@ mod tests {
                 ]);
             }
             rom[physical(base) + count * 6..physical(base) + count * 6 + 2].fill(0);
-            let directory = physical(defs["rt_dispatch_page_table"].1) + page * 2;
+            let directory = symbol_physical("rt_dispatch_page_table") + page * 2;
             rom[directory..directory + 2].copy_from_slice(&base.to_le_bytes());
-            rom[physical(defs["rt_dispatch_page_counts"].1) + page] =
+            rom[symbol_physical("rt_dispatch_page_counts") + page] =
                 u8::try_from(count).unwrap_or(0);
             let mut bus = SmsBus::new(rom, 0xff);
             for low in 0..=255u16 {
