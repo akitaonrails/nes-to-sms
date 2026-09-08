@@ -41,8 +41,10 @@ the shared mapper implementation. First-level demos are checkpoints, not done.
 
 Further performance optimization and VRC6 are deferred. Preserve SMB1, CV1 and
 the accepted SMB3 checkpoint (`68b439a`) as regression baselines; this does not
-claim full-game SMB3 or general MMC3 completion. Missing inputs or physical SMS
-limitations must be reported, not used to silently reduce completion criteria.
+claim full-game SMB3 or general MMC3 completion. Missing inputs must be reported.
+For physical SMS limitations, the user authorizes selecting and documenting the
+best workable adaptation and continuing without a permission round trip. Missing
+content or mapper behavior must not be silently counted as complete.
 
 ## Principles
 

@@ -1,8 +1,10 @@
 # Mapper support plan — from NROM to the major mappers
 
-Current priority (2026-09-07): the user selected **SMB3 / MMC3** next, ahead
-of the older ascending-difficulty ladder. See [SMB3 plan](smb3-plan.md) for
-the current baseline and acceptance gates; mapper 4 still fails closed.
+Current priority (2026-09-08): the [full-game mapper roadmap](mapper-roadmap.md)
+supersedes the historical ladder below. **Adventure Island / CNROM** is active;
+complete each game and its documented mapper coverage before advancing. Preserve
+SMB1/CV1/SMB3 behavior. Performance optimization and VRC6 are deferred. The
+[SMB3 plan](smb3-plan.md) records experimental mapper-4 support and its limits.
 
 Goal: run the bulk of the NES library through the pipeline. Target
 ladder, each rung a shippable milestone with its own stress ROM:

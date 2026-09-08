@@ -298,8 +298,8 @@ evidence. Do not open another game's implementation lane before closing this one
 6. **Review and hand off.** Run workspace tests, relevant assembled/differential
    suites, formatting and lint checks. Record exact ROM/core/input identities,
    observed behavior and any remaining limitations. Missing content, broken audio
-   or rendering defects do not pass as cosmetic exceptions without explicit user
-   agreement. Have correctness and changed
+   or rendering defects must not be silently waived as cosmetic; apply and record
+   the hardware-adaptation policy below where necessary. Have correctness and changed
    ownership boundaries reviewed, create a focused validated commit, preserve
    the old artifact, then update the game's launch ROM. Only then advance.
 
@@ -307,8 +307,11 @@ Use the minimum evidence that establishes each claim, not repeated broad runs
 without a changed boundary. The implementer records results; a separate reviewer
 checks completion claims and material mapping/timing/ownership changes. An
 unsupported hardware feature, known gameplay blocker or unfinished validation
-is not a completed milestone. Stop for missing external inputs or physical SMS
-constraints; document them instead of silently narrowing "full support."
+is not a completed milestone. Stop for missing external inputs. When physical
+SMS constraints arise, the user authorizes choosing the best workable adaptation
+and proceeding: document the hardware evidence, chosen behavior and fidelity
+tradeoff. This authority does not turn omitted game content or unimplemented
+mapper semantics into complete support.
 
 ## Mapper completeness gates
 
@@ -331,9 +334,10 @@ fail closed. Never mark a mapper family complete solely because one title boots.
 Mapper-provided sound needs explicit SMS output behavior and tests; preserving
 register writes while silently dropping a mapper feature does not close that
 row. All game music and sound effects remain required, including NES APU sample
-playback where used. Exact NES timbre is not implied on SMS, but output mappings
-and fidelity limits must be documented and agreed; an infeasible or omitted
-feature stays incomplete unless the user explicitly changes the requirement.
+playback where used. Exact NES timbre is not implied on SMS. The user authorizes
+best-recommendation hardware adaptations without waiting for approval; document
+output mappings and fidelity limits. Omitted content or unimplemented features
+remain explicit gaps, not silently completed rows.
 
 ## Evidence rules for each family
 
