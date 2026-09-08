@@ -500,29 +500,33 @@ fn validate(p: &Profile) -> Result<(), LoadError> {
             "MMC3_FULL_RUNTIME requires mapper 4 and software calls".into(),
         ));
     }
-    if p.translation
-        .runtime_defines
-        .iter()
-        .any(|d| d == "CNROM_BUS_EXPERIMENT")
-        && (p.rom.mapper != 3
-            || p.native_calls()
-            || !p.replacements.is_empty()
-            || !p.jump_engines.is_empty()
-            || !p.return_escapes.is_empty()
-            || !p.return_consumes.is_empty()
-            || !p.bank_entries.is_empty()
-            || !p.bank_calls.is_empty()
-            || !p.chr_packs.is_empty()
-            || p.translation.defer_sprite_registers
-            || p.render.chr_ram_bg_identity
-            || p.render.top_tile_remap_rows != 0
-            || p.translation
-                .runtime_defines
-                .iter()
-                .any(|d| d != "CNROM_BUS_EXPERIMENT"))
+    if p.translation.runtime_defines.iter().any(|d| {
+        matches!(
+            d.as_str(),
+            "CNROM_BUS_EXPERIMENT" | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+        )
+    }) && (p.rom.mapper != 3
+        || p.native_calls()
+        || !p.replacements.is_empty()
+        || !p.jump_engines.is_empty()
+        || !p.return_escapes.is_empty()
+        || !p.return_consumes.is_empty()
+        || !p.bank_entries.is_empty()
+        || !p.bank_calls.is_empty()
+        || !p.chr_packs.is_empty()
+        || p.translation.defer_sprite_registers
+        || p.render.chr_ram_bg_identity
+        || p.render.top_tile_remap_rows != 0
+        || p.translation.runtime_defines.iter().any(|d| {
+            !matches!(
+                d.as_str(),
+                "CNROM_BUS_EXPERIMENT" | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+            )
+        })
+        || p.translation.runtime_defines.len() != 1)
     {
         return Err(LoadError::Validation(
-            "CNROM_BUS_EXPERIMENT requires mapper 3, software calls, and no other runtime defines or replacement/dispatch/bank/CHR-pack overrides".into(),
+            "CNROM experiments require mapper 3, software calls, exactly one experiment define, and no replacement/dispatch/bank/CHR-pack overrides".into(),
         ));
     }
     if p.translation.runtime_defines.iter().any(|name| {
@@ -1017,14 +1021,24 @@ fn validate_switchable_address(field: &str, addr: u16, fixed_start: u16) -> Resu
 }
 
 impl Profile {
-    /// Synthetic bus-only contract; rendering and guest interrupt timing remain closed.
+    /// Synthetic raw bus capability; source timing is separately opt-in.
     pub fn cnrom_bus_experiment(&self) -> bool {
+        self.rom.mapper == 3
+            && self.translation.runtime_defines.iter().any(|d| {
+                matches!(
+                    d.as_str(),
+                    "CNROM_BUS_EXPERIMENT" | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+                )
+            })
+    }
+
+    pub fn source_clock_experiment(&self) -> bool {
         self.rom.mapper == 3
             && self
                 .translation
                 .runtime_defines
                 .iter()
-                .any(|d| d == "CNROM_BUS_EXPERIMENT")
+                .any(|d| d == "CNROM_SOURCE_CLOCK_EXPERIMENT")
     }
 
     pub fn dynamic_cpu_bus(&self) -> bool {
@@ -1120,6 +1134,9 @@ impl Profile {
     /// Keep runtime assembly policy synchronized with inline hardware lowering.
     pub fn effective_runtime_defines(&self) -> Vec<String> {
         let mut defines = self.translation.runtime_defines.clone();
+        if self.source_clock_experiment() {
+            defines.push("CNROM_BUS_EXPERIMENT".into());
+        }
         if self.translation.defer_sprite_registers {
             defines.push("DEFER_SPRITE_REGISTERS".into());
         }

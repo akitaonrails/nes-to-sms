@@ -376,6 +376,9 @@ boot_main:
 .ifdef CNROM_BUS_EXPERIMENT
   call rt_cnrom_init
 .endif
+.ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
+  call rt_source_init
+.endif
 
   ; 11. Clear sprite staging area.
   ld  hl, $c900

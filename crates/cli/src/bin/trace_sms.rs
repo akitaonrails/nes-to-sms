@@ -7443,6 +7443,10 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[path = "trace_sms/source_clock_tests.rs"]
+mod source_clock_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

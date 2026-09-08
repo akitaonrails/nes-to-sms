@@ -43,7 +43,8 @@ and bounded NES 2.0 UxROM (2, submappers 1/2). The
 [pipeline](../crates/cli/src/pipeline.rs) separately admits experimental MMC3 (4)
 through explicit profile capabilities. That is not universal MMC3 compatibility.
 CNROM has a tested [board-model foundation](../crates/nes_rom/src/cnrom.rs)
-and an opt-in [synthetic source-bus runtime](cnrom-bus-runtime.md), but
+and opt-in [synthetic source-bus](cnrom-bus-runtime.md) and
+[source-clock](source-clock-runtime.md) foundations, but
 **rendered-game admission and full mapper support remain unfinished**. The
 [Adventure Island reference](adventure-island-reference.md) pins the target,
 records native execution evidence and tracks full-content acceptance. The existing

@@ -197,6 +197,15 @@ fn validate_config(
         .runtime_defines
         .iter()
         .any(|d| d == "CNROM_BUS_EXPERIMENT");
+    let source_clock = cfg
+        .runtime_defines
+        .iter()
+        .any(|d| d == "CNROM_SOURCE_CLOCK_EXPERIMENT");
+    if source_clock && !cnrom_bus {
+        return Err(EmitError::InvalidCnromConfig(
+            "source clock requires its CNROM raw-bus dependency".into(),
+        ));
+    }
     if cnrom_bus != cfg.cnrom.is_some() || (cfg.mapper == 3) != cnrom_bus {
         return Err(EmitError::InvalidCnromConfig(
             "mapper 3 requires the explicit bus-only experiment and board configuration".into(),
@@ -207,10 +216,12 @@ fn validate_config(
             || cfg.native_calls
             || assets.prg_banks.is_some()
             || cfg.raw_ciram_backend != RawCiramBackend::SramSlot2
-            || cfg
-                .runtime_defines
-                .iter()
-                .any(|d| d != "CNROM_BUS_EXPERIMENT")
+            || cfg.runtime_defines.iter().any(|d| {
+                !matches!(
+                    d.as_str(),
+                    "CNROM_BUS_EXPERIMENT" | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+                )
+            })
             || assets.chr_4bpp.len() > 0x4000
             || assets.chr_maps.as_ref().is_some_and(|v| v.len() > 0x4000)
             || assets.nametable.as_ref().is_none_or(|v| v.len() != 0x700)

@@ -1,0 +1,824 @@
+; Opt-in, rendering-disabled synthetic NTSC source clock. Descriptor ABI v1.
+; CA80..CAFF aliases the INACTIVE legacy CHR reverse map. No legacy renderer
+; or guest-NMI host bridge may run under this capability.
+.ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
+.define SC_CYCLES $ca80 ; completed source cycles, u32 modulo 2^32
+.define SC_DOT $ca84
+.define SC_LINE $ca86
+.define SC_FRAME $ca88 ; independent u32 frame identity
+.define SC_PC $ca8c
+.define SC_OPCODE $ca8e
+.define SC_OPERAND $ca8f
+.define SC_SIZE $ca91
+.define SC_SEQUENCE $ca92
+.define SC_MODE $ca93
+.define SC_BASE $ca94
+.define SC_PENALTY $ca95
+.define SC_PHASE $ca96
+.define SC_TOTAL $ca97
+.define SC_POLL1 $ca98
+.define SC_POLL2 $ca99
+.define SC_EFFECTIVE $ca9a
+.define SC_WRONG $ca9c
+.define SC_POINTER $ca9e
+.define SC_INDEX $caa0
+.define SC_CROSS $caa1
+.define SC_RESULT $caa2
+.define SC_VBLANK $caa3
+.define SC_NMI_LINE $caa4 ; 1=asserted (physical pin low)
+.define SC_NMI_EDGE $caa5
+.define SC_ACCEPTED $caa6
+.define SC_ENTRY $caa7
+.define SC_DMA_PAGE $caa8
+.define SC_DMA_PENDING $caa9
+.define SC_DMA_ALIGN $caaa ; 0: odd numbered transfer=get; 1: opposite
+.define SC_DMA_ACTIVE $caab
+.define SC_EVENT_ADDR $caac
+.define SC_BUS $caae
+.define SC_EVENT_KIND $caaf ; 0=read,1=write
+.define SC_TAKEN $cab0
+.define SC_RESUME $cab2
+.define SC_SAVED_A $cab4
+.define SC_DMA_OFFSET $cab6
+.define SC_TARGET $cab7
+.define SC_FETCH $cab9
+.define SC_Y $cabc
+.define SC_X $cabd
+.define SC_END $cabe
+.if SC_END > $cb00
+  .fail "Source clock exceeds its exclusive reservation"
+.endif
+
+.bank 0 slot 0
+.section "source_clock" free
+rt_source_init:
+  ld hl, SC_CYCLES
+  ld bc, $80
+  xor a
+  call mem_fill
+  ld hl, 261
+  ld (SC_LINE), hl
+  ret
+
+; Inline descriptor is ten bytes; preserve every incoming register normally.
+rt_source_begin:
+  ex (sp), hl
+  push af
+  push bc
+  push de
+  ld (SC_Y), de
+  ld a, (SC_PHASE)
+  ld b, a
+  ld a, (SC_TOTAL)
+  cp b
+  jp nz, rt_source_phase_error
+  ld de, SC_PC
+  ld bc, 10
+  ldir
+  ld (SC_RESUME), hl
+  ld a, (SC_ACCEPTED)
+  or a
+  jr nz, _sc_enter_nmi
+  call _sc_prepare
+  call _sc_prefix
+  pop de
+  pop bc
+  pop af
+  ld hl, (SC_RESUME)
+  ex (sp), hl
+  ret
+_sc_enter_nmi:
+  pop de
+  pop bc
+  pop af
+  pop hl                  ; discard only source_begin's own return ownership
+  jp rt_source_nmi
+
+rt_source_phase_error:
+  ld a, $e9
+  ld ($cb1d), a
+  jp rt_unresolved_jsr_flash
+
+; Non-observing RAM peeks determine conditional duration before early polls.
+; The prefix STILL performs every original pointer/dummy bus access later.
+_sc_prepare:
+  xor a
+  ld (SC_PHASE), a
+  ld (SC_POLL2), a
+  ld (SC_CROSS), a
+  ld (SC_TAKEN), a
+  ld (SC_ENTRY), a
+  ld a, (SC_BASE)
+  ld (SC_TOTAL), a
+  ld hl, (SC_PC)
+  ld (SC_FETCH), hl
+  ld hl, (SC_OPERAND)
+  ld (SC_EFFECTIVE), hl
+  ld (SC_POINTER), hl
+  ld (SC_WRONG), hl
+  ld a, (SC_SEQUENCE)
+  cp 4
+  jp z, _sc_prepare_branch
+  cp 3
+  jp nc, _sc_prepare_poll
+  ld a, (SC_MODE)
+  cp 10
+  jr z, _sc_prepare_indx
+  cp 11
+  jr z, _sc_prepare_indy
+  cp 4
+  jr z, _sc_prepare_zpx
+  cp 5
+  jr z, _sc_prepare_zpy
+  cp 7
+  jr z, _sc_prepare_absx
+  cp 8
+  jp nz, _sc_prepare_poll
+  ld a, (SC_Y)
+  jr _sc_prepare_index
+_sc_prepare_absx:
+  ld a, (SC_X)
+  jr _sc_prepare_index
+_sc_prepare_zpx:
+  ld a, (SC_X)
+  jr _sc_prepare_zp
+_sc_prepare_zpy:
+  ld a, (SC_Y)
+_sc_prepare_zp:
+  add a, l
+  ld l, a
+  ld h, 0
+  ld (SC_EFFECTIVE), hl
+  jp _sc_prepare_poll
+_sc_prepare_indx:
+  ld a, (SC_X)
+  add a, l
+  ld l, a
+_sc_prepare_indy:
+  ld h, 0
+  ld (SC_POINTER), hl
+  ld h, $c0
+  ld c, (hl)
+  inc l
+  ld h, (hl)
+  ld l, c
+  ld (SC_EFFECTIVE), hl
+  ld (SC_WRONG), hl
+  ld a, (SC_MODE)
+  cp 10
+  jr z, _sc_prepare_poll
+  ld a, (SC_Y)
+_sc_prepare_index:
+  add a, l
+  ld l, a
+  ld (SC_WRONG), hl
+  jr nc, _sc_prepare_index_done
+  inc h
+  ld a, 1
+  ld (SC_CROSS), a
+  ld a, (SC_PENALTY)
+  cp 1
+  jr nz, _sc_prepare_index_done
+  ld a, (SC_TOTAL)
+  inc a
+  ld (SC_TOTAL), a
+_sc_prepare_index_done:
+  ld (SC_EFFECTIVE), hl
+_sc_prepare_poll:
+  ld a, (SC_TOTAL)
+  dec a
+  ld (SC_POLL1), a
+  ld a, (SC_SEQUENCE)
+  cp 10
+  ret nz
+  xor a
+  ld (SC_POLL1), a         ; BRK does not accept a second interrupt here
+  ret
+_sc_prepare_branch:
+  ld a, 1
+  ld (SC_POLL1), a
+  ld a, (SC_OPCODE)
+  rlca
+  rlca
+  and 3
+  ld e, a
+  ld d, 0
+  ld hl, _sc_branch_masks
+  add hl, de
+  ld a, ($cb03)
+  and (hl)
+  ld c, 0
+  jr z, _sc_branch_bit
+  ld c, $20
+_sc_branch_bit:
+  ld a, (SC_OPCODE)
+  xor c
+  and $20
+  ret nz
+  ld a, 1
+  ld (SC_TAKEN), a
+  ld hl, (SC_PC)
+  inc hl
+  inc hl
+  ld b, h
+  ld a, (SC_OPERAND)
+  ld e, a
+  ld d, 0
+  bit 7, a
+  jr z, _sc_branch_positive
+  dec d
+_sc_branch_positive:
+  add hl, de
+  ld (SC_EFFECTIVE), hl
+  ld a, 3
+  ld (SC_TOTAL), a
+  ld a, h
+  cp b
+  ret z
+  ld h, b
+  ld (SC_WRONG), hl
+  ld a, 4
+  ld (SC_TOTAL), a
+  ld a, 3
+  ld (SC_POLL2), a
+  ret
+_sc_branch_masks:
+  .db $80,$40,$01,$02
+
+_sc_prefix:
+  call _sc_fetch_byte       ; opcode, cycle1
+  ld a, (SC_SEQUENCE)
+  cp 4
+  jp z, _sc_prefix_branch
+  cp 3
+  jr z, _sc_prefix_implied
+  cp 5
+  jr z, _sc_prefix_implied
+  cp 6
+  jr z, _sc_prefix_pull
+  cp 7
+  jr z, _sc_prefix_jsr
+  cp 8
+  jr z, _sc_prefix_pull
+  cp 9
+  jr z, _sc_prefix_pull
+  cp 10
+  jr z, _sc_prefix_brk
+  call _sc_fetch_byte       ; immediate or low operand
+  ld a, (SC_SIZE)
+  cp 3
+  call z, _sc_fetch_byte
+  ld a, (SC_SEQUENCE)
+  cp 11
+  ret nc                   ; JMP's remaining indirect reads use own helper
+  ld a, (SC_MODE)
+  cp 2
+  ret z
+  cp 10
+  jr z, _sc_prefix_indx
+  cp 11
+  jr z, _sc_prefix_indy
+  cp 4
+  jr z, _sc_prefix_zp
+  cp 5
+  jr z, _sc_prefix_zp
+  cp 7
+  jr z, _sc_prefix_indexed
+  cp 8
+  jr z, _sc_prefix_indexed
+  jr _sc_prefix_nop
+_sc_prefix_implied:
+  ld hl, (SC_FETCH)
+  jp _sc_read
+_sc_prefix_pull:
+  call _sc_prefix_implied
+  jp _sc_stack_dummy
+_sc_prefix_jsr:
+  call _sc_fetch_byte
+  jp _sc_stack_dummy
+_sc_prefix_brk:
+  ld a, (SC_NMI_EDGE)
+  or a
+  jp nz, rt_cnrom_unsupported
+  ld a, 1
+  ld (SC_ENTRY), a
+  jp _sc_fetch_byte         ; BRK padding byte, not next instruction
+_sc_prefix_zp:
+  ld hl, (SC_OPERAND)
+  ld h, 0
+  call _sc_read
+  jr _sc_prefix_nop
+_sc_prefix_indx:
+  ld hl, (SC_OPERAND)
+  ld h, 0
+  call _sc_read
+_sc_prefix_indy:
+  ld hl, (SC_POINTER)
+  call _sc_read
+  inc l
+  call _sc_read
+  ld a, (SC_MODE)
+  cp 10
+  jr z, _sc_prefix_nop
+_sc_prefix_indexed:
+  ld a, (SC_SEQUENCE)
+  or a
+  jr nz, _sc_prefix_dummy
+  ld a, (SC_CROSS)
+  or a
+  jr z, _sc_prefix_nop
+_sc_prefix_dummy:
+  ld hl, (SC_WRONG)
+  call _sc_read
+_sc_prefix_nop:
+  ld a, (SC_SEQUENCE)
+  or a
+  ret nz
+  ld a, (SC_OPCODE)
+  cp $b4
+  ret z
+  cp $bc
+  ret z
+  ; All stable memory NOPs have low five opcode bits $04,$0C,$14,$1C.
+  ld a, (SC_OPCODE)
+  and $1f
+  cp 4
+  jr z, _sc_nop_read
+  cp $0c
+  jr z, _sc_nop_read
+  cp $14
+  jr z, _sc_nop_read
+  cp $1c
+  ret nz
+_sc_nop_read:
+  ; Official BIT ($24/$2C), STY/LDY/CPY/CPX share some encodings: only the
+  ; six absolute-indexed NOPs and explicit zp/absolute variants are NOPs.
+  ld a, (SC_OPCODE)
+  cp $04
+  jr z, _sc_nop_final
+  cp $44
+  jr z, _sc_nop_final
+  cp $64
+  jr z, _sc_nop_final
+  cp $0c
+  jr z, _sc_nop_final
+  and $1f
+  cp $14
+  jr z, _sc_nop_final
+  cp $1c
+  ret nz
+_sc_nop_final:
+  ld hl, (SC_EFFECTIVE)
+  jp _sc_read
+_sc_prefix_branch:
+  call _sc_fetch_byte
+  ld a, (SC_TAKEN)
+  or a
+  ret z
+  ld hl, (SC_FETCH)
+  call _sc_read
+  ld a, (SC_TOTAL)
+  cp 4
+  ret nz
+  ld hl, (SC_WRONG)
+  jp _sc_read
+_sc_fetch_byte:
+  ld hl, (SC_FETCH)
+  call _sc_read
+  inc hl
+  ld (SC_FETCH), hl
+  ret
+_sc_stack_dummy:
+  ld a, ($cb02)
+  ld l, a
+  ld h, 1
+  jp _sc_read
+
+; Actual semantic data accesses validate the precomputed address. Prefix and
+; stack accesses use internal entry points with their explicit raw addresses.
+rt_source_read_bus:
+  call _sc_check_address
+  jp _sc_read
+rt_source_write_bus:
+  call _sc_check_address
+  jp _sc_write
+_sc_check_address:
+  push af
+  push de
+  ld de, (SC_EFFECTIVE)
+  ld a, h
+  cp d
+  jp nz, rt_source_phase_error
+  ld a, l
+  cp e
+  jp nz, rt_source_phase_error
+  pop de
+  pop af
+  ret
+_sc_read:
+  push bc
+  push de
+  push hl
+  ld a, (SC_DMA_PENDING)
+  or a
+  call nz, _sc_dma
+  call _sc_cycle
+  call rt_source_bus_read_event
+  ld (SC_RESULT), a
+  call _sc_poll
+  ld a, (SC_RESULT)
+  pop hl
+  pop de
+  pop bc
+  ret
+_sc_write:
+  push af
+  push bc
+  push de
+  push hl
+  push af
+  call _sc_cycle
+  pop af
+  call rt_source_bus_write_event
+  call _sc_poll
+  pop hl
+  pop de
+  pop bc
+  pop af
+  ret
+; Shared transfer observation points, also used by DMA. Cycle already advanced.
+rt_source_bus_read_event:
+  xor a
+  ld (SC_EVENT_KIND), a
+  ld (SC_EVENT_ADDR), hl
+  call rt_cpu_read_bus
+  ld (SC_BUS), a
+  ret
+rt_source_bus_write_event:
+  push af
+  ld a, 1
+  ld (SC_EVENT_KIND), a
+  ld (SC_EVENT_ADDR), hl
+  pop af
+  ld (SC_BUS), a
+  jp rt_cpu_write_bus
+_sc_cycle:
+  push af
+  ld a, (SC_PHASE)
+  inc a
+  ld (SC_PHASE), a
+  push bc
+  ld b, a
+  ld a, (SC_TOTAL)
+  cp b
+  jp c, rt_source_phase_error
+  pop bc
+  pop af
+  jp _sc_tick
+_sc_poll:
+  ld a, (SC_NMI_EDGE)
+  or a
+  ret z
+  ld a, (SC_PHASE)
+  ld b, a
+  ld a, (SC_POLL1)
+  cp b
+  jr z, _sc_accept
+  ld a, (SC_POLL2)
+  cp b
+  ret nz
+_sc_accept:
+  ld a, 1
+  ld (SC_ACCEPTED), a
+  xor a
+  ld (SC_NMI_EDGE), a
+  ret
+
+; One original CPU cycle, no instruction-phase changes. Frame/dot counters
+; advance by local increments, so completed-cycle u32 wrap changes no deadline.
+_sc_tick:
+  push af
+  push bc
+  push de
+  push hl
+  ld hl, SC_CYCLES
+  call _sc_inc32
+  ld b, 3
+_sc_dot:
+  ld hl, (SC_DOT)
+  inc hl
+  ld de, 341
+  or a
+  sbc hl, de
+  jr nc, _sc_new_line
+  add hl, de
+  ld (SC_DOT), hl
+  ld a, h
+  or a
+  jr nz, _sc_dot_done
+  ld a, l
+  cp 1
+  jr nz, _sc_dot_done
+  ld hl, (SC_LINE)
+  ld a, h
+  or a
+  jr nz, _sc_clear_line
+  ld a, l
+  cp 241
+  jr nz, _sc_dot_done
+  ld a, 1
+  ld (SC_VBLANK), a
+  call rt_source_nmi_line
+  jr _sc_dot_done
+_sc_clear_line:
+  ld a, l
+  cp 5                    ; 261 = $0105
+  jr nz, _sc_dot_done
+  xor a
+  ld (SC_VBLANK), a
+  call rt_source_nmi_line
+  jr _sc_dot_done
+_sc_new_line:
+  ld (SC_DOT), hl          ; zero (one-dot increments never skip a line)
+  ld hl, (SC_LINE)
+  inc hl
+  ld de, 262
+  or a
+  sbc hl, de
+  jr nc, _sc_new_frame
+  add hl, de
+  ld (SC_LINE), hl
+  jr _sc_dot_done
+_sc_new_frame:
+  ld (SC_LINE), hl
+  ld hl, SC_FRAME
+  call _sc_inc32
+_sc_dot_done:
+  djnz _sc_dot
+  pop hl
+  pop de
+  pop bc
+  pop af
+  ret
+_sc_inc32:
+  inc (hl)
+  ret nz
+  inc hl
+  inc (hl)
+  ret nz
+  inc hl
+  inc (hl)
+  ret nz
+  inc hl
+  inc (hl)
+  ret
+
+rt_source_nmi_line:
+  push bc
+  ld a, (SC_VBLANK)
+  ld c, a
+  ld a, ($cb08)
+  rlca
+  and c
+  ld c, a
+  ld a, (SC_NMI_LINE)
+  xor c
+  and c
+  jr z, _sc_line_stable
+  ld a, (SC_ENTRY)
+  or a
+  jp nz, rt_cnrom_unsupported
+  ld a, (SC_DMA_ACTIVE)
+  or a
+  jp nz, rt_cnrom_unsupported
+  ld a, 1
+  ld (SC_NMI_EDGE), a
+_sc_line_stable:
+  ld a, c
+  ld (SC_NMI_LINE), a
+  pop bc
+  ret
+
+rt_source_status_read:
+  ; Explicitly unsupported same-dot set/clear neighborhoods, not fake races.
+  ld hl, (SC_LINE)
+  ld a, h
+  or a
+  jr nz, _sc_status_pre
+  ld a, l
+  cp 240
+  jr z, _sc_status_before
+  cp 241
+  jr z, _sc_status_after
+  jr _sc_status_value
+_sc_status_pre:
+  ld a, l
+  cp 4
+  jr z, _sc_status_before
+  cp 5
+  jr nz, _sc_status_value
+_sc_status_after:
+  ld hl, (SC_DOT)
+  ld a, h
+  or a
+  jr nz, _sc_status_value
+  ld a, l
+  cp 5
+  jp c, rt_cnrom_unsupported
+  jr _sc_status_value
+_sc_status_before:
+  ld hl, (SC_DOT)
+  ld de, 338
+  or a
+  sbc hl, de
+  jp nc, rt_cnrom_unsupported
+_sc_status_value:
+  ld a, (CN_PPU_LATCH)
+  and $1f
+  ld c, a
+  ld a, (SC_VBLANK)
+  rrca
+  or c
+  push af
+  xor a
+  ld (SC_VBLANK), a
+  ld ($cb0e), a
+  call rt_source_nmi_line
+  pop af
+  ld (CN_PPU_LATCH), a
+  ret
+
+rt_source_push:
+  push hl
+  push af
+  ld a, ($cb02)
+  ld l, a
+  ld h, 1
+  dec a
+  ld ($cb02), a
+  pop af
+  call _sc_write
+  pop hl
+  ret
+rt_source_pop:
+  push hl
+  ld a, ($cb02)
+  inc a
+  ld ($cb02), a
+  ld l, a
+  ld h, 1
+  call _sc_read
+  pop hl
+  ret
+rt_source_jsr:
+  push af
+  push hl
+  ld hl, (SC_PC)
+  inc hl
+  inc hl
+  ld a, h
+  call rt_source_push
+  ld a, l
+  call rt_source_push
+  call _sc_fetch_byte      ; late high operand fetch, cycle6
+  pop hl
+  pop af
+  ret
+rt_source_rts:
+  ld (SC_SAVED_A), a
+  call _sc_pop_target
+  call _sc_read            ; RTS's final dummy read uses stacked PC
+  inc hl
+  jp _sc_control_dispatch
+rt_source_rti:
+  ld (SC_SAVED_A), a
+  call rt_source_pop
+  and $cf
+  or $20
+  ld ($cb03), a
+  call _sc_pop_target
+  jp _sc_control_dispatch
+_sc_pop_target:
+  call rt_source_pop
+  ld (SC_TARGET), a
+  call rt_source_pop
+  ld (SC_TARGET+1), a
+  ld hl, (SC_TARGET)
+  ret
+rt_source_indirect_jump:
+  ld (SC_SAVED_A), a
+  call _sc_read
+  ld (SC_TARGET), a
+  inc l                   ; NMOS page-wrap, not INC HL
+  call _sc_read
+  ld h, a
+  ld a, (SC_TARGET)
+  ld l, a
+_sc_control_dispatch:
+  ld a, (SC_PHASE)
+  ld b, a
+  ld a, (SC_TOTAL)
+  cp b
+  jp nz, rt_source_phase_error
+  ld a, (SC_SAVED_A)
+  ld b, h
+  ld c, l
+  jp rt_banked_tail_dispatch
+
+rt_source_nmi:
+  ld (SC_SAVED_A), a
+  xor a
+  ld (SC_ACCEPTED), a
+  ld (SC_PHASE), a
+  ld (SC_POLL1), a
+  ld (SC_POLL2), a
+  ld a, 7
+  ld (SC_TOTAL), a
+  ld a, 1
+  ld (SC_ENTRY), a
+  ld hl, (SC_PC)
+  call _sc_read
+  call _sc_read
+  ld a, h
+  call rt_source_push
+  ld a, l
+  call rt_source_push
+  ld a, ($cb03)
+  and $ef
+  or $20
+  call rt_source_push
+  ld hl, $fffa
+  jr _sc_interrupt_vector
+rt_source_brk:
+  ld (SC_SAVED_A), a
+  ld hl, (SC_PC)
+  inc hl
+  inc hl
+  ld a, h
+  call rt_source_push
+  ld a, l
+  call rt_source_push
+  ld a, ($cb03)
+  or $30
+  call rt_source_push
+  ld hl, $fffe
+_sc_interrupt_vector:
+  ld a, ($cb03)
+  or 4
+  ld ($cb03), a
+  call _sc_read
+  ld (SC_TARGET), a
+  inc hl
+  call _sc_read
+  ld h, a
+  ld a, (SC_TARGET)
+  ld l, a
+  xor a
+  ld (SC_ENTRY), a
+  jp _sc_control_dispatch
+
+rt_source_dma_request:
+  ld a, b
+  ld (SC_DMA_PAGE), a
+  ld a, 1
+  ld (SC_DMA_PENDING), a
+  ret
+_sc_dma:
+  push hl
+  xor a
+  ld (SC_DMA_PENDING), a
+  ld (SC_DMA_OFFSET), a
+  ld a, 1
+  ld (SC_DMA_ACTIVE), a
+  call _sc_tick           ; halt read; no ordinary instruction poll
+  call rt_source_bus_read_event
+  ld a, (SC_CYCLES)
+  ld b, a
+  ld a, (SC_DMA_ALIGN)
+  xor b
+  and 1
+  jr z, _sc_dma_pairs      ; next transfer odd=get under default phase
+  call _sc_tick
+  call rt_source_bus_read_event ; alignment repeats halted read address
+_sc_dma_pairs:
+  ld a, (SC_DMA_PAGE)
+  ld h, a
+  ld a, (SC_DMA_OFFSET)
+  ld l, a
+  call _sc_tick
+  call rt_source_bus_read_event
+  push af
+  call _sc_tick
+  pop af
+  ld hl, $2004
+  call rt_source_bus_write_event
+  ld a, (SC_DMA_OFFSET)
+  inc a
+  ld (SC_DMA_OFFSET), a
+  jr nz, _sc_dma_pairs
+  xor a
+  ld (SC_DMA_ACTIVE), a
+  pop hl
+  ret
+.ends
+.endif

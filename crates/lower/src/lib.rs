@@ -9,6 +9,8 @@
 // SMS RAM layout
 // ---------------------------------------------------------------------------
 
+mod source_clock;
+
 /// SMS RAM addresses for emulated 6502 state.
 /// Matches docs/master-plan.md "SMS RAM layout" section.
 pub mod sms_layout {
@@ -3481,7 +3483,13 @@ enum FullBusAccess {
 }
 
 impl FullBusAccess {
-    fn select(addr: &ir::AddrExpr, neutral_bus: bool) -> Self {
+    fn select(addr: &ir::AddrExpr, neutral_bus: bool, source_clock: bool) -> Self {
+        if source_clock {
+            return Self::Bus {
+                read: "rt_source_read_bus",
+                write: "rt_source_write_bus",
+            };
+        }
         match addr {
             ir::AddrExpr::ZpConst(z) => Self::NativeRam(nes_ram_addr_to_sms(u16::from(*z))),
             ir::AddrExpr::Const(a) if *a < 0x2000 => Self::NativeRam(nes_ram_addr_to_sms(*a)),
@@ -3532,12 +3540,13 @@ fn emit_full_bus_memory(
     op: &ir::Op,
     neutral_bus: bool,
     compound: Option<&ir::Op>,
+    source_clock: bool,
 ) -> bool {
     use ir::Op;
     let Some(addr) = full_bus_operand(op) else {
         return false;
     };
-    let access = FullBusAccess::select(addr, neutral_bus);
+    let access = FullBusAccess::select(addr, neutral_bus, source_clock);
     access.emit_address(p, addr);
     match op {
         Op::StaMem { .. } => access.emit_write(p),
@@ -3673,8 +3682,16 @@ pub fn lower_routine(
     let mmc3_banking = opts.profile.is_some_and(|profile| profile.rom.mapper == 4);
     let full_bus = opts.profile.is_some_and(|p| p.dynamic_cpu_bus());
     let guest_stack = opts.profile.is_some_and(|p| p.cnrom_bus_experiment());
+    let source_clock = opts.profile.is_some_and(|p| p.source_clock_experiment());
+    if source_clock && !routine.ops.iter().any(|op| matches!(op, Op::Source { .. })) {
+        return Err(LowerError::UnsupportedOp {
+            pc: Some(routine.entry),
+            reason: "source clock requires original instruction boundaries".into(),
+        });
+    }
     program.set_wide_continuation_banks(full_bus && !guest_stack);
     if guest_stack
+        && !source_clock
         && routine
             .ops
             .iter()
@@ -3977,6 +3994,8 @@ pub fn lower_routine(
     }
 
     if full_bus {
+        // Source-clock mode also guards direct immediate/accumulator flag-DCE
+        // below: disabling fusion plans alone cannot preserve interrupt-visible P.
         nz_live.fill(true);
         fuse_consumed.fill(false);
         fuse_cmp_end.fill(None);
@@ -4021,7 +4040,7 @@ pub fn lower_routine(
             } else {
                 None
             };
-        if full_bus && emit_full_bus_memory(program, op, guest_stack, compound) {
+        if full_bus && emit_full_bus_memory(program, op, guest_stack, compound, source_clock) {
             if compound.is_some() {
                 compound_consumed = Some(op_idx + 1);
             }
@@ -4099,7 +4118,24 @@ pub fn lower_routine(
             }
 
             // ------------------------------------------------------------------
-            Op::Source { pc, text, .. } => {
+            Op::Source {
+                pc,
+                size,
+                text,
+                instruction,
+            } => {
+                if source_clock {
+                    a_holds_nz = false; // guest interrupt may change A while RTI restores P
+                    let descriptor = instruction
+                        .filter(|i| i.pc == *pc && i.size == *size)
+                        .and_then(source_clock::descriptor)
+                        .ok_or_else(|| LowerError::UnsupportedOp {
+                            pc: Some(*pc),
+                            reason: "source clock requires valid typed source timing".into(),
+                        })?;
+                    program.call("rt_source_begin");
+                    program.data(None, &descriptor);
+                }
                 if opts.emit_source_comments {
                     program.comment(format!("6502 ${pc:04X}: {text}"));
                 }
@@ -4112,6 +4148,10 @@ pub fn lower_routine(
 
             // ------------------------------------------------------------------
             Op::Brk { pc } => {
+                if source_clock {
+                    program.jp("rt_source_brk");
+                    continue;
+                }
                 // NES BRK is a 2-byte software interrupt: the pushed return
                 // PC is the BRK site + 2. rt_brk builds the 3-byte frame on
                 // the emulated stack and vectors to translated_irq; control
@@ -4546,7 +4586,11 @@ pub fn lower_routine(
             // Stack
             // ------------------------------------------------------------------
             Op::Pha => {
-                emit_push6502_inline(program);
+                if source_clock {
+                    program.call("rt_source_push");
+                } else {
+                    emit_push6502_inline(program);
+                }
             }
 
             Op::Pla => {
@@ -4554,7 +4598,11 @@ pub fn lower_routine(
                     program.ld_bc_imm(routine.next_source_pc(op_idx).wrapping_sub(1));
                     program.call("rt_mmc3_guard_pla");
                 }
-                emit_pop6502_inline(program);
+                if source_clock {
+                    program.call("rt_source_pop");
+                } else {
+                    emit_pop6502_inline(program);
+                }
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
                 }
@@ -4568,7 +4616,11 @@ pub fn lower_routine(
                 if full_bus {
                     program.or_imm(0x30); // PHP always pushes B and the unused bit set
                 }
-                emit_push6502_inline(program);
+                if source_clock {
+                    program.call("rt_source_push");
+                } else {
+                    emit_push6502_inline(program);
+                }
                 program.pop_af();
             }
 
@@ -4576,7 +4628,13 @@ pub fn lower_routine(
                 // PLP pops a value from the emulated 6502 stack into
                 // shadow P; A must be preserved.
                 program.push_af();
-                emit_pop6502_inline(program);
+                if source_clock {
+                    program.call("rt_source_pop");
+                    program.and_imm(0xef);
+                    program.or_imm(0x20);
+                } else {
+                    emit_pop6502_inline(program);
+                }
                 program.ld_abs_a(SHADOW_P);
                 program.pop_af();
             }
@@ -4601,12 +4659,14 @@ pub fn lower_routine(
             // ALU: ADC / SBC
             // ------------------------------------------------------------------
             Op::AdcImm(v) => {
-                if !flags_live_after(
-                    ops_slice,
-                    op_idx,
-                    F_N | F_Z | F_C | F_V,
-                    opts.routine_flag_reads,
-                ) {
+                if !source_clock
+                    && !flags_live_after(
+                        ops_slice,
+                        op_idx,
+                        F_N | F_Z | F_C | F_V,
+                        opts.routine_flag_reads,
+                    )
+                {
                     // H.8: result-only ADC — no consumer reads any flag
                     // before overwrite, so skip the whole shadow update.
                     program.ld_c_a();
@@ -4675,12 +4735,14 @@ pub fn lower_routine(
             }
 
             Op::SbcImm(v) => {
-                if !flags_live_after(
-                    ops_slice,
-                    op_idx,
-                    F_N | F_Z | F_C | F_V,
-                    opts.routine_flag_reads,
-                ) {
+                if !source_clock
+                    && !flags_live_after(
+                        ops_slice,
+                        op_idx,
+                        F_N | F_Z | F_C | F_V,
+                        opts.routine_flag_reads,
+                    )
+                {
                     program.ld_c_a();
                     program.ld_a_abs(SHADOW_P);
                     program.rrca();
@@ -4870,7 +4932,14 @@ pub fn lower_routine(
             // ALU: CMP / CPX / CPY
             // ------------------------------------------------------------------
             Op::CmpImm(v) => {
-                if !flags_live_after(ops_slice, op_idx, F_N | F_Z | F_C, opts.routine_flag_reads) {
+                if !source_clock
+                    && !flags_live_after(
+                        ops_slice,
+                        op_idx,
+                        F_N | F_Z | F_C,
+                        opts.routine_flag_reads,
+                    )
+                {
                     // H.8: CMP only produces flags; with no consumer it is
                     // a complete no-op.
                     let _ = v;
@@ -5010,7 +5079,14 @@ pub fn lower_routine(
             // Shifts / rotates
             // ------------------------------------------------------------------
             Op::AslA => {
-                if !flags_live_after(ops_slice, op_idx, F_N | F_Z | F_C, opts.routine_flag_reads) {
+                if !source_clock
+                    && !flags_live_after(
+                        ops_slice,
+                        op_idx,
+                        F_N | F_Z | F_C,
+                        opts.routine_flag_reads,
+                    )
+                {
                     program.add_a_a();
                 } else if let Some(end) = fuse_direct_end[op_idx] {
                     // Native shift: carry = shifted-out bit, same polarity
@@ -5044,7 +5120,14 @@ pub fn lower_routine(
             }
 
             Op::LsrA => {
-                if !flags_live_after(ops_slice, op_idx, F_N | F_Z | F_C, opts.routine_flag_reads) {
+                if !source_clock
+                    && !flags_live_after(
+                        ops_slice,
+                        op_idx,
+                        F_N | F_Z | F_C,
+                        opts.routine_flag_reads,
+                    )
+                {
                     program.srl_a();
                 } else if let Some(end) = fuse_direct_end[op_idx] {
                     program.srl_a();
@@ -5396,7 +5479,9 @@ pub fn lower_routine(
 
             Op::JmpIndirect { addr } => {
                 program.ld_hl_imm(*addr);
-                program.jp(if guest_stack {
+                program.jp(if source_clock {
+                    "rt_source_indirect_jump"
+                } else if guest_stack {
                     "rt_cpu_indirect_jump"
                 } else if full_bus {
                     "rt_mmc3_indirect_jump"
@@ -5424,6 +5509,9 @@ pub fn lower_routine(
                 // `call` is correct and faster.
                 if target.starts_with("rt_") {
                     program.call(target);
+                } else if source_clock {
+                    program.call("rt_source_jsr");
+                    program.translated_tail_jmp(target);
                 } else if guest_stack {
                     // No native/software continuation owner: the real guest
                     // stack is authoritative, including rewritten RTS pairs.
@@ -5526,7 +5614,9 @@ pub fn lower_routine(
             }
 
             Op::Rts => {
-                if guest_stack {
+                if source_clock {
+                    program.jp("rt_source_rts");
+                } else if guest_stack {
                     program.jp("rt_rts_dispatch");
                 } else if opts.profile.is_some_and(|p| p.native_calls()) {
                     program.ret();
@@ -5541,7 +5631,7 @@ pub fn lower_routine(
                 // natively; a game-written PC (BRK return, or a recovery
                 // that rewrote the frame) dispatches through the banked
                 // dispatcher. Tail transfer: control does not come back.
-                program.jp(RTI);
+                program.jp(if source_clock { "rt_source_rti" } else { RTI });
             }
 
             // ------------------------------------------------------------------
@@ -6029,6 +6119,7 @@ mod tests {
                     pc: 0x8000,
                     size: 3,
                     text: "RMW".into(),
+                    instruction: None,
                 },
                 Op::AslMem {
                     addr: AddrExpr::Const(0xb800),
@@ -6040,6 +6131,7 @@ mod tests {
                     pc: 0x8003,
                     size: 3,
                     text: "ORA".into(),
+                    instruction: None,
                 });
             }
             ops.push(Op::OraMem {

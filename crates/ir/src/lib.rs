@@ -146,6 +146,10 @@ pub enum Op {
         pc: u16,
         size: u8,
         text: String,
+        /// Typed source identity for timing and bus sequencing. Pipeline lifts
+        /// always retain it; hand-authored semantic-only fixtures may omit it.
+        /// It must survive optimization even when source comments are disabled.
+        instruction: Option<cpu6502::Instruction>,
     },
 
     /// Profile-verified idle poll. Signals scheduling intent without replacing
@@ -1680,6 +1684,7 @@ pub fn lift_range(prg: &[u8], opts: &LiftOptions) -> Result<Routine, LiftError> 
             pc,
             size: insn.size,
             text: format_instruction(&insn),
+            instruction: Some(insn),
         });
 
         if let Some(site) = opts

@@ -12,6 +12,7 @@
 #![allow(clippy::upper_case_acronyms)]
 
 pub mod table;
+pub mod timing;
 
 pub use table::{ADDR_MODE_NAME, MNEMONIC_NAME, OPCODE_TABLE, OpInfo};
 

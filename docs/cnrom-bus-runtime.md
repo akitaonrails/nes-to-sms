@@ -52,7 +52,8 @@ Source-cycle accounting, guest interrupt delivery, controller/open-bus fidelity,
 graphics, audio completeness and peripheral variants remain separate gates.
 The existing APU shim is not evidence of complete sound support.
 
-Next is source-time scheduling followed by immutable source-frame rendering and
-the [Adventure Island full-content checks](adventure-island-reference.md).
+The next [source-time foundation](source-clock-runtime.md) is implemented under
+a separate synthetic capability; immutable source-frame rendering and
+the [Adventure Island full-content checks](adventure-island-reference.md) remain.
 Host SMS VBlank must not replace original NES elapsed time. Any physical display
 or sound adaptation will be documented separately from source correctness.

@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+cpu6502 = { workspace = true }
 ir = { workspace = true }
 z80_emit = { workspace = true }
 profile = { workspace = true }

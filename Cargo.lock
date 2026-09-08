@@ -115,6 +115,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 name = "lower"
 version = "0.1.0"
 dependencies = [
+ "cpu6502",
  "ir",
  "profile",
  "z80_emit",

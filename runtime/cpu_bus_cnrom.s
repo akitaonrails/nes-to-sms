@@ -130,6 +130,9 @@ _cn_read_io:
   cp $40
   jp nz, rt_cnrom_unsupported
   ld a, l
+.ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
+  jp rt_cnrom_unsupported ; no timed APU/controller/open-bus contract yet
+.endif
   cp $15
   jp z, rt_apu_read
   ; Partially driven controller bits require CPU fetch/open-bus provenance.
@@ -190,6 +193,11 @@ _cn_write_io:
   ld a, l
   cp $18
   jp nc, rt_cnrom_unsupported
+.ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
+  cp $14
+  jp z, rt_source_dma_request
+  jp rt_cnrom_unsupported
+.endif
   cp $16
   jr z, _cn_strobe
   cp $14
@@ -275,7 +283,11 @@ _cn_ppu_read:
   ld a, l
   and 7
   cp 2
+.ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
+  jp z, rt_source_status_read
+.else
   jp z, rt_cnrom_unsupported ; no fabricated vblank/sprite0 timing
+.endif
   cp 4
   jr z, _cn_oam_read
   cp 7
@@ -349,8 +361,10 @@ _cn_ppu_write:
   jp z, _cn_address_write
   jp _cn_data_write
 _cn_ctrl_write:
+.ifndef CNROM_SOURCE_CLOCK_EXPERIMENT
   bit 7, b
   jp nz, rt_cnrom_unsupported ; guest NMI scheduling is a later contract
+.endif
   ld a, b
   ld ($cb08), a
   and 3
@@ -361,6 +375,9 @@ _cn_ctrl_write:
   and $73
   or c
   ld (CN_T_HI), a
+.ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
+  jp rt_source_nmi_line
+.endif
   ret
 _cn_mask_write:
   ld a, b

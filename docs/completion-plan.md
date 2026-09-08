@@ -31,7 +31,12 @@ Work on one game at a time, in this order:
 
 **Active: Adventure Island.** Its dump/board is pinned; the CNROM board model and
 [restricted source-bus checkpoint](cnrom-bus-runtime.md) pass independent review.
-Next implement source timing, interrupts and coherent rendering, then close the
+The subsequent [source-clock foundation](source-clock-runtime.md) also passes:
+ordered accesses, source-driven NMI/BRK/RTI and DMA are tested under an explicitly
+restricted, rendering-disabled capability. Next bank its decoded-PC directory
+and prove exact quiet-wait acceleration, then implement remaining source
+hardware and coherent rendering. These are measured execution prerequisites,
+not another old-game optimization campaign. Close the
 full-game content checklist and mapper coverage matrix before
 advancing. Completion includes every level/branch, sprite, background, music
 track, sound effect, ending and applicable game mode/save behavior. One level,

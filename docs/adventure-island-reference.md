@@ -6,7 +6,7 @@ The [mapper roadmap](mapper-roadmap.md) defines the full-game completion gate.
 All unchecked entries below remain required unless an explicitly documented
 hardware assessment chooses an alternative under the user's authorization.
 
-## Implementation checkpoint: board model and synthetic source bus
+## Implementation checkpoint: board model, source bus and clock
 
 The generic `nes_rom::cnrom` model covers fixed PRG, 8–128 KiB CHR selection,
 conflict variants and optional mirrored 2 KiB RAM. The opt-in
@@ -24,7 +24,11 @@ locally preserved under ignored `out/adventure-baseline.TvOphd/`.
 
 The later bus checkpoint passes 609 workspace tests and its independent
 assembled/core checks; its linked report records the updated regression evidence.
-Next: source timing, interrupts, coherent graphics and full-game/audio validation.
+The [source-clock checkpoint](source-clock-runtime.md) subsequently passes
+independent review with 618 workspace tests, 19 assembled projects and selected
+actual-core checks; its report distinguishes fresh and reused evidence.
+Next: banked resume tables, exact quiet-wait acceleration, remaining source
+hardware, coherent graphics and full-game/audio validation.
 This checkpoint does not close any rendered-game
 or full-mapper acceptance checkbox below.
 

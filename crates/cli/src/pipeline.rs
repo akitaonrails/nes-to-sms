@@ -201,7 +201,7 @@ fn add_mmc3_continuation_labels(
     routines: &mut [ir::Routine],
     prof: &profile::Profile,
 ) -> std::collections::BTreeSet<String> {
-    let pcs: std::collections::BTreeSet<u16> = routines
+    let mut pcs: std::collections::BTreeSet<u16> = routines
         .iter()
         .flat_map(|routine| {
             routine
@@ -215,6 +215,15 @@ fn add_mmc3_continuation_labels(
                 .map(|(index, _)| routine.next_source_pc(index))
         })
         .collect();
+    if prof.source_clock_experiment() {
+        pcs.extend(routines.iter().flat_map(|r| r.ops.iter()).filter_map(|op| {
+            if let ir::Op::Source { pc, .. } = op {
+                Some(*pc)
+            } else {
+                None
+            }
+        }));
+    }
     let mut continuations = std::collections::BTreeSet::new();
     for routine in routines {
         let bank = profile_target_identity(&routine.name).and_then(|(bank, _)| bank);
@@ -1988,6 +1997,23 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 program.ret();
             }
         }
+        if prof.source_clock_experiment() {
+            for sym in [
+                "rt_source_begin",
+                "rt_source_read_bus",
+                "rt_source_write_bus",
+                "rt_source_push",
+                "rt_source_pop",
+                "rt_source_jsr",
+                "rt_source_rts",
+                "rt_source_rti",
+                "rt_source_brk",
+                "rt_source_indirect_jump",
+            ] {
+                program.label(sym);
+                program.ret();
+            }
+        }
         for rep in &prof.replacements {
             if RUNTIME_SYMBOLS.contains(&rep.runtime_label.as_str()) {
                 continue; // already forward-declared above
@@ -2068,6 +2094,14 @@ pub fn run(args: &Args) -> Result<String, Error> {
             }
             dispatch_records.sort();
             dispatch_records.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        }
+        if prof.source_clock_experiment()
+            && dispatch_records.len().saturating_mul(6).saturating_add(258) > 0x4000
+        {
+            return Err(Error::Diagnostic(format!(
+                "source clock fixed-PRG resume directory needs {} decoded boundaries; the current single-bank directory supports at most 2687 (no entries truncated)",
+                dispatch_records.len()
+            )));
         }
         // Computed dispatch honors profile replacements too: a dispatched
         // NES address whose routine is replaced lands on the runtime hook
