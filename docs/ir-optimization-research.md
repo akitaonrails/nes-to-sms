@@ -320,4 +320,21 @@ blanking. It is a runtime specialization, not an IR inliner. This reinforces
 the requirement to profile the actual moving workload before choosing a pass.
 Its later moving-level profile attributes 44.6% to rendering and 17.5% to
 page-local dispatch, while bus routing is 7.5%; map cost shares are not a
-substitute for that workload. Background invalidation is the next investigation.
+substitute for that workload. The subsequent background dependency correction
+removes raw scroll metadata that the renderer does not read, while preserving
+resolved PPU address and fine-X semantics. It improves the full active route
+by another **14.57%** (4.010 → 4.594 updates/second), with matching checkpoint
+RAM and reduced rebuild blanking. This is dependency-based runtime reuse,
+not evidence that a general IR pass or inliner has been implemented.
+The updated moving profile assigns 37.7% to rendering and 20.0% to page-local
+dispatch; the latter's absolute cost remains 912,673 T-states/update. It is
+the next bounded lookup investigation, not a reason to inline every call.
+
+A source audit also rejected a tempting duplicate optimization: the MMC3
+tile converter already emits NES bitplanes directly and derives the upper
+SMS planes from their OR mask and subpalette bits. Its measured cost includes
+CHR fetch, row/flip selection, scratch accesses and VDP output, not a per-pixel
+reconstruction loop. Four pre-expanded palette variants would expand 128 KiB
+of raw CHR to 1 MiB and do not fit the current layout unchanged. Check existing
+lowering and runtime implementation before treating a familiar compiler or
+graphics technique as a new opportunity.

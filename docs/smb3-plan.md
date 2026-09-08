@@ -16,8 +16,8 @@ the mushroom question block, collects the mushroom, clears 1-1 and returns to
 the normal map with the panel changed from `$03` to `$00`, lives still four,
 and no trap. A separate no-input death route returns to the map with three lives.
 This establishes functional first-level support, **not full-speed or full-game
-compatibility**. The active traversal averages only 3.823 game updates/second
-at `500`; 36.99% of callbacks in the gameplay window are uniform-color frames
+compatibility**. The latest active traversal averages only 4.594 game updates/second
+at `500`; 30.54% of callbacks in the gameplay window are uniform-color frames
 during rebuilding, with a longest run of 11 callbacks. Presentation remains
 visibly slow and intermittent; completing an automated route does not establish
 comfortable human playability. See the measured contract below.

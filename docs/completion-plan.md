@@ -27,13 +27,19 @@ Cartridge RAM, physical CHR records and a verified-wait single-split adapter
 are integrated; this is not cycle/A12-accurate general MMC3 support. Current
 functional checkpoint has passed independent correctness and structure review;
 fresh SMB1/CV1 ROMs retain exact byte parity. Performance remains severe:
-about 4.0 updates/second during active traversal and frequent rebuild blanking;
+about 4.6 updates/second during active traversal and frequent rebuild blanking;
 functional completion is not comfortable/full-speed playability. The
 [32-byte internal-RAM fast path](mmc3-ram-fast-path.md) passes independent review
 and yields 4.9% active-traversal gain without reducing rebuild blanking. The
-moving-level profile puts rendering first (44.6%), then dispatch (17.5%).
-Next: identify exact background invalidations and propose a bounded coherent
-presentation improvement before changing cache or scroll architecture.
+moving-level profile put rendering first (44.6%), then dispatch (17.5%).
+A dependency census then identified raw scroll metadata incorrectly classified
+as a BG input. Removing that dependency avoids 44 of 159 rebuilds in the
+200-update moving window and improves the full traversal by another 14.57%,
+with matching checkpoint RAM and lower blanking (38.77% → 30.54%). The renderer
+still uses resolved PPU addresses and fine-X; no cache/scroll redesign was made.
+Next: evaluate a bounded lookup improvement for the measured page-local
+dispatch search, preserving physical-bank identity and strict misses, before
+introducing general inlining or changing graphics storage ownership.
 The parallel [LLVM-style optimization
 research](ir-optimization-research.md) is complete; its measured experiments
 follow correctness rather than replacing the playable-ROM work. Preserve SMB1/CV1

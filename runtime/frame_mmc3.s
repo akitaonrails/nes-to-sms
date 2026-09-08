@@ -356,10 +356,16 @@ _m3f_capture_record:
   call _m3f_record_put
   ld a, ($cb09)
   call _m3f_record_put
+  ; Raw $2005 bytes are packet metadata, not the renderer's BG address.
+  ; $2006 can replace t without replacing them; fine X commits separately.
+  xor a
+  ld (M3G_COMPARE_BG), a
   ld a, ($cb0c)
   call _m3f_record_put
   ld a, ($cb0d)
   call _m3f_record_put
+  ld a, 1
+  ld (M3G_COMPARE_BG), a
   ld a, (M3G_TEMP_LO)
   call _m3f_record_put
   ld a, (M3G_TEMP_HI)

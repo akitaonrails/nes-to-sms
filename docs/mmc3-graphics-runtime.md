@@ -134,14 +134,20 @@ The first incremental path also retains BG patterns, exact-key metadata and
 the prepared/visible nametable when **both frozen BG sources are unchanged**.
 C8EC records BG differences; C8ED selects the comparison group (then becomes
 the renderer's skip-BG scratch). Both CIRAM snapshots, each record's
-BG-selected four physical CHR pages, control/mask, scroll/t, mirroring,
+BG-selected four physical CHR pages, control/mask, t, mirroring,
 explicit IRQ reload and the committed split participate. Physical pages are
 already resolved through MMC3 inversion; changes to the other CHR half do
 not invalidate BG. Control changes conservatively invalidate it, including
 pattern-table selection. An earlier sprite/palette difference cannot bypass
 a later BG comparison.
 
-OAM, non-BG CHR, palettes and fine X can therefore reuse BG. The renderer
+OAM, non-BG CHR, palettes, raw scroll bytes and fine X can therefore reuse BG.
+Raw `$2005` bytes (record10/11) remain exact-packet identities but are not
+rendering inputs: BG addressing uses t12/13 and IRQ reload48..50, while
+fine X14 is committed as SMS scroll. In particular, `$2006` can replace t
+without changing the saved raw scroll bytes. Coarse-t changes still invalidate
+BG; no visible-footprint or offscreen-CIRAM relaxation is applied.
+The renderer
 still blanks, rebuilds sprite patterns/SAT and both palettes, and publishes
 at VBlank. Active/hidden transitions keep the existing per-OAM slot rules;
 there is no visible sprite-pattern overwrite. Single-record fallback
@@ -192,14 +198,24 @@ Its reuse path leaves VRAM, CRAM and VDP registers unchanged; individual source
 identity changes, HUD-only writes, split-only changes and rendering-off are
 separate assertions. These numbers describe that synthetic packet only,
 not an actual-game speedup.
+The nine-byte raw-scroll classification correction adds 72 interpreter
+T-states per two-record capture in this fixture (73,618 first; 222,139
+unchanged), with rebuild and exact-reuse costs unchanged. That interpreter
+estimate is not the nominal Z80 cost: the added opcodes cost 74 T-states for
+two records, as counted by the actual-core profile.
 
-The incremental fixture compares 120 dependency/configuration cases against
+The incremental fixture compares 160 dependency/configuration cases against
 forced full rebuilds, including fine-Y/split boundaries, physical CHR table
 selection/inversion, both records, IRQ reload, palette/fine-X, and sprite
 active/hidden changes. Entire VRAM and both raster palettes/register sets
 must agree, with BG/NT bytes unchanged on eligible packets. Each case also
 mutates live producer state after freezing and repeats with one nested host
-VINT, checking host service without guest reentry. Without the injected IRQ,
+VINT, checking host service without guest reentry. Raw-scroll cases cover
+either byte or both, independently in either/both records, including fine-X
+changes and raw/t disagreement after actual PPUADDR writes. All 48 such
+configuration cases then issue a real PPUSCROLL coarse-t change and require
+BG invalidation, with the same forced-full and nested-interrupt comparisons.
+Without the injected IRQ,
 one active moving sprite takes **42,097 T** on the BG-stable path versus
 **1,783,920–2,028,068 T** for the same forced-full packet. These synthetic
 costs exclude capture and do not predict how often real gameplay qualifies;
@@ -238,6 +254,27 @@ generalize to moving gameplay. Both routes keep four lives and mark 1-1 complete
 the remaining cadence and rebuild blanking are severe playability limitations.
 
 ## Remaining acceptance limits
+
+The subsequent raw-scroll dependency correction removes only unused `$2005`
+metadata from BG identity, while retaining exact packet-change detection and
+resolved PPU address/fine-X handling. Against the accepted RAM-fast-path ROM,
+the same full route improves from **4.010 to 4.594 updates/second (+14.57%)**
+at `500`: 29,571 → 25,811 physical intervals for 1,979 updates. All seven
+full guest/cart RAM checkpoints agree. Gameplay uniform-color callbacks fall
+from 12,463/32,143 to 8,667/28,383 (**38.77% → 30.54%**), with no black frames
+and the same longest flat streak of 11 callbacks. Nonflat image sets overlap
+at all 2,338 common logical ticks; this does not establish equality of every
+physical/intermediate frame or normal-speed playability.
+
+In the narrower 200-update moving profile, full builds fall from 159 to 115;
+nominal work falls from 1,041,506,767 to 913,194,013 T-states (12.32%). Capture
+comparison becomes slightly more expensive because raw-only changes no longer
+short-circuit BG comparisons, but avoiding builds dominates. Map throughput,
+blanking duty and all 401 completed images remain unchanged. Of 7,000 physical
+map frames, 46 differ only on isolated rebuild-entry frames with identical
+neighbors and committed display state. This is consistent with changed
+within-frame blanking timing; exact transient pixel magnitude/region was not
+captured and remains unverified.
 
 The apparent title-ground checker artifact was a **false positive from image
 preview scaling**. Raw native title pixels contain the alternating blocks:

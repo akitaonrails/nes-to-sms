@@ -10241,6 +10241,23 @@ mod tests {
             assert_eq!(cpu.pc, 7);
             cpu.cycles
         };
+        let write_ppu = |bus: &mut SmsBus, register: u8, value: u8| {
+            let mut cpu = Cpu::new();
+            cpu.pc = defs["rt_ppu_write"].1;
+            cpu.sp = 0xdff0;
+            cpu.a = value;
+            cpu.b = register;
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            for _ in 0..3000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                cpu.step(bus).unwrap();
+            }
+            assert_eq!(cpu.pc, 7);
+            assert_eq!(bus.read(0xcb1d), 0);
+        };
         let invoke_with_host_irq = |bus: &mut SmsBus| {
             let mut cpu = Cpu::new();
             cpu.pc = defs["rt_mmc3_frame_present"].1;
@@ -10301,8 +10318,8 @@ mod tests {
                 (0x87ff, true, true),
                 (0xcb08, false, true),
                 (0xcb09, true, true),
-                (0xcb0c, false, true),
-                (0xcb0d, true, true),
+                (0xcb0c, false, false),
+                (0xcb0d, true, false),
                 (0xc834, false, true),
                 (0xc835, true, true),
                 (0xc824, true, true),
@@ -10318,8 +10335,23 @@ mod tests {
                     page / 4 == u16::from(table / 16),
                 ));
             }
-            for (address, hud_only, bg_changed) in cases {
+            // Record mask1=playfield only,2=HUD only,3=both. Keep each raw
+            // scroll byte independent, then combine them with fine-X change.
+            let mut cases: Vec<(Vec<u16>, u8, bool)> = cases
+                .into_iter()
+                .map(|(address, hud_only, bg)| (vec![address], if hud_only { 2 } else { 3 }, bg))
+                .collect();
+            cases.extend([(vec![0xcb0c], 1, false), (vec![0xcb0d], 1, false)]);
+            cases.extend([(vec![0xcb0c], 2, false), (vec![0xcb0d], 3, false)]);
+            for records in 1..=3 {
+                cases.push((vec![0xcb0c, 0xcb0d], records, false));
+                cases.push((vec![0xcb0c, 0xcb0d, 0xc836], records, false));
+            }
+            for (addresses, records, bg_changed) in cases {
+                let address = addresses[0];
+                let raw_scroll = matches!(address, 0xcb0c | 0xcb0d);
                 let mut outcomes = Vec::new();
+                let mut coarse_outcomes = Vec::new();
                 for mode in 0..3 {
                     let force_full = mode == 1;
                     let mut bus = SmsBus::new(rom.clone(), 0xff);
@@ -10330,6 +10362,20 @@ mod tests {
                     bus.write(0xc824, 1);
                     bus.write(0xc834, fine_y << 4);
                     bus.write(0xc837, split);
+                    if raw_scroll {
+                        // Real PPUADDR writes replace t while the raw $2005
+                        // bytes retain an unrelated older scroll. Rendering
+                        // must use t, including after the next raw-only change.
+                        bus.write(0xcb0c, 0x57);
+                        bus.write(0xcb0d, 0xa3);
+                        bus.write(0xcb0b, 0);
+                        for value in [0x20 | ((fine_y & 3) << 4), 0] {
+                            write_ppu(&mut bus, 6, value);
+                        }
+                        assert_eq!(bus.read(0xc835), 0);
+                        assert_eq!(bus.read(0xc834), 0x20 | ((fine_y & 3) << 4));
+                        assert_eq!((bus.read(0xcb0c), bus.read(0xcb0d)), (0x57, 0xa3));
+                    }
                     for page in 0..8u16 {
                         bus.write(0xc850 + page, page as u8 ^ if inverted { 4 } else { 0 });
                     }
@@ -10344,24 +10390,34 @@ mod tests {
                     }
                     let capture = |bus: &mut SmsBus, mutate: bool| {
                         bus.write(0xc8f7, 0);
-                        if mutate && !hud_only {
-                            let value = bus.read(address);
-                            bus.write(
-                                address,
-                                match address {
-                                    0xc900 => 0xe0,                  // active -> hidden
-                                    0xcb08 | 0xc834 => value ^ 0x10, // BG table / fine Y
-                                    _ => value ^ 1,
-                                },
-                            );
+                        let original: Vec<_> =
+                            addresses.iter().map(|&a| (a, bus.read(a))).collect();
+                        if mutate && records & 1 != 0 {
+                            for &(address, value) in &original {
+                                bus.write(
+                                    address,
+                                    match address {
+                                        0xc900 => 0xe0,                  // active -> hidden
+                                        0xcb08 | 0xc834 => value ^ 0x10, // BG table / fine Y
+                                        _ => value ^ 1,
+                                    },
+                                );
+                            }
                         }
                         invoke(bus, "rt_mmc3_capture_playfield");
+                        if mutate && records == 1 {
+                            for &(address, value) in &original {
+                                bus.write(address, value);
+                            }
+                        }
                         bus.write(0xc8f7, 3);
                         bus.write(0xcb0f, 0x1b);
                         bus.write(0xcb10, 0);
-                        if mutate && hud_only {
-                            let value = bus.read(address);
-                            bus.write(address, value ^ if address == 0xc8f7 { 2 } else { 1 });
+                        if mutate && records == 2 {
+                            for &(address, _) in &original {
+                                let value = bus.read(address);
+                                bus.write(address, value ^ if address == 0xc8f7 { 2 } else { 1 });
+                            }
                         }
                         invoke(bus, "rt_mmc3_capture_hud");
                     };
@@ -10379,8 +10435,10 @@ mod tests {
                     assert_eq!(
                         bus.read(0xc8ec) != 0,
                         bg_changed,
-                        "group addr{address:04X} HUD{hud_only} table{table} inverted{inverted}"
+                        "group addr{addresses:04X?} records{records} table{table} inverted{inverted}"
                     );
+                    assert_eq!(bus.read(0xc8f4), 1, "raw scroll must still change packet");
+                    let producer = [0x8000, 0xc850, 0xc900, 0xc860].map(|a| (a, bus.read(a)));
                     // Frozen records, not subsequent producer writes, own this
                     // frame. Host-only service cannot reenter the producer.
                     bus.write(0x8000, 0xff);
@@ -10411,6 +10469,30 @@ mod tests {
                         cycles,
                         playfield_regs,
                     ));
+                    if raw_scroll {
+                        // Follow raw-only reuse with a real coarse-t change.
+                        // Restore only deliberate live mutations, not committed
+                        // renderer state; capture must detect the next BG change.
+                        for (address, value) in producer {
+                            bus.write(address, value);
+                        }
+                        let next_coarse_x = (bus.read(0xc835) ^ 1) & 31;
+                        let scroll = next_coarse_x * 8 + bus.read(0xc836);
+                        bus.write(0xcb0b, 0);
+                        write_ppu(&mut bus, 5, scroll);
+                        assert_eq!(bus.read(0xc835) & 31, next_coarse_x);
+                        capture(&mut bus, false);
+                        assert_eq!(bus.read(0xc8ec), 1, "subsequent coarse t was ignored");
+                        if mode == 2 {
+                            invoke_with_host_irq(&mut bus);
+                        } else {
+                            invoke(&mut bus, "rt_mmc3_frame_present");
+                        }
+                        let playfield = (bus.cram, bus.vdp_regs);
+                        bus.write(0xc831, 0);
+                        invoke(&mut bus, "rt_mmc3_display_line");
+                        coarse_outcomes.push((bus.vram, playfield, bus.cram, bus.vdp_regs));
+                    }
                 }
                 assert_eq!(outcomes[0].0, outcomes[1].0, "VRAM addr{address:04X}");
                 assert_eq!(outcomes[0].1, outcomes[1].1, "playfield palette");
@@ -10428,6 +10510,16 @@ mod tests {
                     outcomes[0].5, outcomes[2].5,
                     "nested host playfield registers"
                 );
+                if raw_scroll {
+                    assert_eq!(
+                        coarse_outcomes[0], coarse_outcomes[1],
+                        "coarse-t forced full"
+                    );
+                    assert_eq!(
+                        coarse_outcomes[0], coarse_outcomes[2],
+                        "coarse-t nested IRQ"
+                    );
+                }
                 if !bg_changed && address != 0xc837 {
                     assert!(outcomes[0].4 < outcomes[1].4 / 2);
                 }
