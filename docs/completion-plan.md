@@ -1,8 +1,8 @@
 # Completion Plan
 
-Step-by-step plan to take the current pipeline from "produces a structurally
-valid `.sms`" to "Super Mario Bros. runs on the Master System with all or
-most of the original NES ROM translated and the game playable end to end."
+Step-by-step execution record for the NES-to-SMS pipeline. The current queue
+requires complete game conversions and reusable mapper support; earlier SMB,
+CV1 and SMB3 sections retain their historical evidence and unfinished work.
 
 This document is the **execution** companion to
 [`master-plan.md`](master-plan.md). The master plan defines architecture,
@@ -12,13 +12,46 @@ re-order, add, remove. Do not throw it away and replace it with a
 different list; the document's value is in being the durable record of
 what we decided to do next and why.
 
-## SMB3 / MMC3 exploration (2026-09-07)
+## Active queue: full-game and mapper compatibility (2026-09-08)
 
-The next optimization work is guided by the
+Follow the detailed [mapper roadmap and completion gates](mapper-roadmap.md).
+Work on one game at a time, in this order:
+
+1. Adventure Island — CNROM.
+2. The Legend of Zelda — MMC1.
+3. Battletoads — AxROM.
+4. Contra (Japan) — VRC2.
+5. Ganbare Goemon 2 (Japan) — VRC2.
+6. Gradius II (Japan) — VRC4.
+7. Parodius Da! (Japan) — VRC4.
+8. Batman: Return of the Joker — FME-7.
+9. Punch-Out!! — MMC2.
+10. Fire Emblem — MMC4.
+11. Castlevania III (USA) — MMC5.
+
+**Next: Adventure Island.** Pin its dump/board, implement and test generic CNROM,
+then close the full-game content checklist and mapper coverage matrix before
+advancing. Completion includes every level/branch, sprite, background, music
+track, sound effect, ending and applicable game mode/save behavior. One level,
+one ending with untested branches, or silent audio is not completion. Compare
+original NES and generated SMS execution, including continuous video and audio;
+test mapper features the game itself does not exercise independently.
+
+Further speed optimization and VRC6 are deferred. Preserve the accepted SMB3
+checkpoint `68b439a` and SMB1/CV1 regression floor; deferral does not turn their
+remaining limitations into completed work. Record overclock settings and timing
+regressions, but do not reopen optimization campaigns before this queue.
+Goemon 2, Japanese Parodius and Punch-Out!! need verified local inputs;
+translated Gradius II and Fire Emblem need provenance checks. Resolve these
+before their turns; do not silently substitute games or reorder the queue.
+
+## SMB3 / MMC3 history (2026-09-07; further optimization deferred)
+
+Deferred optimization work is guided by the
 [post-blinking performance measurements and ordered experiments](smb3-performance-strategy.md).
 Do not assume the existing SMB1 compiler optimizations are enabled in full MMC3
-mode. The [collection-verified mapper roadmap](mapper-roadmap.md) is the queue
-**after** SMB3 performance/playability work, not permission to switch targets now.
+mode. The active compatibility queue above supersedes this section's earlier
+SMB3-first priority; the measurements below remain historical evidence.
 The first [frozen-row address optimization](mmc3-row-address-kernel.md) passes
 independent review with a measured 3.66% full-traversal gain and no regression
 in the accepted graphics/gameplay checks. [Exact playfield cell reuse](mmc3-cell-reuse.md)
@@ -39,7 +72,7 @@ research, not an unfinished implementation: much of the latest workload's CPU
 saving becomes synchronization waiting. Speed takes priority over cartridge
 size; use precomputation and code duplication when complete access costs justify them.
 
-The user selected Super Mario Bros. 3 as the next compatibility effort.
+The user previously selected Super Mario Bros. 3 as the next compatibility effort.
 [SMB3 plan](smb3-plan.md) records the pinned target, architectural blockers,
 ordered implementation and acceptance gates. The compatibility baseline is
 committed; the executable 8 KiB banking foundation has passed independent review
@@ -88,11 +121,11 @@ The parallel [LLVM-style optimization
 research](ir-optimization-research.md) is complete; its measured experiments
 follow correctness rather than replacing the playable-ROM work. Preserve SMB1/CV1
 and their current performance while exploring this path. The CV1 optimization
-queue below remains unfinished, but SMB3 is now the active priority.
+queue below remains unfinished and deferred alongside further SMB3 optimization.
 
 ## SMB motion-only HUD follow-up (2026-09-07)
 
-The user's moving-scoreboard report takes priority over further optimization.
+The user's moving-scoreboard report took priority over further optimization.
 [Investigation and verification](smb-hud-motion.md) record consecutive actual
 GPGX video captures, the early/frozen split correction, lag-frame handling,
 and regression gates. Static checkpoint parity alone did not expose this bug.
@@ -101,12 +134,12 @@ at 300/500, all three NES differential routes and the 1-1-clear checkpoint/cache
 gates pass, and CV1's ROM is byte-identical. The corrected SMB project replaces
 `out/smb` after preserving the old ROM and symbols in the evidence directory.
 
-## Current CV1 performance follow-up (2026-09-06)
+## Deferred CV1 performance follow-up (2026-09-06)
 
 The mapper-2 weapon-return correctness checkpoint is `b9fc51f`; SMB remains
 a mandatory regression target. The new [2× performance research and ordered
 experiments](cv1-double-performance-research.md#ordered-implementation-experiments)
-define the next performance work: close hot-region measurement, prove one
+define the deferred performance work: close hot-region measurement, prove one
 cost-aware lowering rule, optimize the measured sprite producer, then expand
 to register/flag-retaining regions and stack-safe calls. Preserve the current
 ROM until each candidate passes the documented semantic, rendering, gameplay
@@ -116,7 +149,11 @@ and measured; it is a small gain, not completion of the 2× target. Next is the
 sprite-producer region's oracle/contract and loop optimization, not more
 unmeasured address micro-optimizations.
 
-## Definition of done
+## Historical SMB acceptance definition
+
+The active queue uses the stricter full-game and mapper gates above and in the
+[mapper roadmap](mapper-roadmap.md). This earlier SMB checklist does not narrow
+those requirements.
 
 A `sms.sms` produced by this pipeline satisfies all of:
 

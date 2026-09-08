@@ -1,16 +1,42 @@
-# Post-SMB3 mapper roadmap
+# Compatibility-first mapper roadmap
 
-Inventory and source review: 2026-09-08. This is a proposed queue, not a
+Inventory and source review: 2026-09-08. This is the user-ordered queue, not a
 compatibility list. None of the new targets below has been converted or tested
-by this investigation. Priorities favor reusable hardware support and recognizable
-games over collecting mapper numbers.
+by this investigation. Approved order: Adventure Island → Zelda → Battletoads
+→ Contra → Ganbare Goemon 2 → Gradius II → Parodius Da! → Batman: Return of
+the Joker → Punch-Out!! → Fire Emblem → Castlevania III (USA). The added games
+are grouped by VRC family; the earlier targets retain their relative order.
+VRC6 is explicitly deferred. Additional speed optimization is deferred too.
 
-## Prerequisite and existing support
+## Active policy and preserved baseline
 
-- [ ] Close the agreed SMB3 performance and blink-free playability gate before
-  starting another mapper. Preserve its inventory, level-clear, death/return,
-  controller and presentation checks, and the SMB1/Castlevania I regression floor.
+- [x] Preserve the accepted SMB3 checkpoint (`68b439a`) and its measured limits.
+  More SMB3 speed work is **not a prerequisite** for Adventure Island.
+- [ ] Start Adventure Island as the only active new game. Preserve SMB3's
+  inventory, level-clear, death/return, controller and presentation checks,
+  and the SMB1/Castlevania I regression floor throughout the queue.
   See [SMB3 plan](smb3-plan.md) and [completion plan](completion-plan.md).
+
+Compatibility takes priority over optimization: complete one game's conversion
+and acceptance gates before starting the next. There is no full-speed gate in
+this batch. Existing overclock-assisted validation is acceptable when recorded;
+hangs, incorrect interrupts, display corruption and broken controls are not
+excused as slowness. Keep speed measurements as regression evidence, not a new
+optimization campaign. Preserve prior tested ROMs before every handoff.
+
+The goal is reusable, complete mapper behavior, not another game-specific
+adapter. Game completion and mapper completion are separate checkboxes: no
+family is called fully supported while its declared hardware matrix has holes.
+Other games may still need profiles/code discovery; a correct mapper alone
+does not guarantee automatic translation of every game.
+
+**Completion means the whole game, not one level or one representative route.**
+For every queued title, cover all levels, alternate branches, bosses, enemies,
+sprites/animations, backgrounds, menus, endings, music and sound effects, plus
+applicable multiplayer, saves and other game modes. Maintain a content checklist
+with evidence for each entry. A single ending does not prove unvisited branches
+or missing audio. Full documented mapper support is required before advancing;
+features unused by the current title still need implementation and tests.
 
 The current [mapper policy](../crates/nes_rom/src/lib.rs) implements NROM (0)
 and bounded NES 2.0 UxROM (2, submappers 1/2). The
@@ -76,28 +102,54 @@ does not mean zero graphics memory. `m.s` means mapper/submapper.
   Local Tetris is `1.5`, an unbanked-PRG variant, so it is a poor primary probe.
   [MMC1 hardware and variants](https://www.nesdev.org/wiki/INES_Mapper_001).
 
-- [ ] **3. AxROM — Marble Madness (USA).** Available: `7.1`, **128/0**,
+- [ ] **3. AxROM — Battletoads (USA).** Available: `7.2`, **256/0**,
   NES 2.0, NTSC, 8 KiB CHR-RAM. Introduces whole-window 32 KiB PRG switching
-  and selectable one-screen nametables, without bus conflicts in this variant.
+  and selectable one-screen nametables, with bus conflicts in this variant.
   Audit remapped execution, return continuations and vectors: no high PRG window
-  stays fixed. Route: first course → next course → timeout/restart. Follow with
-  Battletoads (USA), `7.2`, **256/0**, to cover the conflict variant and a
-  different action workload. [AxROM hardware](https://www.nesdev.org/wiki/INES_Mapper_007).
+  stays fixed. Route: first-stage combat → death/continue → stage transition;
+  extend coverage to later scrolling and split effects before broad claims.
+  Marble Madness (USA), `7.1`, **128/0**, is an optional no-conflict companion,
+  not a prerequisite game conversion.
+  [AxROM hardware](https://www.nesdev.org/wiki/INES_Mapper_007).
 
-- [ ] **4. VRC2/VRC4 family — Crisis Force (Japan), then verified VRC2 Contra.**
-  Crisis Force is available as `23.2` (**VRC4e**), **128/128**, NES 2.0,
-  NTSC; its header declares 2 KiB PRG-RAM, so RAM-size mirroring needs explicit
-  tests. It provides a concrete register-wiring variant, fine CHR banks and
-  IRQs. Route: start → scrolling combat → death/continue → stage transition.
-  Gradius II (Japan) (En), `25.1` (**VRC4b**), **128/128**, is a later wiring
-  cross-check, subject to payload provenance. For VRC2, use only the
+- [ ] **4. VRC2 — Contra (Japan), after board verification.** Use only the
   `originals/Contra (Japan).nes` candidate: iNES mapper 23, **128/128**,
   submapper unknown. Confirm the board before admission; VRC2b's single-bit
   memory and lack of IRQ are not VRC4 behavior. Do not silently reinterpret
-  ambiguous mapper 23 as VRC4. [VRC2/VRC4](https://www.nesdev.org/wiki/VRC2_and_VRC4),
+  ambiguous mapper 23 as VRC4 or use the collection's mapper-4 namesake.
+  Route: start → scrolling combat → death/continue → stage transition.
+  Follow with Goemon 2 through the same mapper implementation. VRC4 is a
+  separate family milestone below, not something Contra's success establishes.
+  [VRC2/VRC4](https://www.nesdev.org/wiki/VRC2_and_VRC4),
   [wiring/submapper distinctions](https://www.nesdev.org/wiki/NES_2.0_submappers).
 
-- [ ] **5. FME-7 — Batman: Return of the Joker (USA).** Available: `69.0`,
+- [ ] **5. VRC2 — Ganbare Goemon 2 (Japan).** This is the action-game sequel,
+  **not Ganbare Goemon Gaiden** or Goemon Gaiden 2. The inspected collection
+  does not contain it; a verified matching dump is required. Its VRC2b board
+  provides a second real-game check of the implementation used by Contra,
+  including the single-bit readback behavior. Route: opening area → scrolling
+  and room changes → death/restart → later areas and completion. No Goemon-only
+  mapper branch or compatibility patch may substitute for the shared model.
+  [Board and readback reference](https://www.nesdev.org/wiki/VRC2_and_VRC4).
+
+- [ ] **6. VRC4 — Gradius II (Japan).** Available translated candidate:
+  `25.1` (**VRC4b**), **128/128**, NES 2.0, NTSC. Verify its patch/base and
+  declared RAM before admission. Implement VRC4 IRQs, banking/mirroring modes
+  and this wiring variant generically; do not treat it as VRC2 with extra
+  game hooks. Route: gameplay start → scrolling and weapons → death/continue
+  → boss/stage transitions, then complete the game. This is Gradius II,
+  not the CNROM Gradius mentioned under Adventure Island.
+  [VRC4 reference](https://www.nesdev.org/wiki/VRC2_and_VRC4).
+
+- [ ] **7. VRC4 — Parodius Da! (Japan).** Use the Japanese VRC4e/mapper-23
+  cartridge version. The local **Parodius (Europe)** file declares MMC3/mapper 4
+  and cannot validate VRC4. A verified Japanese dump is therefore required.
+  Reuse Gradius II's VRC4 model with the VRC4e address wiring; prove IRQ and
+  CHR/PRG behavior without game-specific exceptions. Route: character selection
+  → scrolling/weapons → death/continue → bosses/stages and completion.
+  [Board reference](https://www.nesdev.org/wiki/Talk:VRC4).
+
+- [ ] **8. FME-7 — Batman: Return of the Joker (USA).** Available: `69.0`,
   **128/256**, NES 2.0, NTSC, 8 KiB PRG-RAM. Although a smaller family, this
   available recognizable game adds a genuinely different interrupt model:
   CPU-cycle-counted 16-bit IRQs, plus bankable ROM/RAM at `$6000` and 1 KiB
@@ -107,33 +159,17 @@ does not mean zero graphics memory. `m.s` means mapper/submapper.
   This game does **not** establish Sunsoft 5B expansion-audio support.
   [FME-7 hardware](https://www.nesdev.org/wiki/Sunsoft_FME-7).
 
-- [ ] **6. MMC5 — Castlevania III: Dracula's Curse (USA).** Available in
-  root and `originals/`: `5.0`, **256/128**, NES 2.0, NTSC, battery flag clear.
-  Put this after simpler families: PRG/CHR modes, separate rendering contexts,
-  ExRAM/nametables and IRQ behavior cross several existing boundaries.
-  Route: first level → boss → branch selection; add a later rising-water
-  reference because the US game uses ExRAM as a third nametable there.
-  Maintain a per-feature support matrix: CV3 does not exercise every MMC5
-  capability, and passing it must not imply extended-attribute, split-mode or
-  expansion-audio completeness. [MMC5 hardware](https://www.nesdev.org/wiki/MMC5),
-  [rising-water distinction](https://www.nesdev.org/wiki/Game_bugs).
-
-## Conditional follow-ups, not blockers for the main queue
-
-These are deliberate hardware-value exceptions to the broad-coverage priority.
-Do not start them merely to fill missing mapper numbers.
-
-- [ ] **7. MMC2 (9) — Mike Tyson's Punch-Out!! / Punch-Out!!.** No mapper-9
+- [ ] **9. MMC2 (9) — Mike Tyson's Punch-Out!! / Punch-Out!!.** No mapper-9
   file exists locally; dump/revision/geometry are unverified and acquisition is
   a prerequisite. The recognizable target would justify PPU-fetch-driven CHR
   latches, which cannot be modeled only by observing CPU register writes.
-  Acceptance: first opponent's changing poses → knockdown → next opponent,
+  Bring-up route: first opponent's changing poses → knockdown → next opponent,
   with independent latch-trigger fetch tests.
   [MMC2 game association](https://www.nesdev.org/wiki/Cartridge_and_mappers%27_history),
   [MMC2/MMC4 differences](https://www.nesdev.org/wiki/MMC4).
 
-- [ ] **8. MMC4 (10) — Fire Emblem: Dark Dragon and the Sword of Light.**
-  Available only as the Quirino v1.0 English translation in `no_match/`:
+- [ ] **10. MMC4 (10) — Fire Emblem: Dark Dragon and the Sword of Light.**
+  Selected local candidate is the Quirino v1.0 English translation:
   `10.0`, **256/128**, NES 2.0, NTSC, battery flag set. Patch/base provenance
   is a blocker; a verified original is preferable for the first reference.
   Reuse the latch-family work, but test MMC4's different low-pattern trigger
@@ -141,7 +177,77 @@ Do not start them merely to fill missing mapper numbers.
   movement → battle → save/reload. Defer rather than claiming broad coverage
   from a small translated-game subset. [MMC4 hardware](https://www.nesdev.org/wiki/MMC4).
 
-- [ ] **9. VRC6 (24/26) — Akumajou Densetsu (Japan).** Not available locally;
+- [ ] **11. MMC5 — Castlevania III: Dracula's Curse (USA).** Available in
+  root and `originals/`: `5.0`, **256/128**, NES 2.0, NTSC, battery flag clear.
+  Put this after the selected latch families: PRG/CHR modes, separate rendering
+  contexts, ExRAM/nametables and IRQ behavior cross several existing boundaries.
+  Route: first level → boss → branch selection; add a later rising-water
+  reference because the US game uses ExRAM as a third nametable there.
+  Maintain a per-feature support matrix: CV3 does not exercise every MMC5
+  capability, and passing it must not imply extended-attribute, split-mode or
+  expansion-audio completeness. [MMC5 hardware](https://www.nesdev.org/wiki/MMC5),
+  [rising-water distinction](https://www.nesdev.org/wiki/Game_bugs).
+
+Goemon 2, Japanese Parodius Da! and Punch-Out!! need verified local inputs.
+Gradius II and Fire Emblem need patch/base provenance checks. These are
+prerequisites, not permission to silently reorder the approved queue. Resolve
+them before their implementation turns; if still blocked, report the exact
+missing input and ask for it rather than substituting another game.
+
+## Additional VRC2/VRC4 choices
+
+Except for the explicitly queued Goemon 2, Gradius II and Parodius Da!, these
+are optional companions, not changes to the approved primary order.
+Use the Japanese Famicom cartridge versions indicated by the hardware sources;
+another region, rerelease or patch can use a different mapper or memory layout.
+
+| Family/variant | Mapper | Other representative games |
+| --- | ---: | --- |
+| VRC2a | 22 | TwinBee 3; Ganbare Pennant Race |
+| VRC2b | 23 | Konami Wai Wai World; Ganbare Goemon 2; Getsu Fūma Den; Dragon Scroll |
+| VRC2c | 25 | Ganbare Goemon Gaiden: Kieta Ōgon Kiseru |
+| VRC4a | 21 | Wai Wai World 2 |
+| VRC4b | 25 | Gradius II; Bio Miracle Bokutte Upa |
+| VRC4c | 21 | Ganbare Goemon Gaiden 2 |
+| VRC4e | 23 | Crisis Force; Akumajou Special: Boku Dracula-kun (Kid Dracula); Parodius Da!; Tiny Toon Adventures |
+
+Board associations: [NESdev family reference](https://www.nesdev.org/wiki/VRC2_and_VRC4)
+and [board inventory](https://www.nesdev.org/wiki/Talk:VRC4).
+VRC4 adds IRQs and banking/mirroring features that VRC2 does not have;
+passing Contra does not establish VRC4 support. Mapper numbers 23 and 25
+alone do not distinguish the families. Use verified board facts and
+[NES 2.0 submappers](https://www.nesdev.org/wiki/NES_2.0_submappers).
+
+Fresh read-only header recheck still finds 96 files. Besides the selected
+Contra candidate, available alternatives are:
+
+- **Crisis Force (Japan):** `23.2`, VRC4e, 128/128 KiB PRG/CHR.
+- **Gradius II (Japan) (En):** `25.1`, VRC4b, 128/128; translation provenance
+  needs verification before using it as the reference.
+- **Kid Dracula (Castlevania Anniversary Collection):** `23.2`, VRC4e,
+  128/128; header declares battery-backed RAM. Verify the rerelease's behavior
+  and geometry rather than assuming it is the original Japanese board.
+- **Ganbare Goemon Gaiden, English translation:** `25.3`, VRC2c, 256/256,
+  battery flag set. Verify patch/base provenance and expanded geometry.
+
+Contra plus Goemon 2 checks reuse across games on VRC2b, not other VRC2 wiring.
+The queued Gradius II plus Parodius checks VRC4b/VRC4e and IRQs. Synthetic
+hardware tests must cover remaining family variants; optional TwinBee 3 would
+add a real VRC2a cross-check, and Crisis Force another real VRC4e cross-check.
+Kid Dracula is another available VRC4e alternative, not another mapper family.
+TwinBee 3 was not found locally. Do not insert unrequested companion conversions
+ahead of the user's eleven selected games.
+
+## Conditional follow-ups, not blockers for the main queue
+
+These are deliberate hardware-value exceptions to the broad-coverage priority.
+Do not start them merely to fill missing mapper numbers.
+
+**VRC6 (24/26) — skipped for this effort; do not start without renewed request.**
+  Akumajou Densetsu (Japan)
+  uses mapper 24; **Madara** and **Esper Dream 2** use mapper 26, with the
+  register address-line wiring swapped. Akumajou is therefore not the only
+  VRC6 game. No mapper-24/26 file was found in the inspected local collection;
   no geometry or submapper has been verified. This is a later audio-focused
   extension, not a substitute for US mapper-5 CV3. Its two pulse channels and
   sawtooth require an explicit SMS audio approximation and measured budget,
@@ -156,7 +262,80 @@ cannot validate N163 IRQ or expansion audio. Defer this and other small,
 special-purpose families until a concrete game justifies the work.
 [Namco-family distinction](https://www.nesdev.org/wiki/INES_Mapper_210).
 
-## Definition of done for each family
+## One-game-at-a-time execution protocol
+
+For each game, the implementing agent owns the following ordered work and its
+evidence. Do not open another game's implementation lane before closing this one.
+
+1. **Pin and scope.** Record dump/payload hash, board/submapper, ROM/RAM geometry,
+   reset behavior and a hardware-feature matrix. Mark each row unimplemented,
+   implemented, synthetic-tested and real-game-tested separately. An ambiguous
+   header needs investigation, not a guessed chip assignment.
+2. **Implement the shared mapper.** Add board semantics, bus effects and event
+   timing through the generic pipeline and runtime. Game addresses/reachability
+   belong in profiles. No per-game mapper shortcuts, permissive stubs or rendered
+   fixtures count as conversion. Existing SMB3 raster assumptions must not become
+   a supposedly generic IRQ implementation for these families.
+3. **Prove hardware behavior.** Differentially test original 6502 programs and
+   assembled Z80 against independent expected board behavior. Cover banking,
+   aliases, boundary/reset/RMW cases, RAM protection/saves and interrupts or PPU
+   latches as applicable. Close matrix rows that the selected game never uses
+   with synthetic/hardware-reference tests rather than leaving them untested.
+4. **Complete the game conversion.** Close the full content checklist above,
+   including all levels and branches, sprites, music and sound effects, not just
+   representative scene types. Boot, controls, transitions, death/retry and
+   applicable saves must work. The short routes in the queue are bring-up
+   milestones only. Require complete playthrough evidence and additional routes
+   for content or modes a single playthrough misses. Compare audio events and
+   audible output throughout, including sample playback and expansion channels
+   where used. Prefer reproducible input routes from reset; any continuation used
+   for later-state tests must have verified provenance, not conceal broken loading.
+5. **Check reuse and regressions.** Re-run previously accepted games after shared
+   changes. Test the second selected game of a family without game-specific mapper
+   edits; any discovered defect gets a generic fix and a regression case for both.
+   Optional companion probes may supply coverage without becoming full conversions
+   inserted into the queue. Retain SMB1/CV1/SMB3 behavior and presentation gates.
+6. **Review and hand off.** Run workspace tests, relevant assembled/differential
+   suites, formatting and lint checks. Record exact ROM/core/input identities,
+   observed behavior and any remaining limitations. Missing content, broken audio
+   or rendering defects do not pass as cosmetic exceptions without explicit user
+   agreement. Have correctness and changed
+   ownership boundaries reviewed, create a focused validated commit, preserve
+   the old artifact, then update the game's launch ROM. Only then advance.
+
+Use the minimum evidence that establishes each claim, not repeated broad runs
+without a changed boundary. The implementer records results; a separate reviewer
+checks completion claims and material mapping/timing/ownership changes. An
+unsupported hardware feature, known gameplay blocker or unfinished validation
+is not a completed milestone. Stop for missing external inputs or physical SMS
+constraints; document them instead of silently narrowing "full support."
+
+## Mapper completeness gates
+
+These are scope checklists, not statements of existing support. At each family
+start, expand them into documented board/variant-specific positive and negative
+tests. Unimplemented documented variants stay visibly open; ambiguous variants
+fail closed. Never mark a mapper family complete solely because one title boots.
+
+| Family | Required coverage beyond the initial game route |
+| --- | --- |
+| CNROM | CHR bank selection and physical identity; documented conflict/no-conflict variants, resets, aliases and bank masking |
+| MMC1 | Serial/reset and consecutive-write semantics; all PRG/CHR modes, mirroring, CHR-ROM/RAM, RAM enable/protection, saves and board-specific upper banking |
+| AxROM | Whole-window remapping, vectors/returns across switches, one-screen mirroring, CHR-RAM and conflict/no-conflict variants |
+| VRC2 | Documented a/b/c wiring, PRG/CHR banking, mirroring, single-bit interface and RAM differences; prove absence of VRC4-only effects |
+| VRC4 | Documented wiring variants, PRG modes, fine CHR banks, mirroring/RAM and IRQ count/prescale/acknowledgment behavior |
+| FME-7 | PRG/CHR and ROM/RAM selection, mirroring, counter/enable/acknowledgment and wrap; include 5B variant audio support and tests, not just Batman's non-audio board |
+| MMC2/MMC4 | Each family's exact PPU-fetch latch triggers/order, CPU/CHR bank modes, mirroring and applicable RAM/saves; do not merge their differing triggers |
+| MMC5 | PRG/CHR modes and rendering contexts, RAM/protection, ExRAM/nametables, extended attributes, split behavior, IRQs, multiplier and audio/register semantics |
+
+Mapper-provided sound needs explicit SMS output behavior and tests; preserving
+register writes while silently dropping a mapper feature does not close that
+row. All game music and sound effects remain required, including NES APU sample
+playback where used. Exact NES timbre is not implied on SMS, but output mappings
+and fidelity limits must be documented and agreed; an infeasible or omitted
+feature stays incomplete unless the user explicitly changes the requirement.
+
+## Evidence rules for each family
 
 1. Record verified dump/board facts in a profile; keep commercial bytes out of
    Git. Reject ambiguous variants and unsupported features explicitly.
@@ -165,10 +344,10 @@ special-purpose families until a concrete game justifies the work.
    relevant PPU fetches. Compare synthetic programs with the existing 6502
    oracle; use hardware-tested cases from the
    [NESdev test catalog](https://www.nesdev.org/wiki/Emulator_tests) where applicable.
-3. Run the proposed route on original NES and translated SMS cores with normal
+3. Run the milestone and completion routes on original NES and translated SMS cores with normal
    input. Compare guest RAM/save state and source-aligned graphics; extend
    routes for features not reached. A title screen is not completion.
-4. Measure before/after with the same inputs and completed guest updates;
+4. Record before/after regression measurements with the same inputs and completed guest updates;
    report core, region, overclock, stalls and blank intervals. No speed is
    predicted by this roadmap. SMS RAM/ROM capacity and expansion-audio costs
    remain feasibility questions, not guaranteed fits.

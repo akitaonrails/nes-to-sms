@@ -23,6 +23,27 @@ the same pipeline with a different profile.
 
 The pipeline is the deliverable. SMB is the proof.
 
+## Current execution priority (2026-09-08)
+
+The user's compatibility-first queue now governs execution; the v1/v2/v3
+milestones above are historical scope, not permission to omit audio or stop at
+one level. Follow the [mapper roadmap](mapper-roadmap.md) and
+[completion plan](completion-plan.md): Adventure Island → Zelda → Battletoads →
+Contra (Japan) → Ganbare Goemon 2 → Gradius II → Parodius Da! (Japan) → Batman:
+Return of the Joker → Punch-Out!! → Fire Emblem → Castlevania III (USA).
+
+Complete one whole game and its full documented mapper feature/variant matrix
+before starting the next. All levels, branches, sprites, backgrounds, music,
+sound effects, endings and applicable game modes/saves are required, with
+reproducible evidence. Features unused by the selected game still require mapper
+tests. Game-specific facts stay in profiles; successful conversion must reuse
+the shared mapper implementation. First-level demos are checkpoints, not done.
+
+Further performance optimization and VRC6 are deferred. Preserve SMB1, CV1 and
+the accepted SMB3 checkpoint (`68b439a`) as regression baselines; this does not
+claim full-game SMB3 or general MMC3 completion. Missing inputs or physical SMS
+limitations must be reported, not used to silently reduce completion criteria.
+
 ## Principles
 
 These are non-negotiable. They exist because the previous trajectory

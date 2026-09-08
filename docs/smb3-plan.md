@@ -1,14 +1,23 @@
 # Super Mario Bros. 3 / MMC3 effort
 
-Started 2026-09-07 at `80e30f6`. SMB3 is the user-selected next compatibility
+Started 2026-09-07 at `80e30f6`. SMB3 was the user-selected next compatibility
 target; SMB1 and Castlevania remain the regression floor. This supplements
 the architecture in [master-plan.md](master-plan.md).
+
+## Priority update (2026-09-08)
+
+Preserve accepted checkpoint `68b439a` as a regression baseline. The user has
+deferred further performance optimization and selected the
+[full-game mapper queue](mapper-roadmap.md), starting with Adventure Island.
+The first-level evidence below does not establish full-game SMB3 or general
+MMC3 support; those limitations remain open, not silently marked complete.
 
 ## Status: experimental first-level route verified; performance remains limited
 
 `profiles/smb3.toml` identifies the local USA Rev 1 target and opts into the
 experimental full runtime and profile-scoped cooperative single-split adapter.
-The user has requested continuation until a playable SMB3 SMS ROM exists.
+The original request was continuation until a playable SMB3 SMS ROM exists;
+the priority update above governs current execution.
 Cartridge RAM, physical CHR rendering and mapped-call translation now support
 reset → animated title → controller-driven World 1 map → level 1-1 in Genesis
 Plus GX at explicit 500% overclock. The input-only route now runs/jumps, hits

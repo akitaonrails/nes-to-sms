@@ -1,5 +1,9 @@
 # SMB3 performance: measurements and next strategy
 
+**Priority update (2026-09-08):** further optimization experiments are deferred
+in favor of the [full-game mapper queue](mapper-roadmap.md). Preserve the accepted
+`68b439a` checkpoint. The proposals below are research, not the active work queue.
+
 Research and extra testing: 2026-09-08, baseline `d647588`. This is a research
 and prioritization result, **not an implemented speedup**. The blink-free SMB3
 ROM and accepted SMB1/CV1 ROMs are unchanged.
