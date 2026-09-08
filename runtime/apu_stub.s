@@ -1061,6 +1061,9 @@ rt_sound_stub:
 ; per-read cost.
 ; MMC3 uses a separate register decoder and keeps slot 2 unchanged.
 rt_mapper_write:
+.ifdef CNROM_BUS_EXPERIMENT
+  jp rt_cpu_write_bus
+.endif
 .ifdef NES_MMC3
   jp rt_mmc3_write
 .else

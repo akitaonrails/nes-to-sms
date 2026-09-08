@@ -988,6 +988,10 @@ _btd_jump_di:
   .endif
   jp   (hl)
 _btd_miss:
+.ifdef CNROM_BUS_EXPERIMENT
+  ; Exact guest RTS/JMP target only; no next-instruction or BRK-walk guesses.
+  jp _btd_trap_flash
+.endif
 .ifdef NES_MMC3
   ; Unknown MMC3 transfers must not inherit UxROM's fixed-bank realignment
   ; or BRK byte-walk approximation: a wrong bank identity is a hard failure.

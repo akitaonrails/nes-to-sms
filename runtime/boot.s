@@ -373,6 +373,9 @@ boot_main:
   ; only AFTER its startup clear. C800 remains the empty-buffer sentinel.
   call rt_mmc3_init
 .endif
+.ifdef CNROM_BUS_EXPERIMENT
+  call rt_cnrom_init
+.endif
 
   ; 11. Clear sprite staging area.
   ld  hl, $c900
@@ -596,6 +599,15 @@ rt_boot_beacon:
   ret
 
 irq_handler:
+.ifdef CNROM_BUS_EXPERIMENT
+  ; Bus-only synthetic contract: acknowledge host IRQ, never invent a guest
+  ; frame/NMI or run legacy graphics over CNROM source state.
+  push af
+  in a, ($bf)
+  pop af
+  ei
+  reti
+.endif
 .ifdef MMC3_FULL_RUNTIME
   jp rt_mmc3_sms_interrupt
 .else

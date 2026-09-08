@@ -268,6 +268,14 @@ enum TranslationMapping {
 
 impl TranslationMapping {
     fn resolve(image: &nes_rom::Image<'_>, prof: &profile::Profile) -> Result<Self, Error> {
+        if prof.cnrom_bus_experiment() {
+            nes_rom::cnrom::Cnrom::new(&image.header, image.prg.len(), image.chr.len(), 0)
+                .map_err(|e| Error::Diagnostic(e.to_string()))?;
+            // CHR banking never changes CPU code identity.
+            return Ok(Self::Legacy(nes_rom::MapperPolicy::Nrom {
+                prg_len: image.prg.len(),
+            }));
+        }
         if image.header.mapper == 4
             && prof
                 .translation
@@ -375,8 +383,9 @@ fn validate_translation_routine(
     prg: &[u8],
     routine: &ir::Routine,
     vector_count: usize,
+    cnrom_bus: bool,
 ) -> validation::ValidationResult {
-    if mapping.is_mmc3() {
+    if mapping.is_mmc3() || cnrom_bus {
         // The isolated harness uses flat NES PRG and legacy Z80 runtime
         // stubs. Even a routine with no explicit mapper write may depend on
         // an 8 KiB mapping; running it there cannot establish MMC3 parity.
@@ -386,9 +395,11 @@ fn validate_translation_routine(
             vectors_run: 0,
             vectors_passed: 0,
             failures: Vec::new(),
-            skipped_reason: Some(
-                "MMC3 requires a mapper-aware NES bus and assembled SMS runtime; isolated validation uses legacy mappings".into(),
-            ),
+            skipped_reason: Some(if cnrom_bus {
+                "CNROM requires its raw CPU bus, guest-stack dispatch and assembled SMS runtime; isolated legacy stubs cannot establish parity".into()
+            } else {
+                "MMC3 requires a mapper-aware NES bus and assembled SMS runtime; isolated validation uses legacy mappings".into()
+            }),
         }
     } else {
         validation::validate_routine(prg, routine, vector_count)
@@ -596,7 +607,7 @@ fn lift_data_regions(
     prof: &profile::Profile,
     bank: Option<u8>,
 ) -> Vec<std::ops::RangeInclusive<u16>> {
-    if !prof.mmc3_full_runtime() {
+    if !prof.dynamic_cpu_bus() {
         return Vec::new();
     }
     prof.data_regions
@@ -648,7 +659,7 @@ fn analyze_with_continuation_roots(
 
         let mut continuations = std::collections::BTreeSet::new();
         for function in &analyzed.functions.functions {
-            let external = if prof.mmc3_full_runtime() {
+            let external = if prof.dynamic_cpu_bus() {
                 function.external_refs.as_slice()
             } else {
                 &[]
@@ -752,7 +763,7 @@ fn emit_translated_routine(
     }
     let lifter_emits_auto = r.branch_labels.contains(&auto) || r.name == auto;
     if r.ops.len() > 600 {
-        if opts.profile.is_some_and(|p| p.mmc3_full_runtime()) {
+        if opts.profile.is_some_and(|p| p.dynamic_cpu_bus()) {
             return Err(Error::Diagnostic(format!(
                 "MMC3 full runtime routine {} exceeds the analyzed routine size bound ({} ops)",
                 r.name,
@@ -782,7 +793,11 @@ fn emit_translated_routine(
         defined_labels.insert(bl.clone());
     }
     if let Err(e) = lower::lower_routine(program, r, opts) {
-        if lower_error_is_fatal(&e) || opts.profile.is_some_and(|p| p.rom.mapper == 4) {
+        if lower_error_is_fatal(&e)
+            || opts
+                .profile
+                .is_some_and(|p| p.rom.mapper == 4 || p.cnrom_bus_experiment())
+        {
             *program = pre_routine_program;
             *defined_labels = pre_routine_labels;
             if opts.profile.is_some_and(|p| p.mmc3_full_runtime()) {
@@ -813,6 +828,18 @@ pub fn run(args: &Args) -> Result<String, Error> {
     let image = nes_rom::parse(&rom_bytes)?;
     // 2. Load the profile.
     let prof = profile::load_from_path(&args.profile)?;
+    if prof.cnrom_bus_experiment() && args.debug_unresolved_stubs {
+        return Err(Error::Diagnostic(
+            "CNROM bus experiment forbids permissive unresolved stubs".into(),
+        ));
+    }
+    if prof.cnrom_bus_experiment()
+        && (rom_bytes[7] & 3 != 0
+            || rom_bytes[12..16] != [0, 0, 0, 0]
+            || rom_bytes.len() != 16 + image.prg.len() + image.chr.len())
+    {
+        return Err(Error::Diagnostic("CNROM bus experiment requires a plain NTSC NES2 synthetic image with no trainer, miscellaneous ROM, expansion device or trailing data".into()));
+    }
 
     if prof.native_calls() && prof.rom.mapper != 0 {
         return Err(Error::Diagnostic(format!(
@@ -1041,7 +1068,12 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
         fixed_prof.jump_engines.retain(|site| site.bank.is_none());
     }
-    let analysis_view = policy.analysis_view(image.prg, 0, 0x8000)?;
+    let mut analysis_view = policy.analysis_view(image.prg, 0, 0x8000)?;
+    if prof.cnrom_bus_experiment() && analysis_view.len() == 0x4000 {
+        // Discovery/lifting index a full CPU PRG window. Keep both CPU
+        // identities of the mirrored16KiB chip without changing raw assets.
+        analysis_view.extend_from_within(..);
+    }
     let analysis_vectors = nes_rom_like::Vectors {
         nmi: vectors.nmi,
         reset: vectors.reset,
@@ -1139,7 +1171,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             materialized_call_sites: materialized_call_sites(&prof, None),
             window_label_prefix: None,
             window_label_range: 0x8000..0xC000,
-            dynamic_cpu_bus: prof.mmc3_full_runtime(),
+            dynamic_cpu_bus: prof.dynamic_cpu_bus(),
             data_regions: lift_data_regions(&prof, None),
             extra_label_pcs: Vec::new(),
         };
@@ -1265,7 +1297,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     materialized_call_sites: materialized_call_sites(&prof, Some(bank)),
                     window_label_prefix: Some(prefix.clone()),
                     window_label_range: window.start..window.end_inclusive + 1,
-                    dynamic_cpu_bus: prof.mmc3_full_runtime(),
+                    dynamic_cpu_bus: prof.dynamic_cpu_bus(),
                     data_regions: lift_data_regions(&prof, Some(bank)),
                     extra_label_pcs: Vec::new(),
                 };
@@ -1303,7 +1335,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                     materialized_call_sites: materialized_call_sites(&prof, Some(bank)),
                     window_label_prefix: in_window.then(|| prefix.clone()),
                     window_label_range: window.start..window.end_inclusive + 1,
-                    dynamic_cpu_bus: prof.mmc3_full_runtime(),
+                    dynamic_cpu_bus: prof.dynamic_cpu_bus(),
                     data_regions: lift_data_regions(&prof, Some(bank)),
                     extra_label_pcs: extras,
                 };
@@ -1360,7 +1392,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
             materialized_call_sites: materialized_call_sites(&prof, None),
             window_label_prefix: None,
             window_label_range: 0x8000..0xC000,
-            dynamic_cpu_bus: prof.mmc3_full_runtime(),
+            dynamic_cpu_bus: prof.dynamic_cpu_bus(),
             data_regions: lift_data_regions(&prof, None),
             extra_label_pcs: extras,
         };
@@ -1459,7 +1491,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
     }
     let mut mmc3_continuations = std::collections::BTreeSet::new();
-    if prof.mmc3_full_runtime() {
+    if prof.dynamic_cpu_bus() {
         if !lift_failures.is_empty() {
             return Err(Error::Diagnostic(format!(
                 "MMC3 full runtime lift failed: {}",
@@ -1946,6 +1978,16 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 program.ret();
             }
         }
+        if prof.cnrom_bus_experiment() {
+            for sym in [
+                "rt_cpu_read_bus",
+                "rt_cpu_write_bus",
+                "rt_cpu_indirect_jump",
+            ] {
+                program.label(sym);
+                program.ret();
+            }
+        }
         for rep in &prof.replacements {
             if RUNTIME_SYMBOLS.contains(&rep.runtime_label.as_str()) {
                 continue; // already forward-declared above
@@ -2014,7 +2056,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 None => (0xFF, r.entry, format_label(r.entry)),
             })
             .collect::<Vec<_>>();
-        if prof.mmc3_full_runtime() {
+        if prof.dynamic_cpu_bus() {
             for routine in &routines {
                 for label in &routine.branch_labels {
                     if mmc3_continuations.contains(label)
@@ -2138,7 +2180,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
     // set from an all-zero 8 KiB CHR (blank tiles, identity maps). The
     // runtime $2007 pattern-write conversion fills real tiles in play.
     let chr_ram_blank;
-    let chr_source: &[u8] = if image.chr.is_empty() || prof.mmc3_full_runtime() {
+    let chr_source: &[u8] = if image.chr.is_empty() || prof.dynamic_cpu_bus() {
         chr_ram_blank = vec![0u8; 8192];
         &chr_ram_blank
     } else {
@@ -2238,10 +2280,16 @@ pub fn run(args: &Args) -> Result<String, Error> {
         }
     };
     let cfg = ProjectConfig {
-        // 512 KiB for everything: NROM translated uses banks 4-23;
-        // banked carts use translated 4-16 + PRG data 17-24 + assets
-        // 25-31 (1 MiB ROMs rendered black on real emulators).
-        rom_kib: if policy.is_mmc3() { 2048 } else { 512 },
+        // Preserve accepted legacy layouts. Synthetic CNROM reserves raw
+        // CHR pages31..38 in a1MiB image; this is bus evidence, not a claim
+        // that its unfinished presentation works on real SMS hardware.
+        rom_kib: if policy.is_mmc3() {
+            2048
+        } else if prof.cnrom_bus_experiment() {
+            1024
+        } else {
+            512
+        },
         region: 0x4C,
         title: truncate_title(&prof.rom.name),
         mirroring,
@@ -2249,6 +2297,12 @@ pub fn run(args: &Args) -> Result<String, Error> {
         mapper: prof.rom.mapper,
         uxrom_bank_count: (banked && !policy.is_mmc3()).then_some(policy.bank_count()),
         mmc3_prg_bank_count: policy.is_mmc3().then_some(policy.bank_count()),
+        cnrom: prof
+            .cnrom_bus_experiment()
+            .then_some(sms_project::CnromConfig {
+                bus_conflicts: image.header.submapper == 2,
+                prg_ram: image.header.prg_ram_size == 2048,
+            }),
         uxrom_bus_conflicts: policy
             .legacy()
             .and_then(|p| p.uxrom_bus_conflicts())
@@ -2478,6 +2532,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 image.prg,
                 r,
                 args.validate_vectors,
+                prof.cnrom_bus_experiment(),
             ));
         }
         let report = validation::format_report(&results);
@@ -3216,6 +3271,7 @@ mod tests {
             &prg,
             &routine,
             8,
+            false,
         );
         assert_eq!(result.routine_name, "L_b0_8000");
         assert_eq!(result.routine_entry, 0x8000);
@@ -3236,6 +3292,7 @@ mod tests {
             &prg,
             &routine,
             8,
+            false,
         );
         assert!(legacy.is_green());
         assert_eq!(legacy.vectors_run, 8);

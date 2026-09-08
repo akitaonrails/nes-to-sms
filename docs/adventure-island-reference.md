@@ -6,11 +6,13 @@ The [mapper roadmap](mapper-roadmap.md) defines the full-game completion gate.
 All unchecked entries below remain required unless an explicitly documented
 hardware assessment chooses an alternative under the user's authorization.
 
-## Implementation checkpoint: board model only
+## Implementation checkpoint: board model and synthetic source bus
 
 The generic `nes_rom::cnrom` model covers fixed PRG, 8–128 KiB CHR selection,
-conflict variants and optional mirrored 2 KiB RAM. Mapper 3 still fails closed
-in the conversion pipeline. A related header fix preserves all twelve NES 2.0
+conflict variants and optional mirrored 2 KiB RAM. The opt-in
+[source-bus runtime](cnrom-bus-runtime.md) adds assembled bus and genuine guest
+stack coverage, while rendered-game admission still fails closed.
+A related header fix preserves all twelve NES 2.0
 mapper bits so extended IDs cannot alias supported boards.
 
 Independent semantic and structure reviews passed. Workspace tests: 598 passed,
@@ -20,8 +22,10 @@ The canonical SMB clear, death/game-over and bonus-pipe routes each match the
 6502 reference for 4,500 frames. Canonical ROMs were not replaced. Evidence is
 locally preserved under ignored `out/adventure-baseline.TvOphd/`.
 
-Next: mapper-neutral CPU bus and assembled CHR/RAM tests, then coherent graphics
-and full-game/audio validation. This checkpoint does not close any rendered-game
+The later bus checkpoint passes 609 workspace tests and its independent
+assembled/core checks; its linked report records the updated regression evidence.
+Next: source timing, interrupts, coherent graphics and full-game/audio validation.
+This checkpoint does not close any rendered-game
 or full-mapper acceptance checkbox below.
 
 ## Pinned input
@@ -186,7 +190,8 @@ input-movie candidate: BizHawk 1.12.1, 128,945 frames. It skips sections via
 bonuses in 2-3/7-3 and avoids fireballs. Thus even successful ending playback
 needs supplemental content routes. Its game-version file SHA-1 differs from
 this NES 2.0 file; verify payload/header provenance and synchronization before
-reuse. No input movie or ROM was downloaded during this investigation.
+reuse. The initial investigation downloaded no movies. The follow-up below
+retrieved public **input-only** movies; no ROM was downloaded.
 
 Existing `frame-diff` is useful for instruction/state comparisons, but its
 renderer documents SMB-specific HUD placement and its APU reference shares
@@ -197,3 +202,132 @@ actual audio evidence before closing that gate. The PSG maps square/triangle/
 noise approximately and currently silences DMC; preserve all reachable events
 and document hardware adaptation explicitly, without claiming identical NES
 waveforms or accepting dropped tracks as success.
+
+## Complete original-NES baseline (2026-09-08)
+
+An original-NES playthrough now reaches **all 32 stage pairs, the final boss,
+rescue/ending and return to title** using controller input only. This proves
+the reference route works, **not that the SMS conversion is complete**.
+
+The first candidate, ktwo's QuickNES/BizHawk movie 5870, has exactly this ROM's
+payload: replacing only header bytes 7–15 in memory with the legacy values
+produces its declared file SHA-1. Direct QuickNES-to-FCEUX replay nevertheless
+failed to start correctly. The finite 6,000-frame failed attempt is preserved
+in `out/adventure-quicknes-failed.Wi2HIW/`; its attract-mode activity is not
+counted as playthrough evidence.
+
+The working input source is Plamondonl7000's
+[FCEUX 2.2.2 submission 5357](https://tasvideos.org/5357S), 141,407 frames.
+It was cancelled for not attempting a speed record, not for lacking an ending.
+The archive contains one FM2 controller movie, no ROM or saved state. Its
+payload MD5 matches this input exactly (`JIuhrL/tKL5OaDmoWKXGCg==` in FM2's
+base64 notation), and requests NTSC, old PPU and one controller.
+
+Replay uses the already pinned FCEUX 2.5.0 container, with **one neutral frame
+after Lua's power-on request** before applying movie frame zero. This is an
+explicit API-start alignment, not a modified game or hand-edited input route.
+Without that prelude, FCEUX misses the initial Start; the failed offset-zero
+attempt is preserved separately. The working run advances 144,000 frames,
+releasing all input after the movie ends. No cheats, memory writes, imported
+states, ROM edits or gameplay patches were used.
+
+Preserved first-run evidence: `out/adventure-full-frozen-first.Wi2HIW/`.
+`frame_141000.png` shows the final encounter, `frame_142000.png` shows the
+congratulations/rescue screen, and `frame_143999.png` shows the returned title
+with score 322,900. The RAM census contains all area/round combinations.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Public 5357 ZIP | `ae1aa5a2cb6512cb2e607eac6768c933a94a3ee5977b936699c8376dcd0ad185` |
+| Original FM2 input | `341cd5ba388367d75958a483375d4c0b03e96f11187ed5041f583087dc816594` |
+| Converted input-only text | `86ccff239bf67a18b7d26c696a285b3c3fbe1f060f1de0d7849ab367489fc6f8` |
+| First-run sampled RAM CSV | `7dedb24fcfe08b242bc7161db829324e7338e1e19a7c4aead5e83bf8b5be6cdf` |
+| First-run mapper/APU events | `800ae9ed0c3089c396ca73193805de7476681f93d4c8c4d0ed04417394822ead` |
+| Native ending GD framebuffer | `26c3b199aef70bcac9c4b901e4c326da5dc3770068a14bc70f0e08e56509649a` |
+
+The full route observes **107 CHR writes across all four banks**. Unlike the
+short bring-up route, boss transitions write with PPUMASK `$1E` too. Apart
+from the initial reset write, the sampled writes occur 1,113 or 1,354 original
+CPU cycles after NMI entry, inside vblank: rendering-enabled does not mean a
+visible-scanline write. Only PPUMASK `$00/$1E` occurs. `$4011=0` occurs 33
+times, with no observed DMC enable. Sound was disabled in this first run;
+no acoustic parity is claimed.
+
+Completion still needs supplemental routes: every hidden/bonus/item outcome,
+fireball use, deaths/continues and any reachable audio commands absent from
+this run. The slower movie's ending is not proof of exhaustive content.
+Current reproducible runner and an additional observation pass live under
+`out/adventure-full-reference.Wi2HIW/`; all movie data and game captures stay
+ignored. The runner accepts `AI_REF_OFFSET=1 AI_REF_LIMIT=144000` and the
+collection-directory argument; the converted input must be from movie 5357.
+
+### Exact stage and execution landmarks
+
+A second identical-input pass records the stage-index writes and every frame's
+logical handshake count. Its sampled RAM CSV and ending framebuffer are
+byte-identical to the preserved first run. It uses the same offset, CPU/PPU
+settings and ROM, with sound output enabled; the packaged CLI recording
+option produced **no WAV**, so there is still no acoustic capture to accept.
+
+Observed RAM fields are zero-based area `$37` and round `$38`. Round advance
+is observed at callback PC `$815D`; wrapping resets `$38` and increments
+`$37` around `$8167/$8169`. These frame intervals include transition screens,
+not uninterrupted controllable gameplay. The first interval begins at game
+initialization (frame 12); the final one includes the ending and returned title.
+
+| Area | Round 1 frames | Round 2 frames | Round 3 frames | Round 4 frames |
+| --- | --- | --- | --- | --- |
+| 1 | 12–4334 | 4335–8587 | 8588–12801 | 12802–17587 |
+| 2 | 17588–22139 | 22140–26465 | 26466–30490 | 30491–35185 |
+| 3 | 35186–39703 | 39704–43799 | 43800–48112 | 48113–52933 |
+| 4 | 52934–57128 | 57129–61260 | 61261–65390 | 65391–70087 |
+| 5 | 70088–74348 | 74349–78443 | 78444–82934 | 82935–87878 |
+| 6 | 87879–92256 | 92257–96365 | 96366–100506 | 100507–105241 |
+| 7 | 105242–109547 | 109548–113818 | 113819–118016 | 118017–122906 |
+| 8 | 122907–127349 | 127350–132251 | 132252–136789 | 136790–143999 |
+
+`$B755` enters the main-frame handshake: it stores `$FF` in `$0B`, waits at
+`$B759/$B75B` for NMI to clear that byte, then performs post-frame work before
+returning. `$66` increments modulo 16 later in this helper, so it is not a
+wide monotonic elapsed-frame counter. Use `ticks.csv`'s observed handshake
+counts, original input frames, camera and stage state when building translated
+routes; do not equate SMS physical frames with original game updates.
+
+The sprite-return observation point `$C372` encounters 13 destinations:
+`$88C3`, `$8924`, `$8931`, `$8C2E`, `$8EDA`, `$8EE6`, `$8EF1`, `$A72E`,
+`$C3B8`, `$C3CA`, `$C3E1`, `$C413`, `$C42F`. These include normal returns
+as well as synthetic dispatch; determine the controlling path rather than
+turning this finite census into a permissive global RTS target whitelist.
+
+Sound independently uses synthetic return dispatch: `$C6C1/$C6C5` load
+destinations from `$C52D,X/$C52C,X`, push them, and RTS at `$C6C9`.
+`$C6CA` can discard a return address with two PLA instructions. New effect
+requests use `$A0` with `$A1` continuation state; music selection uses `$AB`
+and is gated by `$AC`. All facts here were cross-checked with the repository's
+6502 decoder, not a separate toy interpreter.
+
+### Audio coverage is measurable, but not complete
+
+Accepted effect selectors observed at `$C69A`:
+`00 01 02 03 04 05 06 07 08 09 0A 0B 0D 0F 10 12`.
+Accepted music selectors observed at `$C8CE`:
+`01 02 03 04 05 06 07 08 0B 0C 0D 0E`.
+These are selector IDs, not an assertion that every selector is an audible
+track: for example, initialization/silencing paths must be identified.
+
+The engine admits effect IDs below `$14` and music IDs below `$0F`.
+Therefore effect candidates `$0C/$0E/$11/$13` and music `$09/$0A` require
+reachability/content investigation and supplemental routes. They cannot be
+checked off from the complete-playthrough movie. `summary.txt` records all
+observed sound-return destinations and APU register values; `events.csv`
+records accepted selections with original frame, PC and timing.
+
+| Second-pass artifact | SHA-256 |
+| --- | --- |
+| Per-frame stage/input/handshake CSV | `4c897d952de36561550c78fd1430e36993c05871650dae87b107586b39b6db0f` |
+| Mapper/stage/audio event CSV | `d3fae5f128016a2b4bc67d6a453d63e128bb086ac269f129d08447d3cc1629bf` |
+| Dispatch/audio census | `f7e0f0048575a317c68bd32ee46bb44aede1ec12afe35d959143d9e1699a7968` |
+
+The current evidence directory is frozen after this pass. Captures listed in
+`captures.txt` belong to it; an older `frame_005999` capture in the directory
+is only from the earlier bounded trial and is not part of its manifest.

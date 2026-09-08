@@ -500,6 +500,31 @@ fn validate(p: &Profile) -> Result<(), LoadError> {
             "MMC3_FULL_RUNTIME requires mapper 4 and software calls".into(),
         ));
     }
+    if p.translation
+        .runtime_defines
+        .iter()
+        .any(|d| d == "CNROM_BUS_EXPERIMENT")
+        && (p.rom.mapper != 3
+            || p.native_calls()
+            || !p.replacements.is_empty()
+            || !p.jump_engines.is_empty()
+            || !p.return_escapes.is_empty()
+            || !p.return_consumes.is_empty()
+            || !p.bank_entries.is_empty()
+            || !p.bank_calls.is_empty()
+            || !p.chr_packs.is_empty()
+            || p.translation.defer_sprite_registers
+            || p.render.chr_ram_bg_identity
+            || p.render.top_tile_remap_rows != 0
+            || p.translation
+                .runtime_defines
+                .iter()
+                .any(|d| d != "CNROM_BUS_EXPERIMENT"))
+    {
+        return Err(LoadError::Validation(
+            "CNROM_BUS_EXPERIMENT requires mapper 3, software calls, and no other runtime defines or replacement/dispatch/bank/CHR-pack overrides".into(),
+        ));
+    }
     if p.translation.runtime_defines.iter().any(|name| {
         matches!(
             name.as_str(),
@@ -992,6 +1017,20 @@ fn validate_switchable_address(field: &str, addr: u16, fixed_start: u16) -> Resu
 }
 
 impl Profile {
+    /// Synthetic bus-only contract; rendering and guest interrupt timing remain closed.
+    pub fn cnrom_bus_experiment(&self) -> bool {
+        self.rom.mapper == 3
+            && self
+                .translation
+                .runtime_defines
+                .iter()
+                .any(|d| d == "CNROM_BUS_EXPERIMENT")
+    }
+
+    pub fn dynamic_cpu_bus(&self) -> bool {
+        self.mmc3_full_runtime() || self.cnrom_bus_experiment()
+    }
+
     pub fn mmc3_full_runtime(&self) -> bool {
         self.rom.mapper == 4
             && self
@@ -1191,6 +1230,33 @@ start = 0x00
 end = 0x0f
 dest = 0x100
 "#;
+
+    #[test]
+    fn cnrom_bus_capability_is_explicit_and_separate_from_mmc3() {
+        let source = "[rom]\nname='synthetic'\nmapper=3\nprg_kib=32\nchr_kib=32\n[translation]\nruntime_defines=['CNROM_BUS_EXPERIMENT']\n";
+        let p = load_from_str(source).unwrap();
+        assert!(p.cnrom_bus_experiment());
+        assert!(p.dynamic_cpu_bus());
+        assert!(!p.mmc3_full_runtime());
+        assert!(!p.native_calls());
+        assert_eq!(p.effective_runtime_defines(), ["CNROM_BUS_EXPERIMENT"]);
+        for invalid in [
+            source.replace("mapper=3", "mapper=0"),
+            format!("{source}stack_discipline='native'\n"),
+            source.replace(
+                "'CNROM_BUS_EXPERIMENT'",
+                "'CNROM_BUS_EXPERIMENT','MMC3_FULL_RUNTIME'",
+            ),
+            format!(
+                "{source}\n[[replacement]]\naddr=0x8000\nruntime_label='rt_fake'\nreason='not a bus fixture'\n"
+            ),
+        ] {
+            assert!(load_from_str(&invalid).is_err(), "{invalid}");
+        }
+        let ordinary =
+            load_from_str(&source.replace("runtime_defines=['CNROM_BUS_EXPERIMENT']", "")).unwrap();
+        assert!(!ordinary.dynamic_cpu_bus());
+    }
 
     #[test]
     fn parses_pinned_smb3_profile_with_observed_reachability() {

@@ -29,8 +29,10 @@ Work on one game at a time, in this order:
 10. Fire Emblem — MMC4.
 11. Castlevania III (USA) — MMC5.
 
-**Next: Adventure Island.** Pin its dump/board, implement and test generic CNROM,
-then close the full-game content checklist and mapper coverage matrix before
+**Active: Adventure Island.** Its dump/board is pinned; the CNROM board model and
+[restricted source-bus checkpoint](cnrom-bus-runtime.md) pass independent review.
+Next implement source timing, interrupts and coherent rendering, then close the
+full-game content checklist and mapper coverage matrix before
 advancing. Completion includes every level/branch, sprite, background, music
 track, sound effect, ending and applicable game mode/save behavior. One level,
 one ending with untested branches, or silent audio is not completion. Compare

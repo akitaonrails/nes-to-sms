@@ -3474,15 +3474,29 @@ fn emit_full_bus_add_index(p: &mut z80_emit::Program) {
 /// even when a particular execution might land in RAM.
 enum FullBusAccess {
     NativeRam(u16),
-    Bus,
+    Bus {
+        read: &'static str,
+        write: &'static str,
+    },
 }
 
 impl FullBusAccess {
-    fn select(addr: &ir::AddrExpr) -> Self {
+    fn select(addr: &ir::AddrExpr, neutral_bus: bool) -> Self {
         match addr {
             ir::AddrExpr::ZpConst(z) => Self::NativeRam(nes_ram_addr_to_sms(u16::from(*z))),
             ir::AddrExpr::Const(a) if *a < 0x2000 => Self::NativeRam(nes_ram_addr_to_sms(*a)),
-            _ => Self::Bus,
+            _ => Self::Bus {
+                read: if neutral_bus {
+                    "rt_cpu_read_bus"
+                } else {
+                    "rt_mmc3_read_bus"
+                },
+                write: if neutral_bus {
+                    "rt_cpu_write_bus"
+                } else {
+                    "rt_mmc3_write_bus"
+                },
+            },
         }
     }
 
@@ -3491,21 +3505,21 @@ impl FullBusAccess {
             // LD preserves A/native flags, so the raw bus address's AF
             // save/restore is unnecessary. RAM mirrors are already folded.
             Self::NativeRam(native) => p.ld_hl_imm(*native),
-            Self::Bus => emit_full_bus_address(p, addr),
+            Self::Bus { .. } => emit_full_bus_address(p, addr),
         }
     }
 
     fn emit_read(&self, p: &mut z80_emit::Program) {
         match self {
             Self::NativeRam(_) => p.ld_a_hl_ptr(),
-            Self::Bus => p.call("rt_mmc3_read_bus"),
+            Self::Bus { read, .. } => p.call(read),
         }
     }
 
     fn emit_write(&self, p: &mut z80_emit::Program) {
         match self {
             Self::NativeRam(_) => p.ld_hl_ptr_a(),
-            Self::Bus => p.call("rt_mmc3_write_bus"),
+            Self::Bus { write, .. } => p.call(write),
         }
     }
 }
@@ -3513,12 +3527,17 @@ impl FullBusAccess {
 /// Keep one opcode/flag implementation for direct RAM and dynamic bus access.
 /// Both use scratch HL and preserve resident DE/IFF. RMW saves that address
 /// across flag emission and retains the NMOS old-value and final writes.
-fn emit_full_bus_memory(p: &mut z80_emit::Program, op: &ir::Op) -> bool {
+fn emit_full_bus_memory(
+    p: &mut z80_emit::Program,
+    op: &ir::Op,
+    neutral_bus: bool,
+    compound: Option<&ir::Op>,
+) -> bool {
     use ir::Op;
     let Some(addr) = full_bus_operand(op) else {
         return false;
     };
-    let access = FullBusAccess::select(addr);
+    let access = FullBusAccess::select(addr, neutral_bus);
     access.emit_address(p, addr);
     match op {
         Op::StaMem { .. } => access.emit_write(p),
@@ -3576,7 +3595,32 @@ fn emit_full_bus_memory(p: &mut z80_emit::Program, op: &ir::Op) -> bool {
             }
             p.pop_hl();
             access.emit_write(p);
+            if compound.is_some() {
+                p.ld_b_a();
+            }
             p.pop_af();
+            if let Some(alu) = compound {
+                // Stable unofficial instructions use the modified internal
+                // operand, not a new bus read (ROM writes need not stick).
+                match alu {
+                    Op::CmpMem { .. } => emit_cmp_flags_inline(p),
+                    Op::SbcMem { .. } => emit_sbc_flags_inline(p),
+                    Op::AdcMem { .. } => emit_adc_flags_inline(p),
+                    Op::OraMem { .. } => {
+                        p.or_b();
+                        emit_set_nz_inline(p);
+                    }
+                    Op::AndMem { .. } => {
+                        p.and_b();
+                        emit_set_nz_inline(p);
+                    }
+                    Op::EorMem { .. } => {
+                        p.xor_b();
+                        emit_set_nz_inline(p);
+                    }
+                    _ => unreachable!("checked compound RMW pair"),
+                }
+            }
         }
         _ => {
             p.push_af();
@@ -3627,8 +3671,20 @@ pub fn lower_routine(
     // inline fixed-high read sequence; mapper 2 restores an exact live bank.
     let guarded_mapper_window = opts.profile.is_none_or(|profile| profile.rom.mapper != 0);
     let mmc3_banking = opts.profile.is_some_and(|profile| profile.rom.mapper == 4);
-    let full_bus = opts.profile.is_some_and(|p| p.mmc3_full_runtime());
-    program.set_wide_continuation_banks(full_bus);
+    let full_bus = opts.profile.is_some_and(|p| p.dynamic_cpu_bus());
+    let guest_stack = opts.profile.is_some_and(|p| p.cnrom_bus_experiment());
+    program.set_wide_continuation_banks(full_bus && !guest_stack);
+    if guest_stack
+        && routine
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::Brk { .. } | Op::Rti))
+    {
+        return Err(LowerError::UnsupportedOp {
+            pc: Some(routine.entry),
+            reason: "CNROM bus experiment does not implement guest BRK/RTI interrupt frames".into(),
+        });
+    }
     if mmc3_banking && !full_bus {
         check_mmc3_memory_forms(routine)?;
     }
@@ -3940,8 +3996,35 @@ pub fn lower_routine(
     // n,(hl)`. Independent of the shadow update (re-derives from A), so
     // it's correctness-safe; the producer still maintains shadow-P.
     let mut a_holds_nz = false;
+    let mut compound_consumed = None;
     for (op_idx, op) in routine.ops.iter().enumerate() {
-        if full_bus && emit_full_bus_memory(program, op) {
+        if compound_consumed == Some(op_idx) {
+            continue;
+        }
+        // The lifter groups each source instruction under one Source marker.
+        // These exact two-op groups represent stable unofficial RMW+ALU,
+        // whereas two official instructions have an intervening Source.
+        let compound =
+            if guest_stack && op_idx > 0 && matches!(routine.ops[op_idx - 1], Op::Source { .. }) {
+                routine.ops.get(op_idx + 1).filter(|next| {
+                    full_bus_operand(op) == full_bus_operand(next)
+                        && matches!(
+                            (op, *next),
+                            (Op::DecMem { .. }, Op::CmpMem { .. })
+                                | (Op::IncMem { .. }, Op::SbcMem { .. })
+                                | (Op::AslMem { .. }, Op::OraMem { .. })
+                                | (Op::RolMem { .. }, Op::AndMem { .. })
+                                | (Op::LsrMem { .. }, Op::EorMem { .. })
+                                | (Op::RorMem { .. }, Op::AdcMem { .. })
+                        )
+                })
+            } else {
+                None
+            };
+        if full_bus && emit_full_bus_memory(program, op, guest_stack, compound) {
+            if compound.is_some() {
+                compound_consumed = Some(op_idx + 1);
+            }
             if routine.name.starts_with("L_b") && op.may_remap_mmc3_prg() {
                 program.translated_banked_tail_dispatch(routine.next_source_pc(op_idx));
             }
@@ -4438,10 +4521,16 @@ pub fn lower_routine(
             }
 
             Op::Tsx => {
+                if guest_stack {
+                    program.push_af();
+                }
                 program.ld_a_abs(SHADOW_S);
                 program.ld_d_a_reg();
                 if nz_live[op_idx] {
                     emit_set_nz_inline(program);
+                }
+                if guest_stack {
+                    program.pop_af();
                 }
             }
 
@@ -4461,7 +4550,7 @@ pub fn lower_routine(
             }
 
             Op::Pla => {
-                if full_bus {
+                if full_bus && !guest_stack {
                     program.ld_bc_imm(routine.next_source_pc(op_idx).wrapping_sub(1));
                     program.call("rt_mmc3_guard_pla");
                 }
@@ -5307,7 +5396,9 @@ pub fn lower_routine(
 
             Op::JmpIndirect { addr } => {
                 program.ld_hl_imm(*addr);
-                program.jp(if full_bus {
+                program.jp(if guest_stack {
+                    "rt_cpu_indirect_jump"
+                } else if full_bus {
                     "rt_mmc3_indirect_jump"
                 } else {
                     INDIRECT_JMP
@@ -5333,6 +5424,17 @@ pub fn lower_routine(
                 // `call` is correct and faster.
                 if target.starts_with("rt_") {
                     program.call(target);
+                } else if guest_stack {
+                    // No native/software continuation owner: the real guest
+                    // stack is authoritative, including rewritten RTS pairs.
+                    let pc = routine.next_source_pc(op_idx).wrapping_sub(1);
+                    program.push_af();
+                    program.ld_a_imm((pc >> 8) as u8);
+                    emit_push6502_inline(program);
+                    program.ld_a_imm(pc as u8);
+                    emit_push6502_inline(program);
+                    program.pop_af();
+                    program.translated_tail_jmp(target);
                 } else if opts.profile.is_some_and(|p| p.native_calls()) {
                     program.native_call(target);
                 } else {
@@ -5424,7 +5526,9 @@ pub fn lower_routine(
             }
 
             Op::Rts => {
-                if opts.profile.is_some_and(|p| p.native_calls()) {
+                if guest_stack {
+                    program.jp("rt_rts_dispatch");
+                } else if opts.profile.is_some_and(|p| p.native_calls()) {
                     program.ret();
                 } else {
                     program.jp(TRANSLATED_RTS);
@@ -5913,6 +6017,56 @@ mod tests {
             assert!(!build.asm.contains("ld ($FFFF),a"));
             assert!(!build.asm.contains("data_prg_high"));
             assert!(!build.asm.contains("rt_restore_prg_window"));
+        }
+    }
+
+    #[test]
+    fn neutral_bus_latches_compound_rmw_but_not_separate_instruction_reads() {
+        let profile = profile::load_from_str("[rom]\nname='bus'\nmapper=3\nprg_kib=32\nchr_kib=32\n[translation]\nruntime_defines=['CNROM_BUS_EXPERIMENT']\n").unwrap();
+        for separate in [false, true] {
+            let mut ops = vec![
+                Op::Source {
+                    pc: 0x8000,
+                    size: 3,
+                    text: "RMW".into(),
+                },
+                Op::AslMem {
+                    addr: AddrExpr::Const(0xb800),
+                    region: MemRegion::PrgRom,
+                },
+            ];
+            if separate {
+                ops.push(Op::Source {
+                    pc: 0x8003,
+                    size: 3,
+                    text: "ORA".into(),
+                });
+            }
+            ops.push(Op::OraMem {
+                addr: AddrExpr::Const(0xb800),
+                region: MemRegion::PrgRom,
+            });
+            let mut program = z80_emit::Program::new();
+            for symbol in ["rt_cpu_read_bus", "rt_cpu_write_bus"] {
+                program.label(symbol);
+                program.ret();
+            }
+            lower_routine(
+                &mut program,
+                &make_routine("compound", ops),
+                &LowerOptions {
+                    profile: Some(&profile),
+                    ..LowerOptions::default()
+                },
+            )
+            .unwrap();
+            let asm = program.finish().unwrap().asm;
+            assert_eq!(
+                asm.matches("call rt_cpu_read_bus").count(),
+                if separate { 2 } else { 1 }
+            );
+            assert_eq!(asm.matches("call rt_cpu_write_bus").count(), 2);
+            assert!(!asm.contains("rt_mmc3"));
         }
     }
 

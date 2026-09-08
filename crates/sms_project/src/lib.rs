@@ -91,6 +91,8 @@ pub struct ProjectConfig<'a> {
     pub uxrom_bus_conflicts: Option<UxromBusConflicts>,
     /// Mapper 4 physical 8 KiB PRG page count (assets contain 16 KiB pairs).
     pub mmc3_prg_bank_count: Option<u8>,
+    /// Explicit synthetic CNROM bus capability; never inferred from mapper alone.
+    pub cnrom: Option<CnromConfig>,
     /// CHR-RAM cart: patterns upload at runtime; variant regeneration
     /// reads back from VRAM instead of the (blank) data_chr asset.
     pub chr_ram: bool,
@@ -113,6 +115,12 @@ pub struct ProjectConfig<'a> {
     pub runtime_defines: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CnromConfig {
+    pub bus_conflicts: bool,
+    pub prg_ram: bool,
+}
+
 #[derive(Debug)]
 pub enum EmitError {
     Io(io::Error),
@@ -120,6 +128,7 @@ pub enum EmitError {
     InvalidRomSize(u32),
     InvalidUxromConfig(String),
     InvalidMmc3Config(String),
+    InvalidCnromConfig(String),
     ReservedBankPlacement { bank: u32, reserved_bank: u32 },
     LayoutExceedsRomCapacity { required_bank: u32, bank_count: u32 },
 }
@@ -139,6 +148,9 @@ impl fmt::Display for EmitError {
             }
             EmitError::InvalidMmc3Config(reason) => {
                 write!(f, "invalid MMC3 configuration: {reason}")
+            }
+            EmitError::InvalidCnromConfig(reason) => {
+                write!(f, "invalid CNROM configuration: {reason}")
             }
             EmitError::ReservedBankPlacement {
                 bank,
@@ -181,6 +193,37 @@ fn validate_config(
     assets: &ProjectAssets,
     build: &z80_emit::Build,
 ) -> Result<(), EmitError> {
+    let cnrom_bus = cfg
+        .runtime_defines
+        .iter()
+        .any(|d| d == "CNROM_BUS_EXPERIMENT");
+    if cnrom_bus != cfg.cnrom.is_some() || (cfg.mapper == 3) != cnrom_bus {
+        return Err(EmitError::InvalidCnromConfig(
+            "mapper 3 requires the explicit bus-only experiment and board configuration".into(),
+        ));
+    }
+    if cnrom_bus
+        && (cfg.chr_ram
+            || cfg.native_calls
+            || assets.prg_banks.is_some()
+            || cfg.raw_ciram_backend != RawCiramBackend::SramSlot2
+            || cfg
+                .runtime_defines
+                .iter()
+                .any(|d| d != "CNROM_BUS_EXPERIMENT")
+            || assets.chr_4bpp.len() > 0x4000
+            || assets.chr_maps.as_ref().is_some_and(|v| v.len() > 0x4000)
+            || assets.nametable.as_ref().is_none_or(|v| v.len() != 0x700)
+            || assets.prg_low.as_ref().is_none_or(|v| v.len() != 0x4000)
+            || assets.prg_high.as_ref().is_none_or(|v| v.len() != 0x4000)
+            || assets.chr_nes.as_ref().is_none_or(|v| {
+                !(0x2000..=0x20000).contains(&v.len()) || !v.len().is_power_of_two()
+            }))
+    {
+        return Err(EmitError::InvalidCnromConfig(
+            "invalid fixed-PRG/raw-CHR experiment assets".into(),
+        ));
+    }
     let mmc3_full = cfg
         .runtime_defines
         .iter()
@@ -390,6 +433,10 @@ fn validate_config(
         }
     }
     let bank_count = cfg.rom_kib / 16;
+    if cnrom_bus {
+        required_bank = required_bank
+            .max(31 + assets.chr_nes.as_ref().unwrap().len().div_ceil(0x4000) as u32 - 1);
+    }
     if build.project_data_bank_count != 0 {
         if !mmc3_full {
             return Err(EmitError::InvalidMmc3Config(
@@ -542,6 +589,10 @@ fn sms_asm_content(
         24
     };
     let mut mapper_define = format!(".define NES_MAPPER {}", cfg.mapper);
+    if let Some(board) = cfg.cnrom {
+        let count = assets.chr_nes.as_ref().expect("validated CNROM CHR").len() / 0x2000;
+        mapper_define.push_str(&format!("\n.define CNROM_CHR_DATA_BASE 31\n.define CNROM_CHR_BANK_MASK {}\n.define CNROM_BUS_CONFLICTS {}\n.define CNROM_PRG_RAM {}", count - 1, u8::from(board.bus_conflicts), u8::from(board.prg_ram)));
+    }
     if project_data_bank_count != 0 {
         // validate_config admits this only for full MMC3 and proves the
         // reservation fits after all packed PRG, boot assets and raw CHR.
@@ -769,6 +820,11 @@ fn sms_asm_content(
         }
         // Legacy code remains assembled but its PPU read path is bypassed.
         out.push_str("\n.define data_chr_nes data_mmc3_chr_0\n");
+    } else if cfg.cnrom.is_some() {
+        for (page, bytes) in assets.chr_nes.as_ref().unwrap().chunks(0x4000).enumerate() {
+            out.push_str(&format!("\n.bank {} slot 2\n.org $0000\n.section \"data_cnrom_chr_{page}\" force\ndata_cnrom_chr_{page}:\n.incbin \"data/chr.nes\" SKIP {} READ {}\n.ends\n", 31 + page, page * 0x4000, bytes.len()));
+        }
+        out.push_str("\n.define data_chr_nes data_cnrom_chr_0\n");
     } else if assets.chr_nes.is_some() {
         let (bank, org) = if assets.prg_banks.is_some() {
             (asset_base + 1, PACKED_CHR_NES_OFFSET)
@@ -959,6 +1015,7 @@ mod tests {
             mapper: 0,
             uxrom_bank_count: None,
             mmc3_prg_bank_count: None,
+            cnrom: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -976,6 +1033,61 @@ mod tests {
             native_calls: false,
             runtime_defines: Vec::new(),
         }
+    }
+
+    #[test]
+    fn cnrom_project_admission_requires_complete_bounded_asset_contract() {
+        let mut cfg = minimal_cfg();
+        cfg.mapper = 3;
+        cfg.rom_kib = 1024;
+        cfg.raw_ciram_backend = RawCiramBackend::SramSlot2;
+        cfg.runtime_defines = vec!["CNROM_BUS_EXPERIMENT".into()];
+        cfg.cnrom = Some(CnromConfig {
+            bus_conflicts: true,
+            prg_ram: false,
+        });
+        let mut assets = minimal_assets();
+        assets.prg_low = Some(vec![0; 0x4000]);
+        assets.prg_high = Some(vec![0; 0x4000]);
+        assets.nametable = Some(vec![0; 0x700]);
+        for size in [0x2000, 0x4000, 0x8000, 0x10000, 0x20000] {
+            assets.chr_nes = Some(vec![0; size]);
+            assert!(validate_config(&cfg, &assets, &minimal_build()).is_ok());
+        }
+        for size in [0, 0x1000, 0x6000, 0x40000] {
+            assets.chr_nes = Some(vec![0; size]);
+            assert!(matches!(
+                validate_config(&cfg, &assets, &minimal_build()),
+                Err(EmitError::InvalidCnromConfig(_))
+            ));
+        }
+        assets.chr_nes = Some(vec![0; 0x20000]);
+        cfg.rom_kib = 512;
+        assert!(matches!(
+            validate_config(&cfg, &assets, &minimal_build()),
+            Err(EmitError::LayoutExceedsRomCapacity { .. })
+        ));
+        cfg.rom_kib = 1024;
+        cfg.cnrom = None;
+        assert!(matches!(
+            validate_config(&cfg, &assets, &minimal_build()),
+            Err(EmitError::InvalidCnromConfig(_))
+        ));
+        cfg.cnrom = Some(CnromConfig {
+            bus_conflicts: true,
+            prg_ram: true,
+        });
+        cfg.raw_ciram_backend = RawCiramBackend::None;
+        assert!(matches!(
+            validate_config(&cfg, &assets, &minimal_build()),
+            Err(EmitError::InvalidCnromConfig(_))
+        ));
+        cfg.raw_ciram_backend = RawCiramBackend::SramSlot2;
+        assets.prg_high = Some(vec![0; 0x2000]);
+        assert!(matches!(
+            validate_config(&cfg, &assets, &minimal_build()),
+            Err(EmitError::InvalidCnromConfig(_))
+        ));
     }
 
     fn uxrom_bank_payloads() -> Vec<Vec<u8>> {
@@ -1170,6 +1282,7 @@ mod tests {
             mapper: 0,
             uxrom_bank_count: None,
             mmc3_prg_bank_count: None,
+            cnrom: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1203,6 +1316,7 @@ mod tests {
             mapper: 0,
             uxrom_bank_count: None,
             mmc3_prg_bank_count: None,
+            cnrom: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1236,6 +1350,7 @@ mod tests {
             mapper: 0,
             uxrom_bank_count: None,
             mmc3_prg_bank_count: None,
+            cnrom: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1314,6 +1429,7 @@ mod tests {
             mapper: 0,
             uxrom_bank_count: None,
             mmc3_prg_bank_count: None,
+            cnrom: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1370,6 +1486,7 @@ mod tests {
             mapper: 0,
             uxrom_bank_count: None,
             mmc3_prg_bank_count: None,
+            cnrom: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1427,6 +1544,7 @@ mod tests {
             mapper: 0,
             uxrom_bank_count: None,
             mmc3_prg_bank_count: None,
+            cnrom: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,
@@ -1463,6 +1581,7 @@ mod tests {
             mapper: 0,
             uxrom_bank_count: None,
             mmc3_prg_bank_count: None,
+            cnrom: None,
             uxrom_bus_conflicts: None,
             chr_ram: false,
             input_action: false,

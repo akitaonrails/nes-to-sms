@@ -1,6 +1,7 @@
 //! NMOS 6502 / Ricoh 2A03 interpreter — differential-test oracle.
 //!
-//! Instruction-accurate; no cycle accuracy. Decimal mode is a no-op (2A03).
+//! Instruction-accurate; no cycle accuracy. Memory RMW operations expose both
+//! original and modified bus writes. Decimal mode is a no-op (2A03).
 //! Implements all official opcodes plus stable unofficials used by SMB.
 
 #![allow(clippy::upper_case_acronyms)]
@@ -375,7 +376,7 @@ impl Cpu {
     }
 
     fn do_asl_mem(&mut self, bus: &mut impl Bus, ea: u16) {
-        let v = bus.read(ea);
+        let v = read_rmw_operand(bus, ea);
         self.set_flag(FLAG_C, v & 0x80 != 0);
         let r = v << 1;
         bus.write(ea, r);
@@ -383,7 +384,7 @@ impl Cpu {
     }
 
     fn do_lsr_mem(&mut self, bus: &mut impl Bus, ea: u16) {
-        let v = bus.read(ea);
+        let v = read_rmw_operand(bus, ea);
         self.set_flag(FLAG_C, v & 0x01 != 0);
         let r = v >> 1;
         bus.write(ea, r);
@@ -391,7 +392,7 @@ impl Cpu {
     }
 
     fn do_rol_mem(&mut self, bus: &mut impl Bus, ea: u16) {
-        let v = bus.read(ea);
+        let v = read_rmw_operand(bus, ea);
         let old_c = (self.p & FLAG_C) != 0;
         self.set_flag(FLAG_C, v & 0x80 != 0);
         let r = (v << 1) | (old_c as u8);
@@ -400,7 +401,7 @@ impl Cpu {
     }
 
     fn do_ror_mem(&mut self, bus: &mut impl Bus, ea: u16) {
-        let v = bus.read(ea);
+        let v = read_rmw_operand(bus, ea);
         let old_c = (self.p & FLAG_C) != 0;
         self.set_flag(FLAG_C, v & 0x01 != 0);
         let r = (v >> 1) | ((old_c as u8) << 7);
@@ -583,13 +584,13 @@ impl Cpu {
             // --- Increment / Decrement ---
             INC => {
                 let addr = ea.unwrap();
-                let v = bus.read(addr).wrapping_add(1);
+                let v = read_rmw_operand(bus, addr).wrapping_add(1);
                 bus.write(addr, v);
                 self.set_nz(v);
             }
             DEC => {
                 let addr = ea.unwrap();
-                let v = bus.read(addr).wrapping_sub(1);
+                let v = read_rmw_operand(bus, addr).wrapping_sub(1);
                 bus.write(addr, v);
                 self.set_nz(v);
             }
@@ -688,7 +689,7 @@ impl Cpu {
             DCP => {
                 // DEC memory, then CMP.
                 let addr = ea.unwrap();
-                let m = bus.read(addr).wrapping_sub(1);
+                let m = read_rmw_operand(bus, addr).wrapping_sub(1);
                 bus.write(addr, m);
                 let a = self.a;
                 self.do_cmp(a, m);
@@ -696,14 +697,14 @@ impl Cpu {
             ISC => {
                 // INC memory, then SBC.
                 let addr = ea.unwrap();
-                let m = bus.read(addr).wrapping_add(1);
+                let m = read_rmw_operand(bus, addr).wrapping_add(1);
                 bus.write(addr, m);
                 self.do_sbc(m);
             }
             SLO => {
                 // ASL memory, then ORA A.
                 let addr = ea.unwrap();
-                let v = bus.read(addr);
+                let v = read_rmw_operand(bus, addr);
                 self.set_flag(FLAG_C, v & 0x80 != 0);
                 let shifted = v << 1;
                 bus.write(addr, shifted);
@@ -713,7 +714,7 @@ impl Cpu {
             RLA => {
                 // ROL memory, then AND A.
                 let addr = ea.unwrap();
-                let v = bus.read(addr);
+                let v = read_rmw_operand(bus, addr);
                 let old_c = (self.p & FLAG_C) != 0;
                 self.set_flag(FLAG_C, v & 0x80 != 0);
                 let rotated = (v << 1) | (old_c as u8);
@@ -724,7 +725,7 @@ impl Cpu {
             SRE => {
                 // LSR memory, then EOR A.
                 let addr = ea.unwrap();
-                let v = bus.read(addr);
+                let v = read_rmw_operand(bus, addr);
                 self.set_flag(FLAG_C, v & 0x01 != 0);
                 let shifted = v >> 1;
                 bus.write(addr, shifted);
@@ -734,7 +735,7 @@ impl Cpu {
             RRA => {
                 // ROR memory, then ADC A.
                 let addr = ea.unwrap();
-                let v = bus.read(addr);
+                let v = read_rmw_operand(bus, addr);
                 let old_c = (self.p & FLAG_C) != 0;
                 self.set_flag(FLAG_C, v & 0x01 != 0);
                 let rotated = (v >> 1) | ((old_c as u8) << 7);
@@ -809,6 +810,15 @@ impl std::error::Error for StepError {}
 // Bus helpers
 // ---------------------------------------------------------------------------
 
+/// NMOS 6502 RMW instructions write the original byte before the result.
+/// Both writes are observable by memory-mapped hardware, even when identical.
+/// This does not add cycle timing or the CPU's other dummy bus accesses.
+fn read_rmw_operand(bus: &mut impl Bus, addr: u16) -> u8 {
+    let value = bus.read(addr);
+    bus.write(addr, value);
+    value
+}
+
 fn read16(bus: &mut impl Bus, addr: u16) -> u16 {
     let lo = bus.read(addr) as u16;
     let hi = bus.read(addr.wrapping_add(1)) as u16;
@@ -829,6 +839,126 @@ fn read16_zp(bus: &mut impl Bus, ptr: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct WriteRecordingBus {
+        memory: FlatBus,
+        writes: Vec<(u16, u8)>,
+    }
+
+    impl Bus for WriteRecordingBus {
+        fn read(&mut self, addr: u16) -> u8 {
+            self.memory.read(addr)
+        }
+
+        fn write(&mut self, addr: u16, value: u8) {
+            self.writes.push((addr, value));
+            self.memory.write(addr, value);
+        }
+    }
+
+    #[test]
+    fn all_memory_rmw_opcodes_write_original_then_result() {
+        // Literal NMOS opcode encodings, independent of the decoder table.
+        // Each row uses (zp,X), zp, abs, (zp),Y, zp,X, abs,Y, abs,X;
+        // zero entries mark forms that the official instruction lacks.
+        let families = [
+            ([0, 0xe6, 0xee, 0, 0xf6, 0, 0xfe], 0x82),          // INC
+            ([0, 0xc6, 0xce, 0, 0xd6, 0, 0xde], 0x80),          // DEC
+            ([0, 0x06, 0x0e, 0, 0x16, 0, 0x1e], 0x02),          // ASL
+            ([0, 0x46, 0x4e, 0, 0x56, 0, 0x5e], 0x40),          // LSR
+            ([0, 0x26, 0x2e, 0, 0x36, 0, 0x3e], 0x03),          // ROL, C=1
+            ([0, 0x66, 0x6e, 0, 0x76, 0, 0x7e], 0xc0),          // ROR, C=1
+            ([0xe3, 0xe7, 0xef, 0xf3, 0xf7, 0xfb, 0xff], 0x82), // ISC
+            ([0xc3, 0xc7, 0xcf, 0xd3, 0xd7, 0xdb, 0xdf], 0x80), // DCP
+            ([0x03, 0x07, 0x0f, 0x13, 0x17, 0x1b, 0x1f], 0x02), // SLO
+            ([0x43, 0x47, 0x4f, 0x53, 0x57, 0x5b, 0x5f], 0x40), // SRE
+            ([0x23, 0x27, 0x2f, 0x33, 0x37, 0x3b, 0x3f], 0x03), // RLA
+            ([0x63, 0x67, 0x6f, 0x73, 0x77, 0x7b, 0x7f], 0xc0), // RRA
+        ];
+        let mut tested = 0;
+        for (opcodes, result) in families {
+            for (mode, opcode) in opcodes.into_iter().enumerate() {
+                if opcode == 0 {
+                    continue;
+                }
+                let mut bus = WriteRecordingBus {
+                    memory: FlatBus::new(),
+                    writes: Vec::new(),
+                };
+                // Indexed effective addresses cross a page or zero-page end;
+                // both write cycles must reach the resolved, wrapped address.
+                let (operand, target) = match mode {
+                    0 => ([0xfc, 0], 0x4501), // $FC+X=$FF pointer wraps at $00
+                    1 => ([0x40, 0], 0x0040),
+                    2 => ([0x01, 0x45], 0x4501),
+                    3 => ([0xff, 0], 0x4506), // ($FF),Y pointer wraps at $00
+                    4 => ([0xfe, 0], 0x0001), // $FE+X wraps to $01
+                    5 => ([0xfc, 0x44], 0x4501),
+                    6 => ([0xfe, 0x44], 0x4501),
+                    _ => unreachable!(),
+                };
+                bus.memory.ram[0xff] = 0x01;
+                bus.memory.ram[0] = 0x45;
+                bus.memory.ram[target as usize] = 0x81;
+                bus.memory.load(0x8000, &[opcode, operand[0], operand[1]]);
+                let mut cpu = Cpu {
+                    pc: 0x8000,
+                    x: 3,
+                    y: 5,
+                    a: 0x53,
+                    p: FLAG_U | FLAG_C,
+                    ..Cpu::new()
+                };
+                cpu.step(&mut bus).unwrap();
+                assert_eq!(
+                    bus.writes,
+                    [(target, 0x81), (target, result)],
+                    "opcode ${opcode:02X}"
+                );
+                assert_eq!(bus.memory.ram[target as usize], result);
+                tested += 1;
+            }
+        }
+        assert_eq!(tested, 66);
+    }
+
+    #[test]
+    fn rmw_preserves_both_writes_when_result_is_unchanged() {
+        let mut bus = WriteRecordingBus {
+            memory: FlatBus::new(),
+            writes: Vec::new(),
+        };
+        bus.memory.load(0x8000, &[0x0e, 0x00, 0x90]); // ASL $9000, zero stays zero
+        let mut cpu = Cpu {
+            pc: 0x8000,
+            ..Cpu::new()
+        };
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(bus.writes, [(0x9000, 0), (0x9000, 0)]);
+        assert_eq!(cpu.p & (FLAG_N | FLAG_Z | FLAG_C), FLAG_Z);
+    }
+
+    #[test]
+    fn accumulator_shifts_do_not_write_memory_and_store_writes_once() {
+        for (opcode, expected_a) in [(0x0a, 0x02), (0x4a, 0x40), (0x2a, 0x03), (0x6a, 0xc0)] {
+            let mut bus = WriteRecordingBus {
+                memory: FlatBus::new(),
+                writes: Vec::new(),
+            };
+            bus.memory.load(0x8000, &[opcode, 0x8d, 0, 0x90]);
+            let mut cpu = Cpu {
+                pc: 0x8000,
+                a: 0x81,
+                p: FLAG_U | FLAG_C,
+                ..Cpu::new()
+            };
+            cpu.step(&mut bus).unwrap();
+            assert_eq!(cpu.a, expected_a);
+            assert!(bus.writes.is_empty());
+            cpu.step(&mut bus).unwrap();
+            assert_eq!(bus.writes, [(0x9000, expected_a)]);
+        }
+    }
 
     fn cpu_with_bus(program: &[u8], load_at: u16) -> (Cpu, FlatBus) {
         let mut bus = FlatBus::new();

@@ -7643,6 +7643,80 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT Docker-assembled CNROM bus fixture with 2KiB cartridge RAM"]
+    fn cnrom_assembled_bus_preserves_registers_iff_and_exact_mapping() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        for label in ["rt_cpu_read_bus", "rt_cpu_write_bus"] {
+            assert_eq!(defs[label].0, 0, "public bus code must be fixed slot0");
+        }
+        for iff in [false, true] {
+            for sram_control in [0, 8, 12] {
+                for address in [
+                    0x0000, 0x17ff, 0x6000, 0x7fff, 0x8000, 0xc010, 0xffff, 0x2007,
+                ] {
+                    for writing in [false, true] {
+                        let mut bus = SmsBus::new(rom.clone(), 0xff);
+                        bus.write(0xfffe, 17);
+                        bus.write(0xcb14, 17);
+                        bus.write(0xffff, 23);
+                        bus.write(0xfffc, sram_control);
+                        bus.write(0xcb03, 0xa5);
+                        bus.write(0xc000, 0x5a);
+                        bus.write(0xc7ff, 0xa7);
+                        bus.write(0xc810, 2);
+                        bus.write(0xcb11, 0x93);
+                        let mapping = (bus.mapper_control, bus.slot_bank);
+                        let label = if writing {
+                            "rt_cpu_write_bus"
+                        } else {
+                            "rt_cpu_read_bus"
+                        };
+                        let mut cpu = Cpu::new();
+                        cpu.pc = defs[label].1;
+                        cpu.sp = 0xdff0;
+                        cpu.a = 2;
+                        cpu.f = 0x95;
+                        cpu.set_bc(0x1787);
+                        cpu.set_de(0x52a9);
+                        cpu.set_hl(address);
+                        cpu.iff1 = iff;
+                        cpu.iff2 = iff;
+                        bus.write(cpu.sp, 7);
+                        bus.write(cpu.sp + 1, 0);
+                        for _ in 0..1500 {
+                            if cpu.pc == 7 {
+                                break;
+                            }
+                            cpu.step(&mut bus).unwrap();
+                            assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                            assert_eq!(bus.read(0xcb1d), 0, "{label} ${address:04x}");
+                        }
+                        assert_eq!(cpu.pc, 7, "{label} ${address:04x} failed to return");
+                        assert_eq!(cpu.sp, 0xdff2);
+                        assert_eq!((cpu.bc(), cpu.de(), cpu.hl()), (0x1787, 0x52a9, address));
+                        assert_eq!(bus.read(0xcb03), 0xa5);
+                        assert_eq!(bus.read(0xcb14), 17);
+                        assert_eq!((bus.mapper_control, bus.slot_bank), mapping);
+                        assert_eq!((cpu.iff1, cpu.iff2, cpu.ei_pending), (iff, iff, 0));
+                        if writing {
+                            assert_eq!((cpu.a, cpu.f), (2, 0x95));
+                        } else if address == 0 {
+                            assert_eq!(cpu.a, 0x5a);
+                        } else if address == 0x17ff {
+                            assert_eq!(cpu.a, 0xa7);
+                        } else if address == 0x2007 {
+                            assert_eq!(cpu.a, 0x93);
+                            assert_eq!(bus.read(0xcb10), 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "requires TRACE_FUNCTIONAL_PROJECT Docker-assembled MMC3 fixture"]
     fn mmc3_assembled_helpers_preserve_live_state_and_mapping() {
         let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
@@ -8640,9 +8714,17 @@ mod tests {
                     oracle.sp = s;
                     oracle.p = p;
                     oracle.step(&mut source).unwrap();
-                    // Separate NMOS bus contract: oracle_6502 models only final RMW write.
+                    // The oracle now emits both NMOS bus writes itself.
+                    // Assert their literal order instead of inserting a shim.
                     if rmw {
-                        source.writes.insert(0, (address & 0x7ff, value));
+                        assert_eq!(
+                            source.writes,
+                            [
+                                (address & 0x7ff, value),
+                                (address & 0x7ff, source.ram[usize::from(address & 0x7ff)]),
+                            ],
+                            "source RMW write order at{entry:04X}"
+                        );
                     }
                     let mut cpu = Cpu::new();
                     cpu.pc = pc;

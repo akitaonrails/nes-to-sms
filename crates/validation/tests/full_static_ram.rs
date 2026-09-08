@@ -218,13 +218,22 @@ fn all_static_ram_variants_match_original_6502_without_runtime_stubs() {
                     "op{absolute:02X} addr{address:04X} A{a:02X} P{p:02X} data{value:02X}"
                 );
                 assert_eq!(&bus.mem[0xc000..0xc800], source.ram);
-                // The instruction-accurate oracle omits the NMOS dummy store.
-                // Add that separate source bus contract, not a claimed trace.
-                let mut expected = source.writes;
+                // Both NMOS writes now come from the actual oracle bus trace,
+                // not a test-side reconstruction of the original-value write.
                 if op_index >= 16 {
-                    expected.insert(0, (address & 0x7ff, value));
+                    assert_eq!(
+                        source.writes,
+                        [
+                            (address & 0x7ff, value),
+                            (address & 0x7ff, source.ram[usize::from(address & 0x7ff)]),
+                        ],
+                        "source RMW write order op{absolute:02X} addr{address:04X}"
+                    );
                 }
-                assert_eq!(bus.writes, expected, "op{absolute:02X} addr{address:04X}");
+                assert_eq!(
+                    bus.writes, source.writes,
+                    "op{absolute:02X} addr{address:04X}"
+                );
                 assert_eq!(cpu.sp, 0xdff0);
                 assert_eq!((cpu.iff1, cpu.iff2), (seed & 1 != 0, seed & 1 != 0));
                 vectors += 1;
