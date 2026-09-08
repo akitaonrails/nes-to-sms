@@ -361,8 +361,7 @@ rt_mmc3_capture_hud:
   ld ($fffc), a
   ld hl, $8000
   ld de, $9000
-  ld bc, $0800
-  call _m3f_compare_copy
+  call _m3c_capture_hud
   ld de, M3G_RECORD+$40
 _m3f_capture_record:
   ; Compare the BG-selected physical four-page map independently. The
@@ -458,6 +457,9 @@ rt_mmc3_capture_single:
   ld de, M3G_RECORD+$40
   ld bc, $40
   call _m3f_compare_copy
+  ; HUD now describes frozen PF, not necessarily the current live source.
+  ; Its next live capture must scan every block; PF intent stays independent.
+  call rt_mmc3_touch_hud_all
   xor a
   ld (M3G_SPLIT), a
   ret
@@ -517,14 +519,105 @@ _m3f_validate_mask:
   jp rt_mmc3_raster_unsupported
 
 ; Exact PF bitmap: all256 bytes are assigned anew every capture, including
-; clean groups. Source remains immutable while BUSY excludes guest reentry.
-; Eight-byte groups bound changed-data work before each host-service point.
+; untouched blocks. Intent is independent of the committed-source ANCHORED
+; contract: it describes writes since THIS snapshot, even if never published.
+; BUSY excludes the producer; host service cannot write CIRAM or these maps.
 ; HL=8000/DE=8800 on entry, HL=8800/DE=9000 on return; AF/BC scratch.
 _m3c_capture_ciram:
   push hl
   ld hl, M3C_DIRTY
   ld (M3C_COPY_CURSOR), hl
   pop hl
+  ld c, <M3T_PF
+  jr _m3t_mask_byte
+; Same live source, independent HUD destination/intent. No PF bitmap writes.
+; HL=8000/DE=9000 -> HL=8800/DE=9800; AF/BC scratch.
+_m3c_capture_hud:
+  ld c, <M3T_HUD
+_m3t_mask_byte:
+  push hl
+  ld h, >M3T_PF
+  ld l, c
+  ld b, (hl)
+  pop hl
+  ld a, b
+  or a
+  jr nz, _m3t_block
+  ld a, 128                ; all eight16-byte blocks equal their snapshot
+  call _m3t_skip
+  jr _m3t_mask_done
+_m3t_block:
+  ei
+  nop
+  di
+  srl b
+  push bc                  ; intent cursor/bits survive comparison helpers
+  jr nc, _m3t_clean_block
+  bit 4, c
+  jr nz, _m3t_hud_block
+  call _m3c_copy_group
+  call _m3c_copy_group
+  jr _m3t_block_done
+_m3t_hud_block:
+  ld bc, 16
+  call _m3f_compare_copy
+  jr _m3t_block_done
+_m3t_clean_block:
+  ld a, 16
+  call _m3t_skip
+_m3t_block_done:
+  pop bc
+  ld a, l
+  and $7f
+  jr nz, _m3t_block
+_m3t_mask_done:
+  ; Consume only after all128 source bytes for this mask byte are exact.
+  push hl
+  ld h, >M3T_PF
+  ld l, c
+  ld (hl), 0
+  pop hl
+  inc c
+  ei
+  nop
+  di
+  ld a, h
+  cp $88
+  jr nz, _m3t_mask_byte
+  ret
+
+; A=16/128 bytes known equal to this frozen buffer, C=intent-map cursor.
+; Advance both source pointers; PF must also explicitly zero2/16 dirty bytes.
+; Preserve BC; AF scratch. Largest clear is16 bytes, then caller yields.
+_m3t_skip:
+  push bc
+  bit 4, c
+  ld c, a
+  ld b, 0
+  jr nz, _m3t_skip_advance
+  push hl
+  ld hl, (M3C_COPY_CURSOR)
+  rrca
+  rrca
+  rrca
+  ld b, a
+  xor a
+_m3t_skip_dirty:
+  ld (hl), a
+  inc hl
+  djnz _m3t_skip_dirty
+  ld (M3C_COPY_CURSOR), hl
+  pop hl
+_m3t_skip_advance:
+  add hl, bc
+  ex de, hl
+  add hl, bc
+  ex de, hl
+  pop bc
+  ret
+
+; One exact8-byte PF group, retaining the existing closed service boundary.
+; HL/DE advance8; C/AF scratch; B preserved. Caller owns intent iteration.
 _m3c_copy_group:
   ld c, 0
   ld a, (de)
@@ -611,9 +704,6 @@ _m3c_copy_equal7:
   ei
   nop
   di
-  ld a, h
-  cp $88
-  jp nz, _m3c_copy_group
   ret
 
 ; Exact compare-before-overwrite, at most64 bytes between host-service

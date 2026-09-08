@@ -25,6 +25,11 @@
 .define M3G_STALE_IRQ  $c8f8 ; pending IRQ outlived its frozen packet
 .define M3G_EPOCH      $c8f9 ; diagnostic NMI epoch, ownership uses sticky flag
 .define M3G_IRQ_EPOCH  $c8fa
+; Independent physical-CIRAM write intent for the PF/HUD frozen snapshots.
+; Native DD40..DD5F is not guest RAM, renderer scratch or the DE40 stack floor.
+; Each bit covers16 bytes. Capture consumes only its own128-bit map.
+.define M3T_PF        $dd40
+.define M3T_HUD       $dd50
 
 .section "ppu_mmc3" free
 
@@ -95,9 +100,55 @@ rt_mmc3_graphics_init:
   ld bc, $4000
   xor a
   call mem_fill
+  ; The bank0 bulk clear is also a source mutation. Seed AFTER it (and after
+  ; boot's earlier native clears), never infer that frozen buffers are valid.
+  call rt_mmc3_touch_all
   xor a
   ld ($fffc), a
   jp rt_mmc3_chr_changed
+
+rt_mmc3_touch_all:
+  ld hl, M3T_PF
+  ld bc, 32
+  ld a, $ff
+  jp mem_fill
+rt_mmc3_touch_hud_all:
+  ld hl, M3T_HUD
+  ld bc, 16
+  ld a, $ff
+  jp mem_fill
+
+; DI, called AFTER the real source store. HL=physical8000..87FF; AF/BC/HL
+; scratch, DE unchanged. The following increment reloads its own source v.
+; No guest event or host service can intervene between store and both marks.
+rt_mmc3_ciram_touched:
+  ld a, l
+  rrca
+  rrca
+  rrca
+  rrca
+  ld c, a
+  ld b, >rt_mmc3_bit_masks
+  ld a, (bc)
+  ld c, a
+  ld a, h
+  and 7
+  add a, a
+  sla l
+  adc a, 0
+  add a, <M3T_PF
+  ld l, a
+  ld h, >M3T_PF
+  ld a, (hl)
+  or c
+  ld (hl), a
+  ld a, l
+  add a, 16
+  ld l, a
+  ld a, (hl)
+  or c
+  ld (hl), a
+  ret
 
 ; Fixed-bank guarded entry points. Input B=register index; writes preserve
 ; original AF. Read result A; BC/HL scratch. Shadow P is never modified.
@@ -308,6 +359,7 @@ _m3p_datawrite:
   ld a, 8
   ld ($fffc), a
   ld (hl), c
+  call rt_mmc3_ciram_touched
   jp _m3p_increment
 _m3p_palette_write:
   call _m3p_palette_address

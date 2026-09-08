@@ -128,7 +128,7 @@ This explicit experimental boundary prevents silently rendering a layer that
 the guest disabled; it is not a claim of independent-layer support.
 
 Completed byte-identical packets retain the committed display without
-blanking or rebuilding. Capture compares each source byte before replacing
+blanking or rebuilding. Capture establishes exact source equality before replacing
 the previous frozen record: both CIRAM snapshots, OAM, physical CHR maps,
 palette, control/mask, scroll, t, fine X, mirroring, IRQ reload v/intent, and
 the committed split.
@@ -159,8 +159,10 @@ still blanks, rebuilds sprite patterns/SAT and both palettes, and publishes
 at VBlank. Active/hidden transitions keep the existing per-OAM slot rules;
 there is no visible sprite-pattern overwrite. Single-record fallback
 conservatively treats any copied HUD-record change as a BG change. There is
-no dirty-intent capture shortcut, no SAT-only unblanked update, and no new
-cache allocation. READY, partial-layer rejection and render-off behavior
+no SAT-only unblanked update or new BG cache allocation in this initial path.
+The later [touched-block capture](mmc3-touched-capture.md) adds 32 native bytes
+of conservative source-write intent without weakening exact packet comparison.
+READY, partial-layer rejection and render-off behavior
 remain mandatory.
 
 Existing assembled helper tests in `trace_sms.rs` use `TRACE_FUNCTIONAL_PROJECT`:

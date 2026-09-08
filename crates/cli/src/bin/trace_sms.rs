@@ -11317,6 +11317,7 @@ mod tests {
                 for mode in 0..3 {
                     let force_full = mode == 1;
                     let mut bus = SmsBus::new(rom.clone(), 0xff);
+                    bus.ram[0x1d40..0x1d60].fill(0xff); // initial source fixture
                     bus.write(0xfffc, 8);
                     bus.write(0xc831, 1);
                     bus.write(0xcb08, 0xa8 | table);
@@ -11350,13 +11351,32 @@ mod tests {
                     for (index, value) in [24, 1, 3, 17].into_iter().enumerate() {
                         bus.write(0xc900 + index as u16, value);
                     }
+                    let write_source_or_state = |bus: &mut SmsBus, address, value| {
+                        if (0x8000..0x8800).contains(&address) {
+                            let offset = address - 0x8000;
+                            let logical = if bus.read(0xc824) != 0 && offset >= 0x400 {
+                                0x2800 + (offset & 0x3ff)
+                            } else {
+                                0x2000 + offset
+                            };
+                            let v = (bus.read(0xcb0f), bus.read(0xcb10));
+                            mmc3_test_ciram_store(bus, defs["rt_ppu_write"].1, logical, value);
+                            // This synthetic dependency case varies only the
+                            // physical source byte, not the separate IRQ-v input.
+                            bus.write(0xcb0f, v.0);
+                            bus.write(0xcb10, v.1);
+                        } else {
+                            bus.write(address, value);
+                        }
+                    };
                     let capture = |bus: &mut SmsBus, mutate: bool| {
                         bus.write(0xc8f7, 0);
                         let original: Vec<_> =
                             addresses.iter().map(|&a| (a, bus.read(a))).collect();
                         if mutate && records & 1 != 0 {
                             for &(address, value) in &original {
-                                bus.write(
+                                write_source_or_state(
+                                    bus,
                                     address,
                                     match address {
                                         0xc900 => 0xe0,                  // active -> hidden
@@ -11369,7 +11389,7 @@ mod tests {
                         invoke(bus, "rt_mmc3_capture_playfield");
                         if mutate && records == 1 {
                             for &(address, value) in &original {
-                                bus.write(address, value);
+                                write_source_or_state(bus, address, value);
                             }
                         }
                         bus.write(0xc8f7, 3);
@@ -11378,7 +11398,11 @@ mod tests {
                         if mutate && records == 2 {
                             for &(address, _) in &original {
                                 let value = bus.read(address);
-                                bus.write(address, value ^ if address == 0xc8f7 { 2 } else { 1 });
+                                write_source_or_state(
+                                    bus,
+                                    address,
+                                    value ^ if address == 0xc8f7 { 2 } else { 1 },
+                                );
                             }
                         }
                         invoke(bus, "rt_mmc3_capture_hud");
@@ -13266,6 +13290,508 @@ mod tests {
         }
     }
 
+    fn mmc3_test_ciram_store(bus: &mut SmsBus, entry: u16, address: u16, value: u8) {
+        let mapping = (bus.slot_bank, bus.read(0xfffc));
+        bus.write(0xcb0f, (address >> 8) as u8);
+        bus.write(0xcb10, address as u8);
+        let mut cpu = Cpu::new();
+        cpu.pc = entry;
+        cpu.sp = 0xdff0;
+        cpu.a = value;
+        cpu.b = 7;
+        bus.write(cpu.sp, 7);
+        bus.write(cpu.sp + 1, 0);
+        for _ in 0..3000 {
+            if cpu.pc == 7 {
+                break;
+            }
+            cpu.step(bus).unwrap();
+            assert_eq!(bus.read(0xcb1d), 0);
+            assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+        }
+        assert_eq!((cpu.pc, cpu.sp), (7, 0xdff2));
+        assert_eq!((bus.slot_bank, bus.read(0xfffc)), mapping);
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
+    fn mmc3_full_ciram_touches_follow_physical_stores() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let mut bus = SmsBus::new(rom, 0xff);
+        bus.write(0xfffe, 6);
+        bus.write(0xcb14, 6);
+        bus.write(0xffff, 9);
+        bus.write(0xfffc, 12);
+        bus.write(0xcb03, 0xa5);
+        bus.ram[0x1300..0x1600].fill(0x76);
+        bus.cart_ram[0x4000..0x6000].fill(0x96);
+        let invoke = |bus: &mut SmsBus, label: &str, reg: u8, value: u8, iff: bool| {
+            let mapping = (bus.slot_bank, bus.read(0xfffc));
+            let mut cpu = Cpu::new();
+            cpu.pc = defs[label].1;
+            cpu.sp = 0xdff0;
+            cpu.a = value;
+            cpu.f = 0x95;
+            cpu.b = reg;
+            cpu.c = 0x87;
+            cpu.set_de(0x52a9);
+            cpu.set_hl(0x1234);
+            cpu.iff1 = iff;
+            cpu.iff2 = iff;
+            bus.write(cpu.sp, 7);
+            bus.write(cpu.sp + 1, 0);
+            for _ in 0..300_000 {
+                if cpu.pc == 7 {
+                    break;
+                }
+                cpu.step(bus).unwrap();
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                assert_eq!(bus.read(0xcb1d), 0, "{label}");
+            }
+            assert_eq!((cpu.pc, cpu.sp), (7, 0xdff2));
+            if label == "rt_ppu_write" {
+                assert_eq!((cpu.a, cpu.f, cpu.de()), (value, 0x95, 0x52a9));
+                assert_eq!((cpu.iff1, cpu.iff2, cpu.ei_pending), (iff, iff, 0));
+                assert_eq!((bus.slot_bank, bus.read(0xfffc)), mapping);
+            }
+            assert_eq!(bus.read(0xcb03), 0xa5);
+        };
+        let store = |bus: &mut SmsBus, address: u16, value: u8, iff| {
+            // Seed only source-address registers, never the marking state.
+            bus.write(0xcb0f, (address >> 8) as u8);
+            bus.write(0xcb10, address as u8);
+            invoke(bus, "rt_ppu_write", 7, value, iff);
+        };
+        let physical = |address: u16, horizontal: bool| -> usize {
+            let address = address & 0x3fff;
+            if horizontal {
+                usize::from((address & 0x3ff) | ((address & 0x800) >> 1))
+            } else {
+                usize::from(address & 0x7ff)
+            }
+        };
+        let mut vectors = 0;
+        for horizontal in [false, true] {
+            bus.write(0xc824, u8::from(horizontal));
+            for offset in 0..2048u16 {
+                let address = if horizontal && offset >= 1024 {
+                    0x2800 + offset - 1024
+                } else {
+                    0x2000 + offset
+                };
+                bus.ram[0x1d40..0x1d60].fill(0);
+                let increment = if offset & 1 == 0 { 1 } else { 32 };
+                bus.write(0xcb08, if increment == 1 { 0 } else { 4 });
+                let value = (offset as u8).wrapping_mul(29);
+                store(&mut bus, address, value, offset & 2 != 0);
+                let block = usize::from(offset / 16);
+                let mut expected = [0; 16];
+                expected[block / 8] = 1 << (block & 7);
+                assert_eq!(&bus.ram[0x1d40..0x1d50], &expected);
+                assert_eq!(&bus.ram[0x1d50..0x1d60], &expected);
+                assert_eq!(bus.cart_ram[usize::from(offset)], value);
+                let next = u16::from_be_bytes([bus.read(0xcb0f), bus.read(0xcb10)]);
+                assert_eq!(next, address + increment);
+                // Same value and change-then-restore remain conservative touches.
+                for repeated in [value, value ^ 0xff, value] {
+                    store(&mut bus, address, repeated, false);
+                    assert_eq!(&bus.ram[0x1d40..0x1d50], &expected);
+                    assert_eq!(&bus.ram[0x1d50..0x1d60], &expected);
+                }
+                vectors += 1;
+            }
+            for address in [
+                0x2000, 0x23ff, 0x2400, 0x27ff, 0x2800, 0x2bff, 0x2c00, 0x2fff, 0x3000, 0x33ff,
+                0x3400, 0x37ff, 0x3800, 0x3eff,
+            ] {
+                bus.ram[0x1d40..0x1d60].fill(0);
+                store(&mut bus, address, 0x5a, true);
+                let index = physical(address, horizontal);
+                let mut expected = [0; 16];
+                expected[index / 128] = 1 << ((index / 16) & 7);
+                assert_eq!(&bus.ram[0x1d40..0x1d50], &expected);
+                assert_eq!(&bus.ram[0x1d50..0x1d60], &expected);
+                assert_eq!(bus.cart_ram[index], 0x5a);
+                vectors += 1;
+            }
+        }
+        for address in [0, 0x1fff, 0x3f00, 0x3f10, 0x3fff] {
+            bus.ram[0x1d40..0x1d60].fill(0x69);
+            store(&mut bus, address, 0xb7, true);
+            assert!(bus.ram[0x1d40..0x1d60].iter().all(|&v| v == 0x69));
+        }
+        invoke(&mut bus, "rt_ppu_write", 4, 0x37, true);
+        assert!(bus.ram[0x1d40..0x1d60].iter().all(|&v| v == 0x69));
+        for poison in [0, 0xa5] {
+            bus.ram[0x1d40..0x1d60].fill(poison);
+            bus.cart_ram[..0x4000].fill(0x98);
+            invoke(&mut bus, "rt_mmc3_graphics_init", 0, 0, false);
+            assert!(bus.cart_ram[..0x4000].iter().all(|&v| v == 0));
+            assert!(bus.ram[0x1d40..0x1d60].iter().all(|&v| v == 0xff));
+        }
+        assert!(bus.ram[0x1300..0x1600].iter().all(|&v| v == 0x76));
+        assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&v| v == 0x96));
+        eprintln!(
+            "physical CIRAM marking:{vectors} address/mirror vectors, repeated/restored writes, negatives and two init states"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled touched-CIRAM runtime"]
+    fn mmc3_full_ciram_mark_bounds_whole_ppu_and_interrupts() {
+        let path = PathBuf::from(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(path)
+        };
+        let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+        let rom = std::fs::read(path.join("sms.sms")).unwrap();
+        let mut maximum = 0;
+        let mut closed_maximum = 0;
+        let mut min_sp = 0xdff0;
+        let mut injected = 0;
+        for (address, increment, horizontal) in [
+            (0x2000u16, 1, false),
+            (0x207f, 32, false),
+            (0x2fff, 1, false),
+            (0x3eff, 32, true),
+        ] {
+            for iff in [false, true] {
+                let mut runs = vec![None];
+                let mut index = 0;
+                while index < runs.len() {
+                    let injection: Option<(u16, bool)> = runs[index];
+                    let mut bus = SmsBus::new(rom.clone(), 0xff);
+                    bus.write(0xfffc, 12);
+                    bus.write(0xfffe, 6);
+                    bus.write(0xffff, 9);
+                    bus.write(0xcb14, 6);
+                    bus.write(0xcb28, 1);
+                    bus.write(0xcb03, 0xa5);
+                    bus.write(0xc831, 1); // host service cannot enter guest code
+                    bus.write(0xd9f6, 2);
+                    bus.write(0xcb08, if increment == 1 { 0 } else { 4 });
+                    bus.write(0xc824, u8::from(horizontal));
+                    bus.write(0xcb0f, (address >> 8) as u8);
+                    bus.write(0xcb10, address as u8);
+                    bus.ram[0x1300..0x1600].fill(0x76);
+                    bus.cart_ram[0x4000..0x6000].fill(0x96);
+                    let mut cpu = Cpu::new();
+                    cpu.pc = defs["rt_ppu_write"].1;
+                    cpu.sp = 0xdff0;
+                    cpu.a = 0x5a;
+                    cpu.f = 0x95;
+                    cpu.b = 7;
+                    cpu.c = 0x87;
+                    cpu.set_de(0x52a9);
+                    cpu.set_hl(0x1234);
+                    cpu.iff1 = iff;
+                    cpu.iff2 = iff;
+                    bus.write(cpu.sp, 7);
+                    bus.write(cpu.sp + 1, 0);
+                    let mut points = std::collections::BTreeSet::new();
+                    let mut interrupted: Option<[u16; 6]> = None;
+                    let mut fired = false;
+                    let mut total = 0;
+                    let mut closed = 0;
+                    let mut marking = false;
+                    let mut mark_t = 0;
+                    for _ in 0..10_000 {
+                        if cpu.pc == 7 {
+                            break;
+                        }
+                        if let Some([pc, sp, af, bc, de, hl]) = interrupted
+                            && cpu.pc == pc
+                            && cpu.sp == sp
+                        {
+                            assert_eq!(
+                                (
+                                    u16::from_be_bytes([cpu.a, cpu.f]),
+                                    cpu.bc(),
+                                    cpu.de(),
+                                    cpu.hl()
+                                ),
+                                (af, bc, de, hl),
+                                "interrupt context restored before resumed source instruction"
+                            );
+                            interrupted = None;
+                        }
+                        if interrupted.is_none() {
+                            if index == 0 {
+                                points.insert((cpu.pc, false));
+                                if cpu.iff1 && cpu.ei_pending == 0 {
+                                    points.insert((cpu.pc, true));
+                                }
+                            }
+                            if !fired && injection.is_some_and(|(pc, _)| pc == cpu.pc) {
+                                let host = injection.unwrap().1;
+                                if host {
+                                    assert!(cpu.iff1 && cpu.ei_pending == 0);
+                                }
+                                interrupted = Some([
+                                    cpu.pc,
+                                    cpu.sp,
+                                    u16::from_be_bytes([cpu.a, cpu.f]),
+                                    cpu.bc(),
+                                    cpu.de(),
+                                    cpu.hl(),
+                                ]);
+                                cpu.sp -= 2;
+                                bus.write(cpu.sp, cpu.pc as u8);
+                                bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                                cpu.iff2 = cpu.iff1;
+                                cpu.iff1 = false;
+                                cpu.pc = if host { 0x38 } else { 0x66 };
+                                bus.frame_int_pending = host;
+                                fired = true;
+                                injected += 1;
+                            }
+                        }
+                        if index == 0 {
+                            let t = mmc3_row_nominal(&cpu, &mut bus);
+                            total += t;
+                            if !cpu.iff1 || cpu.ei_pending != 0 || bus.read(cpu.pc) == 0xf3 {
+                                closed += t;
+                            }
+                            if cpu.pc == defs["rt_mmc3_ciram_touched"].1 {
+                                marking = true;
+                            }
+                            if marking {
+                                mark_t += t;
+                                if bus.read(cpu.pc) == 0xc9 {
+                                    marking = false;
+                                }
+                            }
+                        }
+                        cpu.step(&mut bus).unwrap();
+                        min_sp = min_sp.min(cpu.sp);
+                        assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                        assert_eq!(bus.read(0xcb1d), 0);
+                    }
+                    assert_eq!(
+                        (cpu.pc, cpu.sp, cpu.a, cpu.f, cpu.de()),
+                        (7, 0xdff2, 0x5a, 0x95, 0x52a9)
+                    );
+                    assert_eq!((cpu.iff1, cpu.iff2, cpu.ei_pending), (iff, iff, 0));
+                    assert_eq!(
+                        (bus.slot_bank[1], bus.slot_bank[2], bus.read(0xfffc)),
+                        (6, 9, 12)
+                    );
+                    assert_eq!(bus.read(0xcb03), 0xa5);
+                    assert_eq!(bus.read(0xc8f9), 0, "no guest event admitted");
+                    assert!(bus.ram[0x1300..0x1600].iter().all(|&v| v == 0x76));
+                    assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&v| v == 0x96));
+                    let physical = if horizontal {
+                        (address & 0x3ff) | ((address & 0x800) >> 1)
+                    } else {
+                        address & 0x7ff
+                    } as usize;
+                    assert_eq!(bus.cart_ram[physical], 0x5a);
+                    let mut expected = [0; 16];
+                    expected[physical / 128] = 1 << ((physical / 16) & 7);
+                    assert_eq!(&bus.ram[0x1d40..0x1d50], &expected);
+                    assert_eq!(&bus.ram[0x1d50..0x1d60], &expected);
+                    if index == 0 {
+                        assert_eq!(mark_t, 151, "entire marking helper including RET");
+                        maximum = maximum.max(total);
+                        if iff {
+                            closed_maximum = closed_maximum.max(closed);
+                        }
+                        runs.extend(points.into_iter().map(Some));
+                    } else {
+                        assert!(fired);
+                    }
+                    index += 1;
+                }
+            }
+        }
+        // A Pause adds11T entry +55T fixed handler. Physical timing/phase
+        // acceptance still belongs to the actual stock-core observer.
+        assert!(maximum + 66 <= 6 * 228);
+        eprintln!(
+            "PPU source-store wholemax={maximum}T, own DImax={closed_maximum}T, +onePause66T; {injected} interrupt sites; minSP={min_sp:04X}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires TRACE_FUNCTIONAL_PROJECT; optional TRACE_BASELINE_PROJECT is frozen f625"]
+    fn mmc3_full_ciram_capture_masks_are_independent() {
+        let resolve = |path: String| {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join(path)
+            }
+        };
+        let current = resolve(std::env::var("TRACE_FUNCTIONAL_PROJECT").unwrap());
+        let mut variants = vec![(current.clone(), false, false), (current, true, false)];
+        if let Ok(path) = std::env::var("TRACE_BASELINE_PROJECT") {
+            variants.push((resolve(path), false, true));
+        }
+        let mut results = Vec::new();
+        for (path, forced, old) in variants {
+            let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+            let mut bus = SmsBus::new(std::fs::read(path.join("sms.sms")).unwrap(), 0xff);
+            bus.write(0xfffc, 8);
+            bus.write(0xcb28, 1); // actual host service, not boot's early return
+            bus.write(0xc831, 1);
+            bus.write(0xc833, 1);
+            bus.write(0xdd3f, 1);
+            bus.write(0xcb08, 0x28);
+            bus.write(0xcb09, 0x18);
+            bus.write(0xc824, 0);
+            bus.write(0xd9f6, 2);
+            bus.cart_ram[..0x800].fill(0x37);
+            bus.ram[0x1d40..0x1d60].fill(0xff); // initial fixture source differs
+            let invoke = |bus: &mut SmsBus, label: &str| {
+                if forced && label != "rt_mmc3_capture_single" {
+                    // Only the reference branch forces scans. Candidate intent
+                    // comes exclusively from actual source writes below.
+                    bus.ram[0x1d40..0x1d60].fill(0xff);
+                }
+                let mut cpu = Cpu::new();
+                cpu.pc = defs[label].1;
+                cpu.sp = 0xdff0;
+                bus.write(cpu.sp, 7);
+                bus.write(cpu.sp + 1, 0);
+                let mut last_service = None;
+                let mut interrupted: Option<[u16; 6]> = None;
+                let mut host_services = 0;
+                for _ in 0..300_000 {
+                    if cpu.pc == 7 {
+                        break;
+                    }
+                    if let Some([pc, sp, af, bc, de, hl]) = interrupted
+                        && cpu.pc == pc
+                        && cpu.sp == sp
+                    {
+                        assert_eq!(
+                            (
+                                u16::from_be_bytes([cpu.a, cpu.f]),
+                                cpu.bc(),
+                                cpu.de(),
+                                cpu.hl()
+                            ),
+                            (af, bc, de, hl),
+                            "HUD capture interrupted context"
+                        );
+                        interrupted = None;
+                    }
+                    let point = (cpu.pc, cpu.hl(), cpu.de());
+                    if !old
+                        && !forced
+                        && label == "rt_mmc3_capture_hud"
+                        && interrupted.is_none()
+                        && cpu.iff1
+                        && cpu.ei_pending == 0
+                        && last_service != Some(point)
+                    {
+                        last_service = Some(point);
+                        interrupted = Some([
+                            cpu.pc,
+                            cpu.sp,
+                            u16::from_be_bytes([cpu.a, cpu.f]),
+                            cpu.bc(),
+                            cpu.de(),
+                            cpu.hl(),
+                        ]);
+                        cpu.sp -= 2;
+                        bus.write(cpu.sp, cpu.pc as u8);
+                        bus.write(cpu.sp + 1, (cpu.pc >> 8) as u8);
+                        cpu.iff2 = cpu.iff1;
+                        cpu.iff1 = false;
+                        cpu.pc = 0x38;
+                        bus.frame_int_pending = true;
+                        host_services += 1;
+                    }
+                    cpu.step(bus).unwrap();
+                    assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+                    assert_eq!(bus.read(0xcb1d), 0);
+                }
+                assert_eq!((cpu.pc, cpu.sp), (7, 0xdff2));
+                assert!(!cpu.iff1);
+                if !old && !forced && label == "rt_mmc3_capture_hud" {
+                    assert!(host_services >= 16, "even clean HUD intent services host");
+                    assert_eq!(bus.read(0xc8f9), 0, "BUSY excludes guest reentry");
+                    eprintln!("independent HUD capture actual host-service points={host_services}");
+                }
+            };
+            let mut states = Vec::new();
+            for step in 0..12 {
+                let source_store = |bus: &mut SmsBus, offset: u16, value| {
+                    mmc3_test_ciram_store(bus, defs["rt_ppu_write"].1, 0x2000 + offset, value);
+                };
+                match step {
+                    2 => source_store(&mut bus, 15, 0x38),
+                    3 => source_store(&mut bus, 16, 0x39),
+                    4 => {
+                        source_store(&mut bus, 127, 0x91);
+                        source_store(&mut bus, 127, 0x37);
+                    }
+                    6 => bus.write(0xc861, 0x21), // record-only, no CIRAM touch
+                    8 => source_store(&mut bus, 2047, 0x40),
+                    10 => {
+                        for index in 0..2048u16 {
+                            source_store(&mut bus, index, index as u8);
+                        }
+                    }
+                    _ => {}
+                }
+                let label = match step {
+                    1 | 3 | 5 | 9 => "rt_mmc3_capture_hud",
+                    7 => "rt_mmc3_capture_single",
+                    _ => "rt_mmc3_capture_playfield",
+                };
+                let other = if label == "rt_mmc3_capture_hud" {
+                    0x1d40
+                } else {
+                    0x1d50
+                };
+                let before: [u8; 16] = bus.ram[other..other + 16].try_into().unwrap();
+                invoke(&mut bus, label);
+                if !old && !forced {
+                    if label == "rt_mmc3_capture_single" {
+                        assert!(bus.ram[0x1d50..0x1d60].iter().all(|&v| v == 0xff));
+                    } else {
+                        assert_eq!(&bus.ram[other..other + 16], &before);
+                        let consumed = if other == 0x1d40 { 0x1d50 } else { 0x1d40 };
+                        assert!(bus.ram[consumed..consumed + 16].iter().all(|&v| v == 0));
+                    }
+                }
+                let mut state = bus.cart_ram[..0x1980].to_vec();
+                state.extend_from_slice(&bus.ram[0x1c00..0x1d39]);
+                state.extend([bus.read(0xdd3f), bus.read(0xc8f4), bus.read(0xc8ed)]);
+                states.push(state);
+            }
+            results.push(states);
+        }
+        for result in &results[1..] {
+            assert_eq!(
+                &results[0], result,
+                "independent snapshots/dirty bytes/records vs forced scan or old f625"
+            );
+        }
+        eprintln!(
+            "12 independent PF/HUD/single/record/restored/dense capture steps x {} controls",
+            results.len()
+        );
+    }
+
     #[test]
     #[ignore = "requires TRACE_FUNCTIONAL_PROJECT assembled MMC3_FULL_RUNTIME fixture"]
     fn mmc3_full_cell_capture_tracks_exact_physical_bytes() {
@@ -13338,7 +13864,10 @@ mod tests {
                 bus.ram[0x1300..0x1600].fill(0x76);
                 bus.ram[0x1c00..0x1d40].fill(0xa5);
                 bus.write(0xdd3f, anchored);
-                bus.ram[0x1d40..0x1d80].fill(0x87);
+                // This fixture initializes source/snapshot bytes directly.
+                // Production interception is tested separately through PPU writes.
+                bus.ram[0x1d40..0x1d60].fill(0xff);
+                bus.ram[0x1d60..0x1d80].fill(0x87);
                 bus.cart_ram[0x4000..0x6000].fill(0x98);
                 let old_record: Vec<u8> = (0..51u8).map(|i| i.wrapping_mul(37)).collect();
                 bus.cart_ram[0x1900..0x1933].copy_from_slice(&old_record);
@@ -13395,7 +13924,9 @@ mod tests {
                 assert_eq!(&bus.ram[0x1c00..0x1d40], &evidence);
                 assert!(bus.ram[..0x800].iter().all(|&b| b == 0x65));
                 assert!(bus.ram[0x1300..0x1600].iter().all(|&b| b == 0x76));
-                assert!(bus.ram[0x1d40..0x1d80].iter().all(|&b| b == 0x87));
+                assert!(bus.ram[0x1d40..0x1d50].iter().all(|&b| b == 0));
+                assert!(bus.ram[0x1d50..0x1d60].iter().all(|&b| b == 0xff));
+                assert!(bus.ram[0x1d60..0x1d80].iter().all(|&b| b == 0x87));
                 assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x98));
             }
         }
@@ -13436,6 +13967,7 @@ mod tests {
                 bus.write(0xc850 + index, index as u8);
             }
             bus.cart_ram[0x4000..0x6000].fill(0x96);
+            bus.ram[0x1d40..0x1d60].fill(0xff); // direct fixture source initialization
             let mut hits = 0;
             let mut frames = Vec::new();
             for frame in 0..12 {
@@ -13444,13 +13976,19 @@ mod tests {
                 // -> mapping/geometry changes -> off/re-enable -> split.
                 match frame {
                     2 => bus.write(0xc861, 0x21),
-                    3 => bus.cart_ram[5] ^= 1,
+                    3 => {
+                        let value = bus.cart_ram[5] ^ 1;
+                        mmc3_test_ciram_store(&mut bus, defs["rt_ppu_write"].1, 0x2005, value);
+                    }
                     4 => bus.write(0xc835, 1),
                     5 => bus.write(0xc824, 0),
                     6 => bus.write(0xc850, 4),
                     7 => bus.write(0xcb09, 0),
                     8 => bus.write(0xcb09, 0x18),
-                    9 => bus.cart_ram[0x3c0] ^= 3,
+                    9 => {
+                        let value = bus.cart_ram[0x3c0] ^ 3;
+                        mmc3_test_ciram_store(&mut bus, defs["rt_ppu_write"].1, 0x23c0, value);
+                    }
                     10 => bus.write(0xc835, 0x21),
                     _ => {}
                 }
@@ -13625,13 +14163,13 @@ mod tests {
             for index in 0..256 {
                 bus.write(0xc900 + index, 0xe0);
             }
-            let invoke = |bus: &mut SmsBus, label: &str, ppu: Option<u8>| {
+            let invoke = |bus: &mut SmsBus, label: &str, ppu: Option<(u8, u8)>| {
                 let mut cpu = Cpu::new();
                 cpu.pc = defs[label].1;
                 cpu.sp = 0xdff0;
-                if let Some(mask) = ppu {
-                    cpu.b = 1;
-                    cpu.a = mask;
+                if let Some((register, value)) = ppu {
+                    cpu.b = register;
+                    cpu.a = value;
                 }
                 bus.write(cpu.sp, 7);
                 bus.write(cpu.sp + 1, 0);
@@ -13651,6 +14189,8 @@ mod tests {
                 }
                 assert_eq!((cpu.pc, cpu.sp), (7, 0xdff2), "{label}");
             };
+            // Initial fixture RAM was prepared without guest stores.
+            bus.ram[0x1d40..0x1d60].fill(0xff);
             // A is coherently published, with an ordinary PF row at y=5.
             invoke(&mut bus, "rt_mmc3_capture_playfield", None);
             invoke(&mut bus, "rt_mmc3_capture_single", None);
@@ -13659,15 +14199,17 @@ mod tests {
             let committed_a = bus.vram;
             const X: usize = 5 * 32 + 4;
             const Y: usize = 5 * 32 + 8;
-            bus.cart_ram[X] = 1;
+            bus.write(0xcb0f, 0x20 | ((X >> 8) as u8));
+            bus.write(0xcb10, X as u8);
+            invoke(&mut bus, "rt_ppu_write", Some((7, 1)));
             invoke(&mut bus, "rt_mmc3_capture_playfield", None); // pending B
             assert_eq!(bus.vram, committed_a, "captureB was not publication");
             bus.write(0xc832, 1); // pending split, not yet asserted IRQ
             bus.write(0xc822, 1);
             bus.write(0xc823, 0);
             bus.write(0xc831, 0); // main owns producer again
-            invoke(&mut bus, "rt_ppu_write", Some(0));
-            invoke(&mut bus, "rt_ppu_write", Some(0x18));
+            invoke(&mut bus, "rt_ppu_write", Some((1, 0)));
+            invoke(&mut bus, "rt_ppu_write", Some((1, 0x18)));
             assert_eq!(bus.read(0xc8f6), 1, "real MASK off/on cancellation intent");
             bus.write(0xc825, 1); // actual cooperative-wait scheduler admission
             bus.frame_int_pending = true;
@@ -13675,7 +14217,9 @@ mod tests {
             assert_eq!((bus.read(0xc832), bus.read(0xc8f6)), (0, 0));
             assert_eq!(bus.vram, committed_a, "cancelledB was never committed");
             if change_y {
-                bus.cart_ram[Y] = 2;
+                bus.write(0xcb0f, 0x20 | ((Y >> 8) as u8));
+                bus.write(0xcb10, Y as u8);
+                invoke(&mut bus, "rt_ppu_write", Some((7, 2)));
             }
             bus.write(0xc831, 2);
             invoke(&mut bus, "rt_mmc3_capture_playfield", None); // source C
@@ -13959,14 +14503,15 @@ mod tests {
         let rom = std::fs::read(path.join("sms.sms")).unwrap();
         let entry = defs["_m3c_capture_ciram"].1;
         let group = defs["_m3c_copy_group"].1;
-        let mut points = std::collections::BTreeSet::new();
         let mut max_span = 0u64;
         // Baseline covers every possible dirty mask in one2048-byte capture.
         // Then Pause interrupts each executed opcode boundary in that kernel.
-        let mut injections = vec![None];
+        let mut injections = vec![(0, None), (1, None), (2, None)];
         let mut run = 0;
         while run < injections.len() {
-            let pause = injections[run];
+            let (pattern, pause) = injections[run];
+            let baseline = pause.is_none();
+            let mut points = std::collections::BTreeSet::new();
             let mut bus = SmsBus::new(rom.clone(), 0xff);
             bus.write(0xfffc, 8);
             bus.write(0xfffe, 6);
@@ -13979,10 +14524,19 @@ mod tests {
             bus.write(0xd9f6, 2);
             bus.write(0xc8ed, 1);
             bus.ram[0x1c00..0x1d80].fill(0x87);
+            bus.ram[0x1d40..0x1d50].fill(match pattern {
+                0 => 0xff,
+                1 => 0,
+                _ => 0x55,
+            });
             bus.ram[0x1300..0x1600].fill(0x76);
             bus.cart_ram[0x4000..0x6000].fill(0x96);
             for index in 0..2048usize {
-                let mask = (index / 8) as u8 ^ 0xff;
+                let mask = if pattern == 1 || (pattern == 2 && (index / 16) & 1 != 0) {
+                    0
+                } else {
+                    (index / 8) as u8 ^ 0xff
+                };
                 let value = (index as u8).wrapping_mul(29);
                 bus.cart_ram[index] = value;
                 bus.cart_ram[0x800 + index] = value ^ ((mask >> (index & 7)) & 1);
@@ -14000,7 +14554,10 @@ mod tests {
             let mut fired = false;
             let mut host_calls = 0;
             let mut last_copied = 0;
-            for _ in 0..200_000 {
+            let mut last_service = None;
+            // Dense capture now exposes400 rather than256 real host-service
+            // points. Bound the added handler executions, not the DI deadline.
+            for _ in 0..350_000 {
                 if cpu.pc == 7 {
                     break;
                 }
@@ -14020,19 +14577,21 @@ mod tests {
                     interrupted = None;
                 }
                 if interrupted.is_none() {
-                    if run == 0 {
+                    if baseline {
                         points.insert(cpu.pc);
                     }
-                    let host = run == 0
+                    let service = (cpu.pc, cpu.hl(), cpu.de());
+                    let host = baseline
                         && cpu.iff1
                         && cpu.ei_pending == 0
-                        && cpu.de() - 0x8800 > last_copied;
+                        && last_service != Some(service);
                     let nmi = !fired && pause == Some(cpu.pc);
                     if host || nmi {
                         if host {
                             let copied = cpu.de() - 0x8800;
-                            assert_eq!(copied - last_copied, 8);
+                            assert!(copied >= last_copied && copied - last_copied <= 128);
                             last_copied = copied;
+                            last_service = Some(service);
                             max_span = max_span.max(span);
                             span = 0;
                             host_calls += 1;
@@ -14058,7 +14617,7 @@ mod tests {
                         }
                     }
                 }
-                if interrupted.is_none() && run == 0 {
+                if interrupted.is_none() && baseline {
                     span += mmc3_row_nominal(&cpu, &mut bus);
                 }
                 cpu.step(&mut bus).unwrap();
@@ -14071,13 +14630,20 @@ mod tests {
             );
             assert!(!cpu.iff1);
             for byte in 0..256usize {
-                assert_eq!(bus.ram[0x1c00 + byte], byte as u8 ^ 0xff);
+                let expected = if pattern == 1 || (pattern == 2 && (byte / 2) & 1 != 0) {
+                    0
+                } else {
+                    byte as u8 ^ 0xff
+                };
+                assert_eq!(bus.ram[0x1c00 + byte], expected);
             }
             assert_eq!(&bus.cart_ram[..0x800], &bus.cart_ram[0x800..0x1000]);
             assert_eq!(&bus.ram[..0x800], &guest);
             assert!(bus.ram[0x1300..0x1600].iter().all(|&b| b == 0x76));
             assert!(bus.ram[0x1d00..0x1d39].iter().all(|&b| b == 0x87));
-            assert!(bus.ram[0x1d3b..0x1d80].iter().all(|&b| b == 0x87));
+            assert!(bus.ram[0x1d3b..0x1d40].iter().all(|&b| b == 0x87));
+            assert!(bus.ram[0x1d40..0x1d50].iter().all(|&b| b == 0));
+            assert!(bus.ram[0x1d50..0x1d80].iter().all(|&b| b == 0x87));
             assert!(bus.cart_ram[0x4000..0x6000].iter().all(|&b| b == 0x96));
             assert_eq!(
                 (bus.slot_bank[1], bus.slot_bank[2], bus.read(0xfffc)),
@@ -14085,10 +14651,20 @@ mod tests {
             );
             assert_eq!(bus.read(0xcb03), 0xa5);
             assert_eq!(bus.read(0xc8f9), 0);
-            if run == 0 {
-                assert_eq!((host_calls, last_copied), (256, 2048));
-                assert!(points.contains(&group));
-                injections.extend(points.iter().copied().map(Some));
+            if baseline {
+                assert_eq!(
+                    (host_calls, last_copied),
+                    (
+                        match pattern {
+                            0 => 400,
+                            1 => 16,
+                            _ => 272,
+                        },
+                        2048
+                    )
+                );
+                assert_eq!(points.contains(&group), pattern != 1);
+                injections.extend(points.iter().copied().map(|pc| (pattern, Some(pc))));
             } else {
                 assert!(fired);
                 assert_eq!(bus.read(0xcb2e), 4);
@@ -14098,12 +14674,12 @@ mod tests {
         // Bound only the new capture's closed service interval, excluding
         // handler execution; the actual stock-core observer owns raster proof.
         assert!(
-            max_span <= 658,
+            max_span <= 831,
             "new capture service interval={max_span} nominal T"
         );
         eprintln!(
-            "capture256dirty masks/256host services/{}Pause sites; max closed span={max_span} nominal T",
-            injections.len() - 1
+            "capture dense/clean/mixed;400+16+272 host services/{}Pause sites; max closed span={max_span} nominal T",
+            injections.len() - 3
         );
     }
 
@@ -14122,6 +14698,7 @@ mod tests {
         let rom = std::fs::read(path.join("sms.sms")).unwrap();
         for overflow in [false, true] {
             let mut bus = SmsBus::new(rom.clone(), 0xff);
+            bus.ram[0x1d40..0x1d60].fill(0xff); // direct initial source fixture
             bus.write(0xfffc, 8);
             bus.write(0xc831, 2);
             bus.write(0xcb08, 0xa8);
@@ -14256,6 +14833,7 @@ mod tests {
             restarts
         };
         let mut bus = SmsBus::new(rom.clone(), 0xff);
+        bus.ram[0x1d40..0x1d60].fill(0xff); // direct initial source fixture
         bus.write(0xfffc, 8);
         bus.write(0xc831, 2);
         bus.write(0xcb08, 0xa8);
@@ -14314,7 +14892,7 @@ mod tests {
             // force allocation/restart while clean later PF rows still reuse
             // committed slots. The reference resolves every cell in reserve.
             for attribute in [0x55, 0xaa] {
-                bus.write(0x83c0, attribute);
+                mmc3_test_ciram_store(&mut bus, defs["rt_ppu_write"].1, 0x23c0, attribute);
                 invoke(&mut bus, "rt_mmc3_capture_playfield", false);
                 invoke(&mut bus, "rt_mmc3_capture_single", false);
                 let mut reference = SmsBus::new(rom.clone(), 0xff);
@@ -14457,6 +15035,7 @@ mod tests {
             let hud_ctrl = ctrl ^ if independent_hud { 0x10 } else { 0 };
             let hud_mirroring = mirroring ^ u8::from(independent_hud);
             let mut bus = SmsBus::new(rom.clone(), 0xff);
+            bus.ram[0x1d40..0x1d60].fill(0xff); // direct initial source fixture
             bus.write(0xfffc, 8);
             bus.write(0xc831, 2);
             bus.write(0xcb08, ctrl);
@@ -14668,13 +15247,20 @@ mod tests {
     fn mmc3_row_nominal(cpu: &Cpu, bus: &mut SmsBus) -> u64 {
         let op = bus.read(cpu.pc);
         match op {
-            0x00 | 0x07 | 0x0f | 0x17 | 0x1f | 0xf3 | 0xfb => 4,
-            0x01 | 0x11 | 0x21 => 10,
+            0x00 | 0x07 | 0x0f | 0x17 | 0x1f | 0xeb | 0xf3 | 0xfb => 4,
+            0x01 | 0x11 | 0x21 | 0x36 => 10,
+            0x10 => {
+                if cpu.b == 1 {
+                    8
+                } else {
+                    13
+                }
+            }
             0x06 | 0x0e | 0x16 | 0x1e | 0x26 | 0x2e | 0x3e | 0xe6 | 0xee | 0xf6 | 0xfe | 0xc6
-            | 0xd6 => 7,
+            | 0xd6 | 0xce => 7,
             0x13 | 0x23 => 6,
-            0x12 | 0x1a => 7,
-            0x04 | 0x0c | 0x14 | 0x1c | 0x24 | 0x2c | 0x3c => 4,
+            0x0a | 0x12 | 0x1a => 7,
+            0x04 | 0x0c | 0x14 | 0x1c | 0x24 | 0x2c | 0x3c | 0x3d => 4,
             0x09 | 0x19 | 0x29 => 11,
             0x22 | 0x2a => 16,
             0x32 | 0x3a => 13,
@@ -14695,7 +15281,7 @@ mod tests {
                 };
                 if taken { 12 } else { 7 }
             }
-            0xc3 | 0xc2 | 0xca | 0xd2 | 0xda => 10,
+            0xc3 | 0xc2 | 0xca | 0xd2 | 0xda | 0xe2 => 10,
             0xc5 | 0xd5 | 0xe5 | 0xf5 => 11,
             0xc1 | 0xd1 | 0xe1 | 0xf1 | 0xc9 => 10,
             0xcd => 17,
@@ -14717,7 +15303,10 @@ mod tests {
             }
             0xcb => {
                 let sub = bus.read(cpu.pc.wrapping_add(1));
-                assert!(sub >= 0x40, "unaccounted CB{sub:02X}");
+                assert!(
+                    sub >= 0x40 || sub == 0x38 || sub == 0x25,
+                    "unaccounted CB{sub:02X}"
+                );
                 if sub & 7 == 6 {
                     if sub < 0x80 { 12 } else { 15 }
                 } else {
@@ -14726,8 +15315,17 @@ mod tests {
             }
             0xed => {
                 let sub = bus.read(cpu.pc.wrapping_add(1));
-                assert_eq!(sub, 0xb0, "unaccounted ED{sub:02X}");
-                if cpu.bc() == 1 { 16 } else { 21 }
+                match sub {
+                    0x57 => 9,
+                    0xb0 => {
+                        if cpu.bc() == 1 {
+                            16
+                        } else {
+                            21
+                        }
+                    }
+                    _ => panic!("unaccounted ED{sub:02X}"),
+                }
             }
             _ => panic!("unaccounted row opcode{op:02X} at{:04X}", cpu.pc),
         }
@@ -15271,7 +15869,12 @@ mod tests {
                 }
                 for page in 0..2u16 {
                     for offset in 0..0x3c0 {
-                        bus.write(0x8000 + page * 0x400 + offset, tile);
+                        mmc3_test_ciram_store(
+                            &mut bus,
+                            defs["rt_ppu_write"].1,
+                            0x2000 + page * 0x800 + offset,
+                            tile,
+                        );
                     }
                 }
                 invoke(&mut bus, "rt_mmc3_capture_playfield");

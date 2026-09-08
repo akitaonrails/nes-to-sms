@@ -7,8 +7,10 @@ This follows the [frozen-row optimization](mmc3-row-address-kernel.md).
 ## Change and correctness boundary
 
 The full MMC3 renderer can reuse a committed playfield tile slot when its exact
-source dependencies are unchanged. Capture compares all 2048 frozen CIRAM bytes
-and replaces a 256-byte change bitmap every time. It preserves the previous
+source dependencies are unchanged. Capture establishes equality or differences
+for all 2,048 frozen CIRAM bytes and replaces a 256-byte change bitmap every time.
+The later [touched-block shortcut](mmc3-touched-capture.md) avoids rereading
+untouched source blocks without changing this exact bitmap. Capture preserves the previous
 51-byte PF record and committed split before replacing the source packet.
 Native `$DC00-$DD3F` owns this evidence; no guest RAM, cartridge capacity or
 stack allocation is added. See the [ownership contract](mmc3-presentation.md).

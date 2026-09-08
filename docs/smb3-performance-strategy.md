@@ -4,6 +4,16 @@ Research and extra testing: 2026-09-08, baseline `d647588`. This is a research
 and prioritization result, **not an implemented speedup**. The blink-free SMB3
 ROM and accepted SMB1/CV1 ROMs are unchanged.
 
+Subsequent implementations are tracked in [completion-plan.md](completion-plan.md).
+The latest [touched-block capture measurements](mmc3-touched-capture.md) reduce
+rescan costs, but row walking, hashing and per-cell reuse still consume
+20.2%/24.9% of the measured moving windows. Batching eight eligible background
+cells is a possible next experiment, not an implemented optimization: current
+PC counts establish individual reuse hits, not how often a whole group qualifies.
+Measure that fraction and include failed checks, slot reservations, bank access
+and interrupt service in the cost model before claiming a larger gain. The
+bounded estimates for this idea remain modest; they do not support a 2× claim.
+
 ## Conclusion
 
 The current backend does too much repeated work per NES update. It is not

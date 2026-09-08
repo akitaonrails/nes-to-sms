@@ -54,9 +54,11 @@ All new code is full-mode-only. NROM/UxROM emit their existing runtime paths.
 Frozen CIRAM comparison/copy admits host service at most every 64 bytes. The
 previous 128-byte equal-data loop could delay stock-clock palette rearm into
 active display; the shorter boundary retains exact bytes and change flags.
-Playfield capture now compares in eight-byte groups, also producing the exact
-byte-change bitmap used by [committed-cell reuse](mmc3-cell-reuse.md). HUD capture
-retains the generic comparison path and cannot overwrite playfield evidence.
+The [touched-block capture path](mmc3-touched-capture.md) skips source blocks
+known equal to each snapshot. Touched playfield blocks compare in eight-byte
+groups; every exact byte-change bitmap byte is still assigned anew. HUD has
+independent touch intent and cannot overwrite playfield evidence. Clean skips
+also admit bounded host service; skipping128 source bytes is not a128-byte copy.
 
 The physical cartridge remains 32 KiB SRAM. Bank-1 guest `$8000–$9FFF` is
 untouched; its distinct upper half stages BG data. There is no added emulator
@@ -76,6 +78,7 @@ memory or altered guest hardware capacity.
 | DD00–DD32 | Previous 51-byte frozen PF record |
 | DD33–DD3E | Prior validity/split and cell-reuse scratch/reserve |
 | DD3F | Frozen source is anchored to the committed NT |
+| DD40–DD4F / DD50–DD5F | Independent PF / HUD physical-CIRAM touch masks |
 | SRAM bank 1 A000–BFFF | 256 staged BG patterns |
 | SRAM bank 0 9980–9FFF, B600–BF7F | 128 staged sprite patterns |
 
@@ -95,7 +98,8 @@ excludes another producer during publication and its native shadow copy, after
 which the anchor is restored. Exact-packet return also restores the equivalent
 anchor; source-off clears it. The renderer's completion callback adds two native
 stack bytes during the publisher call, without enlarging the stack allocation.
-HUD capture leaves PF evidence alone, and initialization does not clear it.
+HUD capture leaves PF evidence alone. Graphics initialization seeds both touch
+masks after clearing live CIRAM; it does not certify the cell-reuse evidence.
 Every reused slot enters `NEEDED`, including reserve-pass restarts; old-live
 protection remains unchanged.
 

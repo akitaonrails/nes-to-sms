@@ -30,7 +30,11 @@ traps and adds another 6.98% full-traversal gain, 16.48% cumulatively.
 independent review. Its separate matched stationary workload gains 0.63%; the
 full functional route still completes without gameplay flashes, but changed
 input-sampling history prevents claiming an additional matched traversal gain.
-This optimization batch is complete. Further fusion/inlining is conditional
+That optimization batch is complete. The next [touched-block capture
+experiment](mmc3-touched-capture.md) measures another 4.81%/3.16% improvement
+in two matched moving windows, with unchanged source states and no gameplay
+blanking. It uses 32 native bytes to avoid rescanning unchanged CIRAM; it does
+not change scheduling or publication deadlines. Further fusion/inlining is conditional
 research, not an unfinished implementation: much of the latest workload's CPU
 saving becomes synchronization waiting. Speed takes priority over cartridge
 size; use precomputation and code duplication when complete access costs justify them.
