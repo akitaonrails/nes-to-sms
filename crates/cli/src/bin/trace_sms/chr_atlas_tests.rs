@@ -1,8 +1,8 @@
 //! Independent canonical-atlas primitive evidence. These drive the assembled
 //! cold/begin/intern/resolve/retire gates directly with literal candidate
-//! bytes. They are not publisher integration, packet coverage, upload-budget
-//! closure or Adventure Island rendering acceptance; pair interning has its
-//! own explicit current-behavior check.
+//! bytes, including aligned 8x16 pair interning. They are not publisher
+//! integration, packet coverage, upload-budget closure or Adventure Island
+//! rendering acceptance.
 
 use super::*;
 
@@ -20,6 +20,8 @@ const AT_ALLOCATED: u8 = 0x01;
 const AT_OLD: u8 = 0x02;
 const AT_PENDING: u8 = 0x04;
 const AT_DIRTY: u8 = 0x08;
+const AT_PAIR_FIRST: u8 = 0x10;
+const AT_PAIR_SECOND: u8 = 0x20;
 const AT_PERMANENT_ZERO: u8 = 0x40;
 
 /// Atlas storage lives in SRAM bank 1; candidates live in SRAM bank 0.
@@ -349,7 +351,7 @@ fn assembled_atlas_retirement_protects_two_generations_then_evicts_and_unlinks()
 
 #[test]
 #[ignore = "requires TRACE_CNROM_ATLAS_PROJECT assembled atlas-capability fixture"]
-fn assembled_atlas_rejects_bad_arguments_and_pair_interning_stays_unadmitted() {
+fn assembled_atlas_rejects_bad_arguments_on_every_gate() {
     let (mut bus, defs) = atlas_fixture();
     cold_boot(&mut bus, &defs);
     atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
@@ -378,10 +380,207 @@ fn assembled_atlas_rejects_bad_arguments_and_pair_interning_stays_unadmitted() {
         atlas_call_fault(&mut bus4, &defs, "rt_chr_atlas_intern_bg", 0xac00),
         3
     );
-    // Pair interning is documented as not yet admitted: it must fail closed
-    // with its explicit selector, not silently allocate.
+    // A pair candidate outside the declared 64-byte row is rejected too.
     assert_eq!(
-        atlas_call_fault(&mut bus, &defs, "rt_chr_atlas_intern_pair", AT_BG_CANDIDATE),
-        8
+        atlas_call_fault(&mut bus, &defs, "rt_chr_atlas_intern_pair", 0xabe0),
+        3
     );
+}
+
+/// One 64-byte pair candidate: top half varies by index, bottom half all
+/// zero so the 64-byte hash deliberately equals the top half's 32-byte hash
+/// (kind discrimination, not hashing, must separate singles from pairs).
+fn pair_candidate(i: u16) -> [u8; 64] {
+    let mut bytes = [0u8; 64];
+    bytes[0] = (i & 0xff) as u8;
+    bytes[1] = (i >> 8) as u8;
+    bytes[2] = 0x5a;
+    bytes
+}
+
+fn stage_pair(bus: &mut SmsBus, bytes: &[u8; 64]) {
+    let caller_mapping = bus.mapper_control;
+    bus.write(0xfffc, 0x08);
+    for (offset, value) in bytes.iter().enumerate() {
+        bus.write(AT_BG_CANDIDATE + offset as u16, *value);
+    }
+    bus.write(0xfffc, caller_mapping);
+}
+
+#[test]
+#[ignore = "requires TRACE_CNROM_ATLAS_PROJECT assembled atlas-capability fixture"]
+fn assembled_atlas_pair_interning_aligns_dedupes_and_keeps_kind_chains_apart() {
+    let (mut bus, defs) = atlas_fixture();
+    cold_boot(&mut bus, &defs);
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+
+    // First pair opens the sprite window: even ordinal 192, physical 256 is
+    // the first even sprite-base pattern, second half physically contiguous.
+    let q1 = pair_candidate(0x0004); // hash $5E, shared with singles below
+    stage_pair(&mut bus, &q1);
+    let (first, physical) =
+        atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_pair", AT_BG_CANDIDATE);
+    assert_eq!((first, physical), (192, 256));
+    assert_eq!(
+        flags(&bus, 192),
+        AT_ALLOCATED | AT_PENDING | AT_DIRTY | AT_PAIR_FIRST
+    );
+    assert_eq!(
+        flags(&bus, 193),
+        AT_ALLOCATED | AT_PENDING | AT_DIRTY | AT_PAIR_SECOND
+    );
+    assert_eq!(payload(&bus, 192), &q1[..32]);
+    assert_eq!(payload(&bus, 193), &q1[32..]);
+    assert_eq!(head(&bus, 0x5e), 192);
+    assert_eq!(link(&bus, 192), 0xffff);
+    let allocated = u16::from_le_bytes([
+        bus.cart_ram[sram1(AT_ALLOCATED_COUNT)],
+        bus.cart_ram[sram1(AT_ALLOCATED_COUNT) + 1],
+    ]);
+    assert_eq!(allocated, 3);
+
+    // Byte-identical pair dedupes without allocating.
+    stage_pair(&mut bus, &q1);
+    assert_eq!(
+        atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_pair", AT_BG_CANDIDATE),
+        (192, 256)
+    );
+
+    // A single candidate equal to the pair's TOP half hashes into the same
+    // chain but must not dedupe onto the pair node.
+    let mut top = [0u8; 32];
+    top.copy_from_slice(&q1[..32]);
+    stage_candidate(&mut bus, &top);
+    assert_eq!(
+        atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_bg", AT_BG_CANDIDATE),
+        (1, 1)
+    );
+    assert_eq!(head(&bus, 0x5e), 1, "single chained ahead of the pair");
+    assert_eq!(link(&bus, 1), 192);
+
+    // A second identical pair lookup still resolves the pair, walking past
+    // the newly chained single with the same first 32 bytes.
+    stage_pair(&mut bus, &q1);
+    assert_eq!(
+        atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_pair", AT_BG_CANDIDATE),
+        (192, 256)
+    );
+    let allocated = u16::from_le_bytes([
+        bus.cart_ram[sram1(AT_ALLOCATED_COUNT)],
+        bus.cart_ram[sram1(AT_ALLOCATED_COUNT) + 1],
+    ]);
+    assert_eq!(allocated, 4);
+}
+
+#[test]
+#[ignore = "requires TRACE_CNROM_ATLAS_PROJECT assembled atlas-capability fixture"]
+fn assembled_atlas_pair_window_fills_boundary_maps_reclaims_and_fails_closed() {
+    let (mut bus, defs) = atlas_fixture();
+    cold_boot(&mut bus, &defs);
+
+    // Fill the whole sprite window: 93 pairs cover ordinals 192..377, with
+    // the physical mapping staying even-aligned across the 375/376 seam.
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+    for index in 0..93u16 {
+        let ordinal = 192 + index * 2;
+        stage_pair(&mut bus, &pair_candidate(0x0100 + index));
+        assert_eq!(
+            atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_pair", AT_BG_CANDIDATE),
+            (ordinal, expected_physical(ordinal)),
+            "pair {index}"
+        );
+        assert_eq!(expected_physical(ordinal) & 1, 0, "even alignment {index}");
+        assert_eq!(
+            expected_physical(ordinal) + 1,
+            expected_physical(ordinal + 1),
+            "contiguous halves {index}"
+        );
+    }
+    assert_eq!(expected_physical(376), 506);
+    // Every pair slot is pending: one more distinct pair fails closed.
+    stage_pair(&mut bus, &pair_candidate(0x2000));
+    let mut probe = atlas_fixture().0;
+    probe.cart_ram.copy_from_slice(&bus.cart_ram);
+    probe.write(0xfffc, 0x08);
+    stage_pair(&mut probe, &pair_candidate(0x2000));
+    assert_eq!(
+        atlas_call_fault(
+            &mut probe,
+            &defs,
+            "rt_chr_atlas_intern_pair",
+            AT_BG_CANDIDATE
+        ),
+        1
+    );
+
+    // Two retirements expire the displayed generation; a fresh pair then
+    // reclaims the first expired pair with an exact chain unlink.
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_retire", 0);
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_retire", 0);
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+    let fresh = pair_candidate(0x3000);
+    stage_pair(&mut bus, &fresh);
+    assert_eq!(
+        atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_pair", AT_BG_CANDIDATE),
+        (192, 256)
+    );
+    assert_eq!(payload(&bus, 192), &fresh[..32]);
+    assert_eq!(payload(&bus, 193), &fresh[32..]);
+    // pair_candidate(0x0100) hashed to 1^0^$5A = $5B and was alone there.
+    assert_eq!(head(&bus, 0x5b), 0xffff, "stale pair chain emptied");
+    let allocated = u16::from_le_bytes([
+        bus.cart_ram[sram1(AT_ALLOCATED_COUNT)],
+        bus.cart_ram[sram1(AT_ALLOCATED_COUNT) + 1],
+    ]);
+    assert_eq!(
+        allocated, 187,
+        "93 pairs + zero, one pair replaced in place"
+    );
+}
+
+#[test]
+#[ignore = "requires TRACE_CNROM_ATLAS_PROJECT assembled atlas-capability fixture"]
+fn assembled_atlas_pair_reclaims_expired_singles_inside_the_sprite_window() {
+    let (mut bus, defs) = atlas_fixture();
+    cold_boot(&mut bus, &defs);
+
+    // Fill singles through ordinal 193 so the sprite window's first pair
+    // slots hold plain background patterns.
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+    for i in 1..=193u16 {
+        stage_candidate(&mut bus, &candidate(i));
+        assert_eq!(
+            atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_bg", AT_BG_CANDIDATE),
+            (i, expected_physical(i))
+        );
+    }
+    // Expire them across two retirements.
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_retire", 0);
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_retire", 0);
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+
+    let h192 = 192u8 ^ 0xa5; // candidate(192) XOR hash
+    let h193 = 193u8 ^ 0xa5;
+    assert_eq!(head(&bus, h192), 192);
+    assert_eq!(head(&bus, h193), 193);
+    let q = pair_candidate(0x0777);
+    stage_pair(&mut bus, &q);
+    assert_eq!(
+        atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_pair", AT_BG_CANDIDATE),
+        (192, 256)
+    );
+    assert_eq!(head(&bus, h192), 0xffff, "expired single unlinked");
+    assert_eq!(head(&bus, h193), 0xffff, "expired single unlinked");
+    assert_eq!(
+        flags(&bus, 192),
+        AT_ALLOCATED | AT_PENDING | AT_DIRTY | AT_PAIR_FIRST
+    );
+    assert_eq!(
+        flags(&bus, 193),
+        AT_ALLOCATED | AT_PENDING | AT_DIRTY | AT_PAIR_SECOND
+    );
+    // Expired singles below the window are reclaimed only by need, not swept.
+    assert_eq!(payload(&bus, 191), &candidate(191)[..]);
 }

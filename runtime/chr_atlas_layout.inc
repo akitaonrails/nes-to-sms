@@ -32,10 +32,12 @@
 .define AT_WORK1 $bfd2
 .define AT_WORK2 $bfd4
 .define AT_WORK3 $bfd6
-.define AT_RESERVED $bfd8
+.define AT_PAIR_STAGE $bfd8
 .define AT_END $c000
 .define AT_BG_CANDIDATE $abc0
 .define AT_BG_CANDIDATE_END $abe0
+.define AT_PAIR_CANDIDATE $abc0
+.define AT_PAIR_CANDIDATE_END $ac00
 .define AT_ALLOCATED $01
 .define AT_OLD $02
 .define AT_PENDING $04
@@ -59,11 +61,14 @@
 .if AT_LINKS+AT_CAPACITY*2 != AT_ACTIVE_NT || AT_ACTIVE_NT+82 != AT_END
   .fail "Atlas links/state budget mismatch"
 .endif
-.if AT_RESERVED+40 != AT_END
-  .fail "Atlas reserved tail mismatch"
+.if AT_PAIR_STAGE+40 != AT_END
+  .fail "Atlas pair-stage tail mismatch"
 .endif
 .if AT_BG_CANDIDATE != $abc0 || AT_BG_CANDIDATE_END-AT_BG_CANDIDATE != 32
   .fail "Atlas candidate overlaps prepared SAT or reserved SRAM"
+.endif
+.if AT_PAIR_CANDIDATE != AT_BG_CANDIDATE || AT_PAIR_CANDIDATE_END != $ac00
+  .fail "Atlas pair candidate must extend the background row exactly to $AC00"
 .endif
 .ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
 .if CHR_ATLAS_CODE_BANK != 2

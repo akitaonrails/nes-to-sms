@@ -293,6 +293,10 @@ _at_bg_find:
   call _at_flag_address
   bit 0, (hl)
   jp z, _at_bad_chain
+  ; Pair nodes share the hash chains but never satisfy a single lookup.
+  ld a, (hl)
+  and AT_PAIR_FIRST | AT_PAIR_SECOND
+  jp nz, _at_bg_next
   ld hl, (AT_CANDIDATE)
   call _at_payload_address
   ld de, $c880
@@ -322,6 +326,7 @@ _at_bg_next:
   jr _at_bg_find
 _at_hash32:
   ld b, 32
+_at_hash_len:
   xor a
 _at_hash_byte:
   xor (hl)
@@ -384,10 +389,20 @@ _at_allocate_found:
   jp _at_resolve
 
 ; Unlink exact ordinal from its old byte hash before overwriting backing.
+; Pair-first nodes were chained under their 64-byte hash; second halves are
+; never chained and must not reach this helper.
 _at_unlink_candidate:
   ld hl, (AT_CANDIDATE)
+  call _at_flag_address
+  ld a, (hl)
+  and AT_PAIR_FIRST
+  ld hl, (AT_CANDIDATE)
   call _at_payload_address
-  call _at_hash32
+  ld b, 32
+  jr z, _at_unlink_hash
+  ld b, 64
+_at_unlink_hash:
+  call _at_hash_len
   call _at_head_address
   ld (AT_PREDECESSOR), hl ; address of head/link containing current ordinal
   ld hl, AT_CAPACITY
@@ -431,10 +446,200 @@ _at_unlink_found:
   ld (AT_ALLOCATED_COUNT), hl
   ret
 
-; Pair allocation follows the same hash/backing authority; not yet admitted.
+; Aligned 8x16 sprite-pair interning: one 64-byte candidate at
+; AT_PAIR_CANDIDATE holds the top then bottom pattern. The first slot is an
+; even sprite-addressable ordinal (192..376) so its physical pattern lands
+; even at $2000+ with the second physically contiguous; the SMS 8x16 tile
+; bit0 mask then selects the pair exactly. The top half stages in atlas SRAM
+; (AT_PAIR_STAGE) and the bottom in the shared $C880 bounce row, so both are
+; readable while atlas SRAM is mapped.
 _at_pair:
+  ld a, h
+  cp >AT_PAIR_CANDIDATE
+  jp nz, _at_bad_ordinal
+  ld a, l
+  cp <AT_PAIR_CANDIDATE
+  jp nz, _at_bad_ordinal
   ld a, 8
+  ld ($fffc), a
+  ld de, $c880
+  ld bc, 32
+  ldir
+  push hl
+  ld a, 12
+  ld ($fffc), a
+  ld hl, $c880
+  ld de, AT_PAIR_STAGE
+  ld bc, 32
+  ldir
+  pop hl
+  ld a, 8
+  ld ($fffc), a
+  ld de, $c880
+  ld bc, 32
+  ldir
+  ld a, 12
+  ld ($fffc), a
+  ld hl, AT_PAIR_STAGE
+  call _at_hash32
+  ld c, a
+  ld hl, $c880
+  call _at_hash32
+  xor c
+  ld (AT_HASH), a
+  call _at_head_address
+  ld e, (hl)
+  inc hl
+  ld d, (hl)
+  ex de, hl
+  ld de, AT_CAPACITY
+  ld (AT_REMAIN), de
+_at_pair_find:
+  ld a, h
+  and l
+  cp $ff
+  jp z, _at_allocate_pair
+  call _at_check_ordinal
+  ld (AT_CANDIDATE), hl
+  call _at_flag_address
+  bit 0, (hl)
+  jp z, _at_bad_chain
+  ; Singles share the hash chains but never satisfy a pair lookup.
+  ld a, (hl)
+  and AT_PAIR_FIRST
+  jr z, _at_pair_next
+  ld hl, (AT_CANDIDATE)
+  call _at_payload_address
+  ld de, AT_PAIR_STAGE
+  ld b, 32
+_at_pair_compare_top:
+  ld a, (de)
+  cp (hl)
+  jr nz, _at_pair_next
+  inc de
+  inc hl
+  djnz _at_pair_compare_top
+  ld de, $c880
+  ld b, 32
+_at_pair_compare_bottom:
+  ld a, (de)
+  cp (hl)
+  jr nz, _at_pair_next
+  inc de
+  inc hl
+  djnz _at_pair_compare_bottom
+  jp _at_pair_admit
+_at_pair_next:
+  ld hl, (AT_REMAIN)
+  dec hl
+  ld (AT_REMAIN), hl
+  ld a, h
+  or l
+  jp z, _at_bad_chain
+  ld hl, (AT_CANDIDATE)
+  call _at_link_address
+  ld e, (hl)
+  inc hl
+  ld d, (hl)
+  ex de, hl
+  jr _at_pair_find
+
+; Only even sprite-addressable ordinals may open a pair, and both slots must
+; be simultaneously unprotected. Expired singles or pairs in the window are
+; reclaimed with exact unlinking; displayed and pending generations stay
+; untouched, and exhaustion fails closed like the single allocator.
+_at_allocate_pair:
+  ld hl, 192
+_at_pair_scan:
+  ld (AT_SCAN), hl
+  call _at_flag_address
+  ld a, (hl)
+  and AT_PROTECTED
+  jr nz, _at_pair_scan_next
+  inc hl
+  ld a, (hl)
+  and AT_PROTECTED
+  jr z, _at_pair_found
+_at_pair_scan_next:
+  ld hl, (AT_SCAN)
+  inc hl
+  inc hl
+  ld de, 378
+  or a
+  sbc hl, de
+  add hl, de
+  jr c, _at_pair_scan
+  ld a, 1
   jp _at_fault
+_at_pair_found:
+  ld hl, (AT_SCAN)
+  ld (AT_CANDIDATE), hl
+  call _at_flag_address
+  bit 0, (hl)
+  call nz, _at_pair_reclaim_slot
+  ld hl, (AT_SCAN)
+  inc hl
+  ld (AT_CANDIDATE), hl
+  call _at_flag_address
+  bit 0, (hl)
+  call nz, _at_pair_reclaim_slot
+  ; Both payload halves are contiguous rows of the first ordinal.
+  ld hl, (AT_SCAN)
+  call _at_payload_address
+  ex de, hl
+  ld hl, AT_PAIR_STAGE
+  ld bc, 32
+  ldir
+  ld hl, $c880
+  ld bc, 32
+  ldir
+  ld hl, (AT_SCAN)
+  call _at_flag_address
+  ld (hl), AT_ALLOCATED | AT_PENDING | AT_DIRTY | AT_PAIR_FIRST
+  inc hl
+  ld (hl), AT_ALLOCATED | AT_PENDING | AT_DIRTY | AT_PAIR_SECOND
+  ld a, (AT_HASH)
+  call _at_head_address
+  push hl
+  ld c, (hl)
+  inc hl
+  ld b, (hl)
+  ld hl, (AT_SCAN)
+  call _at_link_address
+  ld (hl), c
+  inc hl
+  ld (hl), b
+  pop hl
+  ld de, (AT_SCAN)
+  ld (hl), e
+  inc hl
+  ld (hl), d
+  ld hl, (AT_ALLOCATED_COUNT)
+  inc hl
+  inc hl
+  ld (AT_ALLOCATED_COUNT), hl
+  ld hl, (AT_SCAN)
+  ld (AT_CANDIDATE), hl
+_at_pair_admit:
+  ; Protect the second half for this packet, then resolve the first.
+  ld hl, (AT_CANDIDATE)
+  inc hl
+  call _at_flag_address
+  ld a, (hl)
+  or AT_PENDING
+  ld (hl), a
+  ld hl, (AT_CANDIDATE)
+  jp _at_resolve
+; (AT_CANDIDATE) names an expired allocated slot being reclaimed. Pair
+; seconds carry no chain entry but still leave the allocated census.
+_at_pair_reclaim_slot:
+  ld a, (hl)
+  and AT_PAIR_SECOND
+  jp z, _at_unlink_candidate
+  ld hl, (AT_ALLOCATED_COUNT)
+  dec hl
+  ld (AT_ALLOCATED_COUNT), hl
+  ret
 ; This pure metadata primitive is called by publication only after shadowcopy.
 _at_retire:
   ld hl, AT_FLAGS
