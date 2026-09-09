@@ -283,6 +283,12 @@ rt_cnrom_packet_present:
   ld hl, CNP_TOUCHED
   ld bc, 16
   call mem_fill
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+  ; Open the canonical generation before any interning: PENDING clears,
+  ; per-packet resolve marks reset, and a prior eviction invalidates the
+  ; renderer key cache exactly once.
+  call rt_chr_atlas_begin
+.endif
   call packet_render
   ; Blank packets return through blank_display rather than the normal
   ; renderer callback. They still retire only after that VDP operation ends.

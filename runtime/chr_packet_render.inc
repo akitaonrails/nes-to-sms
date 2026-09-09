@@ -521,10 +521,25 @@ _m3r_bg_ready:
   call _m3r_bg_slot
   jp c, _m3r_restart_reserve
 _m3r_write_cell:
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+  ; NT entries carry the canonical 9-bit physical pattern: low byte plus
+  ; attribute bit0. The reserve-pass slot0 placeholder may publish stale
+  ; column bytes; the mandatory full rebuild rewrites every cell.
+  ld l, a
+  ld h, >AT_SLOT_PHYSICAL_LO
+  ld b, (hl)
+  ld h, >AT_SLOT_PHYSICAL_HI
+  ld c, (hl)
+  ld hl, (M3R_NT)
+  ld (hl), b
+  inc hl
+  ld (hl), c
+.else
   ld hl, (M3R_NT)
   ld (hl), a
   inc hl
   ld (hl), 0
+.endif
   inc hl
   ld a, l
   and 63
@@ -1036,7 +1051,28 @@ _m3r_hud_vertical_done:
 _m3r_bg_slot:
   call _m3r_find_slot
   jr c, _m3r_missing
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+  ; First cache hit per packet re-resolves the cached ordinal so its
+  ; canonical slot re-arms PENDING protection before any NT cell can
+  ; reference it. Later hits are pure column reads.
+  call rt_mmc3_reserve_slot
+  ld l, a
+  ld h, >AT_SLOT_RESOLVED
+  bit 0, (hl)
+  ret nz
+  push af
+  ld (hl), 1
+  ld h, >AT_SLOT_ORDINAL_LO
+  ld e, (hl)
+  ld h, >AT_SLOT_ORDINAL_HI
+  ld d, (hl)
+  ex de, hl
+  call rt_chr_atlas_resolve
+  pop af
+  ret
+.else
   jp rt_mmc3_reserve_slot
+.endif
 _m3r_missing:
   ld a, (M3P_PASS)
   cp 1
@@ -1188,6 +1224,27 @@ _m3r_allocate:
   ld a, (M3R_PAL)
   ld b, a
   call _m3r_convert_tile
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+  ; The candidate row holds this key's exact encoded bytes: intern them
+  ; and remember ordinal/physical per cache slot. Interning marks the
+  ; canonical slot PENDING itself, so the resolve mark is set here too.
+  ld hl, AT_BG_CANDIDATE
+  call rt_chr_atlas_intern_bg
+  ld b, h
+  ld c, l
+  ld a, (M3R_SLOT)
+  ld l, a
+  ld h, >AT_SLOT_ORDINAL_LO
+  ld (hl), c
+  ld h, >AT_SLOT_ORDINAL_HI
+  ld (hl), b
+  ld h, >AT_SLOT_PHYSICAL_LO
+  ld (hl), e
+  ld h, >AT_SLOT_PHYSICAL_HI
+  ld (hl), d
+  ld h, >AT_SLOT_RESOLVED
+  ld (hl), 1
+.endif
   ld a, (M3R_SLOT)
   or a
   ret
@@ -1610,6 +1667,42 @@ _m3r_sprite_clip_key_ready:
 .else
   ld b, a
 .endif
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+  ; Canonical pairs are content-addressed: conversion always runs and the
+  ; per-OAM change keys stay out of the identity.
+  call _m3r_convert_tile
+_m3r_sprite_converted:
+  ld a, (M3G_RECORD+8)
+  bit 5, a
+  jr z, _m3r_sprite_single
+  ld a, (M3R_SPRITE_HALF)
+  inc a
+  ld (M3R_SPRITE_HALF), a
+  cp 2
+  jp c, _m3r_sprite_half
+  jr _m3r_sprite_intern
+_m3r_sprite_single:
+  ; 8x8 source mode: the pair's bottom half is the canonical blank.
+  ld hl, AT_PAIR_CANDIDATE+32
+  ld de, AT_PAIR_CANDIDATE+33
+  ld bc, 31
+  ld (hl), 0
+  ldir
+_m3r_sprite_intern:
+  ld hl, AT_PAIR_CANDIDATE
+  call rt_chr_atlas_intern_pair
+  ; Sprites address base $2000, and every pair physical is 256..511, so
+  ; the physical's low byte is exactly the prepared SAT tile index.
+  ld c, e
+  ld a, (M3R_OAM)
+  add a, a
+  add a, $41
+  ld e, a
+  ld d, $ab
+  ld a, c
+  ld (de), a
+  jr _m3r_sprite_next
+.else
   call rt_mmc3_sprite_changed
   call nz, _m3r_convert_tile
 .ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
@@ -1624,6 +1717,7 @@ _m3r_sprite_converted:
   cp 2
   jp c, _m3r_sprite_half
   jr _m3r_sprite_next
+.endif
 _m3r_sprite_hide:
 .ifdef CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT
   ld a, CNP_SAT_HIDDEN

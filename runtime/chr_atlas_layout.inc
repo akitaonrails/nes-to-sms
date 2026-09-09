@@ -10,7 +10,7 @@
 .define AT_ACTIVE_NT $bfae
 .define AT_PHASE $bfaf
 .define AT_FAULT $bfb0
-.define AT_KIND $bfb1
+.define AT_EVICTED $bfb1
 .define AT_LOGICAL_COUNT $bfb2
 .define AT_ALLOCATED_COUNT $bfb4
 .define AT_SCAN $bfb6
@@ -38,6 +38,13 @@
 .define AT_BG_CANDIDATE_END $abe0
 .define AT_PAIR_CANDIDATE $abc0
 .define AT_PAIR_CANDIDATE_END $ac00
+; Renderer-side key-cache columns in SRAM bank 0, indexed by legacy slot.
+; They displace the legacy sprite staging window, which the atlas retires.
+.define AT_SLOT_ORDINAL_LO $b600
+.define AT_SLOT_ORDINAL_HI $b700
+.define AT_SLOT_PHYSICAL_LO $b800
+.define AT_SLOT_PHYSICAL_HI $b900
+.define AT_SLOT_RESOLVED $ba00
 .define AT_ALLOCATED $01
 .define AT_OLD $02
 .define AT_PENDING $04

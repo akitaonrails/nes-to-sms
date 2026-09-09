@@ -539,6 +539,298 @@ fn assembled_atlas_pair_window_fills_boundary_maps_reclaims_and_fails_closed() {
     );
 }
 
+/// Unscripted PAL counter transport for full-packet publisher runs: one
+/// physical PAL line per $7E read, repeating 313. Records every out for
+/// register-history assertions.
+struct AtlasPalBus {
+    inner: SmsBus,
+    line: usize,
+}
+
+impl Bus for AtlasPalBus {
+    fn read(&mut self, address: u16) -> u8 {
+        self.inner.read(address)
+    }
+    fn write(&mut self, address: u16, value: u8) {
+        self.inner.write(address, value);
+    }
+    fn in_port(&mut self, port: u8) -> u8 {
+        if port == 0x7e {
+            let value = match self.line {
+                0..=255 => self.line as u8,
+                256..=266 => (self.line - 256) as u8,
+                267..=312 => (self.line - 267 + 0xd2) as u8,
+                _ => unreachable!(),
+            };
+            self.line = (self.line + 1) % 313;
+            value
+        } else {
+            self.inner.in_port(port)
+        }
+    }
+    fn out_port(&mut self, port: u8, value: u8) {
+        self.inner.out_port(port, value);
+    }
+}
+
+/// Run one full packet presentation; assert no trap and a clean return.
+/// With `allow_blank` false, additionally assert the publisher NEVER takes
+/// the blank fallback (M3P_STATE 2). Boot and the first packet start from
+/// the legitimate display-off blank, so they pass `true`.
+fn atlas_packet_invoke(cpu: &mut Cpu, bus: &mut AtlasPalBus, entry: u16, allow_blank: bool) {
+    cpu.pc = entry;
+    cpu.sp = 0xdff0;
+    bus.write(0xdff0, 7);
+    bus.write(0xdff1, 0);
+    for _ in 0..6_000_000 {
+        if cpu.pc == 7 || bus.inner.read(0xcb1d) != 0 {
+            break;
+        }
+        if !allow_blank {
+            assert_ne!(bus.inner.ram[0x19f6], 2, "blank fallback PC={:04X}", cpu.pc);
+        }
+        cpu.step(bus).unwrap();
+        assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+    }
+    assert_eq!(bus.inner.read(0xcb1d), 0, "packet trap PC={:04X}", cpu.pc);
+    assert_eq!(cpu.pc, 7, "packet helper did not return");
+}
+
+/// Mode4 background palette index honoring the LIVE reg2 table selection in
+/// 240-line mode, with zero scroll. Deliberately independent of the packet
+/// code's own addressing.
+fn atlas_background_index(bus: &SmsBus, x: usize, y: usize) -> u8 {
+    assert!(x < 256 && y < 240);
+    let base = ((usize::from(bus.vdp_regs[2]) & 0x0c) << 10) | 0x700;
+    let entry = base + 2 * ((y / 8) * 32 + x / 8);
+    let attributes = bus.vram[entry + 1];
+    let tile = usize::from(bus.vram[entry]) + usize::from(attributes & 1) * 256;
+    let px = if attributes & 2 == 0 {
+        x & 7
+    } else {
+        7 - (x & 7)
+    };
+    let py = if attributes & 4 == 0 {
+        y & 7
+    } else {
+        7 - (y & 7)
+    };
+    let offset = tile * 32 + py * 4;
+    let color = (0..4).fold(0, |color, plane| {
+        color | (((bus.vram[offset + plane] >> (7 - px)) & 1) << plane)
+    });
+    color + if attributes & 8 == 0 { 0 } else { 16 }
+}
+
+const ATLAS_LITERAL_PLANES: [(u8, u8); 8] = [
+    (0x5a, 0x3c),
+    (0xa5, 0xc3),
+    (0xff, 0x00),
+    (0x00, 0xff),
+    (0xff, 0xff),
+    (0x00, 0x00),
+    (0x55, 0x55),
+    (0xaa, 0xaa),
+];
+const ATLAS_LITERAL_PIXELS: [[u8; 8]; 8] = [
+    [0, 1, 2, 3, 3, 2, 1, 0],
+    [3, 2, 1, 0, 0, 1, 2, 3],
+    [1; 8],
+    [2; 8],
+    [3; 8],
+    [0; 8],
+    [0, 3, 0, 3, 0, 3, 0, 3],
+    [3, 0, 3, 0, 3, 0, 3, 0],
+];
+
+/// Freeze one literal packet into the capture windows and seal it validated.
+fn atlas_seal_packet(bus: &mut AtlasPalBus, frame: u8) {
+    bus.write(0xfffc, 0x08);
+    for base in [0x8800u16, 0x9000] {
+        for offset in 0..0x800 {
+            bus.write(
+                base + offset,
+                if offset & 0x3ff >= 0x3c0 { 0xe4 } else { 0 },
+            );
+        }
+    }
+    for offset in 0..256 {
+        bus.write(0x9800 + offset, 0xe0);
+    }
+    for (offset, value) in [31, 1, 2, 24].into_iter().enumerate() {
+        bus.write(0x9800 + offset as u16, value);
+    }
+    for base in [0x9900u16, 0x9940] {
+        for offset in 0..64 {
+            bus.write(base + offset, 0);
+        }
+        for page in 0..8 {
+            bus.write(base + page, page as u8);
+        }
+        bus.write(base + 9, 0x1e);
+        for offset in 0..32 {
+            bus.write(
+                base + 16 + offset,
+                [0x0f, 0x30, 0x01, 0x16][offset as usize & 3],
+            );
+        }
+    }
+    bus.write(0xfffc, 0x0c);
+    bus.write(0xd400, 2); // Explicitly sealed literal fixture, not PPU proof.
+    bus.write(0xd402, frame);
+}
+
+#[test]
+#[ignore = "requires TRACE_CNROM_ATLAS_PROJECT assembled atlas-capability fixture"]
+fn assembled_atlas_packets_publish_double_buffers_and_never_blank() {
+    let path = PathBuf::from(std::env::var("TRACE_CNROM_ATLAS_PROJECT").unwrap());
+    let defs = load_wla_symbol_defs(&path.join("sms.sym"));
+    let mut rom = std::fs::read(path.join("sms.sms")).unwrap();
+    // Literal test art injected into a test-owned ROM copy at the raw CHR
+    // base: tile0 the literal planes, tile1 solid sprite/background color 1.
+    let raw = 31 * BANK_SIZE;
+    for (row, &(low, high)) in ATLAS_LITERAL_PLANES.iter().enumerate() {
+        rom[raw + row] = low;
+        rom[raw + row + 8] = high;
+    }
+    rom[raw + 16..raw + 24].fill(0xff);
+    rom[raw + 24..raw + 32].fill(0);
+    let mut bus = AtlasPalBus {
+        inner: SmsBus::new(rom, 0xff),
+        line: 0,
+    };
+    let mut cpu = Cpu::new();
+    atlas_packet_invoke(&mut cpu, &mut bus, defs["rt_cnrom_packet_init"].1, true);
+    atlas_packet_invoke(&mut cpu, &mut bus, defs["rt_chr_atlas_cold_init"].1, true);
+    assert_eq!(
+        bus.inner.vdp_regs[2], 0xf3,
+        "cold display owns the $0700 table"
+    );
+
+    // Packet 1 prepares the $3700 table and flips to it.
+    atlas_seal_packet(&mut bus, 0x11);
+    atlas_packet_invoke(&mut cpu, &mut bus, defs["rt_cnrom_packet_present"].1, true);
+    assert_eq!(bus.inner.read(0xd400), 0, "packet retired");
+    assert_eq!(bus.inner.vdp_regs[2], 0xff, "flip to the $3700 table");
+    assert_ne!(bus.inner.vdp_regs[1] & 0x40, 0, "display committed");
+    for y in 0..240 {
+        for x in 0..256 {
+            let color = ATLAS_LITERAL_PIXELS[y & 7][x & 7];
+            let quadrant = ((x >> 4) & 1) + 2 * ((y >> 4) & 1);
+            let expected = if color == 0 {
+                0
+            } else {
+                color + quadrant as u8 * 4
+            };
+            assert_eq!(
+                atlas_background_index(&bus.inner, x, y),
+                expected,
+                "packet1 pixel{x},{y}"
+            );
+        }
+    }
+    // The visible sprite pair: SAT holds the physical low byte; base $2000
+    // shows the solid tile, its 8x8-mode bottom half the canonical blank.
+    assert_eq!(bus.inner.vram[0x3f00], 31);
+    assert_eq!(bus.inner.vram[0x3f80], 24);
+    let sprite = 0x2000 + usize::from(bus.inner.vram[0x3f81]) * 32;
+    assert_eq!(bus.inner.vram[0x3f81] & 1, 0, "pair-aligned sprite tile");
+    for row in 0..8 {
+        assert_eq!(
+            &bus.inner.vram[sprite + row * 4..sprite + row * 4 + 4],
+            &[0xff, 0, 0, 0xff],
+            "sprite row {row}"
+        );
+    }
+    assert!(
+        bus.inner.vram[sprite + 32..sprite + 64]
+            .iter()
+            .all(|&b| b == 0)
+    );
+    let count_after_first = u16::from_le_bytes([
+        bus.inner.cart_ram[sram1(AT_ALLOCATED_COUNT)],
+        bus.inner.cart_ram[sram1(AT_ALLOCATED_COUNT) + 1],
+    ]);
+
+    // Packet 2 changes exactly one background cell; it lands in the $0700
+    // table and the flip returns there.
+    atlas_seal_packet(&mut bus, 0x12);
+    bus.write(0xfffc, 0x08);
+    bus.write(0x8800, 1); // cell (0,0) now the solid color-1 tile
+    bus.write(0xfffc, 0x0c);
+    atlas_packet_invoke(&mut cpu, &mut bus, defs["rt_cnrom_packet_present"].1, false);
+    assert_eq!(bus.inner.read(0xd400), 0);
+    assert_eq!(bus.inner.vdp_regs[2], 0xf3, "flip back to the $0700 table");
+    for y in 0..240 {
+        for x in 0..256 {
+            let expected = if x < 8 && y < 8 {
+                1
+            } else {
+                let color = ATLAS_LITERAL_PIXELS[y & 7][x & 7];
+                let quadrant = ((x >> 4) & 1) + 2 * ((y >> 4) & 1);
+                if color == 0 {
+                    0
+                } else {
+                    color + quadrant as u8 * 4
+                }
+            };
+            assert_eq!(
+                atlas_background_index(&bus.inner, x, y),
+                expected,
+                "packet2 pixel{x},{y}"
+            );
+        }
+    }
+    let count_after_second = u16::from_le_bytes([
+        bus.inner.cart_ram[sram1(AT_ALLOCATED_COUNT)],
+        bus.inner.cart_ram[sram1(AT_ALLOCATED_COUNT) + 1],
+    ]);
+
+    // Packet 3 repeats packet 2 byte-for-byte: pure canonical reuse, no new
+    // allocations, flip forward again with identical pixels.
+    atlas_seal_packet(&mut bus, 0x13);
+    bus.write(0xfffc, 0x08);
+    bus.write(0x8800, 1);
+    bus.write(0xfffc, 0x0c);
+    atlas_packet_invoke(&mut cpu, &mut bus, defs["rt_cnrom_packet_present"].1, false);
+    assert_eq!(bus.inner.read(0xd400), 0);
+    assert_eq!(bus.inner.vdp_regs[2], 0xff, "flip forward again");
+    let count_after_third = u16::from_le_bytes([
+        bus.inner.cart_ram[sram1(AT_ALLOCATED_COUNT)],
+        bus.inner.cart_ram[sram1(AT_ALLOCATED_COUNT) + 1],
+    ]);
+    assert_eq!(
+        count_after_second, count_after_third,
+        "identical packet allocates nothing new"
+    );
+    assert!(count_after_second >= count_after_first);
+    for y in 0..240 {
+        for x in 0..256 {
+            let expected = if x < 8 && y < 8 {
+                1
+            } else {
+                let color = ATLAS_LITERAL_PIXELS[y & 7][x & 7];
+                let quadrant = ((x >> 4) & 1) + 2 * ((y >> 4) & 1);
+                if color == 0 {
+                    0
+                } else {
+                    color + quadrant as u8 * 4
+                }
+            };
+            assert_eq!(
+                atlas_background_index(&bus.inner, x, y),
+                expected,
+                "packet3 pixel{x},{y}"
+            );
+        }
+    }
+    // No canonical slot stays dirty after publication.
+    for ordinal in 0..AT_CAPACITY {
+        let flags = bus.inner.cart_ram[sram1(AT_FLAGS) + usize::from(ordinal)];
+        assert_eq!(flags & AT_DIRTY, 0, "dirty ordinal {ordinal}");
+    }
+}
+
 #[test]
 #[ignore = "requires TRACE_CNROM_ATLAS_PROJECT assembled atlas-capability fixture"]
 fn assembled_atlas_pair_reclaims_expired_singles_inside_the_sprite_window() {

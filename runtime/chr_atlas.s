@@ -147,16 +147,15 @@ _at_zero_nt_byte:
   ret
 
 _at_begin:
-  ; Packet-local handles disappear before any free canonical storage can move.
-  ld hl, AT_HANDLES
-  ld de, AT_HANDLES+1
-  ld bc, 511
-  ld (hl), $ff
-  ldir
-  ld hl, 0
-  ld (AT_LOGICAL_COUNT), hl
+  ; Renderer key-cache entries map keys to ordinals. They stay valid until
+  ; some eviction reuses an ordinal for different bytes; then the whole
+  ; cache resets before any stale ordinal can resolve. Per-packet resolve
+  ; marks always reset so every used ordinal re-arms its PENDING protection.
+  ld a, (AT_EVICTED)
+  or a
   ld a, 8
   ld ($fffc), a
+  jr z, _at_begin_resolved
   ld hl, $ac00
   ld de, $ac01
   ld bc, $03ff
@@ -164,8 +163,16 @@ _at_begin:
   ldir
   ld hl, 0
   ld ($c840), hl
+_at_begin_resolved:
+  ld hl, AT_SLOT_RESOLVED
+  ld de, AT_SLOT_RESOLVED+1
+  ld bc, 255
+  ld (hl), 0
+  ldir
   ld a, 12
   ld ($fffc), a
+  xor a
+  ld (AT_EVICTED), a
   ld hl, AT_FLAGS
   ld bc, AT_CAPACITY
 _at_clear_pending:
@@ -392,6 +399,8 @@ _at_allocate_found:
 ; Pair-first nodes were chained under their 64-byte hash; second halves are
 ; never chained and must not reach this helper.
 _at_unlink_candidate:
+  ld a, 1
+  ld (AT_EVICTED), a
   ld hl, (AT_CANDIDATE)
   call _at_flag_address
   ld a, (hl)
@@ -636,6 +645,8 @@ _at_pair_reclaim_slot:
   ld a, (hl)
   and AT_PAIR_SECOND
   jp z, _at_unlink_candidate
+  ld a, 1
+  ld (AT_EVICTED), a
   ld hl, (AT_ALLOCATED_COUNT)
   dec hl
   ld (AT_ALLOCATED_COUNT), hl

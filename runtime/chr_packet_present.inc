@@ -15,7 +15,8 @@
 .define M3P_STATE    $d9f6 ;0=old display valid,1=commit DI,2=blank fallback
 .define M3P_PASS     $d9f7 ;2=old-live-protected fast build,1=reserve,0=build
 .define M3P_CURSOR   $d9f8
-.define M3P_REMAIN   $d9fa ;reserved/unused; counts live in registers/native stack
+.define M3P_ATLAS_NT $d9fa ;atlas: reg2 value of the DISPLAYED name table
+.define M3P_REMAIN   $d9fb ;reserved/unused; counts live in registers/native stack
 .define M3P_FLAGS    $d9fc ;bit0=copy pending PF palette, bit1=copy pending HUD
 .define M3P_PHASE    $d9fd
 .define M3P_BANK     $d9fe
@@ -57,6 +58,13 @@ rt_mmc3_presentation_init:
   call _m3p_fill
   ld hl, 0
   ld (M3R_COUNT), hl
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+  ; After the metadata fills: atlas cold init leaves the $0700 table
+  ; displayed (reg2 $f3). The flip variable only tracks parity, and
+  ; preparation always writes the other table before flipping to it.
+  ld a, $f3
+  ld (M3P_ATLAS_NT), a
+.endif
   ret
 _m3p_fill:
 rt_mmc3_fill_closed:
@@ -300,6 +308,27 @@ _m3p_unlink_found:
   ret
 
 ; DE=original VRAM tile address. Mark dirty and return mapped SRAM destination.
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+; Atlas mode stages every conversion into the candidate row instead: BG and
+; sprite-half 0 into its first 32 bytes, sprite-half 1 (E bit5 of the fixed
+; legacy destination) into the second. The interning gates own VRAM
+; residency, so no dirty bitmap participates.
+rt_mmc3_pattern_stage:
+rt_chr_packet_sprite_stage_address:
+  ld a, 8
+  ld ($fffc), a
+  ld a, d
+  cp $20
+  ld a, 0
+  jr c, _m3p_stage_atlas_half
+  ld a, e
+  and $20
+_m3p_stage_atlas_half:
+  or <AT_PAIR_CANDIDATE
+  ld e, a
+  ld d, >AT_PAIR_CANDIDATE
+  ret
+.else
 rt_mmc3_pattern_stage:
   push de
   ld a, e
@@ -351,6 +380,7 @@ _m3p_stage_sprite_add:
   add hl, de
   ex de, hl
   ret
+.endif
 
 ; HL=physicalCHRtile,B=conversion attributes,DE=fixed VRAM destination.
 ; Preserve all arguments; NZ iff payload identity changed. Hidden tiles retain
@@ -1153,6 +1183,121 @@ _m3p_pal_final_tail:
   ret
 .endif
 
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+; Enqueue every dirty canonical pattern from atlas SRAM to its physical
+; VRAM home, clearing DIRTY. The dense-to-physical mapping mirrors
+; _at_physical in chr_atlas.s; the two must change together.
+_m3p_atlas_collect:
+  ld hl, 0
+_m3p_atlas_next:
+  ld (M3G_TEMP_HI), hl
+  ld a, 12
+  ld ($fffc), a
+  ld de, AT_FLAGS
+  add hl, de
+  ld a, (hl)
+  and AT_ALLOCATED | AT_DIRTY
+  cp AT_ALLOCATED | AT_DIRTY
+  jr nz, _m3p_atlas_skip
+  ld a, (hl)
+  and $f7                  ; clear AT_DIRTY
+  ld (hl), a
+  ld hl, (M3G_TEMP_HI)
+  call _m3p_atlas_upload
+_m3p_atlas_skip:
+  ei
+  nop
+  di
+  ld hl, (M3G_TEMP_HI)
+  inc hl
+  ld de, AT_CAPACITY
+  or a
+  sbc hl, de
+  add hl, de
+  jr c, _m3p_atlas_next
+  ld a, 8
+  ld ($fffc), a
+  ret
+_m3p_atlas_upload:
+  push hl
+  ld de, 376
+  or a
+  sbc hl, de
+  add hl, de
+  jr c, _m3p_atlas_low
+  ld de, 130
+  add hl, de
+  jr _m3p_atlas_phys
+_m3p_atlas_low:
+  ld de, 56
+  or a
+  sbc hl, de
+  add hl, de
+  jr c, _m3p_atlas_phys
+  ld de, 64
+  add hl, de
+_m3p_atlas_phys:
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  ld a, h
+  or $40
+  ld d, a
+  ld e, l
+  pop hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  add hl, hl
+  ld bc, AT_PAYLOAD
+  add hl, bc
+  ld bc, 32
+  ld a, 12
+  jp _m3p_enqueue
+
+rt_mmc3_commit_display:
+  call _m3p_palette_changes ; exact compare OUTSIDE the atomic VBlank interval
+  call _m3p_queue_reset
+  ; Every canonical transfer is old-safe: fresh ordinals are never
+  ; referenced by the displayed tables (two-generation protection), and the
+  ; whole prepared NT lands in the INACTIVE table. Both flush while the old
+  ; picture stays displayed, without any raster deadline.
+  xor a
+  ld (M3P_PHASE), a
+  call _m3p_atlas_collect
+rt_mmc3_upload_early:
+  ld a, (M3P_ATLAS_NT)
+  and $0c
+  ld d, $77
+  jr z, _m3p_atlas_nt_target
+  ld d, $47
+_m3p_atlas_nt_target:
+  ld e, 0
+  ld hl, $a000
+  ld bc, $0800
+  ld a, 8
+  call _m3p_enqueue
+  call _m3p_flush
+  ; Atomic remainder: SAT + CRAM + registers + the final table flip.
+  ld a, 1
+  ld (M3P_PHASE), a
+  ld a, 8
+  ld ($fffc), a
+  ld hl, $ab00
+  ld de, $7f00
+  ld bc, 64
+  ld a, 8
+  call _m3p_enqueue
+  ld hl, $ab40
+  ld de, $7f80
+  ld bc, 128
+  ld a, 8
+  call _m3p_enqueue
+  jp _m3p_tables_ready
+.else
 rt_mmc3_commit_display:
   call _m3p_palette_changes ; exact compare OUTSIDE the atomic VBlank interval
   call _m3p_queue_reset
@@ -1215,6 +1360,7 @@ _m3p_initial_tables:
   ld bc, 128
   ld a, 8
   call _m3p_enqueue
+.endif
 _m3p_tables_ready:
   ld hl, M3P_CRAM
   ld de, $c000
@@ -1265,6 +1411,15 @@ _m3p_publish_late:
 _m3p_publish_wait:
   call _m3p_new_blank
 rt_mmc3_publish_complete:
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+  ; Flip the displayed name table to the freshly written one INSIDE the
+  ; anchored register window, before display re-enable can expose it.
+  ld a, (M3P_ATLAS_NT)
+  xor $0c
+  ld (M3P_ATLAS_NT), a
+  ld b, 2
+  call vdp_set_register
+.endif
   ld a, (M3P_X)
   ld (M3G_PRESENT_X), a
   ld b, 8
@@ -1312,6 +1467,11 @@ _m3p_publish_reg0:
   ld (M3P_STATE), a
   ; Shadow copies occur AFTER coherent publication, with the new complete
   ; display serviced throughout. Guest remains excluded until this returns.
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+  ; Committed shadows only feed the legacy diff path; the atlas rebuilds
+  ; and republishes whole tables. Age the canonical generations instead.
+  jp rt_chr_atlas_retire
+.endif
   ld a, 8
   ld ($fffc), a
   ld a, (M3G_COMPARE_BG)
