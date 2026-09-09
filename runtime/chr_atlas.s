@@ -20,59 +20,43 @@ rt_chr_atlas_resolve:
   jr _at_gate
 rt_chr_atlas_retire:
   ld a, 5
+; IX/IY stay unused: the verified tracing core intentionally rejects them.
+; Results are HL/DE only; A and flags do not survive the gate.
 _at_gate:
-  push ix
-  push af
+  ld c, a
   ld a, i
   di
-  push af
+  push af                  ; caller IFF2 in P/V
   ld a, ($fffc)
-  push af
-  ld a, ($ffff)
-  push af
+  ld b, a
   ld a, ($fffe)
-  push af
+  ld d, a
+  ld a, ($ffff)
+  ld e, a
+  push bc                  ; caller $fffc / action
+  push de                  ; caller $fffe / $ffff
   ld a, ($cb14)
-  push af
-  ld ix, 0
-  add ix, sp
+  push af                  ; caller slot-1 shadow
   ld a, CHR_ATLAS_CODE_BANK
   ld ($fffe), a
   ld ($cb14), a
-  ld a, (ix+11)
+  ld a, c
   call rt_chr_atlas_dispatch
-  push af
-  ld a, (ix+7)
-  ld ($fffc), a
-  ld a, (ix+5)
-  ld ($ffff), a
-  ld a, (ix+3)
-  ld ($fffe), a
-  ld a, (ix+1)
+  pop bc
+  ld a, b
   ld ($cb14), a
-  bit 2, (ix+8)
-  jr z, _at_gate_di
-  pop af
-  ld sp, ix
   pop bc
+  ld a, b
+  ld ($fffe), a
+  ld a, c
+  ld ($ffff), a
   pop bc
-  pop bc
-  pop bc
-  pop bc
-  pop bc
-  pop ix
+  ld a, b
+  ld ($fffc), a
+  pop bc                   ; caller IFF2 flags in C
+  bit 2, c
+  ret z
   ei
-  ret
-_at_gate_di:
-  pop af
-  ld sp, ix
-  pop bc
-  pop bc
-  pop bc
-  pop bc
-  pop bc
-  pop bc
-  pop ix
   ret
 .ends
 

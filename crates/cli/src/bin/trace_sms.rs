@@ -7484,6 +7484,10 @@ mod source_clock_tests;
 mod cnrom_packet_tests;
 
 #[cfg(test)]
+#[path = "trace_sms/chr_atlas_tests.rs"]
+mod chr_atlas_tests;
+
+#[cfg(test)]
 #[path = "trace_sms/source_apu_tests.rs"]
 mod source_apu_tests;
 #[cfg(test)]
