@@ -201,8 +201,25 @@ allocator and double-buffered name tables are now being implemented. Identical
 32-byte patterns share storage; aligned sprite pairs and a permanent transparent
 tile retain explicit ownership. Preparation may write only unused patterns and
 the inactive table; the final bounded switch preserves the old picture until
-the new one is ready. This remains unvalidated implementation work, not a fixed
-blanking bug or a full-game capacity guarantee.
+the new one is ready.
+
+The atlas primitives are implemented and independently exercised: seven
+assembled fixtures drive the cold/begin/intern/resolve/retire gates directly,
+covering the permanent zero and blank double tables, dedupe and hash-collision
+chains, the dense-to-physical mapping at each legality boundary, capacity
+fail-closed at 378 slots, two-generation retirement with exact stale-chain
+unlink on eviction, and caller bank restoration. Aligned 8x16 pair interning
+is admitted: one 64-byte candidate lands on even sprite-addressable ordinals
+192..376 (physical 256..506, even-aligned and contiguous across the 375/376
+seam), singles and pairs share chains but are separated by kind flags, and
+expired singles or pairs inside the window are reclaimed with exact unlinking.
+The bank gate was rewritten without IX so the verified tracing core — which
+intentionally rejects DD/FD opcodes — can execute it; the original gate had
+never run. Gate results are HL/DE only; A and flags do not survive. This is
+primitive-level evidence: publisher integration (interned preparation, dirty
+uploads to the inactive table, the bounded switch) remains unimplemented, so
+the measured blanking failure is not yet closed and no capacity guarantee for
+arbitrary game frames is claimed.
 
 ## Measured execution prerequisites
 
