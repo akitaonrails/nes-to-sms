@@ -1182,6 +1182,9 @@ _btd_walk_found:
   ld   a, (TR_RET_SCRATCH_A)
   jp   rt_brk
 _btd_slot2_bad:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush
+.endif
   di
   ld   a, ($cb62)
   ld   ($cb1a), a
@@ -1189,6 +1192,9 @@ _btd_slot2_bad:
   ld   ($cb1d), a
   jp   rt_unresolved_jsr_flash
 _btd_trap_flash:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush
+.endif
   ld   a, ($cb14)
   ld   ($fffe), a
   ld   a, ($cb62)
@@ -1544,11 +1550,17 @@ _rti_depth_done:
 ; TODO: In a later phase, rt_unresolved_jsr should look up the target in a
 ; runtime dispatch table (for indirect JSR through profile-annotated jump tables).
 rt_unresolved_jsr:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush
+.endif
   di
   ld   a, $e1
   ld   ($cb1d), a            ; trace-sms runtime trap marker
   ; Flash screen: write $FF (bright white) to CRAM palette 0.
 rt_unresolved_jsr_flash:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush ; every E1/E8/E9/EA diagnostic exposes current time
+.endif
   di
 _ujsr_flash:
   xor  a
@@ -1678,6 +1690,9 @@ _rph_slot1_di:
   ret
 .endif
 _rph_bad:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush
+.endif
   di
   ld   a, RT_PRG_HIGH_BAD_ADDRESS
   ld   ($cb1d), a
@@ -1751,7 +1766,11 @@ _wi_ppu:
   and  $07
   ld   b, a
   ld   a, c
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  jp rt_cnrom_unsupported   ; legacy untimed bus path must never own hardware
+.else
   call rt_ppu_write         ; A = value, B = register index
+.endif
   ld   a, ($cb18)           ; body may clobber C/A; restore STA accumulator
   ret
 
@@ -1909,7 +1928,11 @@ _wzy_ppu:
   and  $07
   ld   b, a
   ld   a, c
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  jp rt_cnrom_unsupported
+.else
   call rt_ppu_write
+.endif
   pop  bc
   pop  hl
   ret

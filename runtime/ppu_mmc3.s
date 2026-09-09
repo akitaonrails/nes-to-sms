@@ -3,23 +3,8 @@
 ; Guest CIRAM uses SRAM bank0 $8000..87FF; cartridge RAM uses bank1 elsewhere.
 ; Every public PPU transaction restores exact SRAM control/slot2 bank/IFF/DE.
 .ifdef MMC3_FULL_RUNTIME
-.define M3G_DIRTY       $c830
-.define M3G_BUSY        $c831
+.include "runtime/chr_packet_layout.inc"
 .define M3G_PHASE       $c832
-.define M3G_READY       $c833
-.define M3G_TEMP_HI     $c834
-.define M3G_TEMP_LO     $c835
-.define M3G_FINE_X      $c836
-.define M3G_SPLIT       $c837
-.define M3G_PRESENT_X   $c838
-.define M3G_PRESENT_Y   $c839
-.define M3G_HUD_X       $c83a
-.define M3G_HUD_Y       $c83b
-.define M3G_PPU_BUS     $c83f
-.define M3G_CHR_MAP     $c850 ; eight resolved physical 1 KiB pages
-.define M3G_PALETTE     $c860 ; raw NES palette, including aliased entries
-.define M3G_TILE        $c880 ; sixteen raw pattern bytes
-.define M3G_RECORD     $9900 ; playfield record, HUD record at $9940
 .define M3G_IRQ_V      $c8f7 ; bit0=guest IRQ active, bit1=explicit v reload
 .define M3G_CANCEL     $c8f6 ; main disabled rendering before logical split
 .define M3G_STALE_IRQ  $c8f8 ; pending IRQ outlived its frozen packet
@@ -28,8 +13,6 @@
 ; Independent physical-CIRAM write intent for the PF/HUD frozen snapshots.
 ; Native DD40..DD5F is not guest RAM, renderer scratch or the DE40 stack floor.
 ; Each bit covers16 bytes. Capture consumes only its own128-bit map.
-.define M3T_PF        $dd40
-.define M3T_HUD       $dd50
 
 .section "ppu_mmc3" free
 
@@ -502,53 +485,7 @@ _m3p_increment_done:
   ld ($cb0f), a
   ret
 
-; HL=15-bit loopy v -> next vertical pixel. DE preserved; AF/BC scratch.
-rt_mmc3_vertical_increment:
-  ld a, h
-  and $70
-  cp $70
-  jr z, _m3p_vertical_coarse
-  ld a, h
-  add a, $10
-  ld h, a
-  ret
-_m3p_vertical_coarse:
-  ld a, h
-  and $0f
-  ld h, a
-  and 3
-  rlca
-  rlca
-  rlca
-  ld b, a
-  ld a, l
-  rlca
-  rlca
-  rlca
-  and 7
-  or b
-  cp 29
-  jr z, _m3p_vertical_toggle
-  cp 31
-  jr z, _m3p_vertical_zero
-  ld a, l
-  add a, 32
-  ld l, a
-  ret nc
-  inc h
-  ret
-_m3p_vertical_toggle:
-  ld a, h
-  xor 8
-  ld h, a
-_m3p_vertical_zero:
-  ld a, h
-  and $0c
-  ld h, a
-  ld a, l
-  and $1f
-  ld l, a
-  ret
+.include "runtime/chr_loopy_y.inc"
 
 ; HL=PPU address $2000..3EFF -> HL=bank0SRAM CIRAM address. C preserved.
 rt_mmc3_ciram_address:

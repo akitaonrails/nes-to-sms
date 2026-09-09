@@ -1,4 +1,5 @@
-; Opt-in, rendering-disabled synthetic NTSC source clock. Descriptor ABI v1.
+; Opt-in NTSC source clock. Descriptor ABI v1. The original clock capability
+; is rendering-disabled/synthetic; SOURCE_HARDWARE adds separately gated domains.
 ; CA80..CAFF aliases the INACTIVE legacy CHR reverse map. No legacy renderer
 ; or guest-NMI host bridge may run under this capability.
 .ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
@@ -80,6 +81,14 @@ rt_source_begin:
   ld a, (SC_TOTAL)
   cp b
   jp nz, rt_source_phase_error
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_boundary
+.else
+  call rt_cnrom_packet_service ; previous instruction complete, no source ticks
+  call rt_source_apu_publish
+.endif
+.endif
   ld de, SC_PC
   ld bc, 10
   ldir
@@ -103,6 +112,9 @@ _sc_enter_nmi:
   jp rt_source_nmi
 
 rt_source_phase_error:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush
+.endif
   ld a, $e9
   ld ($cb1d), a
   jp rt_unresolved_jsr_flash
@@ -126,6 +138,11 @@ rt_source_poll_loop:
   inc hl
   ld (SC_SPAN_ZP), a
   ld (SC_SPAN_RETURN), hl
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+.ifndef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  jp _sc_span_return       ; new domains do NOT inherit the old quiet proof
+.endif
+.endif
   ld l, a
   ld h, $c0
   ld a, (SC_SPAN_VALUE)
@@ -153,9 +170,11 @@ rt_source_poll_loop:
   ld a, (SC_DMA_ACTIVE)
   or b
   jp nz, _sc_span_return
+.ifndef CNROM_SOURCE_HARDWARE_EXPERIMENT
   ld a, ($cb09)
   and $18
   jp nz, _sc_span_return
+.endif
   ld a, (SC_PHASE)
   cp 3
   jp nz, _sc_span_return
@@ -177,7 +196,11 @@ rt_source_poll_loop:
   or a
   sbc hl, de
   jp nz, _sc_span_return
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call _sc_hardware_quiet_capacity
+.else
   call _sc_quiet_capacity
+.endif
   ld a, h
   or l
   jp z, _sc_span_return
@@ -207,6 +230,20 @@ rt_source_quiet_span_begin:
   inc hl
   inc (hl)
 _sc_span_add_dots:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  ; CPU span owns its six reads per iteration; nested typed domain span owns
+  ; the physical PPU fetches. Pending time is normalized at the outer end.
+  ld (SHW_PENDING), de
+  ld hl, (SC_SPAN_START)
+  ld (SHW_START), hl
+  ld hl, (SC_SPAN_START+2)
+  ld (SHW_START+2), hl
+  ld hl, (SC_DOT)
+  ld (SHW_START_DOT), hl
+  ld hl, (SC_LINE)
+  ld (SHW_START_LINE), hl
+  call rt_source_domain_flush
+.else
   ld h, d
   ld l, e
   add hl, hl
@@ -237,6 +274,7 @@ _sc_span_line_done:
 _sc_span_dots_done:
   add hl, de
   ld (SC_DOT), hl
+.endif
 rt_source_quiet_span_end:
 _sc_span_return:
   pop de
@@ -245,6 +283,56 @@ _sc_span_return:
   ld hl, (SC_SPAN_RETURN)
   ex (sp), hl
   ret
+
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+; Called only after the completed branch/PC/NZ/value/interrupt proof. A late
+; already-asserted unmasked IRQ must reach the next real LDA's poll.
+_sc_hardware_quiet_capacity:
+  call rt_source_domain_boundary
+  call rt_source_domain_flush
+  ld a, (SH_IRQ_LINE)
+  or a
+  jr z, _sc_hw_quiet_domains
+  ld a, ($cb03)
+  and 4
+  jr z, _sc_hw_quiet_zero
+_sc_hw_quiet_domains:
+  call rt_source_ppu_interval_deadline
+  ld (SHW_KIND), a
+  ld a, h
+  or l
+  jr z, _sc_hw_quiet_zero
+  push hl
+  call rt_source_apu_deadline
+  pop de
+  ld a, h
+  or l
+  jr z, _sc_hw_quiet_zero
+  or a
+  sbc hl, de
+  jr nc, _sc_hw_quiet_ppu
+  add hl, de
+  jr _sc_hw_quiet_count
+_sc_hw_quiet_ppu:
+  ex de, hl
+_sc_hw_quiet_count:
+  dec hl                    ; end strictly before either domain event
+  ld de, 6
+  ld b, 0
+_sc_hw_quiet_divide:
+  or a
+  sbc hl, de
+  jr c, _sc_hw_quiet_result
+  inc b
+  jr _sc_hw_quiet_divide
+_sc_hw_quiet_result:
+  ld l, b
+  ld h, 0
+  ret
+_sc_hw_quiet_zero:
+  ld hl, 0
+  ret
+.endif
 
 ; HL = complete quiet iterations (0..1820). Relative PPU dot distances avoid
 ; absolute u32 deadline wrap. End STRICTLY before guard-window start; starts
@@ -528,6 +616,9 @@ _sc_prefix_jsr:
   call _sc_fetch_byte
   jp _sc_stack_dummy
 _sc_prefix_brk:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush
+.endif
   ld a, (SC_NMI_EDGE)
   or a
   jp nz, rt_cnrom_unsupported
@@ -679,13 +770,48 @@ _sc_write:
   ret
 ; Shared transfer observation points, also used by DMA. Cycle already advanced.
 rt_source_bus_read_event:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  push af
+  ld a, h
+  cp $20
+  jr c, _shw_read_ready
+  cp $80
+  jr nc, _shw_read_ready
+  call rt_source_domain_flush
+_shw_read_ready:
+  pop af
+rt_source_bus_read_transfer: ; post-flush for hardware; pending permitted RAM/ROM
+.endif
   xor a
   ld (SC_EVENT_KIND), a
   ld (SC_EVENT_ADDR), hl
   call rt_cpu_read_bus
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  push af
+  ld a, h
+  cp $40
+  jr nz, _sc_external_read
+  ld a, l
+  cp $15
+  jr nz, _sc_external_read
+  pop af                  ; internal APU status does not drive external bus
+  ret
+_sc_external_read:
+  pop af
+.endif
   ld (SC_BUS), a
   ret
 rt_source_bus_write_event:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  push af
+  ld a, h
+  cp $20
+  jr c, _shw_write_ready
+  call rt_source_domain_flush
+_shw_write_ready:
+  pop af
+rt_source_bus_write_transfer: ; post-flush for hardware; pending permitted RAM
+.endif
   push af
   ld a, 1
   ld (SC_EVENT_KIND), a
@@ -707,6 +833,32 @@ _sc_cycle:
   pop af
   jp _sc_tick
 _sc_poll:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld a, (SC_PHASE)
+  ld b, a
+  ld a, (SC_POLL1)
+  cp b
+  jr z, _sc_hardware_poll
+  ld a, (SC_POLL2)
+  cp b
+  ret nz
+_sc_hardware_poll:
+  ld a, (SC_NMI_EDGE)
+  or a
+  jr nz, _sc_accept
+  ld a, (SC_ACCEPTED)
+  or a
+  ret nz                  ; a branch's earlier poll remains accepted
+  ld a, ($cb03)
+  and 4                   ; CLI/SEI/PLP still have old P at their poll
+  ret nz                  ; RTI restores P before its final stack reads
+  ld a, (SH_IRQ_LINE)
+  or a
+  ret z
+  ld a, 2
+  ld (SC_ACCEPTED), a
+  ret
+.else
   ld a, (SC_NMI_EDGE)
   or a
   ret z
@@ -718,6 +870,7 @@ _sc_poll:
   ld a, (SC_POLL2)
   cp b
   ret nz
+.endif
 _sc_accept:
   ld a, 1
   ld (SC_ACCEPTED), a
@@ -727,13 +880,33 @@ _sc_accept:
 
 ; One original CPU cycle, no instruction-phase changes. Frame/dot counters
 ; advance by local increments, so completed-cycle u32 wrap changes no deadline.
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+rt_source_tick:
+.endif
 _sc_tick:
   push af
   push bc
   push de
   push hl
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_tick
+  pop hl
+  pop de
+  pop bc
+  pop af
+  ret
+.else
   ld hl, SC_CYCLES
   call _sc_inc32
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_ppu_cycle
+  call rt_source_apu_cycle
+  pop hl
+  pop de
+  pop bc
+  pop af
+  ret
+.else
   ld b, 3
 _sc_dot:
   ld hl, (SC_DOT)
@@ -791,6 +964,11 @@ _sc_dot_done:
   pop bc
   pop af
   ret
+.endif
+.endif
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+rt_source_inc32:
+.endif
 _sc_inc32:
   inc (hl)
   ret nz
@@ -831,6 +1009,9 @@ _sc_line_stable:
   ret
 
 rt_source_status_read:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_ppu_status_window
+.else
   ; Explicitly unsupported same-dot set/clear neighborhoods, not fake races.
   ld hl, (SC_LINE)
   ld a, h
@@ -863,6 +1044,7 @@ _sc_status_before:
   or a
   sbc hl, de
   jp nc, rt_cnrom_unsupported
+.endif
 _sc_status_value:
   ld a, (CN_PPU_LATCH)
   and $1f
@@ -870,6 +1052,12 @@ _sc_status_value:
   ld a, (SC_VBLANK)
   rrca
   or c
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld c, a
+  ld a, (SP_STATUS)
+  and $60
+  or c
+.endif
   push af
   xor a
   ld (SC_VBLANK), a
@@ -957,7 +1145,14 @@ _sc_control_dispatch:
   jp rt_banked_tail_dispatch
 
 rt_source_nmi:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush
+.endif
   ld (SC_SAVED_A), a
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld a, (SC_ACCEPTED)     ; 1=NMI, 2=source APU IRQ
+  ld (SC_ENTRY), a
+.endif
   xor a
   ld (SC_ACCEPTED), a
   ld (SC_PHASE), a
@@ -965,8 +1160,10 @@ rt_source_nmi:
   ld (SC_POLL2), a
   ld a, 7
   ld (SC_TOTAL), a
+.ifndef CNROM_SOURCE_HARDWARE_EXPERIMENT
   ld a, 1
   ld (SC_ENTRY), a
+.endif
   ld hl, (SC_PC)
   call _sc_read
   call _sc_read
@@ -979,8 +1176,17 @@ rt_source_nmi:
   or $20
   call rt_source_push
   ld hl, $fffa
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld a, (SC_ENTRY)
+  cp 2
+  jr nz, _sc_interrupt_vector
+  ld hl, $fffe
+.endif
   jr _sc_interrupt_vector
 rt_source_brk:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush
+.endif
   ld (SC_SAVED_A), a
   ld hl, (SC_PC)
   inc hl
@@ -1015,6 +1221,9 @@ rt_source_dma_request:
   ld (SC_DMA_PENDING), a
   ret
 _sc_dma:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush
+.endif
   push hl
   xor a
   ld (SC_DMA_PENDING), a
@@ -1051,5 +1260,147 @@ _sc_dma_pairs:
   ld (SC_DMA_ACTIVE), a
   pop hl
   ret
+
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+; Only the domain calls are deferred. Every original CPU transfer and poll
+; remains present. The materialized PPU/APU epoch is SC_CYCLES-SHW_PENDING.
+; Called inside the preserving source-tick wrapper; scratch registers allowed.
+rt_source_domain_format_v3:
+rt_source_domain_tick:
+  ld hl, (SHW_REMAIN)
+  ld a, h
+  or l
+  jr nz, _shw_defer_cycle
+  call rt_source_domain_flush
+  ld a, (SC_ENTRY)
+  ld b, a
+  ld a, (SC_DMA_PENDING)
+  or b
+  ld b, a
+  ld a, (SC_DMA_ACTIVE)
+  or b
+  ld b, a
+  ld a, (SC_NMI_EDGE)
+  or b
+  ld b, a
+  ld a, (SC_ACCEPTED)
+  or b
+  jr nz, _shw_precise_cycle
+  ld a, (CNP_STATE)
+  cp 2
+  jr nc, _shw_precise_cycle
+  call rt_source_ppu_interval_deadline
+  ld (SHW_KIND), a
+  ld a, h
+  or l
+  jr z, _shw_precise_cycle
+  push hl
+  call rt_source_apu_deadline
+  pop de
+  ld a, h
+  or l
+  jr z, _shw_precise_cycle
+  or a
+  sbc hl, de
+  jr nc, _shw_ppu_first
+  add hl, de
+  jr _shw_capacity
+_shw_ppu_first:
+  ex de, hl
+_shw_capacity:
+  dec hl                    ; strict interval: never reach either deadline
+  ld a, h
+  or l
+  jr z, _shw_precise_cycle
+  ld (SHW_REMAIN), hl
+  ld hl, (SC_CYCLES)
+  ld (SHW_START), hl
+  ld hl, (SC_CYCLES+2)
+  ld (SHW_START+2), hl
+  ld hl, (SC_DOT)
+  ld (SHW_START_DOT), hl
+  ld hl, (SC_LINE)
+  ld (SHW_START_LINE), hl
+_shw_defer_cycle:
+  ld hl, SC_CYCLES
+  call _sc_inc32
+  ld hl, (SHW_PENDING)
+  inc hl
+  ld (SHW_PENDING), hl
+  ld hl, (SHW_REMAIN)
+  dec hl
+  ld (SHW_REMAIN), hl
+  ret
+_shw_precise_cycle:
+  ld hl, SC_CYCLES
+  call _sc_inc32
+  call rt_source_ppu_cycle
+  jp rt_source_apu_cycle
+
+; Normalize all source domains without charging a source cycle. Preserve all
+; registers/IFF; hardware callers execute their event tap only AFTER this.
+; An interval diagnostic may reenter the common trap: never recursively flush.
+rt_source_domain_flush:
+  push af
+  ld a, (SHW_FLUSH_ACTIVE)
+  or a
+  jr nz, _shw_flush_return
+  push bc
+  push de
+  push hl
+  ld bc, (SHW_PENDING)
+  ld a, b
+  or c
+  jr z, _shw_flush_empty
+  ld a, 1
+  ld (SHW_FLUSH_ACTIVE), a
+  ld (SHW_SPAN_COUNT), bc
+rt_source_domain_span_begin:
+  ; START is before the first deferred cycle; SC_CYCLES is the true endpoint.
+  ; Kind1 is inactive; kind2/3 reconstruct BG/sprite fetches. No status/line
+  ; or APU event is crossed. MODE2 callbacks are internal, not source events.
+  ld a, (SHW_KIND)
+  call rt_source_ppu_interval_advance
+  call rt_source_apu_quiet_advance
+  xor a
+  ld (SHW_FLUSH_ACTIVE), a
+  ld hl, 0
+  ld (SHW_PENDING), hl
+  ld (SHW_REMAIN), hl
+rt_source_domain_span_end:
+  jr _shw_flush_registers
+_shw_flush_empty:
+  ld hl, 0
+  ld (SHW_REMAIN), hl
+_shw_flush_registers:
+  pop hl
+  pop de
+  pop bc
+_shw_flush_return:
+  pop af
+  ret
+
+; Safe completed-instruction service. Ordinary quiet instructions do not force
+; materialization; an accepted interrupt or actual hardware publication does.
+rt_source_domain_boundary:
+  push af
+  ld a, (SC_ACCEPTED)
+  or a
+  call nz, rt_source_domain_flush
+  ld a, (CNP_STATE)
+  cp 2
+  jr nz, _shw_boundary_audio
+  call rt_source_domain_flush
+  call rt_cnrom_packet_service
+_shw_boundary_audio:
+  ld a, (SAP_DIRTY)
+  or a
+  jr z, _shw_boundary_done
+  call rt_source_domain_flush
+  call rt_source_apu_publish
+_shw_boundary_done:
+  pop af
+  ret
+.endif
 .ends
 .endif

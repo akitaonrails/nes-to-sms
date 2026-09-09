@@ -68,6 +68,12 @@ off/on waits, compiler-remapped code and a separately controlled bank-255
 placement. The latter tests the core's upper bank bits, not natural compiler
 placement of that small fixture.
 
+The tested core delays overclock activation for 100 callbacks. Short accelerated
+wait and bank-255 fixtures finish before that delay; their 500 setting verifies
+option configuration, not execution at accelerated speed. Longer precise-wait
+and dense-code probes cross the delay. See the pinned
+[core startup-delay implementation](https://github.com/libretro/Genesis-Plus-GX/blob/162c343/libretro/libretro.c).
+
 Workspace: 622 passed, 205 ignored; formatting, Clippy and release build succeed
 with existing warnings. Fresh SMB1/CV1/SMB3 and earlier bus-only test ROMs remain
 byte-identical to their baselines. Root evidence is locally preserved in ignored

@@ -1,3 +1,4 @@
+.ifndef CNROM_SOURCE_HARDWARE_EXPERIMENT
 .ifndef MMC3_FULL_RUNTIME
 ; sat.s — Sprite Attribute Table (SAT) staging/upload, with software sprite
 ; variants for NES palette selection and horizontal/vertical flipping.
@@ -861,3 +862,4 @@ _sat_upload_done:
 
 .ends
 .endif ; separate full MMC3 graphics backend
+.endif ; source hardware owns source OAM and packet SAT

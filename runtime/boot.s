@@ -77,6 +77,9 @@
 ;   the running code.
 
 .define VDP_R0_BASE            $46   ; Mode 4 + top-row hscroll lock
+.ifdef CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT
+  .include "runtime/chr_packet_target.inc"
+.endif
 .define VDP_R0_LINE_IRQ_ON     $56   ; VDP_R0_BASE + IE1 line IRQ enable
 .define RT_GUARD_OVERFLOW       $F1
 .define RT_GUARD_UNDERFLOW      $F2
@@ -174,6 +177,10 @@ reset_entry:
   jp irq_handler
 
 .org $0066
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_input_pause
+  retn
+.else
 .ifdef INPUT_PAUSE_START
   ; NMI = SMS pause button -> arm a four-count NES Start press at $CB2E.
   ; Legacy input consumes one count per host frame; full MMC3 consumes
@@ -205,9 +212,14 @@ reset_entry:
   ; interrupted context without servicing.
   retn
 .endif
+.endif ; hardware Pause uses source-frame pending input only
 
 ; ─── boot_main ────────────────────────────────────────────────────────────────
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+.org $006b
+.else
 .org $0068
+.endif
 
 .section "boot_main" free
 
@@ -321,7 +333,9 @@ boot_main:
   ; bank 0). Rendering is still driven by the folded internal shadows; this is
   ; only storage scaffolding for later parity/materializer phases.
 .ifndef MMC3_FULL_RUNTIME
+.ifndef CNROM_SOURCE_HARDWARE_EXPERIMENT
   call rt_raw_ciram_sram_clear
+.endif
 .endif
 .endif
 
@@ -377,7 +391,9 @@ boot_main:
   call rt_cnrom_init
 .endif
 .ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
+.ifndef CNROM_SOURCE_HARDWARE_EXPERIMENT
   call rt_source_init
+.endif
 .endif
 
   ; 11. Clear sprite staging area.
@@ -442,12 +458,26 @@ boot_main:
 .ifdef MMC3_FULL_RUNTIME
   call rt_mmc3_graphics_init
 .endif
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ; All legacy clears are finished. Presentation never owns live source RAM.
+  call rt_cnrom_packet_init
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+  ; Cold-only atlas follows generic asset uploads, while display is blank.
+  ; Its SRAM1 clear excludes optional guest $8000..$87FF.
+  call rt_chr_atlas_cold_init
+.endif
+  call rt_source_hardware_init
+.endif
 
   ; 12. Enable display and frame interrupts (VDP reg 1).
   ;     %11110000: display on, frame INT enabled, M1=1 (224-line mode),
   ;     8×8 sprites. 224 lines (28 tile rows) vs 192 so the NES 30-row
   ;     playfield's lower rows (e.g. the ground) aren't clipped.
+.ifdef CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT
+  ld  a, CNP_REG1_DISPLAY   ; explicit PAL SMS-II240, source remains NTSC
+.else
   ld  a, %11110000
+.endif
   ld  b, 1
   call vdp_set_register
   ; NOTE: do NOT `ei` here. If an IRQ fires between this point and the
@@ -509,6 +539,12 @@ _sram_ok:
 .ends
 
 ; ─── irq_handler ──────────────────────────────────────────────────────────────
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+.section "irq_handler" free
+irq_handler:
+  jp rt_cnrom_packet_sms_interrupt
+.ends
+.else
 .section "irq_handler" free
 
 .ifdef DIAG_WILDJUMP
@@ -1608,11 +1644,14 @@ rt_smb_hud_repeat:
 
 .ends
 
+.endif ; legacy IRQ/guest-frame scheduler is unreachable in hardware mode
+
 ; ─── Slot-2 transaction guard ────────────────────────────────────────────────
 ; Cold outer-transaction guard for routines that temporarily map slot 2.  The
 ; hot loops remain inline; callers enter once and exit once.  Frames save IFF2,
 ; SRAM control ($FFFC), slot-2 bank ($FFFF), and the NES PRG-bank shadow
 ; ($CB62).  Preserves BC/DE/HL, clobbers AF, and uses no native pushes.
+.ifndef CNROM_SOURCE_HARDWARE_EXPERIMENT
 .section "slot2_guard" free
 rt_slot2_guard_enter:
   ld  a, i
@@ -1710,6 +1749,8 @@ _slot2_guard_halt:
   halt
   jr  _slot2_guard_halt
 .ends
+
+.endif ; source CPU/packet helpers own exact mapping guards
 
 ; ─── mem_fill ─────────────────────────────────────────────────────────────────
 ; Entry: HL = destination, BC = byte count, A = fill value.

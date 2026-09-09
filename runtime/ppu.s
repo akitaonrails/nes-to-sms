@@ -43,6 +43,7 @@
 ; target under DI and returns by JP instead of consuming a native call frame.
 ; rt_ppu_read:  entry B = register index (0..7). Returns A.
 
+.ifndef CNROM_SOURCE_HARDWARE_EXPERIMENT
 .ifndef MMC3_FULL_RUNTIME
 .section "ppu" free
 
@@ -1546,3 +1547,4 @@ _nes_to_sms_palette:
 
 .ends
 .endif ; legacy PPU; MMC3_FULL_RUNTIME owns ppu_mmc3.s
+.endif ; source hardware owns register side effects and source PPU

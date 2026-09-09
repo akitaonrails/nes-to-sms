@@ -9,6 +9,80 @@ const DOT: u16 = 0xca84;
 const LINE: u16 = 0xca86;
 const FRAME: u16 = 0xca88;
 
+#[test]
+#[ignore = "requires TRACE_CNROM_COMPUTED_RTS_CLOCK and TRACE_CNROM_COMPUTED_RTS_HARDWARE"]
+fn assembled_computed_rts_dispatch_reads_dummy_stack_target_and_resumes() {
+    for (variable, reset_cycles) in [
+        ("TRACE_CNROM_COMPUTED_RTS_CLOCK", 0),
+        ("TRACE_CNROM_COMPUTED_RTS_HARDWARE", 7),
+    ] {
+        let (rom, defs) = project(variable);
+        let mut bus = SmsBus::new(rom, 0xff);
+        let mut cpu = Cpu::new();
+        let mut reads = Vec::new();
+        let mut pending = None;
+        let mut target_cycles = Vec::new();
+        for _ in 0..2_000_000 {
+            if bus.read(0xcb1d) != 0 {
+                break;
+            }
+            if let Some((ret, cycle, address)) = pending
+                && cpu.pc == ret
+            {
+                reads.push((cycle, address, cpu.a));
+                pending = None;
+            }
+            if cpu.pc == defs["rt_source_bus_read_event"].1 {
+                assert!(pending.is_none());
+                pending = Some((read16(&mut bus, cpu.sp), read32(&mut bus, CYCLES), cpu.hl()));
+            }
+            let (bank, target) = defs["L_8120"];
+            if cpu.pc == target && bus.slot_bank[1] == bank {
+                target_cycles.push(read32(&mut bus, CYCLES));
+                assert_eq!(bus.read(0xcb02), 0x3f);
+            }
+            cpu.step(&mut bus).unwrap();
+            if read32(&mut bus, CYCLES) != 0 {
+                assert!(cpu.sp >= NATIVE_STACK_FLOOR);
+            }
+        }
+        let rts: Vec<_> = reads
+            .into_iter()
+            .filter(|(cycle, _, _)| (15 + reset_cycles..=20 + reset_cycles).contains(cycle))
+            .collect();
+        // NMOS RTS: opcode, next-PC dummy, old-S dummy, pull low, pull high,
+        // read unincremented return address; only then dispatch to address+1.
+        let expected: Vec<_> = [
+            (0x8009, 0x60),
+            (0x800a, 0xa9),
+            (0x013d, 0),
+            (0x013e, 0x1f),
+            (0x013f, 0x81),
+            (0x811f, 0xea),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (address, value))| (15 + reset_cycles + i as u32, address, value))
+        .collect();
+        assert_eq!(rts, expected, "{variable}: six literal RTS transfers");
+        assert_eq!(target_cycles, vec![20 + reset_cycles]);
+        assert_eq!(
+            (bus.read(0xc021), bus.read(0xc7ff), bus.read(0xcb1d)),
+            (0x1f, 0xa5, 0xe8)
+        );
+        assert_eq!((bus.read(0xcb02), bus.read(0xcb03)), (0x3f, 0xa4));
+        assert_eq!(read16(&mut bus, 0xca8c), 0x8127);
+        assert_eq!(read32(&mut bus, CYCLES), 33 + reset_cycles);
+        if reset_cycles != 0 {
+            assert_eq!(read16(&mut bus, 0xd380), 0);
+        }
+        eprintln!(
+            "{variable}: six RTS reads {expected:?}, final C{}",
+            33 + reset_cycles
+        );
+    }
+}
+
 fn project(variable: &str) -> (Vec<u8>, HashMap<String, (u8, u16)>) {
     let path = PathBuf::from(std::env::var(variable).expect("assembled clock fixture path"));
     let rom = std::fs::read(path.join("sms.sms")).unwrap();

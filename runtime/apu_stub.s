@@ -261,6 +261,7 @@ _ll_no_carry:
   ld   a, (hl)
   ret
 
+rt_apu_length_table:
 _apu_length_table:
 .db 10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14
 .db 12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30
@@ -510,6 +511,7 @@ _len_tick:
 
 ; Envelope tick. HL -> {divider, level}, D = channel volume register value,
 ; C = channel's env-start flag bit (0=p1, 1=p2, 2=noise).
+rt_apu_envelope_tick:
 _env_tick:
   ; Stackless: save envelope pointer in B:E. apu_frame_tick owns/clobbers
   ; BC/DE/HL, and D must keep the volume register value.
@@ -728,11 +730,17 @@ _st_pop_ret:
 
 ; ─── _psg_update ─────────────────────────────────────────────────────────────
 ; Computes each channel's PSG tone/attenuation and writes only changes.
+rt_apu_psg_publish:
 _psg_update:
 .ifdef CV1_COHERENT_BG
   call rt_cv1_hud_audio_poll
 .endif
   ; ---- pulse 1 -> tone 0 ----
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld a, (SAP_MUTED)
+  bit 0, a
+  jr nz, _pu_p1_off
+.endif
   ld   a, (APU_SHADOW+$15)
   bit  0, a
   jr   z, _pu_p1_off
@@ -751,6 +759,9 @@ _psg_update:
   jr   c, _pu_p1_off        ; period < 8 mutes on the NES
 _pu_p1_on:
   inc  hl                   ; N = P + 1
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_apu_fold_tone
+.endif
   ld   c, 0
   call _psg_tone
   ld   a, (APU_SHADOW+$00)
@@ -773,6 +784,11 @@ _pu_p2:
   call rt_cv1_hud_audio_poll
 .endif
   ; ---- pulse 2 -> tone 1 ----
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld a, (SAP_MUTED)
+  bit 1, a
+  jr nz, _pu_p2_off
+.endif
   ld   a, (APU_SHADOW+$15)
   bit  1, a
   jr   z, _pu_p2_off
@@ -791,6 +807,9 @@ _pu_p2:
   jr   c, _pu_p2_off
 _pu_p2_on:
   inc  hl
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_apu_fold_tone
+.endif
   ld   c, 1
   call _psg_tone
   ld   a, (APU_SHADOW+$04)
@@ -835,6 +854,9 @@ _pu_tri:
 _pu_tri_on:
   inc  hl
   add  hl, hl               ; N = 2 * (P + 1)
+.ifdef CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT
+  call rt_source_apu_pal_period
+.else
 _pu_tri_fold:
   ld   a, h
   cp   $04
@@ -843,6 +865,7 @@ _pu_tri_fold:
   rr   l
   jr   _pu_tri_fold
 _pu_tri_fits:
+.endif
   ld   c, 2
   call _psg_tone
   ld   a, TRI_ATTN
@@ -879,6 +902,15 @@ _pu_nr1:
 _pu_nr0:
   ld   a, $E4               ; white, clock/512
 _pu_nwr:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld b, a
+  ld a, (APU_SHADOW+$0e)
+  bit 7, a
+  ld a, b
+  jr z, _pu_source_noise_mode
+  and $fb                  ; short NES sequence -> periodic PSG adaptation
+_pu_source_noise_mode:
+.endif
   ; Only write when changed: a noise-register write resets the LFSR phase.
   ld   hl, PSG_CACHE+6
   cp   (hl)

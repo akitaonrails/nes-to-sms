@@ -478,6 +478,18 @@ pub struct SourcePollLoop {
 }
 
 fn validate(p: &Profile) -> Result<(), LoadError> {
+    if p.source_hardware_experiment()
+        && p.translation.source_clock_fast_forward
+        && !p
+            .translation
+            .runtime_defines
+            .iter()
+            .any(|d| d == "CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT")
+    {
+        return Err(LoadError::Validation(
+            "source hardware fast-forward requires explicit deferred domain summaries".into(),
+        ));
+    }
     if (p.translation.source_clock_fast_forward || !p.source_poll_loops.is_empty())
         && !p.source_clock_experiment()
     {
@@ -532,10 +544,42 @@ fn validate(p: &Profile) -> Result<(), LoadError> {
             "MMC3_FULL_RUNTIME requires mapper 4 and software calls".into(),
         ));
     }
+    let hardware_deferred = p
+        .translation
+        .runtime_defines
+        .iter()
+        .any(|d| d == "CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT");
+    let hardware_pal240 = p
+        .translation
+        .runtime_defines
+        .iter()
+        .any(|d| d == "CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT");
+    let hardware_atlas = p
+        .translation
+        .runtime_defines
+        .iter()
+        .any(|d| d == "CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT");
+    if hardware_atlas && (!p.source_hardware_experiment() || !hardware_pal240) {
+        return Err(LoadError::Validation(
+            "canonical atlas requires explicit source hardware and PAL240 display options".into(),
+        ));
+    }
+    if hardware_pal240 && !p.source_hardware_experiment() {
+        return Err(LoadError::Validation(
+            "PAL240 display requires CNROM_SOURCE_HARDWARE_EXPERIMENT".into(),
+        ));
+    }
+    if hardware_deferred && !p.source_hardware_experiment() {
+        return Err(LoadError::Validation(
+            "deferred source domains require CNROM_SOURCE_HARDWARE_EXPERIMENT".into(),
+        ));
+    }
     if p.translation.runtime_defines.iter().any(|d| {
         matches!(
             d.as_str(),
-            "CNROM_BUS_EXPERIMENT" | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+            "CNROM_BUS_EXPERIMENT"
+                | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+                | "CNROM_SOURCE_HARDWARE_EXPERIMENT"
         )
     }) && (p.rom.mapper != 3
         || p.native_calls()
@@ -552,13 +596,21 @@ fn validate(p: &Profile) -> Result<(), LoadError> {
         || p.translation.runtime_defines.iter().any(|d| {
             !matches!(
                 d.as_str(),
-                "CNROM_BUS_EXPERIMENT" | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+                "CNROM_BUS_EXPERIMENT"
+                    | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+                    | "CNROM_SOURCE_HARDWARE_EXPERIMENT"
+                    | "CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT"
+                    | "CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT"
+                    | "CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT"
             )
         })
-        || p.translation.runtime_defines.len() != 1)
+        || p.translation.runtime_defines.len()
+            != 1 + usize::from(hardware_deferred)
+                + usize::from(hardware_pal240)
+                + usize::from(hardware_atlas))
     {
         return Err(LoadError::Validation(
-            "CNROM experiments require mapper 3, software calls, exactly one experiment define, and no replacement/dispatch/bank/CHR-pack overrides".into(),
+            "CNROM experiments require mapper 3, software calls, one base experiment with explicit hardware options, and no replacement/dispatch/bank/CHR-pack overrides".into(),
         ));
     }
     if p.translation.runtime_defines.iter().any(|name| {
@@ -1059,22 +1111,43 @@ impl Profile {
             && self.translation.runtime_defines.iter().any(|d| {
                 matches!(
                     d.as_str(),
-                    "CNROM_BUS_EXPERIMENT" | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+                    "CNROM_BUS_EXPERIMENT"
+                        | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+                        | "CNROM_SOURCE_HARDWARE_EXPERIMENT"
                 )
             })
     }
 
     pub fn source_clock_experiment(&self) -> bool {
         self.rom.mapper == 3
+            && self.translation.runtime_defines.iter().any(|d| {
+                matches!(
+                    d.as_str(),
+                    "CNROM_SOURCE_CLOCK_EXPERIMENT" | "CNROM_SOURCE_HARDWARE_EXPERIMENT"
+                )
+            })
+    }
+
+    pub fn source_hardware_experiment(&self) -> bool {
+        self.rom.mapper == 3
             && self
                 .translation
                 .runtime_defines
                 .iter()
-                .any(|d| d == "CNROM_SOURCE_CLOCK_EXPERIMENT")
+                .any(|d| d == "CNROM_SOURCE_HARDWARE_EXPERIMENT")
     }
 
     pub fn dynamic_cpu_bus(&self) -> bool {
         self.mmc3_full_runtime() || self.cnrom_bus_experiment()
+    }
+
+    pub fn source_hardware_atlas_experiment(&self) -> bool {
+        self.source_hardware_experiment()
+            && self
+                .translation
+                .runtime_defines
+                .iter()
+                .any(|d| d == "CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT")
     }
 
     pub fn mmc3_full_runtime(&self) -> bool {
@@ -1166,6 +1239,9 @@ impl Profile {
     /// Keep runtime assembly policy synchronized with inline hardware lowering.
     pub fn effective_runtime_defines(&self) -> Vec<String> {
         let mut defines = self.translation.runtime_defines.clone();
+        if self.source_hardware_experiment() {
+            defines.push("CNROM_SOURCE_CLOCK_EXPERIMENT".into());
+        }
         if self.source_clock_experiment() {
             defines.push("CNROM_BUS_EXPERIMENT".into());
         }
@@ -1307,6 +1383,83 @@ dest = 0x100
 "#;
 
     #[test]
+    fn source_hardware_owns_domains_without_inheriting_quiet_proof() {
+        let source = "[rom]\nname='synthetic'\nmapper=3\nprg_kib=32\nchr_kib=32\n[translation]\nruntime_defines=['CNROM_SOURCE_HARDWARE_EXPERIMENT']\n";
+        let profile = load_from_str(source).unwrap();
+        assert!(profile.source_hardware_experiment());
+        assert!(profile.source_clock_experiment());
+        assert!(profile.cnrom_bus_experiment());
+        assert!(!profile.mmc3_full_runtime());
+        let defines = profile.effective_runtime_defines();
+        for expected in [
+            "CNROM_SOURCE_HARDWARE_EXPERIMENT",
+            "CNROM_SOURCE_CLOCK_EXPERIMENT",
+            "CNROM_BUS_EXPERIMENT",
+        ] {
+            assert!(defines.iter().any(|define| define == expected));
+        }
+        assert_eq!(defines.len(), 3);
+        assert!(load_from_str(&format!("{source}source_clock_fast_forward=true\n")).is_err());
+        let old = load_from_str(&source.replace("SOURCE_HARDWARE", "SOURCE_CLOCK")).unwrap();
+        assert!(!old.source_hardware_experiment());
+        assert_eq!(old.effective_runtime_defines().len(), 2);
+    }
+
+    #[test]
+    fn deferred_domains_require_explicit_hardware_opt_in() {
+        let source = "[rom]\nname='synthetic'\nmapper=3\nprg_kib=32\nchr_kib=32\n[translation]\nruntime_defines=['CNROM_SOURCE_HARDWARE_EXPERIMENT','CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT']\n";
+        let p = load_from_str(source).unwrap();
+        assert!(p.source_hardware_experiment());
+        assert_eq!(p.effective_runtime_defines().len(), 4);
+        assert!(
+            load_from_str(&format!("{source}source_clock_fast_forward=true\n"))
+                .unwrap()
+                .translation
+                .source_clock_fast_forward
+        );
+        for invalid in [
+            source.replace("'CNROM_SOURCE_HARDWARE_EXPERIMENT',", ""),
+            source.replace("mapper=3", "mapper=0"),
+            source.replace(
+                "CNROM_SOURCE_HARDWARE_EXPERIMENT",
+                "CNROM_SOURCE_CLOCK_EXPERIMENT",
+            ),
+            source.replace("']", "','UNRELATED_OVERRIDE']"),
+        ] {
+            assert!(load_from_str(&invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn pal240_is_an_explicit_display_option_not_a_source_clock() {
+        let source = "[rom]\nname='synthetic'\nmapper=3\nprg_kib=32\nchr_kib=32\n[translation]\nruntime_defines=['CNROM_SOURCE_HARDWARE_EXPERIMENT','CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT']\n";
+        let p = load_from_str(source).unwrap();
+        assert!(p.source_hardware_experiment());
+        assert_eq!(p.effective_runtime_defines().len(), 4);
+        let deferred = source.replace("']", "','CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT']");
+        assert_eq!(
+            load_from_str(&deferred)
+                .unwrap()
+                .effective_runtime_defines()
+                .len(),
+            5
+        );
+        for invalid in [
+            source.replace("'CNROM_SOURCE_HARDWARE_EXPERIMENT',", ""),
+            source.replace(
+                "CNROM_SOURCE_HARDWARE_EXPERIMENT",
+                "CNROM_SOURCE_CLOCK_EXPERIMENT",
+            ),
+            source.replace("mapper=3", "mapper=4"),
+            source.replace("']", "','CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT']"),
+            source.replace("']", "','UNRELATED_OVERRIDE']"),
+            format!("{source}source_clock_fast_forward=true\n"),
+        ] {
+            assert!(load_from_str(&invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn cnrom_bus_capability_is_explicit_and_separate_from_mmc3() {
         let source = "[rom]\nname='synthetic'\nmapper=3\nprg_kib=32\nchr_kib=32\n[translation]\nruntime_defines=['CNROM_BUS_EXPERIMENT']\n";
         let p = load_from_str(source).unwrap();
@@ -1331,6 +1484,46 @@ dest = 0x100
         let ordinary =
             load_from_str(&source.replace("runtime_defines=['CNROM_BUS_EXPERIMENT']", "")).unwrap();
         assert!(!ordinary.dynamic_cpu_bus());
+    }
+
+    #[test]
+    fn canonical_atlas_requires_explicit_hardware_and_pal_without_deriving_deferred() {
+        let source = "[rom]\nname='atlas'\nmapper=3\nprg_kib=32\nchr_kib=32\n[translation]\nruntime_defines=['CNROM_SOURCE_HARDWARE_EXPERIMENT','CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT','CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT']\n";
+        let p = load_from_str(source).unwrap();
+        assert!(p.source_hardware_atlas_experiment());
+        assert_eq!(p.effective_runtime_defines().len(), 5);
+        assert!(
+            !p.effective_runtime_defines()
+                .iter()
+                .any(|d| d.contains("DEFERRED"))
+        );
+        let old = source.replace(",'CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT'", "");
+        assert!(
+            !load_from_str(&old)
+                .unwrap()
+                .source_hardware_atlas_experiment()
+        );
+        let deferred = source.replace("']", "','CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT']");
+        assert_eq!(
+            load_from_str(&deferred)
+                .unwrap()
+                .effective_runtime_defines()
+                .len(),
+            6
+        );
+        for invalid in [
+            source.replace("'CNROM_SOURCE_HARDWARE_EXPERIMENT',", ""),
+            source.replace("'CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT',", ""),
+            source.replace(
+                "CNROM_SOURCE_HARDWARE_EXPERIMENT",
+                "CNROM_SOURCE_CLOCK_EXPERIMENT",
+            ),
+            source.replace("mapper=3", "mapper=4"),
+            source.replace("']", "','CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT']"),
+            source.replace("']", "','UNRELATED_OVERRIDE']"),
+        ] {
+            assert!(load_from_str(&invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

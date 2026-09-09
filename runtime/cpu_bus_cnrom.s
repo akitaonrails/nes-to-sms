@@ -1,4 +1,5 @@
-; Synthetic-only CNROM source bus. No rendering or guest IRQ/NMI scheduler.
+; Explicit CNROM source bus. BUS alone has no rendering/guest scheduler;
+; CLOCK and SOURCE_HARDWARE supply their separately admitted source domains.
 ; Fixed PRG, independent CHR8K latch, and mirrored 2K optional cartridge RAM.
 ; Public bus ABI: HL=raw NES effective address, A=written/read byte.
 ; Preserve BC/DE/HL/IFF/shadow P and exact slot2 ROM/SRAM controls.
@@ -9,7 +10,12 @@
 .define CN_T_HI $c814
 .define CN_T_LO $c815
 .define CN_FINE_X $c816
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+.include "runtime/source_hardware_layout.inc"
+.define CN_PALETTE $c860
+.else
 .define CN_PALETTE $c820
+.endif
 .define CN_UNSUPPORTED $e8
 
 .bank 0 slot 0
@@ -130,6 +136,27 @@ _cn_read_io:
   cp $40
   jp nz, rt_cnrom_unsupported
   ld a, l
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  cp $16
+  jr z, _cn_source_pad1
+  cp $17
+  jr z, _cn_source_pad2
+  cp $15
+  jr z, _cn_source_apu_status
+  ld a, (SC_BUS)
+  ret
+_cn_source_pad1:
+  ld b, 0
+  ld a, (SC_BUS)
+  jp rt_source_input_read
+_cn_source_apu_status:
+  ld a, (SC_BUS)
+  jp rt_source_apu_read
+_cn_source_pad2:
+  ld b, 1
+  ld a, (SC_BUS)
+  jp rt_source_input_read
+.endif
 .ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
   jp rt_cnrom_unsupported ; no timed APU/controller/open-bus contract yet
 .endif
@@ -144,8 +171,13 @@ _cn_read_cart:
   ld a, (hl)
   ret
 .else
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld a, (SC_BUS)
+  ret
+.else
   ; The translated bus lacks opcode/dummy-fetch open-bus provenance.
   jp rt_cnrom_unsupported
+.endif
 .endif
 
 _cn_write_locked:
@@ -153,6 +185,13 @@ _cn_write_locked:
   ld a, h
   cp $20
   jr c, _cn_write_ram
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ; Actual source hardware writes invalidate evaluator lookahead. The timed
+  ; caller already materialized old context before entering this raw bus.
+  xor a
+  ld (SP_PRED_VALID), a
+  ld a, h
+.endif
   cp $40
   jp c, _cn_ppu_write
   cp $60
@@ -171,7 +210,24 @@ rt_cnrom_write_register:
   ld a, b
 .endif
   and CNROM_CHR_BANK_MASK
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld c, a
+  ld a, (CN_CHR)
+  xor c
+  push af
+  ld a, c
+.endif
   ld (CN_CHR), a
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  pop af
+  or a
+  ret z
+  ld a, ($cb09)
+  and $18
+  ret z
+  ld a, 1
+  jp rt_source_ppu_mutation
+.endif
   ret
 _cn_write_ram:
   and 7
@@ -196,6 +252,15 @@ _cn_write_io:
 .ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
   cp $14
   jp z, rt_source_dma_request
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  cp $16
+  jr nz, _cn_source_apu_pending
+  ld a, b
+  jp rt_source_input_strobe
+_cn_source_apu_pending:
+  ld a, b
+  jp rt_source_apu_write
+.endif
   jp rt_cnrom_unsupported
 .endif
   cp $16
@@ -237,6 +302,36 @@ _cn_cart_address:
 
 ; Source read at HL=physical PPU address0..3FFF. All external mappings belong
 ; to the enclosing CPU bus transaction, not presentation or live SMS VRAM.
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+; PPU fetches have their own latch, not the external CPU open bus. Preserve
+; exact mapping/IFF even when a CPU bus operation is about to begin.
+rt_source_ppu_raw_read:
+  push bc
+  push de
+  push hl
+  ld a, i
+  push af
+  di
+  ld a, ($fffc)
+  push af
+  ld a, ($ffff)
+  push af
+  call _cn_ppu_source_read
+  ld (CN_RESULT), a
+  pop af
+  ld ($ffff), a
+  pop af
+  ld ($fffc), a
+  pop af
+  ld a, (CN_RESULT)
+  pop hl
+  pop de
+  pop bc
+  jp po, _cn_source_fetch_di
+  ei
+_cn_source_fetch_di:
+  ret
+.endif
 _cn_ppu_source_read:
   ld a, h
   cp $20
@@ -295,6 +390,9 @@ _cn_ppu_read:
   ld a, (CN_PPU_LATCH)
   ret
 _cn_oam_read:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_ppu_guard_render_access
+.endif
   ld a, ($cb0a)
   ld l, a
   ld h, $c9
@@ -302,6 +400,9 @@ _cn_oam_read:
   ld (CN_PPU_LATCH), a
   ret
 _cn_data_read:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_ppu_guard_render_access
+.endif
   call _cn_ppu_address
   ld a, h
   cp $3f
@@ -345,6 +446,20 @@ _cn_ppu_write:
   ld (CN_PPU_LATCH), a
   ld a, l
   and 7
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld c, a
+  ld a, (SP_STARTUP)
+  or a
+  ld a, c
+  jr z, _cn_startup_write_ready
+  cp 2
+  ret c
+  cp 5
+  ret z
+  cp 6
+  ret z
+_cn_startup_write_ready:
+.endif
   or a
   jr z, _cn_ctrl_write
   cp 1
@@ -361,6 +476,14 @@ _cn_ppu_write:
   jp z, _cn_address_write
   jp _cn_data_write
 _cn_ctrl_write:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  bit 6, b
+  jp nz, rt_cnrom_unsupported ; selected standard PPU is not EXT-output mode
+  ld a, ($cb08)
+  xor b
+  and $3f
+  push af
+.endif
 .ifndef CNROM_SOURCE_CLOCK_EXPERIMENT
   bit 7, b
   jp nz, rt_cnrom_unsupported ; guest NMI scheduling is a later contract
@@ -375,30 +498,101 @@ _cn_ctrl_write:
   and $73
   or c
   ld (CN_T_HI), a
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  pop af
+  or a
+  jr z, _cn_ctrl_no_pixel_change
+  ld a, ($cb09)
+  and $18
+  jr z, _cn_ctrl_no_pixel_change
+  ld a, 2
+  call rt_source_ppu_mutation
+_cn_ctrl_no_pixel_change:
+.endif
 .ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
   jp rt_source_nmi_line
 .endif
   ret
 _cn_mask_write:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld a, b
+  and $e1
+  jp nz, rt_cnrom_unsupported ; emphasis/greyscale adapter not admitted yet
+  ld a, ($cb09)
+  xor b
+  push af
+  and $18
+  jr z, _cn_mask_same_rendering
+  ; Mid-render enable/disable corrupts fetch/OAM state: explicit later domain.
+  ld a, (SC_LINE+1)
+  or a
+  jp nz, rt_cnrom_unsupported
+  ld a, (SC_LINE)
+  cp 240
+  jp c, rt_cnrom_unsupported
+  ld a, ($cb0a)
+  or a
+  jp nz, rt_cnrom_unsupported
+_cn_mask_same_rendering:
+  ld a, b
+  ld ($cb09), a
+  pop af
+  or a
+  ret z
+  ld a, 3
+  jp rt_source_ppu_mutation
+.else
   ld a, b
   and $18
   jp nz, rt_cnrom_unsupported ; synthetic-only, no misleading static graphics
   ld a, b
   ld ($cb09), a
   ret
+.endif
 _cn_oam_address:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_ppu_guard_render_access
+.endif
   ld a, b
   ld ($cb0a), a
   ret
 _cn_oam_write:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_ppu_guard_render_access
+.endif
   ld a, ($cb0a)
   ld l, a
   ld h, $c9
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  and 3
+  cp 2
+  jr nz, _cn_oam_stored_bits
+  ld a, b
+  and $e3                 ; RP2C02 attribute bits2..4 are not storage cells
+  ld b, a
+_cn_oam_stored_bits:
+  ld a, l
+.endif
   ld (hl), b
   inc a
   ld ($cb0a), a
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld a, ($cb09)
+  and $18
+  ret z
+  ld a, 8
+  jp rt_source_ppu_mutation
+.endif
   ret
 _cn_scroll_write:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld a, ($cb09)
+  and $18
+  jr z, _cn_scroll_guard_done
+  ; This mutates fineX/t; visible reload/fetch contexts need raster packets.
+  call rt_source_ppu_guard_render_access
+_cn_scroll_guard_done:
+.endif
   ld a, ($cb0e)
   xor 1
   ld ($cb0e), a
@@ -445,6 +639,9 @@ _cn_scroll_second:
   ld (CN_T_HI), a
   ret
 _cn_address_write:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_ppu_guard_render_access
+.endif
   ld a, ($cb0e)
   xor 1
   ld ($cb0e), a
@@ -456,11 +653,23 @@ _cn_address_write:
 _cn_address_second:
   ld a, b
   ld (CN_T_LO), a
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld (SP_ADDR_VALUE), a
+  ld a, (CN_T_HI)
+  ld (SP_ADDR_VALUE+1), a
+  ld a, 1
+  ld (SP_ADDR_PENDING), a ; chosen one-dot delayed internal v load
+  ret
+.else
   ld ($cb10), a
   ld a, (CN_T_HI)
   ld ($cb0f), a
   ret
+.endif
 _cn_data_write:
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  call rt_source_ppu_guard_render_access
+.endif
   call _cn_ppu_address
   ld a, h
   cp $20
@@ -474,7 +683,28 @@ _cn_palette_write:
   call _cn_palette_address
   ld a, b
   and $3f
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld c, a
+  xor (hl)
+  push af
+  ld a, c
+.endif
   ld (hl), a
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ld c, a
+  ld a, l
+  and 3
+  jr nz, _cn_palette_alias_done
+  set 4, l
+  ld (hl), c
+_cn_palette_alias_done:
+  pop af
+  or a
+  jr z, _cn_data_increment
+  ; Even forced blank displays palette[0], or v's palette address override.
+  ld a, 7
+  call rt_source_ppu_mutation
+.endif
 _cn_data_increment:
   jp _cn_ppu_increment
 _cn_palette_address:
@@ -528,6 +758,9 @@ rt_cpu_indirect_jump:
   jp rt_banked_tail_dispatch
 
 rt_cnrom_unsupported:
+.ifdef CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT
+  call rt_source_domain_flush
+.endif
   di
   ld a, CN_UNSUPPORTED
   ld ($cb1d), a

@@ -3145,6 +3145,41 @@ fn main() {
     button_events.sort_by_key(|(frame, _)| *frame);
     checkpoints.sort_by_key(|checkpoint| checkpoint.frame);
 
+    let sym_path = rom_path.with_extension("sym");
+    let symbol_defs = load_wla_symbol_defs(&sym_path);
+    if symbol_defs.contains_key("rt_source_domain_span_begin") {
+        if search_late_routes || search_end_routes {
+            eprintln!("legacy route observers do not support deferred source-domain coordinates");
+            std::process::exit(2);
+        }
+        let domain_format = if symbol_defs.contains_key("rt_source_domain_format_v3") {
+            "deferred-v3"
+        } else if symbol_defs.contains_key("rt_source_domain_format_v2") {
+            "deferred-v2"
+        } else {
+            "deferred-v1"
+        };
+        if std::env::var("SMS_SOURCE_DOMAIN_FORMAT").as_deref() != Ok(domain_format) {
+            eprintln!(
+                "deferred source domains require SMS_SOURCE_DOMAIN_FORMAT={domain_format}: SC_CYCLES is current, PPU/APU state lags by SHW_PENDING at $D380"
+            );
+            std::process::exit(2);
+        }
+        eprintln!(
+            "SOURCE_DOMAIN_FORMAT {domain_format}: materialized epoch=SC_CYCLES-u16(D380); RAM/ROM tap virtual dot=SC_DOT+3*pending within the same scanline; raw hardware callees/diagnostic markers are synchronized"
+        );
+        if domain_format != "deferred-v1" {
+            eprintln!(
+                "SOURCE_DOMAIN_KINDS D38F: 1=inactive, 2=BG, 3=sprite fetch; reconstruct interior PPU state/fetches from immutable span context, not dot arithmetic alone; D3FA modes1/2 are internal lookahead/materialization"
+            );
+        }
+        if domain_format == "deferred-v3" {
+            eprintln!(
+                "SOURCE_CPU_SPANS: optional verified LDAzp/BNE loops use SC_SPAN at CABE..CACC; expand all six reads and two polls per iteration, with nested typed PPU/APU spans, before comparing source events"
+            );
+        }
+    }
+
     if functional_video && (search_late_routes || search_end_routes) {
         eprintln!("--functional-video is unsupported with route-search loops");
         std::process::exit(2);
@@ -3160,9 +3195,7 @@ fn main() {
     }
 
     let rom = std::fs::read(&rom_path).expect("read rom");
-    let sym_path = rom_path.with_extension("sym");
     let symbols = load_wla_symbols(&sym_path);
-    let symbol_defs = load_wla_symbol_defs(&sym_path);
     let asm_path = rom_path.with_extension("asm");
     let expected_mirroring = detect_expected_mirroring(&asm_path);
     let mut runtime_materializer_monitor = RuntimeMaterializerMonitor::new(&symbol_defs);
@@ -7445,6 +7478,20 @@ fn dump_framebuffer_ppm(bus: &SmsBus, path: &str) -> std::io::Result<()> {
 #[cfg(test)]
 #[path = "trace_sms/source_clock_tests.rs"]
 mod source_clock_tests;
+
+#[cfg(test)]
+#[path = "trace_sms/cnrom_packet_tests.rs"]
+mod cnrom_packet_tests;
+
+#[cfg(test)]
+#[path = "trace_sms/source_apu_tests.rs"]
+mod source_apu_tests;
+#[cfg(test)]
+#[path = "trace_sms/source_input_tests.rs"]
+mod source_input_tests;
+#[cfg(test)]
+#[path = "trace_sms/source_ppu_tests.rs"]
+mod source_ppu_tests;
 
 #[cfg(test)]
 mod tests {

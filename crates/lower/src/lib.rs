@@ -5718,7 +5718,14 @@ pub fn lower_routine(
                 // Tail helper entry avoids leaving this translated routine's
                 // native helper return frame; runtime dispatches through the
                 // tail-only banked dispatcher rather than rt_far_gate.
-                program.jp("rt_rts_dispatch");
+                // This IR annotation does not change the source RTS bus
+                // sequence: timed mode must still perform its stack reads
+                // and final dummy read before dispatching target + 1.
+                program.jp(if source_clock {
+                    "rt_source_rts"
+                } else {
+                    "rt_rts_dispatch"
+                });
             }
 
             Op::MapperWrite { addr, value } => {
@@ -5909,6 +5916,53 @@ mod tests {
                 assert!(asm[hook..].contains("$00,$80,$10"));
             }
             assert!(asm.contains("call rt_source_read_bus"));
+        }
+    }
+
+    #[test]
+    fn computed_rts_retains_source_bus_timing_only_in_clock_modes() {
+        for (define, timed) in [
+            ("CNROM_BUS_EXPERIMENT", false),
+            ("CNROM_SOURCE_CLOCK_EXPERIMENT", true),
+            ("CNROM_SOURCE_HARDWARE_EXPERIMENT", true),
+        ] {
+            let profile = profile::load_from_str(&format!(
+                "[rom]\nname='computed-rts'\nmapper=3\nprg_kib=32\nchr_kib=8\n[translation]\nruntime_defines=['{define}']\n"
+            ))
+            .unwrap();
+            let mut ops = Vec::new();
+            for (pc, opcode, semantic) in [
+                (0x8000, 0x48, Op::Pha),
+                (0x8001, 0x48, Op::Pha),
+                (0x8002, 0x60, Op::Rts),
+            ] {
+                ops.push(Op::Source {
+                    pc,
+                    size: 1,
+                    text: "computed RTS sequence".into(),
+                    instruction: Some(cpu6502::decode_at(&[opcode], pc, 0).unwrap()),
+                });
+                ops.push(semantic);
+            }
+            assert_eq!(ir::mark_rts_dispatch(&mut ops), 1);
+            assert!(matches!(ops.last(), Some(Op::RtsDispatch)));
+            let mut program = z80_emit::Program::new();
+            lower_routine(
+                &mut program,
+                &make_routine("computed_rts", ops),
+                &LowerOptions {
+                    profile: Some(&profile),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for label in program.unresolved_labels() {
+                program.label(label);
+                program.ret();
+            }
+            let asm = program.finish().unwrap().asm;
+            assert_eq!(asm.contains("jp rt_source_rts"), timed, "{define}");
+            assert_eq!(asm.contains("jp rt_rts_dispatch"), !timed, "{define}");
         }
     }
 

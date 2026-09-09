@@ -5,20 +5,7 @@
 ; SMS line interrupts replay display scroll only. Host input/audio/VBlank
 ; service continues while a guest handler or blanked renderer is busy.
 .ifdef MMC3_FULL_RUNTIME
-.define M3G_PACKET_CHANGED $c8f4
-.define M3G_BG_CHANGED $c8ec
-.define M3G_COMPARE_BG $c8ed
-.define M3C_DIRTY $dc00
-.define M3C_OLD $dd00
-.define M3C_VALID $dd33
-.define M3C_OLD_SPLIT $dd34
-.define M3C_FRAME $dd35
-.define M3C_ROW $dd36
-.define M3C_OLD_X $dd37
-.define M3C_OLD_PAGE $dd38
-.define M3C_COPY_CURSOR $dd39
-.define M3C_CAPTURE_READY $dd3e
-.define M3C_ANCHORED $dd3f ;frozen PF source matches completed committed NT
+.include "runtime/chr_packet_layout.inc"
 .section "frame_mmc3" free
 
 rt_mmc3_sms_interrupt:

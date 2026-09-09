@@ -1,3 +1,4 @@
+.ifndef CNROM_SOURCE_HARDWARE_EXPERIMENT
 .ifndef MMC3_FULL_RUNTIME
 ; vbuf.s — VRAM update buffer.
 ;
@@ -336,3 +337,4 @@ _vbuf_flush_done:
 
 .ends
 .endif ; separate full MMC3 graphics backend
+.endif ; source hardware never emits legacy VRAM commands

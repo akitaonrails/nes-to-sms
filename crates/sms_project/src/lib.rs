@@ -188,6 +188,79 @@ impl From<io::Error> for EmitError {
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
+/// The atlas reserves physical bank2, including against caller-supplied assembly.
+/// Accept only explicit emitted placement, not WLA expressions or floating
+/// sections whose eventual bank depends on linker space. This is intentionally
+/// new-capability-only; it is not a general assembly expression evaluator.
+fn atlas_explicit_banks(build: &z80_emit::Build) -> Result<Vec<u32>, EmitError> {
+    let invalid = || {
+        EmitError::InvalidCnromConfig(
+        "atlas assembly requires explicit bank/slot and FREE or FORCE sections; banks 1..3 are reserved and unknown placement forms are rejected".into(),
+    )
+    };
+    let mut banks = Vec::new();
+    let mut placed = false;
+    let mut in_section = false;
+    for line in build.asm.lines() {
+        let line = line.split(';').next().unwrap().trim();
+        if line.is_empty() {
+            continue;
+        }
+        let normalized = line.to_ascii_lowercase();
+        let words: Vec<_> = normalized.split_whitespace().collect();
+        match words[0] {
+            ".bank" if !in_section => {
+                if let Some(index) = normalized
+                    .strip_prefix(".bank (project_rom_data_bank_base + ")
+                    .and_then(|tail| tail.strip_suffix(") slot 1"))
+                    .and_then(|number| number.parse::<u16>().ok())
+                {
+                    if index >= build.project_data_bank_count {
+                        return Err(invalid());
+                    }
+                } else {
+                    if words.len() != 4 || words[2] != "slot" {
+                        return Err(invalid());
+                    }
+                    let bank = words[1].parse::<u32>().map_err(|_| invalid())?;
+                    let slot = words[3].parse::<u8>().map_err(|_| invalid())?;
+                    if (1..=3).contains(&bank)
+                        || bank >= 256
+                        || !matches!((bank, slot), (0, 0) | (4..=255, 1 | 2))
+                    {
+                        return Err(invalid());
+                    }
+                    banks.push(bank);
+                }
+                placed = true;
+            }
+            ".section" if placed && !in_section => {
+                let tail = normalized.strip_prefix(".section").unwrap().trim();
+                let Some((name, placement)) =
+                    tail.strip_prefix('"').and_then(|s| s.split_once('"'))
+                else {
+                    return Err(invalid());
+                };
+                if name.is_empty() || !matches!(placement.trim(), "free" | "force") {
+                    return Err(invalid());
+                }
+                in_section = true;
+            }
+            ".ends" if in_section && words.len() == 1 => in_section = false,
+            ".db" | ".dw" if in_section => {}
+            directive if directive.starts_with('.') || !in_section => return Err(invalid()),
+            // A label and placement directive on one line is not an emitted
+            // form. Never let it bypass the directive checks above.
+            token if token.contains(':') && !line.ends_with(':') => return Err(invalid()),
+            _ => {}
+        }
+    }
+    if in_section {
+        return Err(invalid());
+    }
+    Ok(banks)
+}
+
 fn validate_config(
     cfg: &ProjectConfig<'_>,
     assets: &ProjectAssets,
@@ -201,6 +274,46 @@ fn validate_config(
         .runtime_defines
         .iter()
         .any(|d| d == "CNROM_SOURCE_CLOCK_EXPERIMENT");
+    let atlas = cfg
+        .runtime_defines
+        .iter()
+        .any(|d| d == "CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT");
+    if atlas
+        && !cfg
+            .runtime_defines
+            .iter()
+            .any(|d| d == "CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT")
+    {
+        return Err(EmitError::InvalidCnromConfig(
+            "canonical atlas requires explicit source hardware and PAL240 display options".into(),
+        ));
+    }
+    if cfg.runtime_defines.iter().any(|d| {
+        matches!(
+            d.as_str(),
+            "CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT"
+                | "CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT"
+                | "CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT"
+        )
+    }) && !cfg
+        .runtime_defines
+        .iter()
+        .any(|d| d == "CNROM_SOURCE_HARDWARE_EXPERIMENT")
+    {
+        return Err(EmitError::InvalidCnromConfig(
+            "source hardware display/domain options require their hardware dependency".into(),
+        ));
+    }
+    if cfg
+        .runtime_defines
+        .iter()
+        .any(|d| d == "CNROM_SOURCE_HARDWARE_EXPERIMENT")
+        && !source_clock
+    {
+        return Err(EmitError::InvalidCnromConfig(
+            "source hardware requires its source-clock dependency".into(),
+        ));
+    }
     if source_clock && !cnrom_bus {
         return Err(EmitError::InvalidCnromConfig(
             "source clock requires its CNROM raw-bus dependency".into(),
@@ -224,7 +337,12 @@ fn validate_config(
             || cfg.runtime_defines.iter().any(|d| {
                 !matches!(
                     d.as_str(),
-                    "CNROM_BUS_EXPERIMENT" | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+                    "CNROM_BUS_EXPERIMENT"
+                        | "CNROM_SOURCE_CLOCK_EXPERIMENT"
+                        | "CNROM_SOURCE_HARDWARE_EXPERIMENT"
+                        | "CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT"
+                        | "CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT"
+                        | "CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT"
                 )
             })
             || assets.chr_4bpp.len() > 0x4000
@@ -368,12 +486,26 @@ fn validate_config(
             EmitError::InvalidUxromConfig(reason.into())
         }
     };
-    let explicit_banks: Vec<u32> = build
-        .asm
-        .lines()
-        .filter_map(|line| line.trim_start().strip_prefix(".bank "))
-        .filter_map(|tail| tail.split_whitespace().next()?.parse::<u32>().ok())
-        .collect();
+    let explicit_banks: Vec<u32> = if atlas {
+        atlas_explicit_banks(build)?
+    } else {
+        build
+            .asm
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix(".bank "))
+            .filter_map(|tail| tail.split_whitespace().next()?.parse::<u32>().ok())
+            .collect()
+    };
+    if cfg
+        .runtime_defines
+        .iter()
+        .any(|name| name == "CNROM_SOURCE_HARDWARE_EXPERIMENT")
+        && explicit_banks.contains(&1)
+    {
+        return Err(EmitError::InvalidCnromConfig(
+            "source hardware reserves bank 1 for the immutable packet presenter".into(),
+        ));
+    }
     let reserved_bank = if assets.prg_banks.is_some() {
         prg_data_base
     } else {
@@ -621,6 +753,32 @@ fn sms_asm_content(
     if let Some(board) = cfg.cnrom {
         let count = assets.chr_nes.as_ref().expect("validated CNROM CHR").len() / 0x2000;
         mapper_define.push_str(&format!("\n.define CNROM_CHR_DATA_BASE 31\n.define CNROM_CHR_BANK_MASK {}\n.define CNROM_BUS_CONFLICTS {}\n.define CNROM_PRG_RAM {}", count - 1, u8::from(board.bus_conflicts), u8::from(board.prg_ram)));
+        if cfg
+            .runtime_defines
+            .iter()
+            .any(|name| name == "CNROM_SOURCE_HARDWARE_EXPERIMENT")
+        {
+            // Banks 1..3 precede translated code (which starts at 4). Assets
+            // and source dispatch records are all 24+, so this reservation
+            // needs no remapping of existing logical code or physical CHR.
+            mapper_define.push_str("\n.define CHR_PACKET_CODE_BANK 1");
+            if cfg
+                .runtime_defines
+                .iter()
+                .any(|d| d == "CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT")
+            {
+                mapper_define.push_str("\n.define CHR_ATLAS_CODE_BANK 2");
+            }
+            if cfg
+                .runtime_defines
+                .iter()
+                .any(|d| d == "CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT")
+            {
+                mapper_define.push_str(
+                    "\n; Display target: SMS-II PAL 240 lines / 50 Hz. Source remains NTSC NES.",
+                );
+            }
+        }
     }
     if project_data_bank_count != 0 {
         // Keep records after the last raw CHR bank, separate from code/assets.
@@ -989,8 +1147,32 @@ pub fn emit_project(
 
     // generated/ + data/
     emit_data_files(out_dir, build, assets)?;
+    if cfg
+        .runtime_defines
+        .iter()
+        .any(|d| d == "CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT")
+    {
+        fs::write(
+            out_dir.join("data/pal_psg_periods.bin"),
+            pal_psg_period_table(),
+        )?;
+    }
 
     Ok(())
+}
+
+/// PAL target-clock calibration precedes octave folding. The 4096 endpoint
+/// needs a u64 product; source CPU/APU timing does not use this display table.
+fn pal_psg_period_table() -> Vec<u8> {
+    let mut bytes = vec![0; 4097 * 2];
+    for n in 1..=4096usize {
+        let mut period = ((n as u64 * 585_237_664 + 295_312_500) / 590_625_000).max(1);
+        while period >= 1024 {
+            period /= 2;
+        }
+        bytes[n * 2..n * 2 + 2].copy_from_slice(&(period as u16).to_le_bytes());
+    }
+    bytes
 }
 
 /// Emit only the generated asm and data files.
@@ -1067,6 +1249,110 @@ mod tests {
     }
 
     #[test]
+    fn atlas_reserves_bank_two_and_rejects_floating_or_opaque_placement_before_output() {
+        let mut cfg = minimal_cfg();
+        cfg.mapper = 3;
+        cfg.rom_kib = 4096;
+        cfg.raw_ciram_backend = RawCiramBackend::SramSlot2;
+        cfg.cnrom = Some(CnromConfig {
+            bus_conflicts: false,
+            prg_ram: true,
+        });
+        cfg.runtime_defines = [
+            "CNROM_BUS_EXPERIMENT",
+            "CNROM_SOURCE_CLOCK_EXPERIMENT",
+            "CNROM_SOURCE_HARDWARE_EXPERIMENT",
+            "CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT",
+            "CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let mut assets = minimal_assets();
+        assets.prg_low = Some(vec![0; 0x4000]);
+        assets.prg_high = Some(vec![0; 0x4000]);
+        assets.nametable = Some(vec![0; 0x700]);
+        assets.chr_nes = Some(vec![0; 0x20000]);
+        let mut build = minimal_build();
+        let canonical = ".bank 4 slot 1\n.section \"generated_code_0\" free\nnop\n.ends\n.bank 0 slot 0\n.section \"unresolved_stubs\" free\n.ends\n.bank (PROJECT_ROM_DATA_BANK_BASE + 0) slot 1\n.section \"records\" free\n.dw 0\n.ends\n";
+        build.asm = canonical.into();
+        build.project_data_bank_count = 1;
+        validate_config(&cfg, &assets, &build).unwrap();
+        let runtime = vec![PathBuf::from("boot.s"), PathBuf::from("chr_atlas.s")];
+        let enabled = sms_asm_content(&cfg, &assets, true, &runtime, 1);
+        assert!(enabled.contains(".define CHR_ATLAS_CODE_BANK 2"));
+        assert_eq!(
+            enabled.matches(".include \"runtime/chr_atlas.s\"").count(),
+            1
+        );
+        assert!(enabled.contains(".define PROJECT_ROM_DATA_BANK_BASE 39"));
+        cfg.runtime_defines
+            .push("CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT".into());
+        validate_config(&cfg, &assets, &build).unwrap();
+        cfg.runtime_defines.pop();
+        cfg.runtime_defines.pop();
+        let disabled = sms_asm_content(&cfg, &assets, true, &runtime, 1);
+        assert!(!disabled.contains("CHR_ATLAS_CODE_BANK"));
+        cfg.runtime_defines
+            .push("CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT".into());
+
+        let invalid_bodies = [
+            canonical.replace(".bank 4 slot 1", ".bank 2 slot 1"),
+            canonical.replace(".bank 4 slot 1", ".BANK\t$02 SLOT 1"),
+            canonical.replace(".bank 4 slot 1", ".bank 0x2 slot 1"),
+            canonical.replace(".bank 4 slot 1", ".bank (1 + 1) slot 1"),
+            canonical.replace(".bank 4 slot 1", ".bank CHR_ATLAS_CODE_BANK slot 1"),
+            canonical.replace(".bank 4 slot 1", ".bank 3 slot 1"),
+            canonical.replace(".bank 4 slot 1", ".bank 1 slot 1"),
+            canonical.replace(".bank 4 slot 1", ".bank 256 slot 1"),
+            canonical.replace(
+                "\"generated_code_0\" free",
+                "\"generated_code_0\" free BANK 2 SLOT 1",
+            ),
+            canonical.replace(
+                "\"generated_code_0\" free",
+                "\"generated_code_0\" superfree",
+            ),
+            canonical.replace(".bank 4 slot 1\n", ""),
+            canonical.replace("+ 0)", "+ 1)"),
+            canonical.replace("nop", ".include \"unchecked.asm\""),
+            canonical.replace("nop", "escape: .bank 2 slot 1"),
+        ];
+        for (index, asm) in invalid_bodies.into_iter().enumerate() {
+            build.asm = asm;
+            let out = unique_dir(&format!("atlas-placement-{index}"));
+            assert!(
+                matches!(
+                    emit_project(&out, &build, &assets, &cfg, None),
+                    Err(EmitError::InvalidCnromConfig(_))
+                ),
+                "{index}"
+            );
+            assert!(!out.exists());
+            fs::create_dir_all(&out).unwrap();
+            fs::write(out.join("keep.txt"), "existing").unwrap();
+            assert!(emit_project(&out, &build, &assets, &cfg, None).is_err());
+            assert_eq!(fs::read_dir(&out).unwrap().count(), 1);
+            assert_eq!(
+                fs::read_to_string(out.join("keep.txt")).unwrap(),
+                "existing"
+            );
+        }
+        build.asm = canonical.into();
+        for dependency in [
+            "CNROM_SOURCE_HARDWARE_EXPERIMENT",
+            "CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT",
+        ] {
+            let saved = cfg.runtime_defines.clone();
+            cfg.runtime_defines.retain(|d| d != dependency);
+            assert!(matches!(
+                validate_config(&cfg, &assets, &build),
+                Err(EmitError::InvalidCnromConfig(_))
+            ));
+            cfg.runtime_defines = saved;
+        }
+    }
+
+    #[test]
     fn cnrom_project_admission_requires_complete_bounded_asset_contract() {
         let mut cfg = minimal_cfg();
         cfg.mapper = 3;
@@ -1122,6 +1408,96 @@ mod tests {
     }
 
     #[test]
+    fn pal_psg_table_rounds_before_folding_and_is_target_only() {
+        let bytes = pal_psg_period_table();
+        assert_eq!(bytes.len(), 8194);
+        for (n, expected) in [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (100, 99),
+            (1023, 1014),
+            (1024, 1015),
+            (1032, 1023),
+            (1033, 512),
+            (2047, 1014),
+            (2048, 1014),
+            (4095, 1014),
+            (4096, 1014),
+        ] {
+            assert_eq!(
+                u16::from_le_bytes([bytes[n * 2], bytes[n * 2 + 1]]),
+                expected,
+                "N={n}"
+            );
+        }
+        assert!(
+            bytes[2..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|b| (1..1024).contains(&u16::from_le_bytes([b[0], b[1]])))
+        );
+
+        let mut cfg = minimal_cfg();
+        cfg.mapper = 3;
+        cfg.rom_kib = 4096;
+        cfg.raw_ciram_backend = RawCiramBackend::SramSlot2;
+        cfg.cnrom = Some(CnromConfig {
+            bus_conflicts: false,
+            prg_ram: false,
+        });
+        cfg.runtime_defines = [
+            "CNROM_BUS_EXPERIMENT",
+            "CNROM_SOURCE_CLOCK_EXPERIMENT",
+            "CNROM_SOURCE_HARDWARE_EXPERIMENT",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let mut assets = minimal_assets();
+        assets.prg_low = Some(vec![0; 0x4000]);
+        assets.prg_high = Some(vec![0; 0x4000]);
+        assets.nametable = Some(vec![0; 0x700]);
+        assets.chr_nes = Some(vec![0; 0x2000]);
+        let build = minimal_build();
+        let old = unique_dir("pal-old-target");
+        emit_project(&old, &build, &assets, &cfg, None).unwrap();
+        assert!(!old.join("data/pal_psg_periods.bin").exists());
+        assert!(
+            !fs::read_to_string(old.join("sms.asm"))
+                .unwrap()
+                .contains("Display target:")
+        );
+
+        cfg.runtime_defines
+            .push("CNROM_SOURCE_HARDWARE_PAL240_EXPERIMENT".into());
+        let pal = unique_dir("pal-target");
+        emit_project(&pal, &build, &assets, &cfg, None).unwrap();
+        assert_eq!(
+            fs::read(pal.join("data/pal_psg_periods.bin")).unwrap(),
+            bytes
+        );
+        assert!(
+            fs::read_to_string(pal.join("sms.asm"))
+                .unwrap()
+                .contains("SMS-II PAL 240 lines / 50 Hz. Source remains NTSC NES.")
+        );
+        cfg.runtime_defines
+            .retain(|d| d != "CNROM_SOURCE_HARDWARE_EXPERIMENT");
+        let invalid = unique_dir("pal-invalid");
+        assert!(emit_project(&invalid, &build, &assets, &cfg, None).is_err());
+        assert!(!invalid.exists());
+        fs::create_dir_all(&invalid).unwrap();
+        fs::write(invalid.join("keep.txt"), "existing output").unwrap();
+        assert!(emit_project(&invalid, &build, &assets, &cfg, None).is_err());
+        assert_eq!(fs::read_dir(&invalid).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_to_string(invalid.join("keep.txt")).unwrap(),
+            "existing output"
+        );
+    }
+
+    #[test]
     fn source_clock_records_and_code_share_only_unreserved_banks() {
         let mut cfg = minimal_cfg();
         cfg.mapper = 3;
@@ -1156,6 +1532,33 @@ mod tests {
                 "bank{bank}"
             );
         }
+        cfg.runtime_defines
+            .push("CNROM_SOURCE_HARDWARE_EXPERIMENT".into());
+        build.asm = ".bank 1 slot 1\n".into();
+        assert!(matches!(
+            validate_config(&cfg, &assets, &build),
+            Err(EmitError::InvalidCnromConfig(_))
+        ));
+        build.asm = ".bank 4 slot 1\n".into();
+        assert!(validate_config(&cfg, &assets, &build).is_ok());
+        cfg.runtime_defines
+            .push("CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT".into());
+        assert!(validate_config(&cfg, &assets, &build).is_ok());
+        cfg.runtime_defines
+            .retain(|d| d != "CNROM_SOURCE_HARDWARE_EXPERIMENT");
+        assert!(matches!(
+            validate_config(&cfg, &assets, &build),
+            Err(EmitError::InvalidCnromConfig(_))
+        ));
+        cfg.runtime_defines.pop(); // deferred requires hardware, not just clock
+        cfg.runtime_defines
+            .push("CNROM_SOURCE_HARDWARE_EXPERIMENT".into());
+        assert!(
+            sms_asm_content(&cfg, &assets, true, &[], 13)
+                .contains(".define CHR_PACKET_CODE_BANK 1")
+        );
+        cfg.runtime_defines.pop();
+        assert!(!sms_asm_content(&cfg, &assets, true, &[], 13).contains("CHR_PACKET_CODE_BANK"));
         build.asm = ".bank 256 slot 1\n".into();
         assert!(matches!(
             validate_config(&cfg, &assets, &build),

@@ -1,3 +1,4 @@
+.ifndef CNROM_SOURCE_HARDWARE_EXPERIMENT
 .ifndef MMC3_FULL_RUNTIME
 ; chrmap.s — runtime tile remapping + background sub-palette baking.
 ;
@@ -1063,3 +1064,4 @@ _chrmap_attr_write_one_s:
 
 .ends
 .endif ; separate full MMC3 graphics backend
+.endif ; source hardware uses immutable packet presentation

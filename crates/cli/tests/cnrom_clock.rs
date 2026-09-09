@@ -236,6 +236,10 @@ struct ClockFixture {
     shadow_p: Option<u8>,
     fast_forward: bool,
     poll_loops: Vec<(u16, u8)>,
+    source_hardware: bool,
+    source_deferred: bool,
+    vertical: bool,
+    chr: Vec<u8>,
 }
 
 impl ClockFixture {
@@ -255,6 +259,10 @@ impl ClockFixture {
             shadow_p: None,
             fast_forward: false,
             poll_loops: Vec::new(),
+            source_hardware: false,
+            source_deferred: false,
+            vertical: false,
+            chr: vec![0; 32768],
         };
         fixture.finish_at(0x8000 + main.len() as u16);
         fixture
@@ -281,8 +289,14 @@ impl ClockFixture {
         }
         let mut rom = b"NES\x1a".to_vec();
         rom.extend([2, 4, 0x30, 8, 0x10, 0, 0, 0, 0, 0, 0, 0]);
+        if self.vertical {
+            rom[6] |= 1;
+        }
+        if self.source_hardware {
+            rom[15] = 1; // NES2 standard controllers, not unspecified expansion.
+        }
         rom.extend(prg);
-        rom.extend(vec![0; 32768]);
+        rom.extend(&self.chr);
         rom
     }
 }
@@ -715,13 +729,31 @@ fn generate_clock(fixture: &ClockFixture) -> (PathBuf, std::process::Output) {
         .canonicalize()
         .unwrap();
     let work = root.join(format!(
-        "out/tests/cnrom-clock-{}-{}",
+        "out/tests/cnrom-clock-{}{}-{}",
         fixture.name,
+        if fixture.source_deferred {
+            "-deferred"
+        } else {
+            ""
+        },
         std::process::id()
     ));
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("fixture.nes"), fixture.rom()).unwrap();
     let mut profile = "[rom]\nname='source-clock-fixture'\nmapper=3\nprg_kib=32\nchr_kib=32\n[translation]\nstack_discipline='software'\nruntime_defines=['CNROM_SOURCE_CLOCK_EXPERIMENT']\n".to_owned();
+    if fixture.source_hardware {
+        profile = profile.replace(
+            "CNROM_SOURCE_CLOCK_EXPERIMENT",
+            "CNROM_SOURCE_HARDWARE_EXPERIMENT",
+        );
+    }
+    if fixture.source_deferred {
+        assert!(fixture.source_hardware);
+        profile = profile.replace(
+            "'CNROM_SOURCE_HARDWARE_EXPERIMENT'",
+            "'CNROM_SOURCE_HARDWARE_EXPERIMENT','CNROM_SOURCE_HARDWARE_DEFERRED_EXPERIMENT'",
+        );
+    }
     if fixture.fast_forward {
         profile.push_str("source_clock_fast_forward=true\n");
     }
@@ -734,12 +766,18 @@ fn generate_clock(fixture: &ClockFixture) -> (PathBuf, std::process::Output) {
         ));
     }
     std::fs::write(work.join("profile.toml"), profile).unwrap();
-    let generated = Command::new(env!("CARGO_BIN_EXE_nes-to-sms"))
+    let generator = std::env::var_os("CNROM_GENERATOR_BIN")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_nes-to-sms").into());
+    let generated = Command::new(generator)
         .arg(work.join("fixture.nes"))
         .arg(work.join("profile.toml"))
         .arg(work.join("sms"))
         .arg("--runtime")
-        .arg(root.join("runtime"))
+        .arg(
+            std::env::var_os("CNROM_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.join("runtime")),
+        )
         .output()
         .unwrap();
     std::fs::write(
@@ -921,7 +959,13 @@ fn assembled_source_status_nmi_brk_and_dma_keep_literal_timing_and_state() {
 
 fn assert_clock_fixture(fixture: &ClockFixture) -> PathBuf {
     let work = assemble_clock(fixture);
-    let mut trace = Command::new(env!("CARGO_BIN_EXE_trace-sms"));
+    let trace_binary = std::env::var_os("CNROM_TRACE_BIN")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_trace-sms").into());
+    let mut trace = Command::new(trace_binary);
+    if fixture.source_deferred {
+        let symbols = std::fs::read_to_string(work.join("sms/sms.sym")).unwrap();
+        trace.env("SMS_SOURCE_DOMAIN_FORMAT", domain_format(&symbols));
+    }
     trace
         .arg(work.join("sms/sms.sms"))
         .arg("--steps")
@@ -959,4 +1003,458 @@ fn assert_clock_fixture(fixture: &ClockFixture) -> PathBuf {
         String::from_utf8_lossy(&output.stderr)
     );
     work
+}
+
+#[test]
+#[ignore = "requires Docker WLA; genuine two-PHA computed RTS through pipeline rewrite"]
+fn assembled_computed_rts_dispatch_keeps_six_source_cycles() {
+    for (name, hardware) in [
+        ("computed-rts-clock", false),
+        ("computed-rts-hardware", true),
+    ] {
+        // Both unmatched pushes belong to one discovered routine, so the actual
+        // pipeline's mark_rts_dispatch rewrite (not a hand-built IR) must fire.
+        let mut fixture = ClockFixture::new(
+            name,
+            &[0xa2, 0x3f, 0x9a, 0xa9, 0x81, 0x48, 0xa9, 0x1f, 0x48, 0x60],
+            if hardware { 40 } else { 33 },
+            &[(0x21, 0x1f), (0x13e, 0x1f), (0x13f, 0x81), (0xb02, 0x3f)],
+        );
+        fixture.place(0x8120, &[0x85, 0x21]);
+        fixture.finish_at(0x8122);
+        fixture.extra_roots.push(0x8120);
+        fixture.source_hardware = hardware;
+        fixture.source_deferred = hardware;
+        fixture.shadow_p = Some(0xa4);
+        if hardware {
+            fixture.place(fixture.stop, &[0xad, 0x00, 0x50]);
+        }
+        // The established instruction oracle independently checks the computed
+        // target, guest stack, and surviving A, without claiming bus timing.
+        let mut bus = FixedPrgBus {
+            prg: &fixture.prg,
+            ram: [0; 2048],
+        };
+        let mut cpu = oracle_6502::Cpu {
+            pc: 0x8000,
+            ..oracle_6502::Cpu::new()
+        };
+        for _ in 0..20 {
+            if cpu.pc == fixture.stop {
+                break;
+            }
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!((cpu.pc, cpu.a, cpu.sp, cpu.p), (0x8127, 0xa5, 0x3f, 0xa4));
+        assert_eq!(
+            (bus.ram[0x21], bus.ram[0x13e], bus.ram[0x13f]),
+            (0x1f, 0x1f, 0x81)
+        );
+        let work = assert_clock_fixture(&fixture);
+        eprintln!("computed RTS {name}: {}", work.display());
+    }
+}
+
+fn source_irq_fixture(kind: &str) -> ClockFixture {
+    let (name, mut main, setup_cycles, boundary, opcode, pushed_p, delayed) = match kind {
+        "cli" => (
+            "hardware-irq-cli",
+            vec![0xa2, 0x3f, 0x9a],
+            4,
+            29828,
+            0x58,
+            0x22,
+            true,
+        ),
+        "sei" => (
+            "hardware-irq-sei",
+            vec![0xa2, 0x3f, 0x9a, 0x58],
+            6,
+            29828,
+            0x78,
+            0x26,
+            false,
+        ),
+        "plp-mask" => (
+            "hardware-irq-plp-mask",
+            vec![0xa2, 0x3e, 0x9a, 0xa9, 0x24, 0x8d, 0x3f, 1, 0x58],
+            12,
+            29826,
+            0x28,
+            0x24,
+            false,
+        ),
+        "plp-unmask" => (
+            "hardware-irq-plp-unmask",
+            vec![0xa2, 0x3e, 0x9a, 0xa9, 0x20, 0x8d, 0x3f, 1],
+            10,
+            29826,
+            0x28,
+            0x20,
+            true,
+        ),
+        "rti" => (
+            "hardware-irq-rti",
+            vec![
+                0xa2, 0x3c, 0x9a, 0xa9, 0x20, 0x8d, 0x3d, 1, 0xa9, 0, 0x8d, 0x3e, 1, 0xa9, 0x90,
+                0x8d, 0x3f, 1,
+            ],
+            22,
+            29824,
+            0x40,
+            0x20,
+            false,
+        ),
+        _ => unreachable!(),
+    };
+    // Enable pulse1 with length10. Its first half-frame event reduces it to9;
+    // source $4015 therefore reports41 (active pulse + newly asserted IRQ).
+    main.extend([0xa9, 1, 0x8d, 0x15, 0x40, 0xa9, 0, 0x8d, 3, 0x40]);
+    // Literal delay: LDY23=2; each outer body LDX0=2, 256 DEX/BNE pairs=1279,
+    // DEY/BNE=5 except last4. Total 2 +23*1286 -1 =29579 source cycles.
+    main.extend([0xa0, 23, 0xa2, 0, 0xca, 0xd0, 0xfd, 0x88, 0xd0, 0xf8]);
+    let reached = 7 + setup_cycles + 12 + 29579; // Includes seven reset reads.
+    assert_eq!((boundary - reached) % 2, 0);
+    main.extend(vec![0xea; (boundary - reached) / 2]);
+    let critical = 0x8000 + main.len() as u16;
+    main.extend([opcode, 0xea]);
+    let return_pc = if opcode == 0x40 {
+        0x9000
+    } else {
+        critical + 1 + u16::from(delayed)
+    };
+    let cycles = if opcode == 0x40 { 29887 } else { 29889 };
+    let mut fixture = ClockFixture::new(
+        name,
+        &main,
+        cycles,
+        &[
+            (0x500, pushed_p),
+            (0x501, return_pc as u8),
+            (0x502, (return_pc >> 8) as u8),
+            (0x503, 0x41),
+            (0xabd, 0x3c), // Source-boundary X/Y snapshots, not inactive CB00.
+            (0xabc, 0),
+            (0xb02, 0x3f),
+            (0x1500, 0),
+            (0x1501, 0),
+            (0x1400, 1), // IRQ cleared; frame0 retired, frame1 capture in flight.
+            (0xa88, 1),
+        ],
+    );
+    fixture.source_hardware = true;
+    fixture.trace_steps = 12_000_000;
+    fixture.irq = 0xc000;
+    // Observe the REAL guest stack, then read internal APU status outside the
+    // three-cycle IRQ-assertion race, and RTI without fake frame ownership.
+    fixture.place(
+        0xc000,
+        &[
+            0xba, 0xbd, 1, 1, 0x8d, 0, 5, 0xbd, 2, 1, 0x8d, 1, 5, 0xbd, 3, 1, 0x8d, 2, 5, 0xad,
+            0x15, 0x40, 0x8d, 3, 5, 0x40,
+        ],
+    ); // 2 +3*(4+4) +4+4 +6 =40.
+    if opcode == 0x40 {
+        fixture.finish_at(0x9000);
+        fixture.extra_roots.push(0x9000);
+    }
+    fixture.place(fixture.stop, &[0xad, 0, 0x50]); // Explicit guarded expansion.
+    fixture.shadow_p = Some(if pushed_p & 4 != 0 { 0xa4 } else { 0xa0 });
+    fixture
+}
+
+#[test]
+#[ignore = "requires Docker WLA; genuine source APU IRQ at cold cycle29829"]
+fn assembled_source_hardware_irq_polls_cli_sei_plp_and_rti_at_literal_phases() {
+    for kind in ["cli", "sei", "plp-mask", "plp-unmask", "rti"] {
+        let work = assert_clock_fixture(&source_irq_fixture(kind));
+        eprintln!("hardware IRQ {kind}: {}", work.display());
+    }
+}
+
+fn source_render_fixture() -> ClockFixture {
+    let delay = |count| [0xa0, count, 0xa2, 0, 0xca, 0xd0, 0xfd, 0x88, 0xd0, 0xf8];
+    let mut main = delay(23).to_vec(); // C7+29579=29586, before startup release.
+    main.extend([0xea; 42]); // C29670, after release at29668.
+    main.extend([0xa9, 0x40, 0x8d, 0x17, 0x40]); // Inhibit APU IRQ, C29676.
+    main.extend([0xa9, 0, 0x8d, 3, 0x20]); // OAMADDR0, C29682.
+    main.extend([0xa2, 0, 0xa9, 0xff, 0x8d, 4, 0x20, 0xe8, 0xd0, 0xfa]);
+    // LDX/LDA4 +256*(STA4+INX2+BNE3)-1 =2307; OAMADDR wraps0.
+    main.extend(delay(20)); // C31989+25721=57710, second source VBlank.
+    main.extend([0xa9, 0x3f, 0x8d, 6, 0x20, 0xa9, 0, 0x8d, 6, 0x20]);
+    for index in 0..32 {
+        main.extend([0xa9, [0x0f, 0x30, 0x01, 0x16][index & 3], 0x8d, 7, 0x20]);
+    }
+    // CIRAM is the declared cold zero-filled memory: every cell uses tile0 /
+    // palette0. Clear ctrl/scroll/address through actual translated writes.
+    main.extend([
+        0xa9, 0, 0x8d, 0, 0x20, 0x8d, 5, 0x20, 0x8d, 5, 0x20, 0x8d, 6, 0x20, 0x8d, 6, 0x20,
+    ]);
+    // Palette changes and scroll/address setup finish C57936, still VBlank.
+    main.extend([0xa9, 0x1e, 0x8d, 1, 0x20]); // Enable both layers C57942.
+    main.extend(delay(23)); // C87521, beyond whole rendered interval2.
+    let mut fixture = ClockFixture::new(
+        "hardware-rendered-frame",
+        &main,
+        87531,
+        &[
+            (0x1400, 0),
+            (0x1406, 2),
+            (0x1407, 0),
+            (0x1408, 0),
+            (0x1409, 0),
+            (0xa88, 2),
+            (0xb09, 0x1e),
+            (0xb0a, 0),
+            (0x1317, 0),
+            (0x1500, 0),
+        ],
+    );
+    fixture.source_hardware = true;
+    fixture.trace_steps = 45_000_000;
+    fixture.place(fixture.stop, &[0xad, 0, 0x50]);
+    fixture.chr[..16].copy_from_slice(&[
+        0x5a, 0xa5, 0xff, 0, 0xff, 0, 0x55, 0xaa, 0x3c, 0xc3, 0, 0xff, 0xff, 0, 0x55, 0xaa,
+    ]);
+    fixture
+}
+
+#[test]
+#[ignore = "requires Docker WLA; complete frame from genuine translated NES register writes"]
+fn assembled_source_hardware_builds_and_retires_its_first_literal_rendered_frame() {
+    let work = assert_clock_fixture(&source_render_fixture());
+    eprintln!("hardware rendered frame: {}", work.display());
+}
+
+fn source_status_fixture() -> ClockFixture {
+    let mut main = vec![0xa0, 21, 0xa2, 0, 0xca, 0xd0, 0xfd, 0x88, 0xd0, 0xf8];
+    // Seven reset +27007 delay +LDAzp3 +186NOP372 =27389.
+    main.extend([0xa5, 0]);
+    main.extend([0xea; 186]);
+    main.extend([0xad, 2, 0x20, 0x8d, 0, 5]); // Read27393; store27397.
+    let mut fixture = ClockFixture::new(
+        "hardware-status-27393",
+        &main,
+        27407,
+        &[(0x500, 0), (0xaa3, 1), (0xaa5, 0), (0x1400, 0), (0xa88, 0)],
+    );
+    fixture.source_hardware = true;
+    fixture.trace_steps = 12_000_000;
+    fixture.place(fixture.stop, &[0xad, 0, 0x50]);
+    fixture.shadow_p = Some(0xa4);
+    fixture
+}
+
+#[test]
+#[ignore = "requires Docker WLA; translated startup poll three dots before first VBlank"]
+fn assembled_source_hardware_status_at_27393_is_normal_not_a_collision() {
+    let work = assert_clock_fixture(&source_status_fixture());
+    eprintln!("hardware status27393: {}", work.display());
+}
+
+#[test]
+#[ignore = "requires Docker WLA; exact off/on deferred-domain source fixtures"]
+fn assembled_source_hardware_deferred_pairs_keep_literal_endpoints() {
+    for mut fixture in [
+        source_irq_fixture("cli"),
+        source_irq_fixture("rti"),
+        source_status_fixture(),
+        source_render_fixture(),
+    ] {
+        let precise = assert_clock_fixture(&fixture);
+        fixture.source_deferred = true;
+        let deferred = assert_clock_fixture(&fixture);
+        eprintln!(
+            "domain pair {}: precise={} deferred={}",
+            fixture.name,
+            precise.display(),
+            deferred.display()
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires CNROM_DEFERRED_PROJECT assembled deferred subject"]
+fn deferred_cli_requires_explicit_domain_observer_acknowledgment() {
+    let project = PathBuf::from(std::env::var("CNROM_DEFERRED_PROJECT").unwrap());
+    let symbols = std::fs::read_to_string(project.join("sms.sym")).unwrap();
+    let format = domain_format(&symbols);
+    let trace = std::env::var_os("CNROM_TRACE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_trace-sms")));
+    for acknowledgment in [
+        None,
+        Some("incorrect-v0"),
+        Some("deferred-v1"),
+        Some("deferred-v2"),
+    ]
+    .into_iter()
+    .filter(|value| *value != Some(format))
+    {
+        let mut command = Command::new(&trace);
+        command.arg(project.join("sms.sms")).args(["--steps", "1"]);
+        command.env_remove("SMS_SOURCE_DOMAIN_FORMAT");
+        if let Some(value) = acknowledgment {
+            command.env("SMS_SOURCE_DOMAIN_FORMAT", value);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("require SMS_SOURCE_DOMAIN_FORMAT={format}"))
+        );
+    }
+    let output = Command::new(trace)
+        .arg(project.join("sms.sms"))
+        .args(["--search-late-routes", "--steps", "1"])
+        .env("SMS_SOURCE_DOMAIN_FORMAT", format)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("legacy route observers do not support")
+    );
+}
+
+fn domain_format(symbols: &str) -> &'static str {
+    if symbols.contains("rt_source_domain_format_v3") {
+        "deferred-v3"
+    } else if symbols.contains("rt_source_domain_format_v2") {
+        "deferred-v2"
+    } else {
+        "deferred-v1"
+    }
+}
+
+#[test]
+#[ignore = "requires Docker WLA and frozen v3 runtime; same-source precise/ordinary/CPU-wait triple"]
+fn assembled_source_rendered_poll_triple_keeps_literal_nmi_exit_and_frame() {
+    let mut fixture = source_render_fixture();
+    let tail = fixture.stop - 5 - 10;
+    assert_eq!(
+        &fixture.prg[usize::from(tail - 0x8000)..usize::from(tail - 0x8000) + 10],
+        &[0xa0, 23, 0xa2, 0, 0xca, 0xd0, 0xfd, 0x88, 0xd0, 0xf8]
+    );
+    // C57942: preserve the existing genuine cold setup and whole rendered
+    // picture; replace only its final busy delay with an annotated guest wait.
+    fixture.place(
+        tail,
+        &[
+            0xad, 2, 0x20, 0xa9, 0x80, 0x8d, 0, 0x20, 0xa9, 1, 0x85, 0x20, 0x4c, 0, 0x82,
+        ],
+    );
+    fixture.place(0x8200, &[0xa5, 0x20, 0xd0, 0xfc]);
+    fixture.finish_at(0x8204);
+    fixture.place(fixture.stop, &[0xad, 0, 0x50]);
+    fixture.nmi = 0xc000;
+    fixture.place(0xc000, &[0xa9, 0, 0x85, 0x20, 0xe6, 0x21, 0x40]);
+    fixture.cycles = 86996;
+    fixture.shadow_p = Some(0xa4);
+    fixture.expected.extend([
+        (0x20, 0),
+        (0x21, 1),
+        (0x1fd, 0x82),
+        (0x1fc, 0),
+        (0x1fb, 0x24),
+        (0xb02, 0xfd),
+        (0xb08, 0x80),
+        (0xa84, 124),
+        (0xa85, 0),
+        (0xa86, 241),
+        (0xa87, 0),
+    ]);
+    fixture.poll_loops.push((0x8200, 0x20));
+    for (name, deferred, fast) in [
+        ("hardware-rendered-poll-precise", false, false),
+        ("hardware-rendered-poll-ordinary", true, false),
+        ("hardware-rendered-poll-fast", true, true),
+    ] {
+        fixture.name = name;
+        fixture.source_deferred = deferred;
+        fixture.fast_forward = fast;
+        let work = assert_clock_fixture(&fixture);
+        eprintln!("rendered poll {name}: {}", work.display());
+    }
+}
+
+#[test]
+#[ignore = "requires Docker WLA and CNROM_RUNTIME_DIR frozen precise source-hardware runtime"]
+fn assembled_source_hardware_audio_two_literal_periods_and_silence() {
+    assert!(
+        std::env::var_os("CNROM_RUNTIME_DIR").is_some(),
+        "freeze runtime input explicitly"
+    );
+    let delay = |count| [0xa0, count, 0xa2, 0, 0xca, 0xd0, 0xfd, 0x88, 0xd0, 0xf8];
+    let mut main = vec![0xa9, 0x40, 0x8d, 0x17, 0x40]; // C13 IRQ inhibit.
+    main.extend(delay(23)); //29579 original cycles, C29592.
+    for (address, value) in [
+        (0x4000u16, 0x3f),
+        (0x4001, 0),
+        (0x4002, 0xfd),
+        (0x4015, 1),
+        (0x4003, 0),
+    ] {
+        main.extend([0xa9, value, 0x8d, address as u8, (address >> 8) as u8]);
+    }
+    // Timer253 +1 -> SMSperiod254 atC29622, constantvolume15/lengthhalt.
+    main.extend([0xa9, 0xa1, 0x8d, 0xfe, 7]); // C29628.
+    main.extend(delay(10)); //12861 cycles ->42489.
+    main.extend([0xa9, 0x7e, 0x8d, 2, 0x40]); // C42495 period127.
+    main.extend([0xa9, 0xa2, 0x8d, 0xfe, 7]); // C42501.
+    main.extend(delay(10)); // C55362.
+    main.extend([0xa9, 0, 0x8d, 0x15, 0x40]); // C55368 silence.
+    main.extend([0xa9, 0xa3, 0x8d, 0xfe, 7]); // C55374.
+    let mut fixture = ClockFixture::new(
+        "hardware-audio-periods",
+        &main,
+        55384,
+        &[
+            (0x7fe, 0xa3),
+            (0xb02, 0xfd),
+            (0xb09, 0),
+            (0xb30, 0x3f),
+            (0xb32, 0x7e),
+            (0xb45, 0),
+            (0x1500, 0),
+            (0x1501, 0),
+            (0xa88, 1),
+            (0xa84, 85),
+            (0xa85, 0),
+            (0xa86, 225),
+            (0xa87, 0),
+        ],
+    );
+    fixture.source_hardware = true;
+    fixture.shadow_p = Some(0xa4);
+    fixture.trace_steps = 21_000_000;
+    fixture.place(fixture.stop, &[0xad, 0, 0x50]);
+    let work = assert_clock_fixture(&fixture);
+    eprintln!("genuine source audio: {}", work.display());
+}
+
+#[test]
+#[ignore = "requires Docker WLA and CNROM_RUNTIME_DIR isolated materializer runtime"]
+fn assembled_source_hardware_vertical_ppu_literal_subject() {
+    assert!(std::env::var_os("CNROM_RUNTIME_DIR").is_some());
+    let mut fixture = ClockFixture::new("hardware-ppu-vertical", &[0xea], 19, &[]);
+    fixture.source_hardware = true;
+    fixture.vertical = true;
+    fixture.place(fixture.stop, &[0xad, 0, 0x50]);
+    let work = assert_clock_fixture(&fixture);
+    let assembly = std::fs::read_to_string(work.join("sms/sms.asm")).unwrap();
+    assert!(assembly.contains(".define NES_MIRRORING_VERTICAL"));
+    eprintln!("vertical source PPU subject: {}", work.display());
+}
+
+#[test]
+#[ignore = "requires Docker WLA and CNROM_RUNTIME_DIR isolated materializer runtime"]
+fn assembled_source_hardware_horizontal_ppu_literal_subject() {
+    assert!(std::env::var_os("CNROM_RUNTIME_DIR").is_some());
+    let mut fixture = ClockFixture::new("hardware-ppu-horizontal", &[0xea], 19, &[]);
+    fixture.source_hardware = true;
+    fixture.place(fixture.stop, &[0xad, 0, 0x50]);
+    let work = assert_clock_fixture(&fixture);
+    let assembly = std::fs::read_to_string(work.join("sms/sms.asm")).unwrap();
+    assert!(!assembly.contains(".define NES_MIRRORING_VERTICAL"));
+    eprintln!("horizontal source PPU subject: {}", work.display());
 }

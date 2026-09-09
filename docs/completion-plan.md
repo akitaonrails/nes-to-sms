@@ -35,8 +35,24 @@ The subsequent [source-clock foundation](source-clock-runtime.md) also passes:
 ordered accesses, source-driven NMI/BRK/RTI and DMA are tested under an explicitly
 restricted, rendering-disabled capability. The [banked directory and exact
 quiet-wait checkpoint](source-clock-scalability.md) now also passes independent
-review: 622 workspace tests, 29 assembled cases and 15 helper checks. Next
-implement remaining source hardware and coherent rendering. These are measured execution prerequisites,
+review: 622 workspace tests, 29 assembled cases and 15 helper checks. The
+[source hardware and coherent-rendering integration](source-hardware-runtime.md)
+is now in progress: banked synthetic pictures and intentional audible output
+work in an actual SMS core. An original-6502 synthetic program also produces
+the expected complete frame, and source-driven IRQ fixtures pass. Adventure's
+neutral boot now reaches the complete title: five guest-state landmarks match
+the original, and its full 240-line title matches every pixel after declared
+palette conversion. A computed-RTS timing bug exposed by the game is fixed
+generically and covered by a failing-before/passing-after bus regression.
+Motion remains unfinished: 90 title updates trigger a one-physical-frame
+blank fallback at 500. An input-only actual-core route now enters level 1,
+moves, jumps, lands and releases controls without traps. Next close the
+measured upload-budget failure and extend gameplay/reference coverage.
+Exact hardware batching and bounded PAL
+SMS-II 240-line fixtures pass, not full-game acceptance. Native captures show enemies/bosses lost by fixed
+224-line crops; the PAL choice preserves geometry while retaining NTSC source
+timing and documenting the 50 Hz display tradeoff. Existing game targets do
+not change. These are measured execution prerequisites,
 not another old-game optimization campaign. Close the
 full-game content checklist and mapper coverage matrix before
 advancing. Completion includes every level/branch, sprite, background, music

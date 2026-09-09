@@ -771,7 +771,10 @@ fn emit_translated_routine(
         return Ok(());
     }
     let lifter_emits_auto = r.branch_labels.contains(&auto) || r.name == auto;
-    if r.ops.len() > 600 {
+    // The new source-hardware path has validated per-instruction timing and
+    // exact whole-routine byte packing below. IR count is not a ROM capacity
+    // limit (nor evidence that verified source bytes are data).
+    if r.ops.len() > 600 && !opts.profile.is_some_and(|p| p.source_hardware_experiment()) {
         if opts.profile.is_some_and(|p| p.dynamic_cpu_bus()) {
             return Err(Error::Diagnostic(format!(
                 "MMC3 full runtime routine {} exceeds the analyzed routine size bound ({} ops)",
@@ -831,6 +834,14 @@ fn emit_translated_vector_aliases(program: &mut z80_emit::Program, reset: u16, n
     program.translated_tail_jmp(&format_label(irq));
 }
 
+fn cnrom_environment_supported(header: &[u8], source_hardware: bool) -> bool {
+    // NES2 byte15=1 selects the standard controllers implemented only by the
+    // hardware domain. Do not treat other peripherals or reserved bits as pads.
+    header[7] & 3 == 0
+        && header[12..15] == [0, 0, 0]
+        && (header[15] == 0 || (source_hardware && header[15] == 1))
+}
+
 pub fn run(args: &Args) -> Result<String, Error> {
     // 1. Read and parse the ROM.
     let rom_bytes = std::fs::read(&args.rom)?;
@@ -843,10 +854,12 @@ pub fn run(args: &Args) -> Result<String, Error> {
         ));
     }
     if prof.cnrom_bus_experiment()
-        && (rom_bytes[7] & 3 != 0
-            || rom_bytes[12..16] != [0, 0, 0, 0]
+        && (!cnrom_environment_supported(&rom_bytes[..16], prof.source_hardware_experiment())
             || rom_bytes.len() != 16 + image.prg.len() + image.chr.len())
     {
+        if prof.source_hardware_experiment() {
+            return Err(Error::Diagnostic("CNROM source hardware requires plain NTSC NES2 with unspecified or standard controllers and no trainer, miscellaneous ROM, other peripheral or trailing data".into()));
+        }
         return Err(Error::Diagnostic("CNROM bus experiment requires a plain NTSC NES2 synthetic image with no trainer, miscellaneous ROM, expansion device or trailing data".into()));
     }
 
@@ -2291,6 +2304,14 @@ pub fn run(args: &Args) -> Result<String, Error> {
     //    re-enable this strip if linker overflows happen.
     build.asm = strip_section(&build.asm, "runtime_forward_decls");
     build.asm = strip_inline_org(&build.asm);
+    if prof.source_hardware_atlas_experiment() {
+        // SUPERFREE could consume the reserved atlas bank even though the
+        // translated code starts at bank4. Trap helpers belong in fixed ROM.
+        build.asm = build.asm.replace(
+            ".section \"unresolved_stubs\" superfree",
+            ".bank 0 slot 0\n.section \"unresolved_stubs\" free",
+        );
+    }
     if prof.source_clock_experiment() {
         let code_after_data =
             31 + image.chr.len().div_ceil(0x4000) as u32 + u32::from(build.project_data_bank_count);
@@ -3176,6 +3197,32 @@ const RUNTIME_SYMBOLS: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cnrom_hardware_admits_only_implemented_standard_controller_header() {
+        let mut header = [0u8; 16];
+        header[7] = 8;
+        for hardware in [false, true] {
+            for device in [0, 1, 2, 8, 0x81] {
+                header[15] = device;
+                assert_eq!(
+                    super::cnrom_environment_supported(&header, hardware),
+                    device == 0 || (hardware && device == 1)
+                );
+            }
+            header[15] = u8::from(hardware);
+            for index in 12..15 {
+                header[index] = 1;
+                assert!(!super::cnrom_environment_supported(&header, hardware));
+                header[index] = 0;
+            }
+            for console in 1..=3 {
+                header[7] = 8 | console;
+                assert!(!super::cnrom_environment_supported(&header, hardware));
+            }
+            header[7] = 8;
+        }
+    }
+
     #[test]
     fn source_code_remap_preserves_sections_and_rejects_physical_overflow() {
         let asm = ".bank 23 slot 1\n.section \"generated_code_22\" free\n.ends\n.bank 24 slot 1\n.section \"generated_code_23\" free\n  .db :L_9000\n.ends\n.bank (PROJECT_ROM_DATA_BANK_BASE + 0) slot 1\n.section \"rt_dispatch_table_sec\" free\n.ends\n.bank 0 slot 0\n.section \"rt_dispatch_directory_sec\" free\n.ends\n";

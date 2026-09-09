@@ -38,7 +38,15 @@ _vdp_init_table:
   ;   bit 5 = 1  mode bit M4 (selects Mode 4)
   ;   bit 2 = 1  hide left-column (prevents scroll artifacts)
   ;   bit 1 = 1  mode bit M2
+.ifdef CNROM_SOURCE_HARDWARE_EXPERIMENT
+  ; Coherent source packets have no legacy HUD lock/default left clip. Set
+  ; their stable R0 before later enabling224-line M1 in packet initialization.
+  ; Besides avoiding a spurious initial split, this keeps a same-frame R0
+  ; change from masking the height notification in GPGX162c343's frontend.
+  .db 0, $06
+.else
   .db 0, $66
+.endif
   ; reg 1: $A0 = %10100000
   ;   bit 7 = 1  VBlank/frame interrupt enable
   ;   bit 6 = 0  display disabled (enabled after asset load in boot_main)

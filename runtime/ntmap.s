@@ -1,3 +1,4 @@
+.ifndef CNROM_SOURCE_HARDWARE_EXPERIMENT
 .ifndef MMC3_FULL_RUNTIME
 ; ntmap.s — NES nametable/CIRAM address helpers.
 ;
@@ -755,3 +756,4 @@ _npc_attr:
   ret
 .endif
 .endif ; separate full MMC3 graphics backend
+.endif ; source hardware owns raw CIRAM and scroll
