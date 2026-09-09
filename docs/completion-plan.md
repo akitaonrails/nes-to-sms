@@ -33,9 +33,10 @@ Work on one game at a time, in this order:
 [restricted source-bus checkpoint](cnrom-bus-runtime.md) pass independent review.
 The subsequent [source-clock foundation](source-clock-runtime.md) also passes:
 ordered accesses, source-driven NMI/BRK/RTI and DMA are tested under an explicitly
-restricted, rendering-disabled capability. Next bank its decoded-PC directory
-and prove exact quiet-wait acceleration, then implement remaining source
-hardware and coherent rendering. These are measured execution prerequisites,
+restricted, rendering-disabled capability. The [banked directory and exact
+quiet-wait checkpoint](source-clock-scalability.md) now also passes independent
+review: 622 workspace tests, 29 assembled cases and 15 helper checks. Next
+implement remaining source hardware and coherent rendering. These are measured execution prerequisites,
 not another old-game optimization campaign. Close the
 full-game content checklist and mapper coverage matrix before
 advancing. Completion includes every level/branch, sprite, background, music

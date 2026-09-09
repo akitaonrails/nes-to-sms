@@ -206,6 +206,11 @@ fn validate_config(
             "source clock requires its CNROM raw-bus dependency".into(),
         ));
     }
+    if source_clock && cfg.rom_kib > 4096 {
+        return Err(EmitError::InvalidCnromConfig(
+            "source clock image exceeds 256 Sega bank identities".into(),
+        ));
+    }
     if cnrom_bus != cfg.cnrom.is_some() || (cfg.mapper == 3) != cnrom_bus {
         return Err(EmitError::InvalidCnromConfig(
             "mapper 3 requires the explicit bus-only experiment and board configuration".into(),
@@ -374,7 +379,16 @@ fn validate_config(
     } else {
         24
     };
-    if let Some(&bank) = explicit_banks.iter().find(|&&bank| bank >= reserved_bank) {
+    let source_data_end = if source_clock {
+        31 + assets.chr_nes.as_ref().unwrap().len().div_ceil(0x4000) as u32
+            + u32::from(build.project_data_bank_count)
+    } else {
+        0
+    };
+    if let Some(&bank) = explicit_banks
+        .iter()
+        .find(|&&bank| bank >= reserved_bank && (!source_clock || bank < source_data_end))
+    {
         return Err(EmitError::ReservedBankPlacement {
             bank,
             reserved_bank,
@@ -449,12 +463,16 @@ fn validate_config(
             .max(31 + assets.chr_nes.as_ref().unwrap().len().div_ceil(0x4000) as u32 - 1);
     }
     if build.project_data_bank_count != 0 {
-        if !mmc3_full {
+        if !mmc3_full && !source_clock {
             return Err(EmitError::InvalidMmc3Config(
-                "project data-bank reservation currently requires full MMC3".into(),
+                "project data-bank reservation requires full MMC3 or the CNROM source clock".into(),
             ));
         }
-        required_bank += u32::from(build.project_data_bank_count);
+        if source_clock {
+            required_bank = required_bank.max(source_data_end - 1);
+        } else {
+            required_bank += u32::from(build.project_data_bank_count);
+        }
     }
     if required_bank >= bank_count {
         return Err(EmitError::LayoutExceedsRomCapacity {
@@ -605,10 +623,12 @@ fn sms_asm_content(
         mapper_define.push_str(&format!("\n.define CNROM_CHR_DATA_BASE 31\n.define CNROM_CHR_BANK_MASK {}\n.define CNROM_BUS_CONFLICTS {}\n.define CNROM_PRG_RAM {}", count - 1, u8::from(board.bus_conflicts), u8::from(board.prg_ram)));
     }
     if project_data_bank_count != 0 {
-        // validate_config admits this only for full MMC3 and proves the
-        // reservation fits after all packed PRG, boot assets and raw CHR.
-        let data_base =
-            asset_base + 2 + (assets.chr_nes.as_ref().unwrap().len() as u32).div_ceil(0x4000);
+        // Keep records after the last raw CHR bank, separate from code/assets.
+        let data_base = if cfg.cnrom.is_some() {
+            31 + (assets.chr_nes.as_ref().unwrap().len() as u32).div_ceil(0x4000)
+        } else {
+            asset_base + 2 + (assets.chr_nes.as_ref().unwrap().len() as u32).div_ceil(0x4000)
+        };
         mapper_define.push_str(&format!("\n.define PROJECT_ROM_DATA_BANK_BASE {data_base}"));
     }
     if cfg.input_action {
@@ -1097,6 +1117,65 @@ mod tests {
         assets.prg_high = Some(vec![0; 0x2000]);
         assert!(matches!(
             validate_config(&cfg, &assets, &minimal_build()),
+            Err(EmitError::InvalidCnromConfig(_))
+        ));
+    }
+
+    #[test]
+    fn source_clock_records_and_code_share_only_unreserved_banks() {
+        let mut cfg = minimal_cfg();
+        cfg.mapper = 3;
+        cfg.rom_kib = 4096;
+        cfg.raw_ciram_backend = RawCiramBackend::SramSlot2;
+        cfg.runtime_defines = vec![
+            "CNROM_BUS_EXPERIMENT".into(),
+            "CNROM_SOURCE_CLOCK_EXPERIMENT".into(),
+        ];
+        cfg.cnrom = Some(CnromConfig {
+            bus_conflicts: true,
+            prg_ram: false,
+        });
+        let mut assets = minimal_assets();
+        assets.prg_low = Some(vec![0; 0x4000]);
+        assets.prg_high = Some(vec![0; 0x4000]);
+        assets.nametable = Some(vec![0; 0x700]);
+        assets.chr_nes = Some(vec![0; 0x20000]); // raw banks31..38
+        let mut build = minimal_build();
+        build.project_data_bank_count = 13; // records39..51
+        for bank in [1, 23, 52, 255] {
+            build.asm = format!(".bank {bank} slot 1\n");
+            assert!(validate_config(&cfg, &assets, &build).is_ok(), "bank{bank}");
+        }
+        for bank in [24, 30, 31, 38, 39, 51] {
+            build.asm = format!(".bank {bank} slot 1\n");
+            assert!(
+                matches!(
+                    validate_config(&cfg, &assets, &build),
+                    Err(EmitError::ReservedBankPlacement { .. })
+                ),
+                "bank{bank}"
+            );
+        }
+        build.asm = ".bank 256 slot 1\n".into();
+        assert!(matches!(
+            validate_config(&cfg, &assets, &build),
+            Err(EmitError::LayoutExceedsRomCapacity {
+                required_bank: 256,
+                bank_count: 256
+            })
+        ));
+        build.asm.clear();
+        build.project_data_bank_count = 218;
+        assert!(matches!(
+            validate_config(&cfg, &assets, &build),
+            Err(EmitError::LayoutExceedsRomCapacity {
+                required_bank: 256,
+                bank_count: 256
+            })
+        ));
+        cfg.rom_kib = 8192;
+        assert!(matches!(
+            validate_config(&cfg, &assets, &build),
             Err(EmitError::InvalidCnromConfig(_))
         ));
     }

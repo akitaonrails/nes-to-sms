@@ -4133,6 +4133,14 @@ pub fn lower_routine(
                             pc: Some(*pc),
                             reason: "source clock requires valid typed source timing".into(),
                         })?;
+                    if let Some(profile) = opts.profile
+                        && profile.translation.source_clock_fast_forward
+                        && let Some(wait) =
+                            profile.source_poll_loops.iter().find(|wait| wait.at == *pc)
+                    {
+                        program.call("rt_source_poll_loop");
+                        program.data(None, &[(*pc & 0xff) as u8, (*pc >> 8) as u8, wait.zp]);
+                    }
                     program.call("rt_source_begin");
                     program.data(None, &descriptor);
                 }
@@ -5857,6 +5865,52 @@ pub fn lower_routines(
 mod tests {
     use super::*;
     use ir::{AddrExpr, Cond, MemRegion, Op, Routine, ValueSrc};
+
+    #[test]
+    fn source_poll_fast_forward_is_opt_in_and_precedes_the_exact_boundary() {
+        let base = "[rom]\nname='poll'\nmapper=3\nprg_kib=32\nchr_kib=8\n[translation]\nruntime_defines=['CNROM_SOURCE_CLOCK_EXPERIMENT']\n";
+        for enabled in [false, true] {
+            let profile = profile::load_from_str(&format!("{base}source_clock_fast_forward={enabled}\n[[source_poll_loop]]\nat=0x8000\nzp=0x10\n")).unwrap();
+            let instruction = cpu6502::decode_at(&[0xa5, 0x10], 0x8000, 0).unwrap();
+            let routine = make_routine(
+                "poll",
+                vec![
+                    Op::Source {
+                        pc: 0x8000,
+                        size: 2,
+                        text: "LDA $10".into(),
+                        instruction: Some(instruction),
+                    },
+                    Op::LdaMem {
+                        addr: AddrExpr::Const(0x10),
+                        region: MemRegion::ZeroPage,
+                    },
+                ],
+            );
+            let mut program = z80_emit::Program::new();
+            lower_routine(
+                &mut program,
+                &routine,
+                &LowerOptions {
+                    profile: Some(&profile),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for label in program.unresolved_labels() {
+                program.label(label);
+                program.ret();
+            }
+            let asm = program.finish().unwrap().asm;
+            let hook = asm.find("call rt_source_poll_loop");
+            assert_eq!(hook.is_some(), enabled);
+            if let Some(hook) = hook {
+                assert!(hook < asm.find("call rt_source_begin").unwrap());
+                assert!(asm[hook..].contains("$00,$80,$10"));
+            }
+            assert!(asm.contains("call rt_source_read_bus"));
+        }
+    }
 
     #[test]
     fn aligned_indexed_access_uses_three_instructions() {

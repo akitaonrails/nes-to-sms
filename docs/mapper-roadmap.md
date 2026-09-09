@@ -92,6 +92,8 @@ does not mean zero graphics memory. `m.s` means mapper/submapper.
   Submapper 2 explicitly requires AND bus conflicts. Prove writes against the
   currently visible ROM byte, then title → first area → death/restart → area
   transition. Gradius (USA), also `3.2`, **32/32**, is a useful second game.
+  The [banked source-clock checkpoint](source-clock-scalability.md) is reviewed;
+  source graphics/input/audio integration and full-game acceptance remain open.
   [CNROM hardware](https://www.nesdev.org/wiki/CNROM),
   [submapper definitions](https://www.nesdev.org/wiki/NES_2.0_submappers).
 

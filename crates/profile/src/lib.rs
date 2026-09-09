@@ -53,6 +53,9 @@ pub struct Profile {
     /// Verified cooperative VBlank polling boundaries; original code remains translated.
     #[serde(default, rename = "cooperative_wait")]
     pub cooperative_waits: Vec<CooperativeWait>,
+    /// Exact source-clock polling loops; original instructions remain translated.
+    #[serde(default, rename = "source_poll_loop")]
+    pub source_poll_loops: Vec<SourcePollLoop>,
     /// Controller mapping policy. SMS pads have two buttons; NES has
     /// four. `heuristic` (default) keeps the SMB behavior: a
     /// title-mode RAM discriminator flips buttons between
@@ -73,6 +76,9 @@ pub struct Profile {
 /// routes, not provable from the instruction stream).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Translation {
+    /// Opt-in exact quiet-span acceleration; false retains per-bus execution.
+    #[serde(default)]
+    pub source_clock_fast_forward: bool,
     /// Measured far-transfer edge profile for the bank placer: a file of
     /// `CALLER TARGET COUNT` lines (hex NES addresses, from frame-diff's
     /// FD_FAR_EDGES), resolved relative to the profile's directory. The
@@ -464,7 +470,33 @@ pub fn load_from_path(path: impl AsRef<Path>) -> Result<Profile, LoadError> {
     load_from_str(&s)
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePollLoop {
+    pub at: u16,
+    pub zp: u8,
+}
+
 fn validate(p: &Profile) -> Result<(), LoadError> {
+    if (p.translation.source_clock_fast_forward || !p.source_poll_loops.is_empty())
+        && !p.source_clock_experiment()
+    {
+        return Err(LoadError::Validation(
+            "source polling requires the source clock experiment".into(),
+        ));
+    }
+    for (index, wait) in p.source_poll_loops.iter().enumerate() {
+        if wait.at < 0x8000
+            || wait.at & 0xff > 0xfb
+            || p.source_poll_loops[..index]
+                .iter()
+                .any(|other| other.at == wait.at)
+        {
+            return Err(LoadError::Validation(
+                "invalid source_poll_loop address, page or duplicate".into(),
+            ));
+        }
+    }
     if p.translation
         .runtime_defines
         .iter()
@@ -1165,6 +1197,32 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_poll_annotations_are_explicit_unique_and_page_bounded() {
+        let base = "[rom]\nname='poll'\nmapper=3\nprg_kib=32\nchr_kib=8\n[translation]\nruntime_defines=['CNROM_SOURCE_CLOCK_EXPERIMENT']\n";
+        let wait = "[[source_poll_loop]]\nat=0x80fb\nzp=0x10\n";
+        let off = load_from_str(&(base.to_owned() + wait)).unwrap();
+        assert!(!off.translation.source_clock_fast_forward);
+        assert_eq!(off.source_poll_loops.len(), 1);
+        assert!(load_from_str(&(base.to_owned() + wait + "bank=0\n")).is_err());
+        let on =
+            load_from_str(&(base.to_owned() + "source_clock_fast_forward=true\n" + wait)).unwrap();
+        assert!(on.translation.source_clock_fast_forward);
+        for invalid in [
+            wait.replace("0x80fb", "0x80fc"),
+            wait.replace("0x80fb", "0x7ff0"),
+            wait.to_owned() + wait,
+        ] {
+            assert!(load_from_str(&(base.to_owned() + &invalid)).is_err());
+        }
+        assert!(
+            load_from_str(
+                &(base.replace("CNROM_SOURCE_CLOCK_EXPERIMENT", "CNROM_BUS_EXPERIMENT") + wait)
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn cooperative_wait_requires_valid_unique_mmc3_physical_identity() {

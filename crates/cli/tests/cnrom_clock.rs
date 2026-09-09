@@ -234,6 +234,8 @@ struct ClockFixture {
     extra_roots: Vec<u16>,
     trace_steps: u32,
     shadow_p: Option<u8>,
+    fast_forward: bool,
+    poll_loops: Vec<(u16, u8)>,
 }
 
 impl ClockFixture {
@@ -251,6 +253,8 @@ impl ClockFixture {
             extra_roots: Vec::new(),
             trace_steps: 1_500_000,
             shadow_p: None,
+            fast_forward: false,
+            poll_loops: Vec::new(),
         };
         fixture.finish_at(0x8000 + main.len() as u16);
         fixture
@@ -542,6 +546,81 @@ fn nmi_dead_flags_fixture(family: &str) -> ClockFixture {
     fixture
 }
 
+fn quiet_wait_fixtures() -> Vec<ClockFixture> {
+    [
+        ("quiet-off-positive", false, 1, false),
+        ("quiet-on-positive", true, 1, false),
+        ("quiet-off-negative", false, 0x80, false),
+        ("quiet-on-negative", true, 0x80, false),
+        ("quiet-off-alternate", false, 0x80, true),
+        ("quiet-on-alternate", true, 0x80, true),
+        ("quiet-off-zero", false, 0, false),
+        ("quiet-on-zero", true, 0, false),
+    ]
+    .into_iter()
+    .map(|(name, fast, value, alternate)| {
+        let mut main = vec![
+            0x78, 0xa2, 0x3f, 0x9a, 0xa9, value, 0x85, 0x20, 0xa9, 0x80, 0x8d, 0, 0x20, 0xa9, value,
+        ];
+        if alternate {
+            // A80/RAM80 but CMP7F gives N0/Z0/C1. Enter BNE directly: the
+            // next LDA must establish N1, even though A already equals RAM.
+            main.extend([0xc9, 0x7f, 0x4c, 2, 0x81]);
+        } else {
+            main.extend([0x4c, 0, 0x81]);
+        }
+        let cycles = if value == 0 {
+            37
+        } else if alternate {
+            27555
+        } else {
+            27556
+        };
+        let saved_p = if alternate {
+            0xa5
+        } else if value == 0x80 {
+            0xa4
+        } else {
+            0x24
+        };
+        let mut fixture = ClockFixture::new(name, &main, cycles, &[(0x20, 0), (0xb02, 0x3f)]);
+        fixture.place(0x8100, &[0xa5, 0x20, 0xd0, 0xfc]);
+        fixture.finish_at(0x8104);
+        fixture.nmi = 0xc000;
+        fixture.place(0xc000, &[0x8d, 0, 5, 0xa9, 0, 0x85, 0x20, 0xe6, 0x21, 0x40]);
+        fixture.poll_loops.push((0x8100, 0x20));
+        fixture.fast_forward = fast;
+        fixture.shadow_p = Some(if alternate { 0xa5 } else { 0xa4 });
+        fixture.expected.extend([(0xa8c, 9), (0xa8d, 0x81)]);
+        if value != 0 {
+            fixture.expected.extend([
+                (0x21, 1),
+                (0x500, value),
+                (0x13f, 0x81),
+                (0x13e, 2),
+                (0x13d, saved_p),
+            ]);
+        } else {
+            fixture.expected.push((0x21, 0));
+        }
+        fixture.trace_steps = if fast { 2_000_000 } else { 8_000_000 };
+        // Normal loop starts C22. Edge27508 is BNE cycle6; next LDA polls27510,
+        // retires27511. NMI7+handler20 ->27538; resumed BNE3 then LDA3/BNE2
+        // ->27546, terminal10 ->27556. Alternate starts BNE at24 then head27;
+        // edge is LDA cycle1, retiring27510, so everything finishes one earlier.
+        fixture
+    })
+    .collect()
+}
+
+#[test]
+#[ignore = "requires existing Docker WLA toolchain; precise/accelerated real-NMI wait equivalence"]
+fn assembled_quiet_waits_keep_literal_nmi_state_and_zero_or_alternate_entry() {
+    for fixture in quiet_wait_fixtures() {
+        assert_clock_fixture(&fixture);
+    }
+}
+
 #[test]
 #[ignore = "requires existing Docker WLA toolchain; real guest NMI flag-boundary regression"]
 fn assembled_nmi_observes_dead_cmp_flags() {
@@ -643,6 +722,12 @@ fn generate_clock(fixture: &ClockFixture) -> (PathBuf, std::process::Output) {
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("fixture.nes"), fixture.rom()).unwrap();
     let mut profile = "[rom]\nname='source-clock-fixture'\nmapper=3\nprg_kib=32\nchr_kib=32\n[translation]\nstack_discipline='software'\nruntime_defines=['CNROM_SOURCE_CLOCK_EXPERIMENT']\n".to_owned();
+    if fixture.fast_forward {
+        profile.push_str("source_clock_fast_forward=true\n");
+    }
+    for &(at, zp) in &fixture.poll_loops {
+        profile.push_str(&format!("[[source_poll_loop]]\nat={at}\nzp={zp}\n"));
+    }
     for &entry in &fixture.extra_roots {
         profile.push_str(&format!(
             "[[function]]\naddr={entry}\nname='clock_entry_{entry:04x}'\n"
@@ -710,32 +795,112 @@ fn assemble_clock(fixture: &ClockFixture) -> PathBuf {
     work
 }
 
-#[test]
-fn clock_dispatch_capacity_rejects_unrepresentable_full_boundary_directory() {
-    let mut fixture = ClockFixture::new("directory-overflow", &[], 0, &[]);
-    for index in 0..27u16 {
-        let start = 0x8000 + index * 0x100;
-        if index > 0 {
-            fixture.extra_roots.push(start);
-        }
-        fixture.place(start, &[0xea; 100]);
-        let target = if index == 26 {
-            start + 100
-        } else {
-            start + 0x100
-        };
-        fixture.place(start + 100, &[0x4c, target as u8, (target >> 8) as u8]);
-    }
-    // Each short routine is below the independent routine-size limit.
-    // 27*(100 NOP + JMP)=2727 source boundaries exceeds the 2687 entry limit.
-    let (work, generated) = generate_clock(&fixture);
-    assert!(!generated.status.success());
-    let message = String::from_utf8_lossy(&generated.stderr);
-    assert!(
-        message.contains("2687") && message.contains("decoded boundaries"),
-        "{message}"
+fn large_directory_fixture() -> ClockFixture {
+    // Thirty-two real nested source routines plus an NMI handler provide 3278
+    // decoded PCs. Each short routine stays below the separate size ceiling.
+    // All nested calls execute; the deepest wait takes a real NMI, then all31
+    // guest RTS pairs return through the banked directory to the original main.
+    let mut main = vec![0xa2, 0x7f, 0x9a, 0xa9, 0x80, 0x8d, 0, 0x20];
+    main.extend([0xea; 100]);
+    main.extend([0x20, 0, 0x81]);
+    let mut fixture = ClockFixture::new(
+        "directory-large",
+        &main,
+        27735,
+        &[
+            (0x20, 0),
+            (0x21, 1),
+            (0x141, 0x9f),
+            (0x140, 0x68),
+            (0x13f, 0x24),
+            (0xb02, 0x7f),
+            (0xa8c, 0x74),
+            (0xa8d, 0x80),
+        ],
     );
-    assert!(!work.join("sms").exists(), "reject before project output");
+    for page in 0x81u16..0x9f {
+        let mut body = vec![0xea; 100];
+        body.extend([0x20, 0, (page + 1) as u8, 0x60]);
+        fixture.place(page << 8, &body);
+    }
+    let mut deepest = vec![0xea; 100];
+    deepest.extend([0xa9, 1, 0x85, 0x20, 0xa5, 0x20, 0xd0, 0xfc, 0x60]);
+    fixture.place(0x9f00, &deepest);
+    fixture.nmi = 0xc000;
+    fixture.place(0xc000, &[0xa9, 0, 0x85, 0x20, 0xe6, 0x21, 0x40]);
+    fixture.trace_steps = 30_000_000;
+    fixture.shadow_p = Some(0xa4);
+    // Before waiting: setup10 + NOP6400 + JSR186 + LDA/STA5 = C6601.
+    // VBlank edge C27508 is LDA cycle3, so BNE polls at27509 and retires27511.
+    // NMI7 + handler16 ->27534; exit LDA3/BNE2 ->27539;
+    // 31*RTS6 ->27725; terminal10 ->27735. No host-frame count enters this total.
+    fixture
+}
+
+#[test]
+fn clock_dispatch_capacity_accepts_full_bankable_boundary_directory() {
+    let fixture = large_directory_fixture();
+    let (work, generated) = generate_clock(&fixture);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    assert!(work.join("sms").exists());
+}
+
+#[test]
+#[ignore = "requires existing Docker WLA toolchain; >2687 real decoded PCs and guest continuations"]
+fn assembled_large_directory_preserves_deep_rts_and_nmi_continuations() {
+    assert_clock_fixture(&large_directory_fixture());
+}
+
+#[test]
+#[ignore = "requires existing Docker WLA toolchain; translated code beyond logical bank23"]
+fn assembled_dense_directory_executes_remapped_high_code_banks() {
+    // 6400 ADC-immediate instructions produce enough actual translated bytes
+    // to cross logical code bank23. A55+C0 plus ADC0 always remains55/P24.
+    let mut main = vec![0xa2, 0xff, 0x9a, 0x18, 0xa9, 0x55];
+    for _ in 0..100 {
+        main.extend([0x69, 0]);
+    }
+    main.extend([0x20, 0, 0x81]);
+    main.extend([0x20, 0, 0xe0, 0x20, 0x80, 0xe0]); // Execute all256 PCs in two bounded routines.
+    let mut fixture = ClockFixture::new(
+        "directory-dense",
+        &main,
+        14110,
+        &[(0x500, 0x55), (0xb02, 0xff), (0xa8c, 0xdc), (0xa8d, 0x80)],
+    );
+    for page in 0x81u16..=0xbf {
+        let mut body = Vec::new();
+        for _ in 0..100 {
+            body.extend([0x69, 0]);
+        }
+        if page == 0xbf {
+            body.extend([0x8d, 0, 5, 0x60]);
+        } else {
+            body.extend([0x20, 0, (page + 1) as u8, 0x60]);
+        }
+        fixture.place(page << 8, &body);
+    }
+    fixture.shadow_p = Some(0xa4);
+    fixture.trace_steps = 8_000_000;
+    fixture.place(0xe000, &[0xea; 256]);
+    fixture.place(0xe07f, &[0x60]);
+    fixture.place(0xe0ff, &[0x60]);
+    // Setup8 + 6400*ADC2 + 63*(JSR6+RTS6) + leaf store4 + full-page532 + terminal10.
+    let work = assert_clock_fixture(&fixture);
+    let symbols = std::fs::read_to_string(work.join("sms/sms.sym")).unwrap();
+    let destination = symbols
+        .lines()
+        .find(|line| line.ends_with(" L_BF00"))
+        .unwrap();
+    let bank = u8::from_str_radix(destination.split(':').next().unwrap(), 16).unwrap();
+    assert!(
+        bank >= 36,
+        "dense target must execute beyond the24..35 source/data reservation"
+    );
 }
 
 #[test]
@@ -754,7 +919,7 @@ fn assembled_source_status_nmi_brk_and_dma_keep_literal_timing_and_state() {
     }
 }
 
-fn assert_clock_fixture(fixture: &ClockFixture) {
+fn assert_clock_fixture(fixture: &ClockFixture) -> PathBuf {
     let work = assemble_clock(fixture);
     let mut trace = Command::new(env!("CARGO_BIN_EXE_trace-sms"));
     trace
@@ -793,4 +958,5 @@ fn assert_clock_fixture(fixture: &ClockFixture) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    work
 }

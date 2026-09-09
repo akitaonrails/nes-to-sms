@@ -27,8 +27,9 @@ assembled/core checks; its linked report records the updated regression evidence
 The [source-clock checkpoint](source-clock-runtime.md) subsequently passes
 independent review with 618 workspace tests, 19 assembled projects and selected
 actual-core checks; its report distinguishes fresh and reused evidence.
-Next: banked resume tables, exact quiet-wait acceleration, remaining source
-hardware, coherent graphics and full-game/audio validation.
+The [banked resume and quiet-wait checkpoint](source-clock-scalability.md) also
+passes independent review, with 622 workspace tests and unchanged legacy ROMs.
+Next: remaining source hardware, coherent graphics and full-game/audio validation.
 This checkpoint does not close any rendered-game
 or full-mapper acceptance checkbox below.
 

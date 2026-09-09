@@ -1454,6 +1454,13 @@ impl Program {
         self.referenced_labels.insert(label.to_string());
     }
 
+    /// WLA-resolved bank byte for a label owned by this program.
+    pub fn bank_label(&mut self, label: &str) {
+        self.sec().push_byte(0);
+        self.sec().push_asm(format!("  .db :{label}"));
+        self.referenced_labels.insert(label.to_string());
+    }
+
     /// Banked-dispatch table entry (mapper plan M1): 6 bytes —
     /// .dw nes_addr / .db nes_bank ($FF = fixed, matches any bank) /
     /// .db :LABEL / .dw LABEL. Byte stream carries placeholders for the

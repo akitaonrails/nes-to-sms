@@ -865,6 +865,27 @@ _btd_target_ok:
   ld   ($cb1b), a              ; requested target diagnostics / scan key
   ld   a, b
   ld   ($cb1c), a
+.ifdef CNROM_SOURCE_CLOCK_EXPERIMENT
+  ; Slot-zero triples point at complete page groups in banked record ROM.
+  cp   $80
+  jp   c, _btd_miss
+  sub  $80
+  ld   l, a
+  ld   h, 0
+  ld   b, h
+  ld   c, l
+  add  hl, hl
+  add  hl, bc
+  ld   bc, rt_dispatch_page_table
+  add  hl, bc
+  ld   a, (hl)
+  ld   ($fffe), a
+  inc  hl
+  ld   a, (hl)
+  inc  hl
+  ld   h, (hl)
+  ld   l, a
+.else
   ld   a, :rt_dispatch_table
   ld   ($fffe), a
   ld   a, ($cb1c)
@@ -880,6 +901,7 @@ _btd_target_ok:
   inc  hl
   ld   h, (hl)
   ld   l, a
+.endif
 .ifdef MMC3_FULL_RUNTIME
   call _btd_lower_bound
 .endif

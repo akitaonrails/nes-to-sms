@@ -44,7 +44,15 @@
 .define SC_FETCH $cab9
 .define SC_Y $cabc
 .define SC_X $cabd
-.define SC_END $cabe
+.define SC_SPAN_START $cabe
+.define SC_SPAN_REPEATS $cac2
+.define SC_SPAN_HEAD $cac4
+.define SC_SPAN_ZP $cac6
+.define SC_SPAN_VALUE $cac7
+.define SC_SPAN_DUMMY $cac8
+.define SC_SPAN_CYCLES $cac9
+.define SC_SPAN_RETURN $cacb
+.define SC_END $cacd
 .if SC_END > $cb00
   .fail "Source clock exceeds its exclusive reservation"
 .endif
@@ -98,6 +106,229 @@ rt_source_phase_error:
   ld a, $e9
   ld ($cb1d), a
   jp rt_unresolved_jsr_flash
+
+; Inline head16/zp8 descriptor. A summary is permitted only from the exact
+; completed branch state of this loop, with N/Z already matching its LDA.
+; Registers, shadow P, IFF and mappings are untouched. No source bus event is
+; performed here: the two span taps describe all six reads per iteration.
+rt_source_poll_loop:
+  ex (sp), hl
+  push af
+  push bc
+  push de
+  ld (SC_SPAN_VALUE), a
+  ld e, (hl)
+  inc hl
+  ld d, (hl)
+  inc hl
+  ld (SC_SPAN_HEAD), de
+  ld a, (hl)
+  inc hl
+  ld (SC_SPAN_ZP), a
+  ld (SC_SPAN_RETURN), hl
+  ld l, a
+  ld h, $c0
+  ld a, (SC_SPAN_VALUE)
+  or a
+  jp z, _sc_span_return
+  cp (hl)
+  jp nz, _sc_span_return
+  and $80
+  ld b, a
+  ld a, ($cb03)
+  and $82
+  cp b
+  jp nz, _sc_span_return
+  ld a, (SC_NMI_EDGE)
+  ld b, a
+  ld a, (SC_ACCEPTED)
+  or b
+  ld b, a
+  ld a, (SC_ENTRY)
+  or b
+  ld b, a
+  ld a, (SC_DMA_PENDING)
+  or b
+  ld b, a
+  ld a, (SC_DMA_ACTIVE)
+  or b
+  jp nz, _sc_span_return
+  ld a, ($cb09)
+  and $18
+  jp nz, _sc_span_return
+  ld a, (SC_PHASE)
+  cp 3
+  jp nz, _sc_span_return
+  ld a, (SC_TOTAL)
+  cp 3
+  jp nz, _sc_span_return
+  ld a, (SC_OPCODE)
+  cp $d0
+  jp nz, _sc_span_return
+  ld a, (SC_OPERAND)
+  cp $fc
+  jp nz, _sc_span_return
+  ld a, (SC_TAKEN)
+  cp 1
+  jp nz, _sc_span_return
+  inc de
+  inc de
+  ld hl, (SC_PC)
+  or a
+  sbc hl, de
+  jp nz, _sc_span_return
+  call _sc_quiet_capacity
+  ld a, h
+  or l
+  jp z, _sc_span_return
+  ld (SC_SPAN_REPEATS), hl
+  ld d, h
+  ld e, l
+  add hl, hl
+  add hl, de
+  add hl, hl              ; six completed source cycles per iteration
+  ld (SC_SPAN_CYCLES), hl
+  ld hl, (SC_CYCLES)
+  ld (SC_SPAN_START), hl
+  ld hl, (SC_CYCLES+2)
+  ld (SC_SPAN_START+2), hl
+  ld a, (SC_BUS)
+  ld (SC_SPAN_DUMMY), a
+rt_source_quiet_span_begin:
+  ; No hardware event is crossed. Preserve every old branch descriptor byte.
+  ld de, (SC_SPAN_CYCLES)
+  ld hl, (SC_CYCLES)
+  add hl, de
+  ld (SC_CYCLES), hl
+  jr nc, _sc_span_add_dots
+  ld hl, SC_CYCLES+2
+  inc (hl)
+  jr nz, _sc_span_add_dots
+  inc hl
+  inc (hl)
+_sc_span_add_dots:
+  ld h, d
+  ld l, e
+  add hl, hl
+  add hl, de
+  ld de, (SC_DOT)
+  add hl, de
+  ld de, 341
+_sc_span_lines:
+  or a
+  sbc hl, de
+  jr c, _sc_span_dots_done
+  push hl
+  ld hl, (SC_LINE)
+  inc hl
+  ld a, h
+  cp 1
+  jr nz, _sc_span_line_done
+  ld a, l
+  cp 6
+  jr nz, _sc_span_line_done
+  ld hl, SC_FRAME
+  call _sc_inc32
+  ld hl, 0
+_sc_span_line_done:
+  ld (SC_LINE), hl
+  pop hl
+  jr _sc_span_lines
+_sc_span_dots_done:
+  add hl, de
+  ld (SC_DOT), hl
+rt_source_quiet_span_end:
+_sc_span_return:
+  pop de
+  pop bc
+  pop af
+  ld hl, (SC_SPAN_RETURN)
+  ex (sp), hl
+  ret
+
+; HL = complete quiet iterations (0..1820). Relative PPU dot distances avoid
+; absolute u32 deadline wrap. End STRICTLY before guard-window start; starts
+; inside line240/260 dot338 .. line241/261 dot4 return zero.
+_sc_quiet_capacity:
+  ld hl, (SC_LINE)
+  ld de, 241
+  or a
+  sbc hl, de
+  jr c, _sc_quiet_before_vblank
+  jr z, _sc_quiet_after_set
+  ld hl, (SC_LINE)
+  ld de, 261
+  or a
+  sbc hl, de
+  jr c, _sc_quiet_before_clear
+  jr nz, _sc_quiet_zero
+  call _sc_quiet_after_guard
+  jr c, _sc_quiet_zero
+  ld hl, 241             ; line261 -> next frame line240
+  jr _sc_quiet_gap
+_sc_quiet_after_set:
+  call _sc_quiet_after_guard
+  jr c, _sc_quiet_zero
+_sc_quiet_before_clear:
+  ld hl, 260
+  jr _sc_quiet_target
+_sc_quiet_before_vblank:
+  ld hl, 240
+_sc_quiet_target:
+  ld de, (SC_LINE)
+  or a
+  sbc hl, de
+_sc_quiet_gap:
+  ld a, h
+  or a
+  jr nz, _sc_quiet_max
+  ld a, l
+  cp 97
+  jr nc, _sc_quiet_max
+  ld b, a
+  ld hl, 338
+  ld de, 341
+  or a
+  jr z, _sc_quiet_distance
+_sc_quiet_gap_lines:
+  add hl, de
+  djnz _sc_quiet_gap_lines
+_sc_quiet_distance:
+  ld de, (SC_DOT)
+  or a
+  sbc hl, de
+  jr c, _sc_quiet_zero
+  jr z, _sc_quiet_zero
+  dec hl                 ; no ending on the first guarded dot
+  ld bc, 0
+  ld de, 18              ; six CPU cycles = eighteen PPU dots
+_sc_quiet_divide:
+  or a
+  sbc hl, de
+  jr c, _sc_quiet_divided
+  inc bc
+  ld a, b
+  cp 7
+  jr nz, _sc_quiet_divide
+  ld a, c
+  cp $1c                 ; 1820
+  jr nz, _sc_quiet_divide
+_sc_quiet_divided:
+  ld h, b
+  ld l, c
+  ret
+_sc_quiet_max:
+  ld hl, 1820
+  ret
+_sc_quiet_zero:
+  ld hl, 0
+  ret
+_sc_quiet_after_guard:
+  ld hl, (SC_DOT)
+  ld de, 5
+  or a
+  sbc hl, de
+  ret
 
 ; Non-observing RAM peeks determine conditional duration before early polls.
 ; The prefix STILL performs every original pointer/dummy bus access later.

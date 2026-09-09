@@ -1441,6 +1441,51 @@ pub fn run(args: &Args) -> Result<String, Error> {
     }
 
     routines.extend(banked_routines);
+    for wait in &prof.source_poll_loops {
+        let offset = usize::from(wait.at - 0x8000) % image.prg.len();
+        let expected = [0xa5, wait.zp, 0xd0, 0xfc];
+        let sources: Vec<_> = routines
+            .iter()
+            .flat_map(|r| r.ops.iter())
+            .filter_map(|op| {
+                if let ir::Op::Source {
+                    pc, instruction, ..
+                } = op
+                {
+                    Some((*pc, instruction))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let head = sources
+            .iter()
+            .filter(|(pc, instruction)| {
+                *pc == wait.at
+                    && instruction.is_some_and(|i| {
+                        i.opcode == 0xa5 && i.operand == cpu6502::Operand::Addr(u16::from(wait.zp))
+                    })
+            })
+            .count();
+        let branch = sources
+            .iter()
+            .filter(|(pc, instruction)| {
+                *pc == wait.at + 2
+                    && instruction.is_some_and(|i| {
+                        i.opcode == 0xd0 && i.operand == cpu6502::Operand::Relative(-4)
+                    })
+            })
+            .count();
+        if image.prg.get(offset..offset + 4) != Some(expected.as_slice())
+            || head != 1
+            || branch != 1
+        {
+            return Err(Error::Diagnostic(format!(
+                "source_poll_loop ${:04X} requires unique decoded LDA zp / BNE same-page self and exact original bytes",
+                wait.at
+            )));
+        }
+    }
     if prof.mmc3_full_runtime() {
         for wait in &prof.cooperative_waits {
             let offset = usize::from(wait.bank) * 0x2000 + usize::from(wait.at & 0x1fff);
@@ -2000,6 +2045,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
         if prof.source_clock_experiment() {
             for sym in [
                 "rt_source_begin",
+                "rt_source_poll_loop",
                 "rt_source_read_bus",
                 "rt_source_write_bus",
                 "rt_source_push",
@@ -2095,14 +2141,6 @@ pub fn run(args: &Args) -> Result<String, Error> {
             dispatch_records.sort();
             dispatch_records.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
         }
-        if prof.source_clock_experiment()
-            && dispatch_records.len().saturating_mul(6).saturating_add(258) > 0x4000
-        {
-            return Err(Error::Diagnostic(format!(
-                "source clock fixed-PRG resume directory needs {} decoded boundaries; the current single-bank directory supports at most 2687 (no entries truncated)",
-                dispatch_records.len()
-            )));
-        }
         // Computed dispatch honors profile replacements too: a dispatched
         // NES address whose routine is replaced lands on the runtime hook
         // (slot 0) instead of the translated body.
@@ -2126,6 +2164,51 @@ pub fn run(args: &Args) -> Result<String, Error> {
                 },
             )
         });
+        if prof.source_clock_experiment() {
+            // Complete high-byte groups never straddle a mapped record bank.
+            // Each group has its own real terminator, including empty pages.
+            let mut bank = 0u8;
+            let mut used = 0usize;
+            program.set_section_project_data_placement(bank, 1);
+            for page in 0x80u16..=0xff {
+                let group: Vec<_> = dispatch_records
+                    .iter()
+                    .filter(|(_, addr, _)| addr >> 8 == page)
+                    .collect();
+                let size = group.len() * 6 + 2;
+                if size > 0x4000 {
+                    return Err(Error::Diagnostic(
+                        "source clock dispatch page exceeds a ROM bank".into(),
+                    ));
+                }
+                if used + size > 0x4000 {
+                    bank = bank.checked_add(1).ok_or_else(|| {
+                        Error::Diagnostic(
+                            "source clock dispatch banks exceed mapper addressability".into(),
+                        )
+                    })?;
+                    program.section(&format!("rt_dispatch_records_{bank}_sec"));
+                    program.set_section_project_data_placement(bank, 1);
+                    used = 0;
+                }
+                program.label(format!("rt_dispatch_page_{page:02X}"));
+                for (nes_bank, addr, label) in group {
+                    program.dispatch_entry(*addr, *nes_bank, label);
+                }
+                program.data(None, &[0, 0]);
+                used += size;
+            }
+            program.section("rt_dispatch_directory_sec");
+            program.set_section_placement(0, 0);
+            program.label("rt_dispatch_page_table");
+            for page in 0x80u16..=0xff {
+                let label = format!("rt_dispatch_page_{page:02X}");
+                program.bank_label(&label);
+                program.word_label(&label);
+            }
+            program.label("rt_dispatch_directory_end");
+            return Ok((program, lower_failures, unresolved, assigned_sections));
+        }
         let page_counts = prof
             .mmc3_full_runtime()
             .then(|| mmc3_dispatch_page_counts(&dispatch_records))
@@ -2208,6 +2291,11 @@ pub fn run(args: &Args) -> Result<String, Error> {
     //    re-enable this strip if linker overflows happen.
     build.asm = strip_section(&build.asm, "runtime_forward_decls");
     build.asm = strip_inline_org(&build.asm);
+    if prof.source_clock_experiment() {
+        let code_after_data =
+            31 + image.chr.len().div_ceil(0x4000) as u32 + u32::from(build.project_data_bank_count);
+        build.asm = remap_source_code_banks(&build.asm, code_after_data)?;
+    }
 
     // 8. Convert assets (CHR + a default palette + nametable placeholder).
     // CHR-RAM carts (chr_kib = 0) ship no pattern data: build the asset
@@ -2317,7 +2405,9 @@ pub fn run(args: &Args) -> Result<String, Error> {
         // Preserve accepted legacy layouts. Synthetic CNROM reserves raw
         // CHR pages31..38 in a1MiB image; this is bus evidence, not a claim
         // that its unfinished presentation works on real SMS hardware.
-        rom_kib: if policy.is_mmc3() {
+        rom_kib: if prof.source_clock_experiment() {
+            4096 // all 256 Sega bank-register identities, without asset overlap
+        } else if policy.is_mmc3() {
             2048
         } else if prof.cnrom_bus_experiment() {
             1024
@@ -2891,9 +2981,45 @@ fn copy_converted_chr_tile(chr: &[u8], source_tile: usize, dest: &mut [u8]) {
     }
 }
 
-/// Remove `.org` directives that appear inside `.section ... .ends` blocks.
-/// WLA-DX rejects `.org` in sectioned code; placement comes from the
-/// memory/ROM bank map instead.
+/// Source-clock-only physical placement. Logical section IDs remain unchanged
+/// for near/far analysis; WLA resolves every bank-of-label after this remap.
+fn remap_source_code_banks(asm: &str, code_after_data: u32) -> Result<String, Error> {
+    let lines: Vec<_> = asm.lines().collect();
+    let mut out = String::with_capacity(asm.len());
+    for (index, line) in lines.iter().enumerate() {
+        if lines
+            .get(index + 1)
+            .is_some_and(|next| next.starts_with(".section \"generated_code_"))
+        {
+            let logical = line
+                .strip_prefix(".bank ")
+                .and_then(|tail| tail.strip_suffix(" slot 1"))
+                .and_then(|number| number.parse::<u32>().ok())
+                .ok_or_else(|| {
+                    Error::Diagnostic("source code section lacks its explicit slot-one bank".into())
+                })?;
+            let physical = if logical < 24 {
+                logical
+            } else {
+                code_after_data.checked_add(logical - 24).ok_or_else(|| {
+                    Error::Diagnostic("source code bank allocation overflows".into())
+                })?
+            };
+            if physical >= 256 {
+                return Err(Error::Diagnostic(format!(
+                    "source code physical bank {physical} exceeds the 256-bank Sega addressability limit; no output truncated"
+                )));
+            }
+            out.push_str(&format!(".bank {physical} slot 1\n"));
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+/// Remove `.org` directives inside sections; placement comes from the bank map.
 fn strip_inline_org(asm: &str) -> String {
     let mut out = String::with_capacity(asm.len());
     let mut in_section = false;
@@ -3050,6 +3176,20 @@ const RUNTIME_SYMBOLS: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_code_remap_preserves_sections_and_rejects_physical_overflow() {
+        let asm = ".bank 23 slot 1\n.section \"generated_code_22\" free\n.ends\n.bank 24 slot 1\n.section \"generated_code_23\" free\n  .db :L_9000\n.ends\n.bank (PROJECT_ROM_DATA_BANK_BASE + 0) slot 1\n.section \"rt_dispatch_table_sec\" free\n.ends\n.bank 0 slot 0\n.section \"rt_dispatch_directory_sec\" free\n.ends\n";
+        let remapped = super::remap_source_code_banks(asm, 52).unwrap();
+        assert_eq!(remapped, asm.replace(".bank 24 slot 1", ".bank 52 slot 1"));
+        assert!(
+            super::remap_source_code_banks(asm, 255)
+                .unwrap()
+                .contains(".bank 255 slot 1")
+        );
+        assert!(super::remap_source_code_banks(asm, 256).is_err());
+        let far = asm.replace(".bank 24 slot 1", ".bank 228 slot 1");
+        assert!(super::remap_source_code_banks(&far, 52).is_err());
+    }
     #[test]
     fn mmc3_dispatch_counts_preserve_page_edges_and_oversized_fallback() {
         let mut records = Vec::new();

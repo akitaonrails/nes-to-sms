@@ -86,9 +86,10 @@ timing collisions remain unavailable. Conservative status-read windows near
 VBlank set/clear and new NMI edges during vector entry/DMA trap explicitly.
 This is not a blanket cycle-accurate CPU/PPU claim.
 
-The current fixed directory fits 2,687 decoded boundaries; larger inputs fail
-before output. Banked directory pages can remove this software layout limit
-without omitting code or changing existing games.
+This checkpoint's fixed directory fit 2,687 decoded boundaries. The subsequent
+[banked source execution checkpoint](source-clock-scalability.md) removes that
+layout limit and verifies guarded quiet-wait acceleration without changing
+existing games. Rendering and the other hardware domains remain next work.
 
 The conservative clock is expensive: 64 measured DEX/BNE iterations consume
 320 source cycles and approximately 558,489 Z80 cycles, with a 51-byte loop.
