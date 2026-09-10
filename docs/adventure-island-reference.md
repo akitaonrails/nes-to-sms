@@ -126,10 +126,31 @@ harvests bank entries (`FD_LOG_BANK_ENTRIES`), and accepts NES-button
 routes (`--nes-buttons-script`, bypassing the SMB-tuned title-mode
 heuristic). Verified: the title screen renders correctly and player state
 advances under the attract demo. Route authoring against this fast oracle
-is the intended path to the level/boss/transition content matrix; the
-immediate open sub-task is finding Adventure's attract-demo-vs-player-
-control discriminator (area/round stay 0 through level 1-1, so they do not
-distinguish the two) to script a controlled game-start.
+is the intended path to the level/boss/transition content matrix.
+
+**Game-start recipe (solved 2026-09-10):** pulse Start through the title
+window, then hold Right; the attract demo's "moving Higgins" is the ROM's
+own demo playback, and area/round stay 0 through level 1-1 (area 0), so
+$EE ($FF title / $00 in-level) is the mode signal. A fixed-jump route
+reaches ~1200 px into level 1-1 before Higgins dies on an unrendered
+obstacle (the oracle renders background only, no sprites).
+
+**Gameplay guest-state tracking (measured 2026-09-10):** replaying the SMS
+build's own safe input route on the oracle, the source-hardware build
+tracks the real game's camera and player_x within about 1 pixel across
+400+ frames of player-controlled level-1 play (frames 458-873), never
+diverging widely — but not byte-exact per frame, and no frame or input
+shift closes the residual. Crucially, the frame-diff oracle uses a
+SIMPLIFIED PPU/timing model (fixed instructions-per-frame, synthetic
+sprite-0), so it is NOT a byte-exact reference for cycle-sensitive
+gameplay physics; the ~1 px residual is at the level of the oracle's own
+timing imprecision, not a demonstrated SMS defect. Byte-exact gameplay
+parity therefore needs a cycle-accurate NES reference, not this oracle.
+The SMS source-hardware build also traps (E9 source-phase error) on some
+frame-scripted input timings that its own state-driven route avoids, so
+replays must use the build's safe input route. Net item-1 gameplay status:
+renders coherently, tracks the real game within ~1 px, reaches deep
+level-1 content; exact parity and a level clear remain open.
 The runner mounts the collection read-only and owns its temporary containers.
 
 Observed, with the limitations of this short route:
