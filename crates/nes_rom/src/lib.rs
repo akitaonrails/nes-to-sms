@@ -12,6 +12,7 @@ pub mod fme7;
 pub mod mmc1;
 pub mod mmc2;
 pub mod mmc3;
+pub mod mmc5;
 pub mod vrc2;
 
 pub const INES_MAGIC: [u8; 4] = [b'N', b'E', b'S', 0x1a];

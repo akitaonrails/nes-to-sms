@@ -20,7 +20,6 @@ use std::fmt;
 
 pub const CHR_WINDOW_SIZE: usize = 4 * 1024;
 const PRG_8K: usize = 8 * 1024;
-const PRG_16K: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mmc2Error {

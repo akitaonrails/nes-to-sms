@@ -269,6 +269,7 @@ enum StatefulMapper {
     Vrc2(nes_rom::vrc2::Vrc2),
     Fme7(nes_rom::fme7::Fme7),
     Mmc2(nes_rom::mmc2::Mmc2),
+    Mmc5(nes_rom::mmc5::Mmc5),
 }
 
 impl StatefulMapper {
@@ -279,6 +280,7 @@ impl StatefulMapper {
             Self::Vrc2(v) => v.cpu_to_prg_offset(addr),
             Self::Fme7(f) => f.cpu_to_prg_offset(addr),
             Self::Mmc2(m) => m.cpu_to_prg_offset(addr),
+            Self::Mmc5(m) => m.cpu_to_prg_offset(addr),
         }
     }
     fn write_register(&mut self, addr: u16, value: u8) {
@@ -288,6 +290,7 @@ impl StatefulMapper {
             Self::Vrc2(v) => v.write_register(addr, value),
             Self::Fme7(f) => f.write_register(addr, value),
             Self::Mmc2(m) => m.write_register(addr, value),
+            Self::Mmc5(m) => m.write_register(addr, value),
         }
     }
     fn prg_ram_enabled(&self) -> bool {
@@ -297,6 +300,7 @@ impl StatefulMapper {
             Self::Vrc2(_) => false,
             Self::Fme7(f) => f.prg6000_is_ram(),
             Self::Mmc2(m) => m.prg_ram_enabled(),
+            Self::Mmc5(m) => m.prg_ram_enabled(),
         }
     }
     /// Advance the mapper's scanline IRQ one step; true when it asserts IRQ.
@@ -304,7 +308,16 @@ impl StatefulMapper {
         match self {
             Self::Vrc2(v) => v.vrc_irq_scanline(),
             Self::Fme7(f) => f.irq_scanline(),
+            Self::Mmc5(m) => m.irq_scanline(),
             _ => false,
+        }
+    }
+    /// A mapper that answers reads in its register range ($5000-$5FFF for
+    /// MMC5's IRQ status) returns Some; None means "not a mapper read".
+    fn status_read(&mut self, addr: u16) -> Option<u8> {
+        match self {
+            Self::Mmc5(m) => m.read_status(addr),
+            _ => None,
         }
     }
     /// A mapper that answers its own $6000-$7FFF reads (e.g. VRC2's one-bit
@@ -338,6 +351,7 @@ impl StatefulMapper {
                 Some(f.chr_bank_1k(window) as usize * 1024 + (ppu_addr as usize & 0x3FF))
             }
             Self::Mmc2(m) => Some(m.chr_offset(ppu_addr)),
+            Self::Mmc5(m) => Some(m.chr_offset(ppu_addr)),
             _ => None,
         }
     }
@@ -593,6 +607,11 @@ impl oracle_6502::Bus for NesBus {
                 v
             }
             0x4017 => 0x40, // controller 2: nothing pressed
+            0x5000..=0x5FFF => self
+                .stateful
+                .as_mut()
+                .and_then(|m| m.status_read(addr))
+                .unwrap_or(0),
             0x6000..=0x7FFF => {
                 if let Some(off) = self
                     .stateful
@@ -728,6 +747,13 @@ impl oracle_6502::Bus for NesBus {
                     self.ctrl_shift = self.buttons;
                 }
                 self.strobe = new_strobe;
+            }
+            0x5000..=0x5FFF => {
+                // MMC5 register space (and ExRAM). Route to the mapper; other
+                // mappers ignore this range.
+                if let Some(m) = &mut self.stateful {
+                    m.write_register(addr, value);
+                }
             }
             0x6000..=0x7FFF => {
                 let consumed = self
@@ -2287,6 +2313,10 @@ fn main() {
         9 | 10 => Some(StatefulMapper::Mmc2(
             nes_rom::mmc2::Mmc2::new(&image.header, image.prg.len(), image.chr.len())
                 .expect("supported MMC2/MMC4 board"),
+        )),
+        5 => Some(StatefulMapper::Mmc5(
+            nes_rom::mmc5::Mmc5::new(&image.header, image.prg.len(), image.chr.len())
+                .expect("supported MMC5 board"),
         )),
         _ => None,
     };
