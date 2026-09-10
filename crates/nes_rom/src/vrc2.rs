@@ -297,6 +297,59 @@ mod tests {
         }
     }
 
+    fn gradius_header_mapper25() -> Header {
+        let mut h = contra_header();
+        h.mapper = 25; // VRC4b/e: A0/A1 selector lines swapped
+        h
+    }
+
+    #[test]
+    fn prg_swap_mode_exchanges_8000_and_c000() {
+        let mut v = Vrc2::new(&contra_header(), 8 * PRG_BANK_SIZE, 16 * 8 * 1024).unwrap();
+        v.write_register(0x8000, 5); // prg0 = bank 5
+        // Default (swap mode off): $8000 switchable, $C000 fixed second-to-last.
+        assert_eq!(v.cpu_to_prg_offset(0x8000), Some(5 * PRG_WINDOW_SIZE));
+        assert_eq!(v.cpu_to_prg_offset(0xC000), Some(14 * PRG_WINDOW_SIZE));
+        // $9002 = sel 2 on mapper 23 -> PRG swap mode (bit1 set).
+        v.write_register(0x9002, 0x02);
+        // Now the ends exchange: $8000 fixed second-to-last, $C000 switchable.
+        assert_eq!(v.cpu_to_prg_offset(0x8000), Some(14 * PRG_WINDOW_SIZE));
+        assert_eq!(v.cpu_to_prg_offset(0xC000), Some(5 * PRG_WINDOW_SIZE));
+        assert_eq!(v.cpu_to_prg_offset(0xE000), Some(15 * PRG_WINDOW_SIZE));
+    }
+
+    #[test]
+    fn mapper25_swaps_selector_lines_for_irq_registers() {
+        // Gradius II (mapper 25) reaches IRQ control at $F001 and the latch
+        // high nibble at $F002 — the A0/A1 swap. Latch $F6 fires after 10 ticks.
+        let mut v =
+            Vrc2::new(&gradius_header_mapper25(), 8 * PRG_BANK_SIZE, 16 * 8 * 1024).unwrap();
+        v.write_register(0xF000, 0x06); // sel 0: latch low nibble = 6
+        v.write_register(0xF002, 0x0F); // sel 1 (swapped): latch high -> $F6
+        v.write_register(0xF001, 0x02); // sel 2 (swapped): enable, scanline mode
+        for _ in 0..9 {
+            assert!(!v.vrc_irq_scanline());
+        }
+        assert!(
+            v.vrc_irq_scanline(),
+            "mapper-25 IRQ fires after 10 scanlines"
+        );
+    }
+
+    #[test]
+    fn cycle_mode_irq_counts_faster_than_scanline() {
+        let mut v = Vrc2::new(&contra_header(), 8 * PRG_BANK_SIZE, 16 * 8 * 1024).unwrap();
+        v.write_register(0xF000, 0x00);
+        v.write_register(0xF001, 0x0F); // latch $F0 -> 16 counts to overflow
+        v.write_register(0xF002, 0x06); // control: enable (bit1) + cycle mode (bit2)
+        // Cycle mode advances ~114 counts per scanline call, so 16 counts to the
+        // overflow happen within the first scanline tick.
+        assert!(
+            v.vrc_irq_scanline(),
+            "cycle mode overflows within one scanline"
+        );
+    }
+
     #[test]
     fn contra_board_parses_and_banks_prg() {
         let mut v = Vrc2::new(&contra_header(), 8 * PRG_BANK_SIZE, 16 * 8 * 1024).unwrap();

@@ -303,6 +303,29 @@ mod tests {
     }
 
     #[test]
+    fn banks_every_switchable_window_and_all_chr() {
+        let mut f = batman();
+        // $6000 ROM bank 3, $8000 bank 5, $A000 bank 6, $C000 bank 7.
+        for (cmd, bank) in [(0x08, 0x03u8), (0x09, 5), (0x0A, 6), (0x0B, 7)] {
+            f.write_register(0x8000, cmd);
+            f.write_register(0xA000, bank);
+        }
+        assert_eq!(f.cpu_to_prg_offset(0x6000), Some(3 * PRG_WINDOW_SIZE));
+        assert_eq!(f.cpu_to_prg_offset(0x8000), Some(5 * PRG_WINDOW_SIZE));
+        assert_eq!(f.cpu_to_prg_offset(0xA000), Some(6 * PRG_WINDOW_SIZE));
+        assert_eq!(f.cpu_to_prg_offset(0xC000), Some(7 * PRG_WINDOW_SIZE));
+        assert_eq!(f.cpu_to_prg_offset(0xE000), Some(15 * PRG_WINDOW_SIZE)); // fixed
+        // All eight 1 KiB CHR windows are independently banked.
+        for w in 0u8..8 {
+            f.write_register(0x8000, w); // command = CHR window w
+            f.write_register(0xA000, w + 10);
+        }
+        for w in 0u8..8 {
+            assert_eq!(f.chr_bank_1k(w), (w + 10) as u16);
+        }
+    }
+
+    #[test]
     fn rejects_wrong_mapper() {
         let mut h = batman_header();
         h.mapper = 4;

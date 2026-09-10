@@ -370,6 +370,50 @@ mod tests {
     }
 
     #[test]
+    fn prg_mode0_32k_bank() {
+        let mut m = cv3();
+        m.write_register(0x5100, 0); // 32 KiB mode
+        m.write_register(0x5117, 0x80 | 8); // aligned to 8 KiB banks 8..11
+        assert_eq!(m.cpu_to_prg_offset(0x8000), Some(8 * PRG_8K));
+        assert_eq!(m.cpu_to_prg_offset(0xA000), Some(9 * PRG_8K));
+        assert_eq!(m.cpu_to_prg_offset(0xC000), Some(10 * PRG_8K));
+        assert_eq!(m.cpu_to_prg_offset(0xE000), Some(11 * PRG_8K));
+    }
+
+    #[test]
+    fn prg_mode2_16k_plus_two_8k() {
+        let mut m = cv3();
+        m.write_register(0x5100, 2); // 16 KiB ($8000) + 8 KiB ($C000) + 8 KiB ($E000)
+        m.write_register(0x5115, 0x80 | 4); // 16 KiB window -> 8 KiB banks 4/5
+        m.write_register(0x5116, 0x80 | 20); // $C000 8 KiB bank 20
+        m.write_register(0x5117, 0x80 | 31); // $E000 8 KiB bank 31
+        assert_eq!(m.cpu_to_prg_offset(0x8000), Some(4 * PRG_8K));
+        assert_eq!(m.cpu_to_prg_offset(0xA000), Some(5 * PRG_8K));
+        assert_eq!(m.cpu_to_prg_offset(0xC000), Some(20 * PRG_8K));
+        assert_eq!(m.cpu_to_prg_offset(0xE000), Some(31 * PRG_8K));
+    }
+
+    #[test]
+    fn chr_mode0_8k_sprite_set() {
+        let mut m = cv3();
+        m.write_register(0x5101, 0); // 8 KiB CHR mode
+        m.write_register(0x5127, 2); // sprite-set 8 KiB bank 2 -> 1 KiB banks 16..23
+        assert_eq!(m.chr_bank_1k(0), 16);
+        assert_eq!(m.chr_bank_1k(7), 23);
+    }
+
+    #[test]
+    fn chr_background_set_takes_over_after_bg_write() {
+        let mut m = cv3();
+        m.write_register(0x5101, 3); // 1 KiB mode
+        m.write_register(0x5120, 4); // sprite set window 0
+        assert_eq!(m.chr_bank_1k(0), 4);
+        // A write to the background set ($5128-$512B) switches the source.
+        m.write_register(0x5128, 9); // bg set window 0
+        assert_eq!(m.chr_bank_1k(0), 9);
+    }
+
+    #[test]
     fn rejects_wrong_mapper() {
         let mut h = cv3_header();
         h.mapper = 4;

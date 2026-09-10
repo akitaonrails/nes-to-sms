@@ -268,6 +268,42 @@ mod tests {
     }
 
     #[test]
+    fn wram_tracks_battery_and_ram_header_fields() {
+        // MMC4 with a battery (Fire Emblem) exposes $6000 WRAM.
+        let mut h = header(10, 16, 16);
+        h.has_battery = true;
+        assert!(
+            Mmc2::new(&h, 256 * 1024, 128 * 1024)
+                .unwrap()
+                .prg_ram_enabled()
+        );
+        // MMC2 (Punch-Out) with no RAM fields has none.
+        assert!(
+            !Mmc2::new(&header(9, 8, 16), 128 * 1024, 128 * 1024)
+                .unwrap()
+                .prg_ram_enabled()
+        );
+        // A declared PRG-RAM size also counts.
+        let mut h = header(9, 8, 16);
+        h.prg_ram_size = 8 * 1024;
+        assert!(
+            Mmc2::new(&h, 128 * 1024, 128 * 1024)
+                .unwrap()
+                .prg_ram_enabled()
+        );
+    }
+
+    #[test]
+    fn chr_offset_follows_latch_and_table() {
+        let mut m = Mmc2::new(&header(9, 8, 16), 128 * 1024, 128 * 1024).unwrap();
+        m.write_register(0xC000, 7); // table0 $FE -> bank 7 (power-on latch)
+        m.write_register(0xE000, 9); // table1 $FE -> bank 9
+        // Table 0 pattern ($0000-$0FFF) and table 1 ($1000-$1FFF).
+        assert_eq!(m.chr_offset(0x0000), 7 * CHR_WINDOW_SIZE);
+        assert_eq!(m.chr_offset(0x1000), 9 * CHR_WINDOW_SIZE);
+    }
+
+    #[test]
     fn rejects_wrong_mapper() {
         assert!(matches!(
             Mmc2::new(&header(4, 8, 16), 128 * 1024, 128 * 1024),
