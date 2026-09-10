@@ -266,6 +266,7 @@ fn load_script_with(
 enum StatefulMapper {
     Mmc1(nes_rom::mmc1::Mmc1),
     Axrom(nes_rom::axrom::Axrom),
+    Vrc2(nes_rom::vrc2::Vrc2),
 }
 
 impl StatefulMapper {
@@ -273,18 +274,50 @@ impl StatefulMapper {
         match self {
             Self::Mmc1(m) => m.cpu_to_prg_offset(addr),
             Self::Axrom(a) => a.cpu_to_prg_offset(addr),
+            Self::Vrc2(v) => v.cpu_to_prg_offset(addr),
         }
     }
     fn write_register(&mut self, addr: u16, value: u8) {
         match self {
             Self::Mmc1(m) => m.write_register(addr, value),
             Self::Axrom(a) => a.write_register(addr, value),
+            Self::Vrc2(v) => v.write_register(addr, value),
         }
     }
     fn prg_ram_enabled(&self) -> bool {
         match self {
             Self::Mmc1(m) => m.prg_ram_enabled(),
             Self::Axrom(_) => false,
+            Self::Vrc2(_) => false,
+        }
+    }
+    /// A mapper that answers its own $6000-$7FFF reads (e.g. VRC2's one-bit
+    /// microwire latch) returns Some; None falls back to the WRAM array.
+    fn wram_read(&self) -> Option<u8> {
+        match self {
+            Self::Vrc2(v) => Some(v.microwire_read()),
+            _ => None,
+        }
+    }
+    /// Returns true when the mapper consumed a $6000-$7FFF write itself.
+    fn wram_write(&mut self, value: u8) -> bool {
+        match self {
+            Self::Vrc2(v) => {
+                v.microwire_write(value);
+                true
+            }
+            _ => false,
+        }
+    }
+    /// Flat CHR-ROM offset for a PPU pattern address, when the mapper banks
+    /// CHR in 1 KiB windows (VRC2/4). None means "use the default banking".
+    fn chr_1k_offset(&self, ppu_addr: u16) -> Option<usize> {
+        match self {
+            Self::Vrc2(v) => {
+                let window = ((ppu_addr >> 10) & 7) as u8;
+                Some(v.chr_bank_1k(window) as usize * 1024 + (ppu_addr as usize & 0x3FF))
+            }
+            _ => None,
         }
     }
 }
@@ -530,7 +563,9 @@ impl oracle_6502::Bus for NesBus {
             }
             0x4017 => 0x40, // controller 2: nothing pressed
             0x6000..=0x7FFF => {
-                if self.stateful.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
+                if let Some(v) = self.stateful.as_ref().and_then(|m| m.wram_read()) {
+                    v
+                } else if self.stateful.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
                     self.prg_ram[(addr - 0x6000) as usize]
                 } else {
                     0
@@ -658,7 +693,12 @@ impl oracle_6502::Bus for NesBus {
                 self.strobe = new_strobe;
             }
             0x6000..=0x7FFF => {
-                if self.stateful.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
+                let consumed = self
+                    .stateful
+                    .as_mut()
+                    .map(|m| m.wram_write(value))
+                    .unwrap_or(false);
+                if !consumed && self.stateful.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
                     self.prg_ram[(addr - 0x6000) as usize] = value;
                 }
             }
@@ -761,6 +801,13 @@ fn render_nes_ppm(bus: &NesBus, path: &str) -> std::io::Result<()> {
     let chr = |addr: usize| -> u8 {
         // Pattern reads come from CHR ROM when present, else the CHR-RAM shadow.
         if !bus.chr.is_empty() {
+            if let Some(off) = bus
+                .stateful
+                .as_ref()
+                .and_then(|m| m.chr_1k_offset((addr & 0x1FFF) as u16))
+            {
+                return bus.chr[off % bus.chr.len()];
+            }
             let base = (bus.chr_bank as usize) * 0x2000;
             bus.chr[(base + (addr & 0x1FFF)) % bus.chr.len()]
         } else {
@@ -1069,8 +1116,24 @@ fn run_reference(
             bus.watch_log.clear();
             bus.watch_bank_log.clear();
         }
+        let hist_frame = std::env::var("FD_PC_HIST")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        let mut pc_hist: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+        let distinct_on = std::env::var("FD_DISTINCT").is_ok();
+        let mut distinct: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        let mut pcmin = 0xFFFFu16;
+        let mut pcmax = 0u16;
         for _ in 0..REF_INSN_PER_FRAME {
             bus.last_pc = cpu.pc;
+            if distinct_on {
+                distinct.insert(cpu.pc);
+                pcmin = pcmin.min(cpu.pc);
+                pcmax = pcmax.max(cpu.pc);
+            }
+            if Some(frame) == hist_frame {
+                *pc_hist.entry(cpu.pc).or_insert(0) += 1;
+            }
             if trace_pc_hits < trace_pc_limit && trace_pc_list.contains(&cpu.pc) {
                 let stack_p = bus.ram[0x0100 | cpu.sp.wrapping_add(1) as usize];
                 let stack_lo = bus.ram[0x0100 | cpu.sp.wrapping_add(2) as usize];
@@ -1189,6 +1252,23 @@ fn run_reference(
             }
         }
         snaps.push(bus.ram);
+        if std::env::var("FD_DBG_PC").is_ok() && frame % 100 == 0 {
+            eprintln!("DBG frame {frame} pc=${:04X}", bus.last_pc);
+        }
+        if distinct_on && frame % 10 == 0 {
+            eprintln!(
+                "DISTINCT f{frame} n={} pcmin=${pcmin:04X} pcmax=${pcmax:04X} mask=${:02X}",
+                distinct.len(),
+                bus.ppu_mask
+            );
+        }
+        if Some(frame) == hist_frame {
+            let mut v: Vec<_> = pc_hist.iter().collect();
+            v.sort_by(|a, b| b.1.cmp(a.1));
+            for (pc, c) in v.into_iter().take(12) {
+                eprintln!("HIST f{frame} pc=${pc:04X} count={c}");
+            }
+        }
     }
     if call_log_frame.is_some() {
         for (f, b, pc, t) in &call_log {
@@ -2141,6 +2221,10 @@ fn main() {
         7 => Some(StatefulMapper::Axrom(
             nes_rom::axrom::Axrom::new(&image.header, image.prg.len())
                 .expect("supported AxROM board"),
+        )),
+        22 | 23 | 25 => Some(StatefulMapper::Vrc2(
+            nes_rom::vrc2::Vrc2::new(&image.header, image.prg.len(), image.chr.len())
+                .expect("supported VRC2/4 board"),
         )),
         _ => None,
     };
