@@ -239,9 +239,16 @@ Genesis Plus GX PAL/500 neutral title route now completes to source frame
 zero-page differences, every one of the baseline's 240 distinct displayed
 images reappears pixel-identical, and the 90 single-frame blank fallbacks
 shrink to 16 short episodes (41 callbacks) confined to title-animation
-phases whose old/new pattern unions exceed the pool. This is title-route
-coherence evidence, not gameplay acceptance, normal-speed playability or a
-capacity guarantee for other games. Byte-identity gates are checked with
+phases whose old/new pattern unions exceed the pool. The input-only first-level route also completes on the atlas build with
+byte-exact guest endpoints (player X 96, camera 367, terminal Y 152,
+source frame 527). During the gameplay span the baseline's 12 spurious
+single-frame blanks disappear entirely — the only remaining blank episodes
+are the source's own display-off level loading, present in both runs at
+matching lengths. The route baseline was captured on a different pinned
+core build, so this comparison rests on guest endpoints and the uniform
+frame census, not pixel-hash identity. This is title and first-level route
+coherence evidence, not full-game acceptance, normal-speed playability or
+a capacity guarantee for other games. Byte-identity gates are checked with
 the SDSC header's build-date byte and checksum masked; the assembler stamps
 the UTC build date at $7FE6, which is the only bit of nondeterminism.
 
