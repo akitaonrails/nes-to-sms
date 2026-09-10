@@ -280,10 +280,10 @@ rt_source_ppu_predict_overflow:
   sbc hl, de
   jr nz, _sp_predict_scan
   ld hl, (SP_OVERFLOW_DOT)
-  jr _sp_predict_success
+  jp _sp_predict_success
 _sp_predict_already_set:
   ld hl, $ffff
-  jr _sp_predict_success
+  jp _sp_predict_success
 _sp_predict_scan:
   ld a, i
   di
@@ -296,23 +296,52 @@ _sp_predict_scan:
   ldir
   ld a, 1
   ld (SP_INTERNAL_MODE), a
+; Overflow can only assert on an even action dot >= 66, and the counters
+; are invariant across the skipped odd/fill dots (the fills only touch
+; secondary bytes, which the backup restores). Step one even action at a
+; time with the latch recomputed from the odd-dot-invariant N/M.
 _sp_predict_loop:
   ld hl, (SC_DOT)
+  ld a, h
+  or a
+  jr nz, _sp_predict_none
+  ld a, l
+  cp 64
+  jr nc, _sp_predict_first
+  ld l, 64
+_sp_predict_first:
+  ld a, l
+  add a, 2
+  and $fe
+  ld l, a
+  jr nz, _sp_predict_evaluate
+  inc h                      ; wrapped to dot 256
+_sp_predict_evaluate:
+  push hl
+  ld a, (SP_EVAL_N)
+  add a, a
+  add a, a
+  ld b, a
+  ld a, (SP_EVAL_M)
+  or b
+  ld l, a
+  ld h, $c9
+  ld a, (hl)
+  ld (SP_OAM_LATCH), a
+  call _sp_eval_even
+  pop hl
+  ld a, (SP_STATUS)
+  and $20
+  jr nz, _sp_predict_restore
+  inc hl
   inc hl
   ld a, h
   or a
   jr z, _sp_predict_evaluate
   ld a, l
   or a
-  jr nz, _sp_predict_none
-_sp_predict_evaluate:
-  ld (SC_DOT), hl
-  call _sp_sprite_evaluate
-  ld a, (SP_STATUS)
-  and $20
-  jr z, _sp_predict_loop
-  ld hl, (SC_DOT)
-  jr _sp_predict_restore
+  jr z, _sp_predict_evaluate ; exactly dot 256 remains
+  jr _sp_predict_none
 _sp_predict_none:
   ld hl, $ffff
 _sp_predict_restore:
