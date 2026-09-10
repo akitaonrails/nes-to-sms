@@ -219,6 +219,12 @@ pub enum MapperPolicy {
         bank_count: u8,
         bus_conflicts: UxromBusConflicts,
     },
+    /// Mapper 3 (CNROM): fixed PRG, CHR-bank select on $8000-$FFFF writes.
+    Cnrom {
+        prg_len: usize,
+        chr_bank_count: u8,
+        bus_conflicts: UxromBusConflicts,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,6 +315,37 @@ pub fn resolve_mapper_policy(
     }
 }
 
+/// Oracle/analysis resolver that additionally admits CNROM (mapper 3). Kept
+/// SEPARATE from `resolve_mapper_policy` so the SMS conversion pipeline's
+/// default path still rejects CNROM and forces explicit board opt-in; only
+/// the reference oracle (frame-diff) uses this wider set.
+pub fn resolve_mapper_policy_oracle(
+    header: &Header,
+    prg_len: usize,
+) -> Result<MapperPolicy, MapperPolicyError> {
+    if header.mapper == 3 {
+        if header.kind != HeaderKind::Nes2 {
+            return Err(MapperPolicyError::UxromRequiresNes2);
+        }
+        if prg_len != PRG_BANK_SIZE && prg_len != 2 * PRG_BANK_SIZE {
+            return Err(MapperPolicyError::InvalidNromPrgLayout { prg_len });
+        }
+        let bus_conflicts = match header.submapper {
+            // CNROM submapper 2 requires AND bus conflicts, like UxROM.
+            0 | 1 => UxromBusConflicts::None,
+            2 => UxromBusConflicts::And,
+            submapper => return Err(MapperPolicyError::UnsupportedUxromSubmapper { submapper }),
+        };
+        let chr_bank_count = (header.chr_len() / CHR_BANK_SIZE).max(1) as u8;
+        return Ok(MapperPolicy::Cnrom {
+            prg_len,
+            chr_bank_count,
+            bus_conflicts,
+        });
+    }
+    resolve_mapper_policy(header, prg_len)
+}
+
 impl MapperPolicy {
     pub fn is_banked(self) -> bool {
         matches!(self, Self::Uxrom { .. })
@@ -316,14 +353,14 @@ impl MapperPolicy {
 
     pub fn bank_count(self) -> u8 {
         match self {
-            Self::Nrom { prg_len } => (prg_len / PRG_BANK_SIZE) as u8,
+            Self::Nrom { prg_len } | Self::Cnrom { prg_len, .. } => (prg_len / PRG_BANK_SIZE) as u8,
             Self::Uxrom { bank_count, .. } => bank_count,
         }
     }
 
     fn checked_bank_offset(self, bank: u8) -> Result<usize, MapperPolicyError> {
         match self {
-            Self::Nrom { .. } => Ok(0),
+            Self::Nrom { .. } | Self::Cnrom { .. } => Ok(0),
             Self::Uxrom { bank_count, .. } if bank < bank_count => {
                 Ok(bank as usize * PRG_BANK_SIZE)
             }
@@ -343,7 +380,7 @@ impl MapperPolicy {
             return Ok(None);
         }
         match self {
-            Self::Nrom { prg_len } => {
+            Self::Nrom { prg_len } | Self::Cnrom { prg_len, .. } => {
                 let offset = (cpu_addr - 0x8000) as usize;
                 Ok(Some(if prg_len == PRG_BANK_SIZE {
                     offset & (PRG_BANK_SIZE - 1)
@@ -373,8 +410,8 @@ impl MapperPolicy {
     /// Return the PRG bytes visible in the fixed $C000-$FFFF window.
     pub fn fixed_prg<'a>(self, prg: &'a [u8]) -> &'a [u8] {
         match self {
-            Self::Nrom { prg_len } if prg_len == PRG_BANK_SIZE => prg,
-            Self::Nrom { .. } => &prg[PRG_BANK_SIZE..],
+            Self::Nrom { prg_len } | Self::Cnrom { prg_len, .. } if prg_len == PRG_BANK_SIZE => prg,
+            Self::Nrom { .. } | Self::Cnrom { .. } => &prg[PRG_BANK_SIZE..],
             Self::Uxrom { bank_count, .. } => {
                 let offset = (bank_count as usize - 1) * PRG_BANK_SIZE;
                 &prg[offset..offset + PRG_BANK_SIZE]
@@ -394,7 +431,7 @@ impl MapperPolicy {
         selected_bank: u8,
     ) -> Result<Vec<u8>, MapperPolicyError> {
         match self {
-            Self::Nrom { .. } => Ok(prg.to_vec()),
+            Self::Nrom { .. } | Self::Cnrom { .. } => Ok(prg.to_vec()),
             Self::Uxrom { .. } => {
                 let mut view = Vec::with_capacity(2 * PRG_BANK_SIZE);
                 view.extend_from_slice(self.prg_bank(prg, selected_bank)?);
@@ -404,9 +441,33 @@ impl MapperPolicy {
         }
     }
 
+    /// CNROM CHR bank selected by a $8000-$FFFF write, honoring submapper-2
+    /// AND bus conflicts. Returns None for non-CNROM policies. The result
+    /// indexes an 8 KiB CHR window; it does not affect PRG/CPU reads.
+    pub fn cnrom_chr_bank_from_write(self, raw_write: u8, pre_write_rom_byte: u8) -> Option<u8> {
+        match self {
+            Self::Cnrom {
+                chr_bank_count,
+                bus_conflicts,
+                ..
+            } => {
+                let effective = match bus_conflicts {
+                    UxromBusConflicts::None => raw_write,
+                    UxromBusConflicts::And => raw_write & pre_write_rom_byte,
+                };
+                Some(if chr_bank_count == 0 {
+                    0
+                } else {
+                    effective % chr_bank_count
+                })
+            }
+            _ => None,
+        }
+    }
+
     pub fn uxrom_bus_conflicts(self) -> Option<UxromBusConflicts> {
         match self {
-            Self::Nrom { .. } => None,
+            Self::Nrom { .. } | Self::Cnrom { .. } => None,
             Self::Uxrom { bus_conflicts, .. } => Some(bus_conflicts),
         }
     }
@@ -418,7 +479,7 @@ impl MapperPolicy {
         pre_write_rom_byte: u8,
     ) -> Result<u8, MapperPolicyError> {
         match self {
-            Self::Nrom { .. } => Ok(0),
+            Self::Nrom { .. } | Self::Cnrom { .. } => Ok(0),
             Self::Uxrom {
                 bank_count,
                 bus_conflicts,
@@ -656,6 +717,50 @@ mod tests {
                 Some(8 * PRG_BANK_SIZE - 1)
             );
         }
+    }
+
+    #[test]
+    fn cnrom_policy_fixes_prg_and_selects_chr_bank() {
+        let mut h = header(3);
+        h.kind = HeaderKind::Nes2;
+        h.submapper = 2; // AND bus conflicts
+        h.prg_banks = 2; // 32 KiB PRG
+        h.chr_banks = 4; // 32 KiB CHR = four 8 KiB banks
+        let policy = resolve_mapper_policy_oracle(&h, 2 * PRG_BANK_SIZE).unwrap();
+        assert!(matches!(policy, MapperPolicy::Cnrom { .. }));
+        // PRG behaves exactly like NROM-32: fixed, unbanked.
+        assert!(!policy.is_banked());
+        assert_eq!(policy.cpu_to_prg_offset(0x8000, 0).unwrap(), Some(0));
+        assert_eq!(
+            policy.cpu_to_prg_offset(0xffff, 0).unwrap(),
+            Some(2 * PRG_BANK_SIZE - 1)
+        );
+        // A $8000+ write selects the CHR bank (mod 4), AND'd with the bus byte.
+        assert_eq!(policy.cnrom_chr_bank_from_write(0x02, 0xff), Some(2));
+        assert_eq!(policy.cnrom_chr_bank_from_write(0x07, 0x02), Some(2)); // 7 & 2 = 2
+        assert_eq!(policy.cnrom_chr_bank_from_write(0x05, 0xff), Some(1)); // 5 % 4 = 1
+        // Non-CNROM policies do not select a CHR bank.
+        let uxrom = resolve_mapper_policy(&header(2), 8 * PRG_BANK_SIZE).unwrap();
+        assert_eq!(uxrom.cnrom_chr_bank_from_write(3, 0xff), None);
+    }
+
+    #[test]
+    fn cnrom_requires_nes2_and_valid_prg() {
+        let mut ines = header(3);
+        ines.kind = HeaderKind::INes;
+        ines.prg_banks = 2;
+        assert_eq!(
+            resolve_mapper_policy_oracle(&ines, 2 * PRG_BANK_SIZE),
+            Err(MapperPolicyError::UxromRequiresNes2)
+        );
+        let mut bad = header(3);
+        bad.kind = HeaderKind::Nes2;
+        assert_eq!(
+            resolve_mapper_policy_oracle(&bad, 3 * PRG_BANK_SIZE),
+            Err(MapperPolicyError::InvalidNromPrgLayout {
+                prg_len: 3 * PRG_BANK_SIZE
+            })
+        );
     }
 
     #[test]

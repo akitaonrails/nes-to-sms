@@ -103,6 +103,11 @@ fn script_buttons(frame: usize, script: &str) -> Buttons {
 struct ButtonTimeline {
     builtin: String,
     events: Vec<(usize, u8)>, // frame -> raw SMS $DC active-low port value
+    // frame -> NES controller byte (Buttons bits). When present the reference
+    // uses these directly, bypassing the SMB-tuned SMS->NES title-mode
+    // heuristic. Authored against the NES oracle for games (e.g. Adventure
+    // Island) whose RAM map does not match the SMB oper_mode probe.
+    nes_events: Option<Vec<(usize, u8)>>,
 }
 
 impl ButtonTimeline {
@@ -110,6 +115,7 @@ impl ButtonTimeline {
         Self {
             builtin: name,
             events: Vec::new(),
+            nes_events: None,
         }
     }
 
@@ -117,7 +123,24 @@ impl ButtonTimeline {
         Self {
             builtin: "buttons-script".to_string(),
             events,
+            nes_events: None,
         }
+    }
+
+    fn from_nes_events(events: Vec<(usize, u8)>) -> Self {
+        Self {
+            builtin: "nes-buttons-script".to_string(),
+            events: Vec::new(),
+            nes_events: Some(events),
+        }
+    }
+
+    /// The raw NES controller byte at `frame`, if this timeline was authored
+    /// in NES-button terms. Events hold until the next one; neutral before.
+    fn nes_at(&self, frame: usize) -> Option<u8> {
+        let events = self.nes_events.as_ref()?;
+        let idx = events.partition_point(|(event_frame, _)| *event_frame <= frame);
+        Some(if idx == 0 { 0 } else { events[idx - 1].1 })
     }
 
     fn sms_dc_at(&self, frame: usize) -> u8 {
@@ -169,6 +192,53 @@ fn parse_button_event(spec: &str) -> Result<(usize, u8), String> {
 }
 
 fn load_button_script(path: &str) -> Result<Vec<(usize, u8)>, String> {
+    load_script_with(path, parse_button_event)
+}
+
+/// NES controller byte from names, held until the next event. Directly a
+/// Buttons bitmask, with no SMS $DC round-trip or title-mode remapping.
+fn buttons_to_nes(spec: &str) -> Result<u8, String> {
+    let mut nes = 0u8;
+    for raw in spec.split(',') {
+        let name = raw.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        nes |= match name.as_str() {
+            "a" => Buttons::A,
+            "b" => Buttons::B,
+            "select" => Buttons::SELECT,
+            "start" => Buttons::START,
+            "up" => Buttons::UP,
+            "down" => Buttons::DOWN,
+            "left" => Buttons::LEFT,
+            "right" => Buttons::RIGHT,
+            other => return Err(format!("unknown NES button entry: {other}")),
+        };
+    }
+    Ok(nes)
+}
+
+fn parse_nes_button_event(spec: &str) -> Result<(usize, u8), String> {
+    let (frame, buttons) = spec
+        .split_once(':')
+        .or_else(|| spec.split_once('='))
+        .ok_or_else(|| format!("expected FRAME:buttons, got {spec}"))?;
+    let frame = frame
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("invalid frame in NES button event: {frame}"))?;
+    Ok((frame, buttons_to_nes(buttons)?))
+}
+
+fn load_nes_button_script(path: &str) -> Result<Vec<(usize, u8)>, String> {
+    load_script_with(path, parse_nes_button_event)
+}
+
+fn load_script_with(
+    path: &str,
+    parse: impl Fn(&str) -> Result<(usize, u8), String>,
+) -> Result<Vec<(usize, u8)>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("failed to read button script {path}: {err}"))?;
     let mut events = Vec::new();
@@ -178,7 +248,7 @@ fn load_button_script(path: &str) -> Result<Vec<(usize, u8)>, String> {
             continue;
         }
         events.push(
-            parse_button_event(line)
+            parse(line)
                 .map_err(|err| format!("invalid button script {path}:{}: {err}", line_idx + 1))?,
         );
     }
@@ -232,6 +302,7 @@ struct NesBus {
     ppu_log_count: usize,
     /// UxROM: selected 16 KiB bank at $8000-$BFFF.
     prg_bank: u8,
+    chr_bank: u8,
     mapper_policy: nes_rom::MapperPolicy,
     /// CHR-RAM store for pattern-space $2007 writes (ground truth).
     chr_ram: Vec<u8>,
@@ -309,6 +380,7 @@ impl NesBus {
                 .unwrap_or(200),
             ppu_log_count: 0,
             prg_bank: 0,
+            chr_bank: 0,
             mapper_policy,
             chr_ram: vec![0u8; 0x3000],
             palette_ram: [0u8; 32],
@@ -534,6 +606,14 @@ impl oracle_6502::Bus for NesBus {
                         .selected_bank_from_write(value, bus_byte)
                         .expect("valid mapper write bank");
                 }
+                // CNROM: the write selects the 8 KiB CHR bank; PRG is fixed.
+                let bus_byte = self.prg_read(addr);
+                if let Some(bank) = self
+                    .mapper_policy
+                    .cnrom_chr_bank_from_write(value, bus_byte)
+                {
+                    self.chr_bank = bank;
+                }
             }
             _ => {}
         }
@@ -613,7 +693,8 @@ fn render_nes_ppm(bus: &NesBus, path: &str) -> std::io::Result<()> {
     let chr = |addr: usize| -> u8 {
         // Pattern reads come from CHR ROM when present, else the CHR-RAM shadow.
         if !bus.chr.is_empty() {
-            bus.chr[addr % bus.chr.len()]
+            let base = (bus.chr_bank as usize) * 0x2000;
+            bus.chr[(base + (addr & 0x1FFF)) % bus.chr.len()]
         } else {
             bus.chr_ram[addr & 0x1FFF]
         }
@@ -895,11 +976,14 @@ fn run_reference(
     let mut snaps: Vec<[u8; 0x800]> = Vec::with_capacity(frames);
     for frame in 0..frames {
         bus.current_frame = Some(frame);
-        bus.buttons = effective_nes_buttons(
-            frame,
-            timeline,
-            if pause_is_start { 0 } else { bus.ram[0x0770] },
-        );
+        bus.buttons = match timeline.nes_at(frame) {
+            Some(nes) => nes,
+            None => effective_nes_buttons(
+                frame,
+                timeline,
+                if pause_is_start { 0 } else { bus.ram[0x0770] },
+            ),
+        };
         bus.vblank = true;
         bus.sprite0_phase = 0; // new frame: re-arm the sprite-0 hit handshake
         if bus.nmi_enabled {
@@ -1949,6 +2033,7 @@ fn main() {
     let mut frames = 120usize;
     let mut script = "none".to_string();
     let mut buttons_script: Option<String> = None;
+    let mut nes_buttons_script: Option<String> = None;
     let mut ref_only = false;
     let mut i = 3;
     while i < args.len() {
@@ -1965,6 +2050,10 @@ fn main() {
                 i += 1;
                 buttons_script = Some(args[i].clone());
             }
+            "--nes-buttons-script" => {
+                i += 1;
+                nes_buttons_script = Some(args[i].clone());
+            }
             "--ref-only" => ref_only = true,
             other => {
                 eprintln!("unknown arg: {other}");
@@ -1976,11 +2065,18 @@ fn main() {
 
     let nes = std::fs::read(&nes_path).expect("read nes");
     let image = nes_rom::parse(&nes).expect("parse nes");
-    let mapper_policy = nes_rom::resolve_mapper_policy(&image.header, image.prg.len())
+    let mapper_policy = nes_rom::resolve_mapper_policy_oracle(&image.header, image.prg.len())
         .expect("supported mapper policy");
     let prg = image.prg.to_vec();
 
-    let (timeline, script_desc) = if let Some(path) = buttons_script {
+    let (timeline, script_desc) = if let Some(path) = nes_buttons_script {
+        let events = load_nes_button_script(&path)
+            .unwrap_or_else(|err| panic!("invalid --nes-buttons-script: {err}"));
+        (
+            ButtonTimeline::from_nes_events(events),
+            format!("nes-buttons-script:{path}"),
+        )
+    } else if let Some(path) = buttons_script {
         let events = load_button_script(&path)
             .unwrap_or_else(|err| panic!("invalid --buttons-script: {err}"));
         (
