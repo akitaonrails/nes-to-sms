@@ -268,6 +268,7 @@ enum StatefulMapper {
     Axrom(nes_rom::axrom::Axrom),
     Vrc2(nes_rom::vrc2::Vrc2),
     Fme7(nes_rom::fme7::Fme7),
+    Mmc2(nes_rom::mmc2::Mmc2),
 }
 
 impl StatefulMapper {
@@ -277,6 +278,7 @@ impl StatefulMapper {
             Self::Axrom(a) => a.cpu_to_prg_offset(addr),
             Self::Vrc2(v) => v.cpu_to_prg_offset(addr),
             Self::Fme7(f) => f.cpu_to_prg_offset(addr),
+            Self::Mmc2(m) => m.cpu_to_prg_offset(addr),
         }
     }
     fn write_register(&mut self, addr: u16, value: u8) {
@@ -285,6 +287,7 @@ impl StatefulMapper {
             Self::Axrom(a) => a.write_register(addr, value),
             Self::Vrc2(v) => v.write_register(addr, value),
             Self::Fme7(f) => f.write_register(addr, value),
+            Self::Mmc2(m) => m.write_register(addr, value),
         }
     }
     fn prg_ram_enabled(&self) -> bool {
@@ -293,6 +296,7 @@ impl StatefulMapper {
             Self::Axrom(_) => false,
             Self::Vrc2(_) => false,
             Self::Fme7(f) => f.prg6000_is_ram(),
+            Self::Mmc2(m) => m.prg_ram_enabled(),
         }
     }
     /// Advance the mapper's scanline IRQ one step; true when it asserts IRQ.
@@ -333,6 +337,7 @@ impl StatefulMapper {
                 let window = ((ppu_addr >> 10) & 7) as u8;
                 Some(f.chr_bank_1k(window) as usize * 1024 + (ppu_addr as usize & 0x3FF))
             }
+            Self::Mmc2(m) => Some(m.chr_offset(ppu_addr)),
             _ => None,
         }
     }
@@ -2278,6 +2283,10 @@ fn main() {
         69 => Some(StatefulMapper::Fme7(
             nes_rom::fme7::Fme7::new(&image.header, image.prg.len(), image.chr.len())
                 .expect("supported FME-7 board"),
+        )),
+        9 | 10 => Some(StatefulMapper::Mmc2(
+            nes_rom::mmc2::Mmc2::new(&image.header, image.prg.len(), image.chr.len())
+                .expect("supported MMC2/MMC4 board"),
         )),
         _ => None,
     };
