@@ -1002,6 +1002,20 @@ fn run_reference(
                 bus.ram[0x18], bus.ram[0x19], bus.ram[0x0D]
             );
         }
+        // FD_REF_TRACK=off,off,... prints those RAM byte offsets (hex, e.g.
+        // 0x37 or 594) for the reference every frame. General per-frame guest
+        // state probe for route/parity work and mapper debugging.
+        if let Ok(spec) = std::env::var("FD_REF_TRACK") {
+            let vals: Vec<String> = spec
+                .split(',')
+                .filter_map(|raw| {
+                    let t = raw.trim().trim_start_matches("0x").trim_start_matches('$');
+                    usize::from_str_radix(t, 16).ok().filter(|a| *a < 0x800)
+                })
+                .map(|a| format!("${a:03X}=${:02X}", bus.ram[a]))
+                .collect();
+            println!("REF_TRACK f{frame} {}", vals.join(" "));
+        }
         if let Some((dir, frames_wanted)) = &nes_dump {
             if frames_wanted.contains(&frame) {
                 let path = format!("{dir}/ref_{frame:05}.ppm");
