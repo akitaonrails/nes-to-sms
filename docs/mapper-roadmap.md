@@ -97,6 +97,22 @@ does not mean zero graphics memory. `m.s` means mapper/submapper.
   [CNROM hardware](https://www.nesdev.org/wiki/CNROM),
   [submapper definitions](https://www.nesdev.org/wiki/NES_2.0_submappers).
 
+  **Progress (2026-09-10, see [source-hardware runtime](source-hardware-runtime.md)):**
+  Title screen pixel-exact; the canonical-pattern atlas publisher renders
+  coherent gameplay with double-buffered name tables and eliminated the
+  spurious blank frames; a −38% materialization-speed campaign landed; an
+  input-only first-level route completes with byte-exact guest endpoints and
+  a sustained traversal renders deeper level-1 content (enemies, score
+  popups, items, terrain scroll) correctly. **Still open for item-1
+  completion:** gameplay pixel/guest-state parity vs the NES oracle (needs
+  Adventure-specific oracle input plumbing — the SMB-tuned title-mode
+  heuristic and derived guest_pad do not transfer), a level-clear route,
+  audio (sound-engine command table + PSG fidelity), the remaining content
+  matrix (all areas, bosses, death/restart, transitions), and the source-fps
+  gap (~0.14 source fps at 500%; closing it needs the native-span
+  graduation, a design campaign). Gradius (USA) `3.2` stays the CNROM
+  second-game check.
+
 - [ ] **2. MMC1 — The Legend of Zelda (USA, Rev 1).** Available as
   `Legend of Zelda, The (USA) (Rev 1).nes`: `1.0`, **128/0**, NES 2.0,
   NTSC; header declares 8 KiB CHR-RAM and 8 KiB battery-backed PRG-RAM.
