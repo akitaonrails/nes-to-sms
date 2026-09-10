@@ -1580,10 +1580,147 @@ _sp_eval_adv_even:
   ld a, b
   or a
   ret z
+; B holds the remaining even-step budget. The common COUNT<8 phase runs
+; per sprite with bulk copies; endpoint state is what the fixtures compare,
+; and every write here mirrors one _sp_eval_even step: the tested Y lands
+; in the slot's first byte on both outcomes, a hit records index and
+; sprite-zero on its first step then copies the sprite's four bytes, and a
+; budget that ends mid-copy leaves M at the copied count. All N advances
+; go through _sp_eval_next_n itself. The rare overflow-probe phase keeps
+; stepping through _sp_eval_even unchanged.
 _sp_eval_adv_loop:
   ld a, (SP_EVAL_DONE)
   or a
-  jr nz, _sp_eval_adv_done_run
+  jp nz, _sp_eval_adv_done_run
+  ld a, (SP_EVAL_COUNT)
+  cp 8
+  jp nc, _sp_eval_adv_step
+  ld a, (SP_EVAL_M)
+  or a
+  jr nz, _sp_eval_adv_midcopy
+  ld a, (SP_EVAL_N)
+  add a, a
+  add a, a
+  ld l, a
+  ld h, $c9
+  ld a, ($cb08)
+  and $20
+  ld e, 8
+  jr z, _sp_eval_adv_h8
+  ld e, 16
+_sp_eval_adv_h8:
+  ld a, (SC_LINE)
+  sub (hl)
+  jr c, _sp_eval_adv_miss
+  cp e
+  jr nc, _sp_eval_adv_miss
+  ; hit: index and zero flags belong to this first step
+  ld a, (SP_EVAL_COUNT)
+  add a, <SP_SECONDARY_INDEX
+  ld e, a
+  ld d, >SP_SECONDARY_INDEX
+  ld a, (SP_EVAL_N)
+  ld (de), a
+  or a
+  jr nz, _sp_eval_adv_hit_dest
+  ld a, 1
+  ld (SP_ZERO_NEXT), a
+_sp_eval_adv_hit_dest:
+  ld a, (SP_EVAL_COUNT)
+  add a, a
+  add a, a
+  add a, <SP_SECONDARY
+  ld e, a
+  ld d, >SP_SECONDARY
+  ld a, b
+  cp 4
+  jr c, _sp_eval_adv_hit_partial
+  push bc
+  ld bc, 4
+  ldir
+  pop bc
+  ld a, (SP_EVAL_COUNT)
+  inc a
+  ld (SP_EVAL_COUNT), a
+  call _sp_eval_next_n
+  ld a, b
+  sub 4
+  ld b, a
+  jp nz, _sp_eval_adv_loop
+  ret
+_sp_eval_adv_hit_partial:
+  push bc
+  ld c, b
+  ld b, 0
+  ldir
+  pop bc
+  ld a, b
+  ld (SP_EVAL_M), a
+  ret
+_sp_eval_adv_miss:
+  ; the dummy-tested Y still lands in the slot's first byte
+  ld a, (SP_EVAL_COUNT)
+  add a, a
+  add a, a
+  add a, <SP_SECONDARY
+  ld e, a
+  ld d, >SP_SECONDARY
+  ld a, (hl)
+  ld (de), a
+  call _sp_eval_next_n
+  dec b
+  jp nz, _sp_eval_adv_loop
+  ret
+_sp_eval_adv_midcopy:
+  ld c, a                    ; M (1..3)
+  ld a, 4
+  sub c
+  cp b
+  jr c, _sp_eval_adv_mid_k
+  ld a, b
+_sp_eval_adv_mid_k:
+  push af                    ; k
+  ld a, (SP_EVAL_COUNT)
+  add a, a
+  add a, a
+  or c
+  add a, <SP_SECONDARY
+  ld e, a
+  ld d, >SP_SECONDARY
+  ld a, (SP_EVAL_N)
+  add a, a
+  add a, a
+  or c
+  ld l, a
+  ld h, $c9
+  pop af
+  ld c, a                    ; k as copy counter (M no longer needed)
+  push bc
+  ld b, c
+_sp_eval_adv_mid_copy:
+  ld a, (hl)
+  ld (de), a
+  inc hl
+  inc de
+  djnz _sp_eval_adv_mid_copy
+  pop bc
+  ; new M from the destination cursor; a wrap closes the slot
+  ld a, e
+  sub <SP_SECONDARY
+  and 3
+  ld (SP_EVAL_M), a
+  jr nz, _sp_eval_adv_mid_budget
+  ld a, (SP_EVAL_COUNT)
+  inc a
+  ld (SP_EVAL_COUNT), a
+  call _sp_eval_next_n
+_sp_eval_adv_mid_budget:
+  ld a, b
+  sub c
+  ld b, a
+  jp nz, _sp_eval_adv_loop
+  ret
+_sp_eval_adv_step:
   push bc
   ld a, (SP_EVAL_N)
   add a, a
@@ -1597,7 +1734,8 @@ _sp_eval_adv_loop:
   ld (SP_OAM_LATCH), a
   call _sp_eval_even
   pop bc
-  djnz _sp_eval_adv_loop
+  dec b
+  jp nz, _sp_eval_adv_loop
   ret
 _sp_eval_adv_done_run:
   ld a, (SP_EVAL_N)
