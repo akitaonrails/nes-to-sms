@@ -291,6 +291,13 @@ impl StatefulMapper {
             Self::Vrc2(_) => false,
         }
     }
+    /// Advance the mapper's scanline IRQ one step; true when it asserts IRQ.
+    fn vrc_irq_scanline(&mut self) -> bool {
+        match self {
+            Self::Vrc2(v) => v.vrc_irq_scanline(),
+            _ => false,
+        }
+    }
     /// A mapper that answers its own $6000-$7FFF reads (e.g. VRC2's one-bit
     /// microwire latch) returns Some; None falls back to the WRAM array.
     fn wram_read(&self) -> Option<u8> {
@@ -1124,8 +1131,23 @@ fn run_reference(
         let mut distinct: std::collections::HashSet<u16> = std::collections::HashSet::new();
         let mut pcmin = 0xFFFFu16;
         let mut pcmax = 0u16;
+        // Drive the mapper's scanline IRQ (VRC4) 262 times per frame, spread
+        // across the fixed instruction budget. The frame-granular oracle has no
+        // cycle clock, so this stands in for scanline timing: enough for
+        // IRQ-paced main loops (Gradius II, Goemon) to advance.
+        const SCANLINES_PER_FRAME: u32 = 262;
+        let scanline_interval = (REF_INSN_PER_FRAME as u32 / SCANLINES_PER_FRAME).max(1);
+        let mut insn_since_scanline = 0u32;
         for _ in 0..REF_INSN_PER_FRAME {
             bus.last_pc = cpu.pc;
+            insn_since_scanline += 1;
+            if insn_since_scanline >= scanline_interval {
+                insn_since_scanline = 0;
+                let fire = bus.stateful.as_mut().is_some_and(|m| m.vrc_irq_scanline());
+                if fire {
+                    cpu.irq(&mut bus);
+                }
+            }
             if distinct_on {
                 distinct.insert(cpu.pc);
                 pcmin = pcmin.min(cpu.pc);

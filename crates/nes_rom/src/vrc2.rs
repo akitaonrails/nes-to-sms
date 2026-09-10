@@ -76,6 +76,18 @@ pub struct Vrc2 {
     // to detect the board; a wrong answer trips their self-test. VRC4 variants
     // that ship true 8 KiB WRAM are not modeled here yet.
     ram_latch: u8,
+    // VRC4 scanline/cycle IRQ counter ($F000-$F003). VRC2 games leave it
+    // disabled; VRC4 games (Gradius II, Goemon) drive their split-screen and
+    // main-loop pacing off it, so it must run for them to progress.
+    irq_latch: u8,
+    irq_counter: u8,
+    irq_enabled: bool,
+    irq_enable_after_ack: bool,
+    irq_cycle_mode: bool,
+    irq_pending: bool,
+    // Scanline mode divides the pixel clock by 341 dots (~113.667 CPU cycles);
+    // this prescaler carries the fractional remainder between ticks.
+    irq_prescaler: i16,
 }
 
 impl Vrc2 {
@@ -118,6 +130,13 @@ impl Vrc2 {
             chr: [0; 8],
             mirroring: 0,
             ram_latch: 0,
+            irq_latch: 0,
+            irq_counter: 0,
+            irq_enabled: false,
+            irq_enable_after_ack: false,
+            irq_cycle_mode: false,
+            irq_pending: false,
+            irq_prescaler: 0,
         })
     }
 
@@ -179,8 +198,64 @@ impl Vrc2 {
                     *entry = (*entry & 0x00f) | ((value as u16 & 0x1f) << 4);
                 }
             }
-            _ => {} // $F000 IRQ not modeled
+            0xF000 => match sel {
+                0 => self.irq_latch = (self.irq_latch & 0xF0) | (value & 0x0F),
+                1 => self.irq_latch = (self.irq_latch & 0x0F) | ((value & 0x0F) << 4),
+                2 => {
+                    // Control: bit0 = enable-after-ack (A), bit1 = enable (E),
+                    // bit2 = mode (M: 0 scanline, 1 cycle).
+                    self.irq_enable_after_ack = value & 0x01 != 0;
+                    self.irq_enabled = value & 0x02 != 0;
+                    self.irq_cycle_mode = value & 0x04 != 0;
+                    self.irq_pending = false;
+                    if self.irq_enabled {
+                        self.irq_counter = self.irq_latch;
+                        self.irq_prescaler = 0;
+                    }
+                }
+                _ => {
+                    // Acknowledge: clear pending, restore E from A.
+                    self.irq_pending = false;
+                    self.irq_enabled = self.irq_enable_after_ack;
+                }
+            },
+            _ => {}
         }
+    }
+
+    /// Advance the VRC4 IRQ counter by one scanline and report whether the IRQ
+    /// line is (still) asserted. The frame-granular oracle calls this 262 times
+    /// per frame in place of cycle-exact timing. Scanline mode ticks the
+    /// counter once per scanline; cycle mode ticks per CPU cycle, ~113.67 per
+    /// scanline, so the prescaler carries the fraction across calls.
+    pub fn vrc_irq_scanline(&mut self) -> bool {
+        if self.irq_enabled {
+            if self.irq_cycle_mode {
+                // 341 dots / 3 dots-per-cycle = 113.67 CPU cycles per scanline.
+                self.irq_prescaler += 341;
+                while self.irq_prescaler >= 3 {
+                    self.irq_prescaler -= 3;
+                    self.irq_step_counter();
+                }
+            } else {
+                self.irq_step_counter();
+            }
+        }
+        self.irq_asserted()
+    }
+
+    fn irq_step_counter(&mut self) {
+        if self.irq_counter == 0xFF {
+            self.irq_counter = self.irq_latch;
+            self.irq_pending = true;
+        } else {
+            self.irq_counter += 1;
+        }
+    }
+
+    /// True while the mapper is holding the CPU IRQ line low.
+    pub fn irq_asserted(&self) -> bool {
+        self.irq_enabled && self.irq_pending
     }
 
     pub fn cpu_to_prg_offset(&self, cpu_addr: u16) -> Option<usize> {
@@ -278,6 +353,35 @@ mod tests {
         assert_eq!(v.microwire_read(), 0);
         v.microwire_write(0xFF);
         assert_eq!(v.microwire_read(), 1);
+    }
+
+    #[test]
+    fn scanline_irq_fires_after_reload_period() {
+        let mut v = Vrc2::new(&contra_header(), 8 * PRG_BANK_SIZE, 16 * 8 * 1024).unwrap();
+        // Latch $F6 -> counter reloads at $F6, so it overflows after
+        // 256 - 0xF6 = 10 scanline ticks. Write low then high nibble.
+        v.write_register(0xF000, 0x06); // low nibble
+        v.write_register(0xF001, 0x0F); // high nibble -> latch $F6
+        // Control: enable (E=1, bit1), scanline mode (M=0). sel 2 on mapper 23.
+        v.write_register(0xF002, 0x02);
+        for _ in 0..9 {
+            assert!(!v.vrc_irq_scanline(), "should not fire before 10 ticks");
+        }
+        assert!(v.vrc_irq_scanline(), "fires on the 10th tick");
+        assert!(v.irq_asserted());
+        // Acknowledge clears the line.
+        v.write_register(0xF003, 0);
+        assert!(!v.irq_asserted());
+    }
+
+    #[test]
+    fn disabled_irq_never_fires() {
+        let mut v = Vrc2::new(&contra_header(), 8 * PRG_BANK_SIZE, 16 * 8 * 1024).unwrap();
+        v.write_register(0xF000, 0x0F);
+        v.write_register(0xF001, 0x0F); // latch $FF -> would fire next tick
+        for _ in 0..300 {
+            assert!(!v.vrc_irq_scanline(), "disabled counter stays quiet");
+        }
     }
 
     #[test]
