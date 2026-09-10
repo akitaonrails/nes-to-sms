@@ -11,7 +11,7 @@
 .define AT_PHASE $bfaf
 .define AT_FAULT $bfb0
 .define AT_EVICTED $bfb1
-.define AT_LOGICAL_COUNT $bfb2
+.define AT_RELEASED $bfb2
 .define AT_ALLOCATED_COUNT $bfb4
 .define AT_SCAN $bfb6
 .define AT_CANDIDATE $bfb8

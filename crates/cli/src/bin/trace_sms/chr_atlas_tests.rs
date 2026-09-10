@@ -644,7 +644,7 @@ const ATLAS_LITERAL_PIXELS: [[u8; 8]; 8] = [
 ];
 
 /// Freeze one literal packet into the capture windows and seal it validated.
-fn atlas_seal_packet(bus: &mut AtlasPalBus, frame: u8) {
+fn atlas_seal_packet(bus: &mut AtlasPalBus, frame: u8, sprite_tile: u8) {
     bus.write(0xfffc, 0x08);
     for base in [0x8800u16, 0x9000] {
         for offset in 0..0x800 {
@@ -657,7 +657,7 @@ fn atlas_seal_packet(bus: &mut AtlasPalBus, frame: u8) {
     for offset in 0..256 {
         bus.write(0x9800 + offset, 0xe0);
     }
-    for (offset, value) in [31, 1, 2, 24].into_iter().enumerate() {
+    for (offset, value) in [31, sprite_tile, 2, 24].into_iter().enumerate() {
         bus.write(0x9800 + offset as u16, value);
     }
     for base in [0x9900u16, 0x9940] {
@@ -695,6 +695,8 @@ fn assembled_atlas_packets_publish_double_buffers_and_never_blank() {
     }
     rom[raw + 16..raw + 24].fill(0xff);
     rom[raw + 24..raw + 32].fill(0);
+    rom[raw + 32..raw + 40].fill(0);
+    rom[raw + 40..raw + 48].fill(0xff); // tile2: solid sprite color 2
     let mut bus = AtlasPalBus {
         inner: SmsBus::new(rom, 0xff),
         line: 0,
@@ -708,7 +710,7 @@ fn assembled_atlas_packets_publish_double_buffers_and_never_blank() {
     );
 
     // Packet 1 prepares the $3700 table and flips to it.
-    atlas_seal_packet(&mut bus, 0x11);
+    atlas_seal_packet(&mut bus, 0x11, 1);
     atlas_packet_invoke(&mut cpu, &mut bus, defs["rt_cnrom_packet_present"].1, true);
     assert_eq!(bus.inner.read(0xd400), 0, "packet retired");
     assert_eq!(bus.inner.vdp_regs[2], 0xff, "flip to the $3700 table");
@@ -754,7 +756,7 @@ fn assembled_atlas_packets_publish_double_buffers_and_never_blank() {
 
     // Packet 2 changes exactly one background cell; it lands in the $0700
     // table and the flip returns there.
-    atlas_seal_packet(&mut bus, 0x12);
+    atlas_seal_packet(&mut bus, 0x12, 1);
     bus.write(0xfffc, 0x08);
     bus.write(0x8800, 1); // cell (0,0) now the solid color-1 tile
     bus.write(0xfffc, 0x0c);
@@ -788,7 +790,7 @@ fn assembled_atlas_packets_publish_double_buffers_and_never_blank() {
 
     // Packet 3 repeats packet 2 byte-for-byte: pure canonical reuse, no new
     // allocations, flip forward again with identical pixels.
-    atlas_seal_packet(&mut bus, 0x13);
+    atlas_seal_packet(&mut bus, 0x13, 1);
     bus.write(0xfffc, 0x08);
     bus.write(0x8800, 1);
     bus.write(0xfffc, 0x0c);
@@ -829,6 +831,157 @@ fn assembled_atlas_packets_publish_double_buffers_and_never_blank() {
         let flags = bus.inner.cart_ram[sram1(AT_FLAGS) + usize::from(ordinal)];
         assert_eq!(flags & AT_DIRTY, 0, "dirty ordinal {ordinal}");
     }
+
+    // Packets 4-7 force a pair eviction, the eviction-triggered cache reset
+    // and post-reset slot reallocation. This is the exact class that broke
+    // in the actual core: a cache wipe with populated OLD_LIVE left stale
+    // key holes below the count high water and a later slot unlink trapped.
+    atlas_seal_packet(&mut bus, 0x14, 0); // literal-planes pair replaces tile1
+    bus.write(0xfffc, 0x08);
+    bus.write(0x8800, 1);
+    bus.write(0xfffc, 0x0c);
+    atlas_packet_invoke(&mut cpu, &mut bus, defs["rt_cnrom_packet_present"].1, false);
+    assert_eq!(bus.inner.read(0xd400), 0);
+    atlas_seal_packet(&mut bus, 0x15, 2); // solid-color2 pair; old pair expires
+    bus.write(0xfffc, 0x08);
+    bus.write(0x8800, 1);
+    bus.write(0xfffc, 0x0c);
+    atlas_packet_invoke(&mut cpu, &mut bus, defs["rt_cnrom_packet_present"].1, false);
+    assert_eq!(bus.inner.read(0xd400), 0);
+    assert_eq!(
+        bus.inner.cart_ram[sram1(0xbfb1)],
+        1,
+        "pair reclamation flagged an eviction"
+    );
+    // The next two packets run through the eviction-reset cache and fresh
+    // slot allocation; they must publish pixel-exactly with no trap.
+    for (frame, changed_cell) in [(0x16u8, 0x20u16), (0x17, 0x40)] {
+        atlas_seal_packet(&mut bus, frame, 2);
+        bus.write(0xfffc, 0x08);
+        bus.write(0x8800, 1);
+        bus.write(0x8800 + changed_cell, 1);
+        bus.write(0xfffc, 0x0c);
+        atlas_packet_invoke(&mut cpu, &mut bus, defs["rt_cnrom_packet_present"].1, false);
+        assert_eq!(bus.inner.read(0xd400), 0);
+        let row = usize::from(changed_cell) / 32 * 8;
+        // The $E4 attribute grid: palette = 2*(cell_row%4 >= 2) + (cell_col%4 >= 2).
+        let changed_pal = if (row / 8) % 4 >= 2 { 2u8 } else { 0 };
+        for y in 0..240 {
+            for x in 0..256 {
+                let expected = if x < 8 && y < 8 {
+                    1
+                } else if x < 8 && y >= row && y < row + 8 {
+                    1 + changed_pal * 4
+                } else {
+                    let color = ATLAS_LITERAL_PIXELS[y & 7][x & 7];
+                    let quadrant = ((x >> 4) & 1) + 2 * ((y >> 4) & 1);
+                    if color == 0 {
+                        0
+                    } else {
+                        color + quadrant as u8 * 4
+                    }
+                };
+                assert_eq!(
+                    atlas_background_index(&bus.inner, x, y),
+                    expected,
+                    "packet{frame:02x} pixel{x},{y}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires TRACE_CNROM_ATLAS_PROJECT assembled atlas-capability fixture"]
+fn assembled_atlas_capacity_release_surrenders_displayed_generation_once() {
+    let (mut bus, defs) = atlas_fixture();
+    cold_boot(&mut bus, &defs);
+
+    // A full displayed generation: 377 distinct patterns, all retired OLD.
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+    for i in 2..=378u16 {
+        stage_candidate(&mut bus, &candidate(i));
+        atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_bg", AT_BG_CANDIDATE);
+    }
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_retire", 0);
+    assert_eq!(flags(&bus, 1), AT_ALLOCATED | AT_OLD | AT_DIRTY);
+
+    // The next packet needs 377 completely different patterns: the union
+    // cannot fit, so the first exhausted scan releases the displayed
+    // generation once and allocation proceeds.
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+    assert_eq!(bus.cart_ram[sram1(0xbfb2)], 0, "release cleared at begin");
+    for i in 2..=378u16 {
+        stage_candidate(&mut bus, &candidate(0x1000 + i));
+        let (ordinal, _) = atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_bg", AT_BG_CANDIDATE);
+        assert!(ordinal >= 1 && ordinal < AT_CAPACITY, "reallocated {i}");
+    }
+    assert_eq!(
+        bus.cart_ram[sram1(0xbfb2)],
+        1,
+        "release recorded for commit"
+    );
+    // A 378th distinct pattern in the SAME packet still fails closed.
+    stage_candidate(&mut bus, &candidate(0x2fff));
+    assert_eq!(
+        atlas_call_fault(&mut bus, &defs, "rt_chr_atlas_intern_bg", AT_BG_CANDIDATE),
+        1
+    );
+}
+
+#[test]
+#[ignore = "requires TRACE_CNROM_ATLAS_PROJECT assembled atlas-capability fixture"]
+fn assembled_atlas_bg_harvests_expired_pairs_instead_of_failing_closed() {
+    let (mut bus, defs) = atlas_fixture();
+    cold_boot(&mut bus, &defs);
+
+    // One pair, then two empty generations: the pair expires.
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+    let q = pair_candidate(0x0009); // hash $53, alone in its chain
+    stage_pair(&mut bus, &q);
+    assert_eq!(
+        atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_pair", AT_BG_CANDIDATE),
+        (192, 256)
+    );
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_retire", 0);
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_retire", 0);
+
+    // Fill every single slot below the sprite window, then keep going: the
+    // next allocation must break the expired pair rather than fail closed.
+    atlas_call(&mut bus, &defs, "rt_chr_atlas_begin", 0);
+    for i in 1..192u16 {
+        stage_candidate(&mut bus, &candidate(i));
+        assert_eq!(
+            atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_bg", AT_BG_CANDIDATE),
+            (i, expected_physical(i)),
+            "fill {i}"
+        );
+    }
+    stage_candidate(&mut bus, &candidate(0x0777));
+    assert_eq!(
+        atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_bg", AT_BG_CANDIDATE),
+        (192, 256),
+        "expired pair first half harvested"
+    );
+    assert_eq!(head(&bus, 0x53), 0xffff, "pair chain node unlinked");
+    assert_eq!(flags(&bus, 193), 0, "partner half freed");
+    assert_eq!(
+        flags(&bus, 192),
+        AT_ALLOCATED | AT_PENDING | AT_DIRTY,
+        "harvested slot is a plain single now"
+    );
+    // The freed partner is immediately usable by the next single.
+    stage_candidate(&mut bus, &candidate(0x0778));
+    assert_eq!(
+        atlas_call(&mut bus, &defs, "rt_chr_atlas_intern_bg", AT_BG_CANDIDATE),
+        (193, expected_physical(193))
+    );
+    let allocated = u16::from_le_bytes([
+        bus.cart_ram[sram1(AT_ALLOCATED_COUNT)],
+        bus.cart_ram[sram1(AT_ALLOCATED_COUNT) + 1],
+    ]);
+    assert_eq!(allocated, 194, "zero + 191 singles + two harvested slots");
 }
 
 #[test]

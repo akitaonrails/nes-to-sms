@@ -173,6 +173,7 @@ _at_begin_resolved:
   ld ($fffc), a
   xor a
   ld (AT_EVICTED), a
+  ld (AT_RELEASED), a
   ld hl, AT_FLAGS
   ld bc, AT_CAPACITY
 _at_clear_pending:
@@ -347,7 +348,7 @@ _at_allocate_scan:
   ld hl, (AT_SCAN)
   call _at_flag_address
   ld a, (hl)
-  and AT_PROTECTED | AT_PAIR_FIRST | AT_PAIR_SECOND
+  and AT_PROTECTED
   jr z, _at_allocate_found
   ld hl, (AT_SCAN)
   inc hl
@@ -356,14 +357,51 @@ _at_allocate_scan:
   or a
   sbc hl, de
   jr c, _at_allocate_scan
+  call _at_capacity_release
+  jp _at_allocate_bg
+; When the displayed and pending pattern sets genuinely cannot share the
+; pool, release the displayed generation ONCE per packet and let the
+; publisher blank that frame before any canonical upload. Payload bytes
+; reach VRAM only at commit, so the displayed picture is intact until then.
+; A second exhaustion in the same packet still fails closed.
+_at_capacity_release:
+  ld a, (AT_RELEASED)
+  or a
+  jr z, _at_release_old
   ld a, 1
   jp _at_fault
+_at_release_old:
+  ld a, 1
+  ld (AT_RELEASED), a
+  ld hl, AT_FLAGS
+  ld bc, AT_CAPACITY
+_at_release_entry:
+  ld a, (hl)
+  and $fd                  ; clear AT_OLD
+  ld (hl), a
+  inc hl
+  dec bc
+  ld a, b
+  or c
+  jr nz, _at_release_entry
+  ret
+; Expired pairs are as reclaimable as expired singles — otherwise a churning
+; sprite graveyard permanently shrinks the background pool until allocation
+; fails closed with free storage in hand. Breaking a pair unlinks its
+; 64-byte chain node (always owned by the first half) and frees the partner.
 _at_allocate_found:
   ld hl, (AT_SCAN)
   ld (AT_CANDIDATE), hl
   call _at_flag_address
+  ld a, (hl)
+  and AT_PAIR_FIRST
+  jr nz, _at_bg_break_first
+  ld a, (hl)
+  and AT_PAIR_SECOND
+  jr nz, _at_bg_break_second
   bit 0, (hl)
   call nz, _at_unlink_candidate
+_at_bg_reclaimed:
   ld hl, (AT_CANDIDATE)
   call _at_payload_address
   ex de, hl
@@ -394,6 +432,30 @@ _at_allocate_found:
   ld (AT_ALLOCATED_COUNT), hl
   ld hl, (AT_CANDIDATE)
   jp _at_resolve
+_at_bg_break_first:
+  ; The victim owns the pair's chain entry; its second half is freed.
+  call _at_unlink_candidate
+  ld hl, (AT_SCAN)
+  inc hl
+  jr _at_bg_free_partner
+_at_bg_break_second:
+  ; The first half one slot below owns the chain entry; unlink through it,
+  ; free it, then reuse the scanned slot itself.
+  ld hl, (AT_SCAN)
+  dec hl
+  ld (AT_CANDIDATE), hl
+  call _at_unlink_candidate
+  ld hl, (AT_SCAN)
+  dec hl
+_at_bg_free_partner:
+  call _at_flag_address
+  ld (hl), 0
+  ld hl, (AT_ALLOCATED_COUNT)
+  dec hl
+  ld (AT_ALLOCATED_COUNT), hl
+  ld hl, (AT_SCAN)
+  ld (AT_CANDIDATE), hl
+  jp _at_bg_reclaimed
 
 ; Unlink exact ordinal from its old byte hash before overwriting backing.
 ; Pair-first nodes were chained under their 64-byte hash; second halves are
@@ -578,8 +640,8 @@ _at_pair_scan_next:
   sbc hl, de
   add hl, de
   jr c, _at_pair_scan
-  ld a, 1
-  jp _at_fault
+  call _at_capacity_release
+  jp _at_allocate_pair
 _at_pair_found:
   ld hl, (AT_SCAN)
   ld (AT_CANDIDATE), hl

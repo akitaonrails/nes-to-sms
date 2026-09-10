@@ -215,11 +215,35 @@ seam), singles and pairs share chains but are separated by kind flags, and
 expired singles or pairs inside the window are reclaimed with exact unlinking.
 The bank gate was rewritten without IX so the verified tracing core — which
 intentionally rejects DD/FD opcodes — can execute it; the original gate had
-never run. Gate results are HL/DE only; A and flags do not survive. This is
-primitive-level evidence: publisher integration (interned preparation, dirty
-uploads to the inactive table, the bounded switch) remains unimplemented, so
-the measured blanking failure is not yet closed and no capacity guarantee for
-arbitrary game frames is claimed.
+never run. Gate results are HL/DE only; A and flags do not survive. The publisher integration is now implemented and measured. The renderer
+interns every converted pattern (NT entries carry 9-bit canonical physicals;
+SAT tiles are pair physical low bytes), the legacy key cache persists as a
+key-to-ordinal map reset exactly on atlas evictions, pattern and name-table
+uploads run deadline-free against the inactive table, and the atomic window
+shrinks to SAT + CRAM + registers + one reg-2 flip. Slots became pure cache
+entries, so OLD_LIVE stays empty under the atlas — dense allocation preserves
+the unlink invariant across eviction resets (the first actual-core run
+trapped exactly there). Expired pairs are harvested by single allocation
+(breaking the pair and freeing the partner), and when a displayed/pending
+pattern union genuinely exceeds the 378-slot pool — Mode 4's pattern space
+is fully allocated, so the pool cannot grow — the allocator releases the
+displayed generation once per packet and the publisher blanks that single
+frame before any upload; a second exhaustion still fails closed.
+
+Ten assembled fixtures cover the primitives plus a full three-packet
+publisher run (pixel-exact on both alternating tables, no fallback after the
+first publish, no re-allocation for identical packets) and the
+eviction-reset, pair-harvest and capacity-release regressions. The actual
+Genesis Plus GX PAL/500 neutral title route now completes to source frame
+300 with no trap: all five in-range guest-state landmarks match with zero
+zero-page differences, every one of the baseline's 240 distinct displayed
+images reappears pixel-identical, and the 90 single-frame blank fallbacks
+shrink to 16 short episodes (41 callbacks) confined to title-animation
+phases whose old/new pattern unions exceed the pool. This is title-route
+coherence evidence, not gameplay acceptance, normal-speed playability or a
+capacity guarantee for other games. Byte-identity gates are checked with
+the SDSC header's build-date byte and checksum masked; the assembler stamps
+the UTC build date at $7FE6, which is the only bit of nondeterminism.
 
 ## Measured execution prerequisites
 

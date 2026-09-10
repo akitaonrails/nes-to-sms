@@ -136,6 +136,18 @@ rt_mmc3_prepare_display:
   call rt_mmc3_presentation_init
   call rt_mmc3_blank_display
 _m3p_prepare_old:
+.ifdef CNROM_SOURCE_HARDWARE_ATLAS_EXPERIMENT
+  ; Under the atlas, slots are pure cache entries: displayed pixels live in
+  ; canonical VRAM patterns, never in slot-indexed uploads, so no slot is
+  ; display-live. Keeping OLD_LIVE empty makes allocation dense from slot
+  ; zero, which preserves the invariant slot unlinking traps on — every
+  ; slot below the count high water is spliced into its hash chain — even
+  ; across the eviction-triggered cache reset in the atlas begin gate.
+  ld hl, M3P_OLD_LIVE
+  ld bc, 32
+  xor a
+  call mem_fill
+.else
   ; A completed full build records every rendered slot in NEEDED. All
   ; remaining NT rows are zero-filled, so the exact ALL32-row live set is
   ; NEEDED union{slot0}. Stable packets retain NEEDED with their unchanged NT.
@@ -150,6 +162,7 @@ _m3p_prepare_old:
   ld a, (M3P_OLD_LIVE)
   or 1
   ld (M3P_OLD_LIVE), a
+.endif
 _m3p_prepare_needed:
   ld a, (M3G_COMPARE_BG)
   or a
@@ -1261,6 +1274,19 @@ _m3p_atlas_phys:
 rt_mmc3_commit_display:
   call _m3p_palette_changes ; exact compare OUTSIDE the atomic VBlank interval
   call _m3p_queue_reset
+  ; A capacity release surrendered the displayed generation's protection:
+  ; its patterns may now be reused, so the old picture must not stay
+  ; visible through the uploads. This costs exactly one blanked frame and
+  ; only for packets whose old/new pattern union exceeds the pool.
+  ld a, 12
+  ld ($fffc), a
+  ld a, (AT_RELEASED)
+  or a
+  jr z, _m3p_atlas_coherent
+  xor a
+  ld (AT_RELEASED), a
+  call rt_mmc3_blank_display
+_m3p_atlas_coherent:
   ; Every canonical transfer is old-safe: fresh ordinals are never
   ; referenced by the displayed tables (two-generation protection), and the
   ; whole prepared NT lands in the INACTIVE table. Both flush while the old
