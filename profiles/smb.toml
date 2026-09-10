@@ -127,23 +127,28 @@ start = 0x00
 end = 0xff
 dest = 0
 
-# Sprite patterns (NES pattern table 0) -> SMS slots $100-$1A6 (256-422).
-# 224-line mode moves the name table to $3700 (= slot 440), so only sprite
-# slots up to 439 are valid VRAM. Reserved layout within 256-439:
-#   256-422  packed sprite patterns ($00-$A6)
-#   423      blank/transparent tile (unpacked = zero); unmapped sprite tiles
-#            fall back here (see build_chr_maps, BLANK_SPRITE_VALUE = 167).
-#   424-439  16 scratch slots the runtime rewrites each frame to emulate the
-#            horizontal/vertical sprite flips the SMS VDP can't do in hardware
-#            (runtime/sat.s rt_sat_resolve / do_flip).
-# NES sprite tile $FC (SMB's blank/transparent tile) isn't packed, so it
-# resolves to the blank slot. Sprite tiles $A7-$FF don't fit and fall back to
-# transparent (high-range graphics: score popups, flag, etc.).
+# Sprite patterns (NES pattern table 0). 224-line mode moves the name
+# table to $3700 (= slot 440), so only sprite slots up to 439 are valid
+# VRAM, and SMB's full sprite sheet (~240 used tiles) can never fit next
+# to 256 background tiles statically. Layout within 256-439:
+#   256-383  packed hot sprite patterns ($00-$7F: Mario/Luigi, fireballs,
+#            coins, the common early enemies)
+#   384-431  48-slot on-demand pool (sprite_dynamic below): flip/palette
+#            variants AND every used tile >= $80 (piranha plants, fire
+#            flower, buzzy beetles, Bowser, Toad/Peach, score popups...)
+#            are generated here at runtime from the ROM-side ext blob
+#            (runtime/sat.s variant_get_scratch / do_sprite_variant).
+#   432      blank/transparent tile; genuinely blank NES tiles (e.g. $FC)
+#            still resolve here.
 [[chr_pack]]
 table = 0
 start = 0x00
-end = 0xa6
+end = 0x7f
 dest = 0x100
+
+[sprite_dynamic]
+pool_first_rel = 128
+pool_size = 48
 
 # === Functions (JSR + JumpEngine targets) ===
 

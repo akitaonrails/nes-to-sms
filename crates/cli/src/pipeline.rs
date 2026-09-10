@@ -2329,7 +2329,8 @@ pub fn run(args: &Args) -> Result<String, Error> {
     } else {
         image.chr
     };
-    let (chr_4bpp, chr_maps, chr_report) = build_chr_assets(chr_source, &prof.chr_packs)?;
+    let (chr_4bpp, chr_maps, chr_ext, chr_report) =
+        build_chr_assets(chr_source, &prof.chr_packs, prof.sprite_dynamic)?;
     let palette: [u8; 32] = default_palette();
     // Default name table: all zeros. Real rendering comes from translated
     // PPU $2006/$2007 writes during init/NMI. (Switch this to a tile-
@@ -2402,7 +2403,13 @@ pub fn run(args: &Args) -> Result<String, Error> {
         prg_banks,
         prg_high,
         chr_nes,
-        chr_maps: Some(chr_maps),
+        chr_maps: Some({
+            let mut blob = chr_maps;
+            if let Some(ext) = chr_ext {
+                blob.extend_from_slice(&ext);
+            }
+            blob
+        }),
     };
 
     // 9. Emit the WLA-DX project.
@@ -2458,6 +2465,7 @@ pub fn run(args: &Args) -> Result<String, Error> {
         chr_ram: image.chr.is_empty(),
         input_action: prof.input.mode == profile::InputMode::Action,
         input_pause_start: prof.input.pause_start,
+        sprite_dynamic: prof.sprite_dynamic.map(|d| (d.pool_first_rel, d.pool_size)),
         scroll_split: prof.render.scroll_split,
         top_tile_remap_rows: prof.render.top_tile_remap_rows,
         top_tile_remap_from: prof.render.top_tile_remap_from.clone(),
@@ -2733,7 +2741,13 @@ fn format_label(addr: u16) -> String {
 fn build_chr_assets(
     chr: &[u8],
     packs: &[profile::ChrPackRange],
-) -> Result<(Vec<u8>, Vec<u8>, String), Error> {
+    sprite_dynamic: Option<profile::SpriteDynamic>,
+) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>, String), Error> {
+    if sprite_dynamic.is_some() && packs.is_empty() {
+        return Err(Error::Diagnostic(
+            "sprite_dynamic requires explicit [[chr_pack]] ranges".into(),
+        ));
+    }
     if packs.is_empty() {
         let chr_4bpp = assets::nes_chr_to_sms_4bpp(chr);
         let mut physical = [[None; 256]; 2];
@@ -2743,11 +2757,11 @@ fn build_chr_assets(
         for (tile, slot) in physical[1].iter_mut().take(192).enumerate() {
             *slot = Some(256 + tile as u16);
         }
-        let (chr_maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp)
+        let (chr_maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp, None)
             .map_err(|err| Error::Diagnostic(format!("CHR map generation failed: {err}")))?;
         let report = chr_pack_report(chr, packs, &physical, chr_4bpp.len(), unmapped);
         let report = append_sprite_fallback_report(report, fallbacks);
-        return Ok((chr_4bpp, chr_maps, report));
+        return Ok((chr_4bpp, chr_maps, None, report));
     }
 
     let mut chr_4bpp = vec![0u8; 448 * 32];
@@ -2764,11 +2778,49 @@ fn build_chr_assets(
             physical[usize::from(range.table)][usize::from(tile)] = Some(dest_slot as u16);
         }
     }
-    let (chr_maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp)
+    // Tiles the static packs leave without a base-$2000-usable slot become
+    // on-demand tiles: their converted bytes travel in a ROM-side blob and
+    // the sprite map points at them with the $FF dynamic sentinel. Static
+    // pack destinations never reach relative byte $FF (slots cap at 447),
+    // so the sentinel cannot collide with a real mapping. Only NES table 0
+    // participates: the runtime pool addresses base $2000.
+    let mut chr_ext: Option<Vec<u8>> = None;
+    let mut ext_index: [[Option<u8>; 256]; 2] = [[None; 256]; 2];
+    if sprite_dynamic.is_some() {
+        let mut blob = Vec::new();
+        for tile in 0..256usize {
+            if matches!(physical[0][tile], Some(256..=511)) {
+                continue;
+            }
+            let base = tile * 16;
+            if chr.len() < base + 16 || chr[base..base + 16].iter().all(|b| *b == 0) {
+                continue;
+            }
+            let index = blob.len() / 32;
+            if index >= 255 {
+                return Err(Error::Diagnostic(
+                    "sprite_dynamic: more than 255 on-demand tiles in table 0".into(),
+                ));
+            }
+            let start = blob.len();
+            blob.resize(start + 32, 0);
+            copy_converted_chr_tile(chr, tile, &mut blob[start..start + 32]);
+            ext_index[0][tile] = Some(index as u8);
+        }
+        chr_ext = Some(blob);
+    }
+    let dynamic = sprite_dynamic.map(|d| (d, &ext_index));
+    let (chr_maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp, dynamic)
         .map_err(|err| Error::Diagnostic(format!("CHR map generation failed: {err}")))?;
     let report = chr_pack_report(chr, packs, &physical, chr_4bpp.len(), unmapped);
-    let report = append_sprite_fallback_report(report, fallbacks);
-    Ok((chr_4bpp, chr_maps, report))
+    let mut report = append_sprite_fallback_report(report, fallbacks);
+    if let Some(blob) = &chr_ext {
+        report.push_str(&format!(
+            "sprite dynamic tiles (table 0): {} carried in ROM\n",
+            blob.len() / 32
+        ));
+    }
+    Ok((chr_4bpp, chr_maps, chr_ext, report))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2888,8 +2940,9 @@ fn format_runs(runs: &[(u8, u8)]) -> String {
 fn build_chr_maps(
     physical: &[[Option<u16>; 256]; 2],
     chr_4bpp: &[u8],
+    dynamic: Option<(profile::SpriteDynamic, &[[Option<u8>; 256]; 2])>,
 ) -> Result<(Vec<u8>, usize, SpriteFallbacks), String> {
-    let mut out = Vec::with_capacity(0x600);
+    let mut out = Vec::with_capacity(0x800);
     let mut unmapped = 0usize;
 
     for table in physical.iter().take(2) {
@@ -2920,7 +2973,19 @@ fn build_chr_maps(
         .iter()
         .any(|slot| !matches!(slot, Some(0..=255)));
     let fallback_2000 =
-        if needs_fallback_2000 {
+        if let Some((geometry, _)) = dynamic {
+            // The slot after the pool is the reserved transparent fallback;
+            // pool slots themselves are rewritten at runtime and must never be
+            // the blank. Profile validation keeps this inside the budget.
+            let rel = geometry.pool_first_rel as usize + geometry.pool_size as usize;
+            if !sms_tile_is_transparent(chr_4bpp, 256 + rel) {
+                return Err(format!(
+                    "sprite_dynamic fallback slot {} is not transparent",
+                    256 + rel
+                ));
+            }
+            Some(rel as u8)
+        } else if needs_fallback_2000 {
             Some(transparent_sprite_fallback_2000(chr_4bpp).ok_or_else(|| {
                 "no transparent sprite fallback tile for SMS base $2000".to_string()
             })?)
@@ -2940,7 +3005,17 @@ fn build_chr_maps(
         base_0000_rel: fallback_0000,
     };
     for (table_idx, table) in physical.iter().take(2).enumerate() {
-        for slot in table.iter().take(256) {
+        for (tile, slot) in table.iter().take(256).enumerate() {
+            if table_idx == 0
+                && let Some((_, ext_index)) = dynamic
+                && ext_index[0][tile].is_some()
+            {
+                // On-demand tile: the runtime resolves $FF through the
+                // ext tables appended below. Never a real relative byte —
+                // static slots cap at 447, relative 191.
+                out.push(0xff);
+                continue;
+            }
             let value = match slot {
                 Some(slot @ 0..=255) if table_idx == 1 => *slot as u8,
                 Some(slot @ 256..=511) if table_idx == 0 => (*slot - 256) as u8,
@@ -2965,7 +3040,16 @@ fn build_chr_maps(
         }
     }
 
-    debug_assert_eq!(out.len(), 0x600);
+    if let Some((_, ext_index)) = dynamic {
+        for table in ext_index.iter().take(2) {
+            for entry in table.iter().take(256) {
+                out.push(entry.unwrap_or(0xff));
+            }
+        }
+        debug_assert_eq!(out.len(), 0x800);
+    } else {
+        debug_assert_eq!(out.len(), 0x600);
+    }
     Ok((out, unmapped, fallbacks))
 }
 
@@ -3372,7 +3456,7 @@ mod tests {
         map_table_to_base_0000(&mut physical, 1);
         let chr_4bpp = vec![0u8; 448 * 32];
 
-        let (maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp).unwrap();
+        let (maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp, None).unwrap();
 
         assert_eq!(maps[0x400], 167);
         assert_eq!(fallbacks.base_2000_rel, Some(167));
@@ -3387,7 +3471,7 @@ mod tests {
         let mut chr_4bpp = vec![0xffu8; 512 * 32];
         chr_4bpp[5 * 32..6 * 32].fill(0);
 
-        let (maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp).unwrap();
+        let (maps, unmapped, fallbacks) = build_chr_maps(&physical, &chr_4bpp, None).unwrap();
 
         assert_eq!(maps[0x500], 5);
         assert_eq!(fallbacks.base_2000_rel, None);
@@ -3401,9 +3485,64 @@ mod tests {
         map_table_to_base_2000(&mut physical, 0);
         let chr_4bpp = vec![0xffu8; 512 * 32];
 
-        let err = build_chr_maps(&physical, &chr_4bpp).unwrap_err();
+        let err = build_chr_maps(&physical, &chr_4bpp, None).unwrap_err();
 
         assert!(err.contains("SMS base $0000"));
+    }
+
+    #[test]
+    fn sprite_dynamic_pool_emits_sentinel_ext_tables_and_carries_tiles() {
+        // A CHR where NES tile $C0 in table 0 has content but no static slot,
+        // and tile $10 is statically packed at physical slot 300.
+        let chr: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+        let packs = [profile::ChrPackRange {
+            table: 0,
+            start: 0x10,
+            end: 0x10,
+            dest: 300,
+        }];
+        let dynamic = Some(profile::SpriteDynamic {
+            pool_first_rel: 128,
+            pool_size: 8,
+        });
+        let (chr_4bpp, maps, ext, _report) = build_chr_assets(&chr, &packs, dynamic).unwrap();
+        let ext = ext.expect("dynamic build carries an ext blob");
+
+        // Legacy $600 layout followed by the two 256-byte ext tables.
+        assert!(maps.len() >= 0x800);
+        // Statically packed $10 keeps its relative byte (300 - 256 = 44) and
+        // is NOT a dynamic tile.
+        assert_eq!(maps[0x400 + 0x10], 44);
+        assert_eq!(maps[0x600 + 0x10], 0xff, "static tile has no ext index");
+        // Tile $C0 has content but no static slot -> sentinel + an ext index.
+        assert_eq!(
+            maps[0x400 + 0xc0],
+            0xff,
+            "dynamic tile carries the sentinel"
+        );
+        let ext_slot = maps[0x600 + 0xc0];
+        assert_ne!(ext_slot, 0xff, "dynamic tile has an ext table entry");
+        // The carried ext bytes equal the standalone conversion of tile $C0.
+        let mut expected = [0u8; 32];
+        copy_converted_chr_tile(&chr, 0xc0, &mut expected);
+        let start = usize::from(ext_slot) * 32;
+        assert_eq!(&ext[start..start + 32], &expected);
+        // The reserved fallback slot (pool_first + size = 136) is transparent.
+        assert!(sms_tile_is_transparent(&chr_4bpp, 256 + 136));
+    }
+
+    #[test]
+    fn sprite_dynamic_requires_chr_packs() {
+        let chr = vec![0u8; 8192];
+        let dynamic = Some(profile::SpriteDynamic {
+            pool_first_rel: 128,
+            pool_size: 8,
+        });
+        let err = build_chr_assets(&chr, &[], dynamic).unwrap_err();
+        match err {
+            Error::Diagnostic(message) => assert!(message.contains("chr_pack")),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

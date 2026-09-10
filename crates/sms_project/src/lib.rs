@@ -101,6 +101,10 @@ pub struct ProjectConfig<'a> {
     pub input_action: bool,
     /// SMS PAUSE button injects a NES Start press (see input.s/boot.s).
     pub input_pause_start: bool,
+    /// On-demand sprite tile pool geometry: (first base-$2000-relative
+    /// slot, slot count). The chr_maps blob then carries the ext tables
+    /// and tile bytes after its $600-byte legacy layout.
+    pub sprite_dynamic: Option<(u8, u8)>,
     /// Arm the sprite-0 line-IRQ scroll split (see boot.s).
     pub scroll_split: bool,
     /// Display-only remap applied while materializing the declared top rows.
@@ -798,6 +802,11 @@ fn sms_asm_content(
     if !cfg.scroll_split {
         mapper_define.push_str("\n.define NO_SCROLL_SPLIT 1");
     }
+    if let Some((first, size)) = cfg.sprite_dynamic {
+        mapper_define.push_str(&format!(
+            "\n.define SPRITE_DYNAMIC_POOL 1\n.define SPRITE_DYN_FIRST {first}\n.define SPRITE_DYN_SIZE {size}"
+        ));
+    }
     if cfg.top_tile_remap_rows > 0 {
         mapper_define.push_str(&format!(
             "\n.define PROFILE_TOP_TILE_REMAP_ROWS {}\n.define PROFILE_TOP_TILE_REMAP_TO ${:02X}",
@@ -1050,10 +1059,22 @@ fn sms_asm_content(
              data_chr_sprite_map0:\n\
              .incbin \"data/chr_maps.bin\" SKIP $400 READ $100\n\
              data_chr_sprite_map1:\n\
-             .incbin \"data/chr_maps.bin\" SKIP $500 READ $100\n\
-             data_chr_maps_end:\n\
-             .ends\n"
+             .incbin \"data/chr_maps.bin\" SKIP $500 READ $100\n"
         ));
+        if assets.chr_maps.as_ref().is_some_and(|v| v.len() > 0x600) {
+            out.push_str(
+                "data_chr_sprite_ext0:\n\
+                 .incbin \"data/chr_maps.bin\" SKIP $600 READ $100\n\
+                 data_chr_sprite_ext1:\n\
+                 .incbin \"data/chr_maps.bin\" SKIP $700 READ $100\n\
+                 data_chr_ext:\n\
+                 .incbin \"data/chr_maps.bin\" SKIP $800\n",
+            );
+        }
+        out.push_str(
+            "data_chr_maps_end:\n\
+             .ends\n",
+        );
     }
 
     out
@@ -1233,6 +1254,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            sprite_dynamic: None,
             scroll_split: true,
             top_tile_remap_rows: 0,
             top_tile_remap_from: Vec::new(),
@@ -1780,6 +1802,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            sprite_dynamic: None,
             scroll_split: true,
             top_tile_remap_rows: 0,
             top_tile_remap_from: Vec::new(),
@@ -1814,6 +1837,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            sprite_dynamic: None,
             scroll_split: true,
             top_tile_remap_rows: 0,
             top_tile_remap_from: Vec::new(),
@@ -1848,6 +1872,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            sprite_dynamic: None,
             scroll_split: true,
             top_tile_remap_rows: 0,
             top_tile_remap_from: Vec::new(),
@@ -1927,6 +1952,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            sprite_dynamic: None,
             scroll_split: true,
             top_tile_remap_rows: 0,
             top_tile_remap_from: Vec::new(),
@@ -1984,6 +2010,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            sprite_dynamic: None,
             scroll_split: true,
             top_tile_remap_rows: 0,
             top_tile_remap_from: Vec::new(),
@@ -2042,6 +2069,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            sprite_dynamic: None,
             scroll_split: true,
             top_tile_remap_rows: 0,
             top_tile_remap_from: Vec::new(),
@@ -2079,6 +2107,7 @@ mod tests {
             chr_ram: false,
             input_action: false,
             input_pause_start: false,
+            sprite_dynamic: None,
             scroll_split: true,
             top_tile_remap_rows: 0,
             top_tile_remap_from: Vec::new(),

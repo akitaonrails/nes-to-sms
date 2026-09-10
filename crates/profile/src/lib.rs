@@ -32,6 +32,12 @@ pub struct Profile {
     pub ram_tags: Vec<RamTag>,
     #[serde(default, rename = "chr_pack")]
     pub chr_packs: Vec<ChrPackRange>,
+    /// Optional on-demand sprite tile pool for CHR-ROM games whose sprite
+    /// sheet exceeds the static SMS slot budget. Tiles left out of the
+    /// static packs are carried in ROM and generated into pool slots at
+    /// runtime by the existing variant machinery.
+    #[serde(default)]
+    pub sprite_dynamic: Option<SpriteDynamic>,
     /// `JSR JumpEngine`-style dispatch sites. Each entry maps a call
     /// site to the inline `.dd2` target table that follows it in the
     /// original NES PRG. The lifter substitutes the JSR with a direct
@@ -414,6 +420,18 @@ impl JumpEngineSite {
     pub fn applies_to_bank(&self, bank: Option<u8>) -> bool {
         self.bank == bank
     }
+}
+
+/// On-demand sprite tile pool geometry. Slots are SAT tile bytes relative
+/// to VDP sprite base $2000 (physical slot = 256 + rel). The slot
+/// immediately after the pool is the reserved transparent fallback, so
+/// `pool_first_rel + pool_size` must itself stay inside the pattern budget.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct SpriteDynamic {
+    /// First dynamic slot as a base-$2000-relative SAT tile byte.
+    pub pool_first_rel: u8,
+    /// Number of dynamic slots, each 32 VRAM bytes. At least 1.
+    pub pool_size: u8,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -841,6 +859,31 @@ fn validate(p: &Profile) -> Result<(), LoadError> {
                 )));
             }
             *used = true;
+        }
+    }
+    if let Some(dynamic) = p.sprite_dynamic {
+        if dynamic.pool_size == 0 {
+            return Err(LoadError::Validation(
+                "sprite_dynamic pool_size must be at least 1".into(),
+            ));
+        }
+        let end_rel = u16::from(dynamic.pool_first_rel) + u16::from(dynamic.pool_size);
+        // The slot after the pool is the reserved transparent fallback; it
+        // must itself sit inside the base-$2000 pattern budget (rel 0..183).
+        if end_rel > 183 {
+            return Err(LoadError::Validation(format!(
+                "sprite_dynamic pool plus its transparent fallback exceeds the \
+                 base-$2000 slot budget: first={} size={}",
+                dynamic.pool_first_rel, dynamic.pool_size
+            )));
+        }
+        for rel in u16::from(dynamic.pool_first_rel)..=end_rel {
+            let slot = usize::from(256 + rel);
+            if used_chr_slots[slot] {
+                return Err(LoadError::Validation(format!(
+                    "sprite_dynamic pool slot {slot} overlaps a chr_pack range"
+                )));
+            }
         }
     }
     Ok(())

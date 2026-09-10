@@ -77,12 +77,26 @@
 ;
 ; CHR-RAM 8x16 sprites are resolved per OAM entry into SMS slots 0..127.
 
+.ifdef SPRITE_DYNAMIC_POOL
+; On-demand pool: the profile chooses the slot window; the slot after the
+; pool is the reserved transparent tile. Key tables reuse $D400-$D45F —
+; the CHR-RAM resolve table and the legacy 16-entry keys, both unused in
+; this configuration. Cache keys carry bit2 as the "dynamic source" flag:
+; the id byte is then the NES tile and generation reads the ROM ext blob.
+.define SAT_BLANK_REL    SPRITE_DYN_FIRST+SPRITE_DYN_SIZE
+.define SAT_SCRATCH_BASE  SPRITE_DYN_FIRST
+.define SAT_SCRATCH_COUNT SPRITE_DYN_SIZE
+.define SAT_RESOLVED      $d400
+.define SAT_VAR_TILE_KEYS $d400
+.define SAT_VAR_ATTR_KEYS $d430
+.else
 .define SAT_BLANK_REL    167
 .define SAT_SCRATCH_BASE  168
 .define SAT_SCRATCH_COUNT 16
 .define SAT_RESOLVED      $d400
 .define SAT_VAR_TILE_KEYS $d440
 .define SAT_VAR_ATTR_KEYS $d450
+.endif
 .define SAT_ATTRS         $d480
 .define SAT_SCRATCH_NEXT  $d460
 .define SAT_VARIANT_ATTR  $d461
@@ -159,7 +173,11 @@ _oam_dma_done:
 do_sprite_variant:
   push af                    ; save scratch index
   ld   a, b
+.ifdef SPRITE_DYNAMIC_POOL
+  and  $c7                   ; bit2 = dynamic-source flag rides along
+.else
   and  $c3
+.endif
   ld   (SAT_VARIANT_ATTR), a ; palette + flip key
   ld   a, c
   ld   (SAT_VARIANT_TILE), a
@@ -191,6 +209,22 @@ do_sprite_variant:
   ld   (SAT_VARIANT_SRC), hl
 .else
   ; source base in ROM = data_chr ($8000) + (256 + C)*32 = $A000 + C*32
+.ifdef SPRITE_DYNAMIC_POOL
+  ld   a, (SAT_VARIANT_ATTR)
+  bit  2, a
+  jr   z, _dof_static_src
+  ; Dynamic source: park the ext TABLE entry address; the slot lookup and
+  ; final source address resolve after the single sanctioned bank map
+  ; below (an extra $FFFF write here would trip the nested-map guard).
+  ld   a, c
+  ld   e, a
+  ld   d, $00
+  ld   hl, data_chr_sprite_ext0
+  add  hl, de
+  ld   (SAT_VARIANT_SRC), hl
+  jr   _dof_src_done
+_dof_static_src:
+.endif
   ld   l, c
   ld   h, $00
   add  hl, hl
@@ -201,6 +235,9 @@ do_sprite_variant:
   ld   de, $a000
   add  hl, de
   ld   (SAT_VARIANT_SRC), hl
+.ifdef SPRITE_DYNAMIC_POOL
+_dof_src_done:
+.endif
 .endif
 
   ; CV1's shared dynamic cache owns $2000 + slot*64 in both sprite sizes.
@@ -221,7 +258,11 @@ do_sprite_variant:
   add  hl, hl
   ld   de, $2000
 .else
+.ifdef SPRITE_DYNAMIC_POOL
+  ld   de, $2000+SPRITE_DYN_FIRST*32
+.else
   ld   de, $3500
+.endif
 .endif
   add  hl, de
   ld   a, l
@@ -233,8 +274,37 @@ do_sprite_variant:
   ; Map the static CHR asset for CHR-ROM builds. CHR-RAM variants read the
   ; staged planar bytes above and leave the current PRG window visible.
 .ifndef NES_CHR_RAM
+.ifdef SPRITE_DYNAMIC_POOL
+  ld   a, (SAT_VARIANT_ATTR)
+  bit  2, a
   ld   a, :data_chr
+  jr   z, _dof_bank_ready
+  ld   a, :data_chr_maps
+_dof_bank_ready:
+.else
+  ld   a, :data_chr
+.endif
   ld   ($ffff), a
+.ifdef SPRITE_DYNAMIC_POOL
+  ; Dynamic tiles: the parked ext-table entry now resolves to the real
+  ; converted-tile address inside the mapped maps bank.
+  ld   a, (SAT_VARIANT_ATTR)
+  bit  2, a
+  jr   z, _dof_src_ready
+  ld   hl, (SAT_VARIANT_SRC)
+  ld   a, (hl)
+  ld   l, a
+  ld   h, $00
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl
+  add  hl, hl                ; ext slot * 32
+  ld   de, data_chr_ext
+  add  hl, de
+  ld   (SAT_VARIANT_SRC), hl
+_dof_src_ready:
+.endif
 .endif
 
   ld   b, 8                  ; rows remaining
@@ -330,7 +400,11 @@ variant_get_scratch:
   ld   a, c
   ld   (SAT_VARIANT_TILE), a
   ld   a, b
+.ifdef SPRITE_DYNAMIC_POOL
+  and  $c7
+.else
   and  $c3
+.endif
   ld   (SAT_VARIANT_ATTR), a
 
   ld   a, (SAT_SCRATCH_NEXT)
@@ -366,7 +440,14 @@ _vgs_miss:
   ; and 80-byte invalidation loops were ~2% of all execution).
   ld   a, (SAT_RR_VICTIM)
   inc  a
+.ifdef SPRITE_DYNAMIC_POOL
+  cp   SAT_SCRATCH_COUNT
+  jr   c, _vgs_victim_ok
+  xor  a
+_vgs_victim_ok:
+.else
   and  SAT_SCRATCH_COUNT - 1
+.endif
   ld   (SAT_RR_VICTIM), a
   jr   _vgs_alloc_at         ; A = victim slot
 
@@ -783,14 +864,53 @@ _sat_xt_loop:
   inc  l
   out  ($be), a              ; write X
   inc  d
-  ld   a, c
+  ld   a, c                  ; C keeps the NES tile (rt_map_sprite_tile preserves BC)
   call rt_map_sprite_tile    ; A = mapped rel tile (preserves BC, DE, HL)
+.ifdef SPRITE_DYNAMIC_POOL
+  cp   SAT_BLANK_REL
+  jr   z, _sat_xt_blank
+  inc  a                     ; $FF = on-demand sentinel from the map
+  jr   z, _sat_xt_dynamic
+  ld   c, a                  ; undo the inc: static mapped tile
+  dec  c
+  jr   _sat_xt_have_static
+_sat_xt_blank:
+  ld   c, a
+  jr   _sat_xt_out
+_sat_xt_dynamic:
+  ; Dynamic tile: base $2000 is guaranteed (only map0 carries sentinels),
+  ; and identity attributes still generate through the same pool. C already
+  ; holds the NES tile the ext table is keyed by.
+  ld   a, b
+  and  $c3
+  or   $04
+  ld   b, a
+  push hl
+  push de
+  call variant_get_scratch   ; C = NES tile, B = attr|dyn -> A = pool rel
+  pop  de
+  pop  hl
+  ld   c, a
+  ld   a, d
+  out  ($bf), a
+  ld   a, $3f
+  or   $40
+  out  ($bf), a
+  jr   _sat_xt_out
+_sat_xt_have_static:
+  ld   a, b
+  and  $c3                   ; palette bits + H/V flip; ignore priority
+  jr   z, _sat_xt_out
+  jr   _sat_xt_static_variant
+.else
   ld   c, a
   cp   SAT_BLANK_REL
   jr   z, _sat_xt_out
   ld   a, b
   and  $c3                   ; palette bits + H/V flip; ignore priority
   jr   z, _sat_xt_out
+.endif
+_sat_xt_static_variant:
   ld   b, a
   ld   a, ($cb08)            ; PPUCTRL bit3 => $0000 base: no safe scratch
   bit  3, a
