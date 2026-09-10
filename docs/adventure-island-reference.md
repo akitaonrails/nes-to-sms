@@ -115,6 +115,21 @@ Emulator: Ubuntu FCEUX 2.5.0, revision
 disabled; Docker image `nes-to-sms-nesref` ID
 `sha256:c291d28b7597352c18a7f203f6833e086e4bdc31e5c054b85aabde5216e44670`.
 Reproduce using `bash out/adventure-reference.kECfiP/run.sh /path/to/nes-directory`.
+
+**Update 2026-09-10: the fast in-repo oracle now supports CNROM, so the
+fragile FCEUX-under-xvfb rig is no longer required for Adventure.**
+`frame-diff` (over the `oracle_6502` core) runs the real Adventure ROM
+directly via `resolve_mapper_policy_oracle` (mapper 3 admitted separately
+from the SMS pipeline's guarded path); it renders correct NES ground-truth
+frames (`FD_NES_DUMP`), logs per-frame RAM (`FD_REF_TRACK=off,off,...`),
+harvests bank entries (`FD_LOG_BANK_ENTRIES`), and accepts NES-button
+routes (`--nes-buttons-script`, bypassing the SMB-tuned title-mode
+heuristic). Verified: the title screen renders correctly and player state
+advances under the attract demo. Route authoring against this fast oracle
+is the intended path to the level/boss/transition content matrix; the
+immediate open sub-task is finding Adventure's attract-demo-vs-player-
+control discriminator (area/round stay 0 through level 1-1, so they do not
+distinguish the two) to script a controlled game-start.
 The runner mounts the collection read-only and owns its temporary containers.
 
 Observed, with the limitations of this short route:
