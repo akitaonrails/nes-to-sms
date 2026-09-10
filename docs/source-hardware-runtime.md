@@ -295,6 +295,23 @@ ordinary → fast actual-core callbacks fall from 4,392 → 3,845 at 100 and
 12%/11% reduction is not a game-speed claim and must not be added directly to
 percentages from a different workload.
 
+A measured materialization-speed campaign (2026-09-10) rewrote the hottest
+deferred-path loops with exact-equivalence proofs at every step: division
+tables, an analytic then per-sprite-batched evaluation walker, per-slot
+sprite-window replay, and a register-only per-sprite overflow predictor
+that eliminated the backup copies entirely. Actual-core callbacks to
+source frame 300 fell 101,167 → 62,807 (−38%) across five commits, each
+gated on the 104-byte endpoint-equality fixtures, the literal overflow
+dots, exact guest-state landmarks and untouched game baselines. The
+post-campaign profile is flat: about 21% is per-instruction verified
+clock/bus dispatch and 13% the precise 16..23-dot span suffix; no single
+remaining range exceeds 4.1%. Interactive speed cannot come from further
+micro-optimization of the interpreter — the remaining gap to nominal is
+orders of magnitude, and closing it requires graduating verified spans of
+translated code to native execution between hardware-visible events, the
+coordinated clock/APU/bus/span design this document already names as the
+measured execution prerequisite.
+
 The immediate gate is genuine source-generated frames and interrupts, followed
 by matched Adventure checkpoints and the full
 [content and mapper acceptance queue](mapper-roadmap.md).
