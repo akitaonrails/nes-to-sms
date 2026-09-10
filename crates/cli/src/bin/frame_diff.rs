@@ -304,6 +304,10 @@ struct NesBus {
     prg_bank: u8,
     chr_bank: u8,
     mapper_policy: nes_rom::MapperPolicy,
+    /// Stateful MMC1 board (mapper 1), routed ahead of `mapper_policy`.
+    mmc1: Option<nes_rom::mmc1::Mmc1>,
+    /// 8 KiB PRG-RAM at $6000-$7FFF (battery-backed saves on MMC1 boards).
+    prg_ram: Vec<u8>,
     /// CHR-RAM store for pattern-space $2007 writes (ground truth).
     chr_ram: Vec<u8>,
     /// PPU palette RAM ($3F00-$3F1F) captured from $2007 writes, so the
@@ -334,7 +338,12 @@ impl NesBus {
         }
     }
 
-    fn new(prg: Vec<u8>, chr: Vec<u8>, mapper_policy: nes_rom::MapperPolicy) -> Self {
+    fn new(
+        prg: Vec<u8>,
+        chr: Vec<u8>,
+        mapper_policy: nes_rom::MapperPolicy,
+        mmc1: Option<nes_rom::mmc1::Mmc1>,
+    ) -> Self {
         Self {
             ram: [0; 0x800],
             prg,
@@ -380,6 +389,8 @@ impl NesBus {
                 .unwrap_or(200),
             ppu_log_count: 0,
             prg_bank: 0,
+            mmc1,
+            prg_ram: vec![0u8; nes_rom::mmc1::PRG_RAM_SIZE],
             chr_bank: 0,
             mapper_policy,
             chr_ram: vec![0u8; 0x3000],
@@ -389,6 +400,9 @@ impl NesBus {
     }
 
     fn prg_read(&self, addr: u16) -> u8 {
+        if let Some(mmc1) = &self.mmc1 {
+            return self.prg[mmc1.cpu_to_prg_offset(addr).expect("PRG read address")];
+        }
         let off = self
             .mapper_policy
             .cpu_to_prg_offset(addr, self.prg_bank)
@@ -415,7 +429,16 @@ impl oracle_6502::Bus for NesBus {
                         // arms the phase and returns 0, later polls return 1. SMB's
                         // NMI waits for bit6 to clear then set — without this the
                         // reference NMI spins forever and never runs the engine.
-                        if self.ppu_mask & 0x18 != 0 {
+                        // Sprite-0 hit synthesis, generalized past SMB: a
+                        // read while VBlank is set (frame start) CLEARS the
+                        // hit (phase 0), because the real hit clears at the
+                        // pre-render line. Only reads after VBlank has been
+                        // cleared, with rendering on, arm then report the hit.
+                        // This satisfies both SMB's clear-then-set NMI wait
+                        // and Zelda's wait-for-clear init loop ($E4D4).
+                        if self.vblank {
+                            self.sprite0_phase = 0;
+                        } else if self.ppu_mask & 0x18 != 0 {
                             if self.sprite0_phase == 0 {
                                 self.sprite0_phase = 1;
                             } else {
@@ -477,6 +500,13 @@ impl oracle_6502::Bus for NesBus {
                 v
             }
             0x4017 => 0x40, // controller 2: nothing pressed
+            0x6000..=0x7FFF => {
+                if self.mmc1.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
+                    self.prg_ram[(addr - 0x6000) as usize]
+                } else {
+                    0
+                }
+            }
             0x8000..=0xFFFF => self.prg_read(addr),
             _ => 0,
         }
@@ -598,7 +628,15 @@ impl oracle_6502::Bus for NesBus {
                 }
                 self.strobe = new_strobe;
             }
+            0x6000..=0x7FFF => {
+                if self.mmc1.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
+                    self.prg_ram[(addr - 0x6000) as usize] = value;
+                }
+            }
             0x8000..=0xFFFF => {
+                if let Some(mmc1) = &mut self.mmc1 {
+                    mmc1.write_register(addr, value);
+                }
                 if self.mapper_policy.is_banked() {
                     let bus_byte = self.prg_read(addr);
                     self.prg_bank = self
@@ -636,7 +674,7 @@ mod mapper_tests {
         let mut prg = vec![0u8; 2 * nes_rom::PRG_BANK_SIZE];
         prg[0] = 1;
         prg[nes_rom::PRG_BANK_SIZE] = 1;
-        let mut bus = NesBus::new(prg, vec![], uxrom(nes_rom::UxromBusConflicts::And));
+        let mut bus = NesBus::new(prg, vec![], uxrom(nes_rom::UxromBusConflicts::And), None);
 
         oracle_6502::Bus::write(&mut bus, 0x8000, 3);
         assert_eq!(bus.prg_bank, 1);
@@ -651,6 +689,7 @@ mod mapper_tests {
             vec![0; 2 * nes_rom::PRG_BANK_SIZE],
             vec![],
             uxrom(nes_rom::UxromBusConflicts::None),
+            None,
         );
         oracle_6502::Bus::write(&mut bus, 0x8000, 1);
         assert_eq!(bus.prg_bank, 1);
@@ -801,12 +840,13 @@ fn run_reference(
     prg: Vec<u8>,
     chr: Vec<u8>,
     mapper_policy: nes_rom::MapperPolicy,
+    mmc1: Option<nes_rom::mmc1::Mmc1>,
     frames: usize,
     timeline: &ButtonTimeline,
 ) -> ([u8; 0x800], Vec<[u8; 0x800]>) {
     use oracle_6502::Cpu;
     let mut cpu = Cpu::new();
-    let mut bus = NesBus::new(prg, chr, mapper_policy);
+    let mut bus = NesBus::new(prg, chr, mapper_policy, mmc1);
     cpu.reset(&mut bus);
 
     // Pre-roll: run reset-init until NMI is enabled. SMB polls $2002 for
@@ -2065,8 +2105,22 @@ fn main() {
 
     let nes = std::fs::read(&nes_path).expect("read nes");
     let image = nes_rom::parse(&nes).expect("parse nes");
-    let mapper_policy = nes_rom::resolve_mapper_policy_oracle(&image.header, image.prg.len())
-        .expect("supported mapper policy");
+    let mmc1 = if image.header.mapper == 1 {
+        Some(
+            nes_rom::mmc1::Mmc1::new(&image.header, image.prg.len()).expect("supported MMC1 board"),
+        )
+    } else {
+        None
+    };
+    let mapper_policy = if mmc1.is_some() {
+        // MMC1 is stateful and routed via `mmc1`; the policy field is unused.
+        nes_rom::MapperPolicy::Nrom {
+            prg_len: image.prg.len(),
+        }
+    } else {
+        nes_rom::resolve_mapper_policy_oracle(&image.header, image.prg.len())
+            .expect("supported mapper policy")
+    };
     let prg = image.prg.to_vec();
 
     let (timeline, script_desc) = if let Some(path) = nes_buttons_script {
@@ -2091,8 +2145,14 @@ fn main() {
         "Reference: running SMB PRG ({} bytes) for {frames} frames, script={script_desc}",
         prg.len()
     );
-    let (ref_init, ref_snaps) =
-        run_reference(prg, image.chr.to_vec(), mapper_policy, frames, &timeline);
+    let (ref_init, ref_snaps) = run_reference(
+        prg,
+        image.chr.to_vec(),
+        mapper_policy,
+        mmc1,
+        frames,
+        &timeline,
+    );
 
     // FD_REF_ONLY=1: print a compact per-frame reference trajectory for
     // authoring/recalibrating input scripts against real-NES dynamics
@@ -2421,6 +2481,7 @@ mod tests {
             vec![0u8; 0x8000],
             vec![0u8; 0x2000],
             nes_rom::MapperPolicy::Nrom { prg_len: 0x8000 },
+            None,
         )
     }
 

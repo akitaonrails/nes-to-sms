@@ -7,6 +7,7 @@ use std::fmt;
 use sha2::{Digest, Sha256};
 
 pub mod cnrom;
+pub mod mmc1;
 pub mod mmc3;
 
 pub const INES_MAGIC: [u8; 4] = [b'N', b'E', b'S', 0x1a];
