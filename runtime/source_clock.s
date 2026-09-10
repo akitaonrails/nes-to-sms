@@ -317,16 +317,10 @@ _sc_hw_quiet_ppu:
   ex de, hl
 _sc_hw_quiet_count:
   dec hl                    ; end strictly before either domain event
-  ld de, 6
-  ld b, 0
-_sc_hw_quiet_divide:
-  or a
-  sbc hl, de
-  jr c, _sc_hw_quiet_result
-  inc b
-  jr _sc_hw_quiet_divide
-_sc_hw_quiet_result:
-  ld l, b
+  ld de, sc_div6_floor_table
+  add hl, de
+  ld a, (hl)
+  ld l, a
   ld h, 0
   ret
 _sc_hw_quiet_zero:

@@ -140,16 +140,10 @@ _sp_blank_distance:
   ld de, (SC_DOT)
   or a
   sbc hl, de
-  ld de, 3
-  ld b, 0
-_sp_blank_divide:
-  inc b
-  or a
-  sbc hl, de
-  jr c, _sp_blank_divided
-  jr nz, _sp_blank_divide
-_sp_blank_divided:
-  ld l, b
+  ld de, sp_div3_ceil_table
+  add hl, de
+  ld a, (hl)
+  ld l, a
   ld h, 0
   jr _sp_blank_return
 _sp_blank_one:
@@ -487,16 +481,10 @@ _sp_interval_query_return:
   pop bc
   ret
 _sp_interval_divide:
-  ld de, 3
-  ld b, 0
-_sp_interval_divide_loop:
-  inc b
-  or a
-  sbc hl, de
-  jr c, _sp_interval_divided
-  jr nz, _sp_interval_divide_loop
-_sp_interval_divided:
-  ld l, b
+  ld de, sp_div3_ceil_table
+  add hl, de
+  ld a, (hl)
+  ld l, a
   ld h, 0
   ret
 
@@ -556,16 +544,50 @@ _sp_interval_inactive_advance:
   ld bc, (SP_INTERVAL_COUNT)
   call rt_source_ppu_inactive_advance
   jr _sp_interval_finish
+; Sprite-window dots 258..320: live state keeps only slot 0's zero-sprite
+; latches and the final slot's in-progress fetch, so replay exactly the
+; slot-0 tail and the final slot from its phase 0, jumping the dots between.
 _sp_interval_sprite_advance:
+  ld hl, (SP_INTERVAL_END)
+  ld de, 265
+  or a
+  sbc hl, de
+  jr c, _sp_isa_tail         ; whole span inside slot 0: replay it all
+_sp_isa_slot0:
+  ld hl, (SC_DOT)
+  ld de, 264
+  or a
+  sbc hl, de
+  jr nc, _sp_isa_jump
   ld hl, (SC_DOT)
   inc hl
   ld (SC_DOT), hl
   call _sp_sprite_fetch
+  jr _sp_isa_slot0
+_sp_isa_jump:
+  ld hl, (SP_INTERVAL_END)
+  dec hl
+  ld a, l
+  and $f8
+  ld l, a                    ; final slot's phase-0 boundary (H stays 1)
+  ld de, (SC_DOT)
+  or a
+  sbc hl, de
+  jr c, _sp_isa_tail
+  jr z, _sp_isa_tail
+  add hl, de
+  ld (SC_DOT), hl
+_sp_isa_tail:
   ld hl, (SC_DOT)
   ld de, (SP_INTERVAL_END)
   or a
   sbc hl, de
-  jr nz, _sp_interval_sprite_advance
+  jr z, _sp_interval_finish
+  ld hl, (SC_DOT)
+  inc hl
+  ld (SC_DOT), hl
+  call _sp_sprite_fetch
+  jr _sp_isa_tail
 _sp_interval_finish:
   xor a
   ld (SP_INTERNAL_MODE), a
@@ -598,15 +620,8 @@ _sp_interval_bg_advance:
   cp 16
   jp c, _sp_interval_bg_tail
 _sp_interval_eval_prefix:
-  ld hl, (SC_DOT)
-  inc hl
-  ld (SC_DOT), hl
-  call _sp_sprite_evaluate
-  ld hl, (SC_DOT)
   ld de, (SP_INTERVAL_SUFFIX)
-  or a
-  sbc hl, de
-  jr nz, _sp_interval_eval_prefix
+  call _sp_eval_advance
   ld a, (SP_INTERVAL_SUFFIX)
   srl a
   srl a
@@ -1406,6 +1421,100 @@ _sp_eval_nonnegative:
   cp b
   ret
 
+; Apply the exact evaluation effects of every dot in (SC_DOT, DE] and move
+; SC_DOT to DE without stepping dots. Kind-2 preconditions: rendering on,
+; visible row, OAMADDR zero, DE even and at most 232. Dots through 64 are
+; the deterministic secondary $FF fill; afterwards each even dot consumes
+; the OAM byte its preceding odd dot latched, and N/M are odd-dot
+; invariant, so the latch is recomputed per step. Once DONE is set every
+; remaining even dot only advances N (wraps re-assert DONE and keep M 0).
+_sp_eval_advance:
+  ld hl, (SC_DOT)
+  ld a, h
+  or a
+  jr nz, _sp_eval_adv_walk
+  ld a, l
+  cp 64
+  jr nc, _sp_eval_adv_walk
+  ld a, e
+  cp 64
+  jr c, _sp_eval_adv_enda
+  ld a, 64
+_sp_eval_adv_enda:
+  ld c, a
+  ld a, l
+  add a, 2
+  and $fe
+  ld b, a
+_sp_eval_adv_fill:
+  ld a, b
+  cp c
+  jr z, _sp_eval_adv_fill_one
+  jr nc, _sp_eval_adv_filled
+_sp_eval_adv_fill_one:
+  push bc
+  ld a, b
+  srl a
+  dec a
+  ld l, a
+  ld h, 0
+  ld bc, SP_SECONDARY
+  add hl, bc
+  ld (hl), $ff
+  pop bc
+  inc b
+  inc b
+  jr _sp_eval_adv_fill
+_sp_eval_adv_filled:
+  ld l, c
+  ld h, 0
+_sp_eval_adv_walk:
+  push de
+  ex de, hl
+  ld a, e
+  and 1
+  ld c, a
+  or a
+  sbc hl, de
+  ld a, c
+  or a
+  jr z, _sp_eval_adv_even
+  inc hl
+_sp_eval_adv_even:
+  srl h
+  rr l
+  ld b, l
+  pop hl
+  ld (SC_DOT), hl
+  ld a, b
+  or a
+  ret z
+_sp_eval_adv_loop:
+  ld a, (SP_EVAL_DONE)
+  or a
+  jr nz, _sp_eval_adv_done_run
+  push bc
+  ld a, (SP_EVAL_N)
+  add a, a
+  add a, a
+  ld b, a
+  ld a, (SP_EVAL_M)
+  or b
+  ld l, a
+  ld h, $c9
+  ld a, (hl)
+  ld (SP_OAM_LATCH), a
+  call _sp_eval_even
+  pop bc
+  djnz _sp_eval_adv_loop
+  ret
+_sp_eval_adv_done_run:
+  ld a, (SP_EVAL_N)
+  add a, b
+  and $3f
+  ld (SP_EVAL_N), a
+  ret
+
 _sp_sprite_fetch:
   ld a, (SC_DOT)
   dec a
@@ -1693,5 +1802,56 @@ _sp_forced_blank:
   ret nc
   ld a, 9
   jp rt_source_ppu_mutation
+
+; Exact division tables replacing the repeated-subtraction loops that ran
+; at nearly every deferred tick. Inputs are bounded by one PPU row (341).
+; ceil(i/3) for dot distances 0..341; index 0 keeps the legacy loop's 1.
+sp_div3_ceil_table:
+.db 1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5
+.db 6, 6, 6, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10, 11
+.db 11, 11, 12, 12, 12, 13, 13, 13, 14, 14, 14, 15, 15, 15, 16, 16
+.db 16, 17, 17, 17, 18, 18, 18, 19, 19, 19, 20, 20, 20, 21, 21, 21
+.db 22, 22, 22, 23, 23, 23, 24, 24, 24, 25, 25, 25, 26, 26, 26, 27
+.db 27, 27, 28, 28, 28, 29, 29, 29, 30, 30, 30, 31, 31, 31, 32, 32
+.db 32, 33, 33, 33, 34, 34, 34, 35, 35, 35, 36, 36, 36, 37, 37, 37
+.db 38, 38, 38, 39, 39, 39, 40, 40, 40, 41, 41, 41, 42, 42, 42, 43
+.db 43, 43, 44, 44, 44, 45, 45, 45, 46, 46, 46, 47, 47, 47, 48, 48
+.db 48, 49, 49, 49, 50, 50, 50, 51, 51, 51, 52, 52, 52, 53, 53, 53
+.db 54, 54, 54, 55, 55, 55, 56, 56, 56, 57, 57, 57, 58, 58, 58, 59
+.db 59, 59, 60, 60, 60, 61, 61, 61, 62, 62, 62, 63, 63, 63, 64, 64
+.db 64, 65, 65, 65, 66, 66, 66, 67, 67, 67, 68, 68, 68, 69, 69, 69
+.db 70, 70, 70, 71, 71, 71, 72, 72, 72, 73, 73, 73, 74, 74, 74, 75
+.db 75, 75, 76, 76, 76, 77, 77, 77, 78, 78, 78, 79, 79, 79, 80, 80
+.db 80, 81, 81, 81, 82, 82, 82, 83, 83, 83, 84, 84, 84, 85, 85, 85
+.db 86, 86, 86, 87, 87, 87, 88, 88, 88, 89, 89, 89, 90, 90, 90, 91
+.db 91, 91, 92, 92, 92, 93, 93, 93, 94, 94, 94, 95, 95, 95, 96, 96
+.db 96, 97, 97, 97, 98, 98, 98, 99, 99, 99, 100, 100, 100, 101, 101, 101
+.db 102, 102, 102, 103, 103, 103, 104, 104, 104, 105, 105, 105, 106, 106, 106, 107
+.db 107, 107, 108, 108, 108, 109, 109, 109, 110, 110, 110, 111, 111, 111, 112, 112
+.db 112, 113, 113, 113, 114, 114
+; floor(i/6) for quiet-wait capacities 0..341.
+sc_div6_floor_table:
+.db 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2
+.db 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 5, 5
+.db 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7
+.db 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10
+.db 10, 10, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 13, 13
+.db 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15
+.db 16, 16, 16, 16, 16, 16, 17, 17, 17, 17, 17, 17, 18, 18, 18, 18
+.db 18, 18, 19, 19, 19, 19, 19, 19, 20, 20, 20, 20, 20, 20, 21, 21
+.db 21, 21, 21, 21, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23
+.db 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 26, 26, 26, 26
+.db 26, 26, 27, 27, 27, 27, 27, 27, 28, 28, 28, 28, 28, 28, 29, 29
+.db 29, 29, 29, 29, 30, 30, 30, 30, 30, 30, 31, 31, 31, 31, 31, 31
+.db 32, 32, 32, 32, 32, 32, 33, 33, 33, 33, 33, 33, 34, 34, 34, 34
+.db 34, 34, 35, 35, 35, 35, 35, 35, 36, 36, 36, 36, 36, 36, 37, 37
+.db 37, 37, 37, 37, 38, 38, 38, 38, 38, 38, 39, 39, 39, 39, 39, 39
+.db 40, 40, 40, 40, 40, 40, 41, 41, 41, 41, 41, 41, 42, 42, 42, 42
+.db 42, 42, 43, 43, 43, 43, 43, 43, 44, 44, 44, 44, 44, 44, 45, 45
+.db 45, 45, 45, 45, 46, 46, 46, 46, 46, 46, 47, 47, 47, 47, 47, 47
+.db 48, 48, 48, 48, 48, 48, 49, 49, 49, 49, 49, 49, 50, 50, 50, 50
+.db 50, 50, 51, 51, 51, 51, 51, 51, 52, 52, 52, 52, 52, 52, 53, 53
+.db 53, 53, 53, 53, 54, 54, 54, 54, 54, 54, 55, 55, 55, 55, 55, 55
+.db 56, 56, 56, 56, 56, 56
 .ends
 .endif
