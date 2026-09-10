@@ -6,6 +6,7 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 
+pub mod axrom;
 pub mod cnrom;
 pub mod mmc1;
 pub mod mmc3;

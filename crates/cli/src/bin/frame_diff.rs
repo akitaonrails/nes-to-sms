@@ -260,6 +260,35 @@ fn load_script_with(
 // Reference: NES system bus over oracle_6502
 // ---------------------------------------------------------------------------
 
+/// Stateful cartridge mappers routed ahead of the stateless MapperPolicy in
+/// the reference bus. Add a variant per new mapper; the bus only needs PRG
+/// mapping, the register-write port, and whether PRG-RAM at $6000 is enabled.
+enum StatefulMapper {
+    Mmc1(nes_rom::mmc1::Mmc1),
+    Axrom(nes_rom::axrom::Axrom),
+}
+
+impl StatefulMapper {
+    fn cpu_to_prg_offset(&self, addr: u16) -> Option<usize> {
+        match self {
+            Self::Mmc1(m) => m.cpu_to_prg_offset(addr),
+            Self::Axrom(a) => a.cpu_to_prg_offset(addr),
+        }
+    }
+    fn write_register(&mut self, addr: u16, value: u8) {
+        match self {
+            Self::Mmc1(m) => m.write_register(addr, value),
+            Self::Axrom(a) => a.write_register(addr, value),
+        }
+    }
+    fn prg_ram_enabled(&self) -> bool {
+        match self {
+            Self::Mmc1(m) => m.prg_ram_enabled(),
+            Self::Axrom(_) => false,
+        }
+    }
+}
+
 struct NesBus {
     ram: [u8; 0x800],
     prg: Vec<u8>, // 32 KiB mapped at $8000-$FFFF
@@ -304,8 +333,8 @@ struct NesBus {
     prg_bank: u8,
     chr_bank: u8,
     mapper_policy: nes_rom::MapperPolicy,
-    /// Stateful MMC1 board (mapper 1), routed ahead of `mapper_policy`.
-    mmc1: Option<nes_rom::mmc1::Mmc1>,
+    /// Stateful mapper (MMC1/AxROM/...), routed ahead of `mapper_policy`.
+    stateful: Option<StatefulMapper>,
     /// 8 KiB PRG-RAM at $6000-$7FFF (battery-backed saves on MMC1 boards).
     prg_ram: Vec<u8>,
     /// CHR-RAM store for pattern-space $2007 writes (ground truth).
@@ -342,7 +371,7 @@ impl NesBus {
         prg: Vec<u8>,
         chr: Vec<u8>,
         mapper_policy: nes_rom::MapperPolicy,
-        mmc1: Option<nes_rom::mmc1::Mmc1>,
+        stateful: Option<StatefulMapper>,
     ) -> Self {
         Self {
             ram: [0; 0x800],
@@ -389,7 +418,7 @@ impl NesBus {
                 .unwrap_or(200),
             ppu_log_count: 0,
             prg_bank: 0,
-            mmc1,
+            stateful,
             prg_ram: vec![0u8; nes_rom::mmc1::PRG_RAM_SIZE],
             chr_bank: 0,
             mapper_policy,
@@ -400,8 +429,8 @@ impl NesBus {
     }
 
     fn prg_read(&self, addr: u16) -> u8 {
-        if let Some(mmc1) = &self.mmc1 {
-            return self.prg[mmc1.cpu_to_prg_offset(addr).expect("PRG read address")];
+        if let Some(m) = &self.stateful {
+            return self.prg[m.cpu_to_prg_offset(addr).expect("PRG read address")];
         }
         let off = self
             .mapper_policy
@@ -501,7 +530,7 @@ impl oracle_6502::Bus for NesBus {
             }
             0x4017 => 0x40, // controller 2: nothing pressed
             0x6000..=0x7FFF => {
-                if self.mmc1.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
+                if self.stateful.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
                     self.prg_ram[(addr - 0x6000) as usize]
                 } else {
                     0
@@ -629,13 +658,13 @@ impl oracle_6502::Bus for NesBus {
                 self.strobe = new_strobe;
             }
             0x6000..=0x7FFF => {
-                if self.mmc1.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
+                if self.stateful.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
                     self.prg_ram[(addr - 0x6000) as usize] = value;
                 }
             }
             0x8000..=0xFFFF => {
-                if let Some(mmc1) = &mut self.mmc1 {
-                    mmc1.write_register(addr, value);
+                if let Some(m) = &mut self.stateful {
+                    m.write_register(addr, value);
                 }
                 if self.mapper_policy.is_banked() {
                     let bus_byte = self.prg_read(addr);
@@ -840,13 +869,13 @@ fn run_reference(
     prg: Vec<u8>,
     chr: Vec<u8>,
     mapper_policy: nes_rom::MapperPolicy,
-    mmc1: Option<nes_rom::mmc1::Mmc1>,
+    stateful: Option<StatefulMapper>,
     frames: usize,
     timeline: &ButtonTimeline,
 ) -> ([u8; 0x800], Vec<[u8; 0x800]>) {
     use oracle_6502::Cpu;
     let mut cpu = Cpu::new();
-    let mut bus = NesBus::new(prg, chr, mapper_policy, mmc1);
+    let mut bus = NesBus::new(prg, chr, mapper_policy, stateful);
     cpu.reset(&mut bus);
 
     // Pre-roll: run reset-init until NMI is enabled. SMB polls $2002 for
@@ -2105,15 +2134,18 @@ fn main() {
 
     let nes = std::fs::read(&nes_path).expect("read nes");
     let image = nes_rom::parse(&nes).expect("parse nes");
-    let mmc1 = if image.header.mapper == 1 {
-        Some(
+    let stateful = match image.header.mapper {
+        1 => Some(StatefulMapper::Mmc1(
             nes_rom::mmc1::Mmc1::new(&image.header, image.prg.len()).expect("supported MMC1 board"),
-        )
-    } else {
-        None
+        )),
+        7 => Some(StatefulMapper::Axrom(
+            nes_rom::axrom::Axrom::new(&image.header, image.prg.len())
+                .expect("supported AxROM board"),
+        )),
+        _ => None,
     };
-    let mapper_policy = if mmc1.is_some() {
-        // MMC1 is stateful and routed via `mmc1`; the policy field is unused.
+    let mapper_policy = if stateful.is_some() {
+        // The stateful mapper is routed via `stateful`; the policy is unused.
         nes_rom::MapperPolicy::Nrom {
             prg_len: image.prg.len(),
         }
@@ -2149,7 +2181,7 @@ fn main() {
         prg,
         image.chr.to_vec(),
         mapper_policy,
-        mmc1,
+        stateful,
         frames,
         &timeline,
     );
