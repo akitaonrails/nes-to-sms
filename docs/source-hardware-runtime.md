@@ -255,10 +255,21 @@ holds through motion. This is title and first-level route coherence
 evidence (guest-state + uniform-census + visual inspection), not
 full-game acceptance, exact gameplay pixel-hash parity against the NES
 oracle, normal-speed playability or a capacity guarantee for other games.
-Remaining first-level acceptance gates: a pixel-parity comparison of the
-gameplay route against FD_NES_DUMP ground truth (title is pixel-exact;
-gameplay is not yet), and a level-clear route beyond the current
-enter/move/jump/land control checkpoint. Byte-identity gates are checked with
+A sustained-run traversal (hold run + periodic jump, `adventure_traverse.py`)
+drives level 1 about 3x deeper than the control checkpoint — camera 367 ->
+1123, source frame 527 -> 873 — before the callback budget ends. Rendered
+frames across it show new content all rendering coherently: a snail enemy,
+a score popup ("100", a high-range sprite), item pickups, and continuous
+terrain scroll with correct walk/jump poses. This exercises the
+enemy/animation/HUD checklist entries visually, though it is not a
+level-clear (a fixed jump timer does not clear every obstacle) and the
+0.136 source-fps overhead means ~14 s of game costs the full 200k-callback
+capture. Remaining first-level acceptance gates: a pixel-parity comparison
+of the gameplay route against FD_NES_DUMP ground truth (title is
+pixel-exact; gameplay is not yet — the route's derived guest_pad is not a
+replayable input, so a matched dual-emulator input bridge is still owed),
+a level-clear route beyond the current traversal, and the source-fps gap
+that keeps gameplay far below real time. Byte-identity gates are checked with
 the SDSC header's build-date byte and checksum masked; the assembler stamps
 the UTC build date at $7FE6, which is the only bit of nondeterminism.
 
