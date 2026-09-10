@@ -77,12 +77,13 @@ _sp_reset_read:
 ; Three PPU dots precede the original CPU transfer. Source clock already
 ; charged this CPU cycle. Hardware-domain state is never advanced by host IRQ.
 rt_source_ppu_cycle:
-  ld b, 3
-_sp_cycle_dot:
+  ; Unrolled three-dot advance: one BC save for the whole cycle instead of
+  ; a counted loop saving around every dot.
   push bc
   call _sp_advance_dot
+  call _sp_advance_dot
+  call _sp_advance_dot
   pop bc
-  djnz _sp_cycle_dot
   ret
 
 ; Isolated domain proof leaf, not yet selected by a profile or source clock.
@@ -285,84 +286,145 @@ _sp_predict_already_set:
   ld hl, $ffff
   jp _sp_predict_success
 _sp_predict_scan:
-  ld a, i
-  di
-  push af
+  ; Register-only per-sprite scan: nothing live mutates, so the backup
+  ; copies, DI window and internal mode are gone. Continuing the row's
+  ; evaluation from the current counters IS the full row's trajectory.
+  ; Actions land on even dots: the base is the first even dot after
+  ; max(current dot, 64); a miss costs one action, an in-range hit four,
+  ; and the ninth in-range Y (read through the diagonal-bug M) asserts
+  ; overflow at the action's own dot. Past dot 256 nothing can assert.
   ld hl, (SC_DOT)
-  ld (SP_PRED_SAVED_DOT), hl
-  ld hl, SP_BASE
-  ld de, SP_BACKUP
-  ld bc, SP_LIVE_END-SP_BASE
-  ldir
-  ld a, 1
-  ld (SP_INTERNAL_MODE), a
-; Overflow can only assert on an even action dot >= 66, and the counters
-; are invariant across the skipped odd/fill dots (the fills only touch
-; secondary bytes, which the backup restores). Step one even action at a
-; time with the latch recomputed from the odd-dot-invariant N/M.
-_sp_predict_loop:
-  ld hl, (SC_DOT)
-  ld a, h
-  or a
-  jr nz, _sp_predict_none
   ld a, l
   cp 64
-  jr nc, _sp_predict_first
+  jr nc, _sp_predict_base
   ld l, 64
-_sp_predict_first:
+_sp_predict_base:
   ld a, l
   add a, 2
   and $fe
   ld l, a
-  jr nz, _sp_predict_evaluate
-  inc h                      ; wrapped to dot 256
-_sp_predict_evaluate:
-  push hl
+  jr nz, _sp_predict_have_base
+  inc h                      ; wrapped to exactly dot 256
+_sp_predict_have_base:
+  ld (SP_PRED_SAVED_DOT), hl
+  ld a, (SP_EVAL_DONE)
+  or a
+  jp nz, _sp_predict_none
   ld a, (SP_EVAL_N)
-  add a, a
-  add a, a
   ld b, a
   ld a, (SP_EVAL_M)
-  or b
+  ld c, a
+  ld a, (SP_EVAL_COUNT)
+  ld d, a
+_sp_predict_sprite:
+  ld a, d
+  cp 8
+  jr nc, _sp_predict_over
+  ld a, c
+  or a
+  jr z, _sp_predict_test_y
+  ; finish the current in-range copy: 4-M actions, then the next sprite
+  ld a, 4
+  sub c
+  ld c, 0
+  inc d
+  add a, a
+  call _sp_predict_dot_add
+  jr _sp_predict_next_n
+_sp_predict_test_y:
+  ld a, b
+  add a, a
+  add a, a
   ld l, a
   ld h, $c9
-  ld a, (hl)
-  ld (SP_OAM_LATCH), a
-  call _sp_eval_even
-  pop hl
-  ld a, (SP_STATUS)
+  ld a, ($cb08)
   and $20
-  jr nz, _sp_predict_restore
-  inc hl
-  inc hl
+  ld e, 8
+  jr z, _sp_predict_h8
+  ld e, 16
+_sp_predict_h8:
+  ld a, (SC_LINE)
+  sub (hl)
+  jr c, _sp_predict_miss
+  cp e
+  jr nc, _sp_predict_miss
+  ; hit: four copy actions fill one secondary slot
+  inc d
+  ld a, 8
+  call _sp_predict_dot_add
+  jr _sp_predict_next_n
+_sp_predict_miss:
+  ld a, 2
+  call _sp_predict_dot_add
+_sp_predict_next_n:
+  ld a, b
+  inc a
+  and $3f
+  ld b, a
+  jr z, _sp_predict_none     ; N wrapped: evaluation is DONE for the row
+  jr _sp_predict_sprite
+_sp_predict_over:
+  ; overflow probe: the dummy Y read goes through the diagonal-bug M
+  ld hl, (SP_PRED_SAVED_DOT)
   ld a, h
   or a
-  jr z, _sp_predict_evaluate
+  jr z, _sp_predict_over_in
   ld a, l
   or a
-  jr z, _sp_predict_evaluate ; exactly dot 256 remains
-  jr _sp_predict_none
+  jr nz, _sp_predict_none    ; past dot 256
+_sp_predict_over_in:
+  ld a, b
+  add a, a
+  add a, a
+  or c
+  ld l, a
+  ld h, $c9
+  ld a, ($cb08)
+  and $20
+  ld e, 8
+  jr z, _sp_predict_over_h8
+  ld e, 16
+_sp_predict_over_h8:
+  ld a, (SC_LINE)
+  sub (hl)
+  jr c, _sp_predict_over_miss
+  cp e
+  jr nc, _sp_predict_over_miss
+  ld hl, (SP_PRED_SAVED_DOT)
+  jr _sp_predict_restore
+_sp_predict_over_miss:
+  ld a, c
+  inc a
+  and 3
+  ld c, a
+  ld a, 2
+  call _sp_predict_dot_add
+  ld a, b
+  inc a
+  and $3f
+  ld b, a
+  jr z, _sp_predict_none
+  jr _sp_predict_over
+_sp_predict_dot_add:
+  push hl
+  ld hl, (SP_PRED_SAVED_DOT)
+  add a, l
+  ld l, a
+  jr nc, _sp_predict_dot_store
+  inc h
+_sp_predict_dot_store:
+  ld (SP_PRED_SAVED_DOT), hl
+  pop hl
+  ret
 _sp_predict_none:
   ld hl, $ffff
 _sp_predict_restore:
-  ld (SP_PRED_RESULT), hl
-  ld hl, SP_BACKUP
-  ld de, SP_BASE
-  ld bc, SP_LIVE_END-SP_BASE
-  ldir
-  ld hl, (SP_PRED_SAVED_DOT)
-  ld (SC_DOT), hl
-  xor a
-  ld (SP_INTERNAL_MODE), a
+  ld (SP_OVERFLOW_DOT), hl
   ld hl, (SC_LINE)
   ld (SP_PRED_LINE), hl
-  ld hl, (SP_PRED_RESULT)
-  ld (SP_OVERFLOW_DOT), hl
   ld a, 1
   ld (SP_PRED_VALID), a
-  pop af
-  jp po, _sp_predict_success
-  ei
+  ld hl, (SP_OVERFLOW_DOT)
 _sp_predict_success:
   xor a
   pop de
