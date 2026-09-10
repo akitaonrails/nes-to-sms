@@ -270,6 +270,7 @@ enum StatefulMapper {
     Fme7(nes_rom::fme7::Fme7),
     Mmc2(nes_rom::mmc2::Mmc2),
     Mmc5(nes_rom::mmc5::Mmc5),
+    Mmc3(nes_rom::mmc3::Mmc3),
 }
 
 impl StatefulMapper {
@@ -281,6 +282,7 @@ impl StatefulMapper {
             Self::Fme7(f) => f.cpu_to_prg_offset(addr),
             Self::Mmc2(m) => m.cpu_to_prg_offset(addr),
             Self::Mmc5(m) => m.cpu_to_prg_offset(addr),
+            Self::Mmc3(m) => m.cpu_to_prg_offset(addr),
         }
     }
     fn write_register(&mut self, addr: u16, value: u8) {
@@ -291,6 +293,9 @@ impl StatefulMapper {
             Self::Fme7(f) => f.write_register(addr, value),
             Self::Mmc2(m) => m.write_register(addr, value),
             Self::Mmc5(m) => m.write_register(addr, value),
+            Self::Mmc3(m) => {
+                m.write_register(addr, value);
+            }
         }
     }
     fn prg_ram_enabled(&self) -> bool {
@@ -301,6 +306,7 @@ impl StatefulMapper {
             Self::Fme7(f) => f.prg6000_is_ram(),
             Self::Mmc2(m) => m.prg_ram_enabled(),
             Self::Mmc5(m) => m.prg_ram_enabled(),
+            Self::Mmc3(_) => true,
         }
     }
     /// Advance the mapper's scanline IRQ one step; true when it asserts IRQ.
@@ -309,6 +315,17 @@ impl StatefulMapper {
             Self::Vrc2(v) => v.vrc_irq_scanline(),
             Self::Fme7(f) => f.irq_scanline(),
             Self::Mmc5(m) => m.irq_scanline(),
+            Self::Mmc3(m) => {
+                // Approximate one A12 rising edge per scanline (the BG->sprite
+                // pattern-fetch transition) so the MMC3 counter advances without
+                // a cycle-exact PPU. Good enough for IRQ-paced main loops.
+                m.observe_ppu_address(0x0000);
+                m.clock_m2_falling_edge();
+                m.clock_m2_falling_edge();
+                m.clock_m2_falling_edge();
+                m.observe_ppu_address(0x1000);
+                m.irq_pending()
+            }
             _ => false,
         }
     }
@@ -353,6 +370,7 @@ impl StatefulMapper {
             Self::Mmc1(m) => Some(m.chr_offset(ppu_addr)),
             Self::Mmc2(m) => Some(m.chr_offset(ppu_addr)),
             Self::Mmc5(m) => Some(m.chr_offset(ppu_addr)),
+            Self::Mmc3(m) => m.ppu_to_chr_offset(ppu_addr),
             _ => None,
         }
     }
@@ -2319,6 +2337,14 @@ fn main() {
             nes_rom::mmc5::Mmc5::new(&image.header, image.prg.len(), image.chr.len())
                 .expect("supported MMC5 board"),
         )),
+        4 => nes_rom::mmc3::Mmc3::new(
+            &image.header,
+            image.prg.len(),
+            image.chr.len(),
+            nes_rom::mmc3::Mmc3Revision::Sharp,
+        )
+        .ok()
+        .map(StatefulMapper::Mmc3),
         _ => None,
     };
     let mapper_policy = if stateful.is_some() {
