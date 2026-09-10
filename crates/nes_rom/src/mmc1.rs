@@ -8,10 +8,10 @@
 //! $6000-$7FFF. Zelda (mapper 1, 128 KiB PRG, 8 KiB CHR-RAM, battery) is the
 //! first target.
 //!
-//! Not modeled: SxROM variants that repurpose CHR bank bits for extended PRG
-//! or PRG-RAM banking (SUROM/SOROM/SXROM 512 KiB, multiple RAM chips), the
-//! MMC1A/MMC1B consecutive-write quirk timing, and CHR-ROM boards (added
-//! when a CHR-ROM MMC1 game enters the queue).
+//! Both CHR-RAM and 4 KiB-banked CHR-ROM boards are supported. Not modeled:
+//! SxROM variants that repurpose CHR bank bits for extended PRG or PRG-RAM
+//! banking (SUROM/SOROM/SXROM 512 KiB, multiple RAM chips) and the MMC1A/MMC1B
+//! consecutive-write quirk timing.
 //!
 //! Register contract: <https://www.nesdev.org/wiki/MMC1>.
 
@@ -100,7 +100,8 @@ pub struct Mmc1 {
     control: u8, // bit0-1 mirroring, bit2-3 PRG mode, bit4 CHR mode
     chr0: u8,
     chr1: u8,
-    prg: u8, // bit0-3 PRG bank, bit4 PRG-RAM disable (1 = disabled)
+    prg: u8,                // bit0-3 PRG bank, bit4 PRG-RAM disable (1 = disabled)
+    chr_bank_count_4k: u16, // 0 for CHR-RAM boards
 }
 
 impl Mmc1 {
@@ -126,9 +127,17 @@ impl Mmc1 {
         if header.mirroring == Mirroring::FourScreen {
             return Err(Mmc1Error::UnsupportedFourScreen);
         }
-        if header.chr_len() != 0 {
-            return Err(Mmc1Error::UnsupportedChrRom);
-        }
+        // CHR-ROM (4 KiB-banked) and CHR-RAM boards are both supported. A
+        // present CHR ROM must be a power-of-two multiple of the 4 KiB window.
+        let chr_len = header.chr_len();
+        let chr_bank_count_4k = if chr_len == 0 {
+            0
+        } else {
+            if chr_len % CHR_WINDOW_SIZE != 0 || !chr_len.is_power_of_two() {
+                return Err(Mmc1Error::UnsupportedChrRom);
+            }
+            (chr_len / CHR_WINDOW_SIZE) as u16
+        };
         if prg_len % PRG_BANK_SIZE != 0 || !prg_len.is_power_of_two() {
             return Err(Mmc1Error::InvalidPrgLayout { prg_len });
         }
@@ -152,6 +161,7 @@ impl Mmc1 {
             chr0: 0,
             chr1: 0,
             prg: 0,
+            chr_bank_count_4k,
         })
     }
 
@@ -239,14 +249,26 @@ impl Mmc1 {
     /// In 8 KiB CHR mode both windows come from `chr0 & !1` and its successor.
     /// For CHR-RAM boards this indexes 4 KiB windows of the CHR-RAM.
     pub fn chr_bank_4k(&self, window: u8) -> u8 {
-        if self.control & 0x10 == 0 {
+        let raw = if self.control & 0x10 == 0 {
             // 8 KiB mode: chr0 low bit ignored; window picks the half.
             (self.chr0 & !1) | (window & 1)
         } else if window == 0 {
             self.chr0
         } else {
             self.chr1
+        };
+        if self.chr_bank_count_4k > 0 {
+            (raw as u16 % self.chr_bank_count_4k) as u8
+        } else {
+            raw
         }
+    }
+
+    /// Flat CHR-ROM offset for a PPU pattern address under the current CHR
+    /// banking. Only meaningful for CHR-ROM boards.
+    pub fn chr_offset(&self, ppu_addr: u16) -> usize {
+        let window = (ppu_addr >> 12) & 1;
+        self.chr_bank_4k(window as u8) as usize * CHR_WINDOW_SIZE + (ppu_addr as usize & 0x0FFF)
     }
 
     /// PRG-RAM at $6000-$7FFF is enabled unless the PRG register's bit 4 is set.
@@ -258,6 +280,44 @@ impl Mmc1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metroid_header() -> Header {
+        Header {
+            kind: HeaderKind::Nes2,
+            prg_banks: 8,  // 128 KiB
+            chr_banks: 16, // 128 KiB CHR-ROM
+            prg_ram_size: 0,
+            prg_nvram_size: 0,
+            chr_ram_size: 0,
+            chr_nvram_size: 0,
+            mapper: 1,
+            submapper: 0,
+            mirroring: Mirroring::Vertical,
+            has_trainer: false,
+            has_battery: false,
+        }
+    }
+
+    #[test]
+    fn chr_rom_board_banks_4k_windows() {
+        let mut m = Mmc1::new(&metroid_header(), 8 * PRG_BANK_SIZE).unwrap();
+        // 128 KiB CHR = thirty-two 4 KiB banks. Serial writes are LSB-first.
+        // control = 4 KiB CHR mode (0x10) | PRG mode 3 (0x0c) = 0x1c = 0b11100.
+        m.write_register(0x8000, 0x80); // reset the shift register
+        for bit in [0, 0, 1, 1, 1] {
+            m.write_register(0x8000, bit);
+        }
+        // chr0 = 5 = 0b00101 via serial writes to $A000, LSB first.
+        for bit in [1, 0, 1, 0, 0] {
+            m.write_register(0xA000, bit);
+        }
+        assert_eq!(m.chr_bank_4k(0), 5);
+        assert_eq!(m.chr_offset(0x0000), 5 * CHR_WINDOW_SIZE);
+        assert_eq!(
+            m.chr_offset(0x1000) / CHR_WINDOW_SIZE,
+            m.chr_bank_4k(1) as usize
+        );
+    }
 
     fn zelda_header() -> Header {
         Header {
@@ -358,8 +418,15 @@ mod tests {
             Mmc1::new(&h, 8 * PRG_BANK_SIZE),
             Err(Mmc1Error::UnsupportedMapper { mapper: 4 })
         ));
+        // CHR-ROM is now a supported board (was rejected before 4 KiB banking).
         let mut h = zelda_header();
-        h.chr_banks = 1; // CHR-ROM
+        h.chr_banks = 1; // 8 KiB CHR-ROM
+        h.chr_ram_size = 0;
+        assert!(Mmc1::new(&h, 8 * PRG_BANK_SIZE).is_ok());
+        // A non-power-of-two CHR ROM is still rejected.
+        let mut h = zelda_header();
+        h.chr_banks = 3; // 24 KiB, not power of two
+        h.chr_ram_size = 0;
         assert!(matches!(
             Mmc1::new(&h, 8 * PRG_BANK_SIZE),
             Err(Mmc1Error::UnsupportedChrRom)

@@ -350,6 +350,7 @@ impl StatefulMapper {
                 let window = ((ppu_addr >> 10) & 7) as u8;
                 Some(f.chr_bank_1k(window) as usize * 1024 + (ppu_addr as usize & 0x3FF))
             }
+            Self::Mmc1(m) => Some(m.chr_offset(ppu_addr)),
             Self::Mmc2(m) => Some(m.chr_offset(ppu_addr)),
             Self::Mmc5(m) => Some(m.chr_offset(ppu_addr)),
             _ => None,

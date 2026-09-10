@@ -349,6 +349,21 @@ pub fn resolve_mapper_policy_oracle(
             bus_conflicts,
         });
     }
+    if header.mapper == 2 && header.kind != HeaderKind::Nes2 {
+        // iNES UxROM has no submapper; default to AND bus conflicts (the
+        // conservative common case) so the oracle can boot old-header UxROM
+        // dumps like Metal Gear. The strict SMS pipeline still requires NES 2.0.
+        if prg_len % PRG_BANK_SIZE == 0 {
+            let bank_count = prg_len / PRG_BANK_SIZE;
+            if matches!(bank_count, 2 | 4 | 8 | 16) {
+                return Ok(MapperPolicy::Uxrom {
+                    bank_count: bank_count as u8,
+                    bus_conflicts: UxromBusConflicts::And,
+                });
+            }
+        }
+        return Err(MapperPolicyError::InvalidUxromPrgLayout { prg_len });
+    }
     resolve_mapper_policy(header, prg_len)
 }
 
