@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 pub mod axrom;
 pub mod cnrom;
+pub mod fme7;
 pub mod mmc1;
 pub mod mmc3;
 pub mod vrc2;

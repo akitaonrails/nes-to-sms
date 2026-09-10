@@ -267,6 +267,7 @@ enum StatefulMapper {
     Mmc1(nes_rom::mmc1::Mmc1),
     Axrom(nes_rom::axrom::Axrom),
     Vrc2(nes_rom::vrc2::Vrc2),
+    Fme7(nes_rom::fme7::Fme7),
 }
 
 impl StatefulMapper {
@@ -275,6 +276,7 @@ impl StatefulMapper {
             Self::Mmc1(m) => m.cpu_to_prg_offset(addr),
             Self::Axrom(a) => a.cpu_to_prg_offset(addr),
             Self::Vrc2(v) => v.cpu_to_prg_offset(addr),
+            Self::Fme7(f) => f.cpu_to_prg_offset(addr),
         }
     }
     fn write_register(&mut self, addr: u16, value: u8) {
@@ -282,6 +284,7 @@ impl StatefulMapper {
             Self::Mmc1(m) => m.write_register(addr, value),
             Self::Axrom(a) => a.write_register(addr, value),
             Self::Vrc2(v) => v.write_register(addr, value),
+            Self::Fme7(f) => f.write_register(addr, value),
         }
     }
     fn prg_ram_enabled(&self) -> bool {
@@ -289,12 +292,14 @@ impl StatefulMapper {
             Self::Mmc1(m) => m.prg_ram_enabled(),
             Self::Axrom(_) => false,
             Self::Vrc2(_) => false,
+            Self::Fme7(f) => f.prg6000_is_ram(),
         }
     }
     /// Advance the mapper's scanline IRQ one step; true when it asserts IRQ.
     fn vrc_irq_scanline(&mut self) -> bool {
         match self {
             Self::Vrc2(v) => v.vrc_irq_scanline(),
+            Self::Fme7(f) => f.irq_scanline(),
             _ => false,
         }
     }
@@ -323,6 +328,10 @@ impl StatefulMapper {
             Self::Vrc2(v) => {
                 let window = ((ppu_addr >> 10) & 7) as u8;
                 Some(v.chr_bank_1k(window) as usize * 1024 + (ppu_addr as usize & 0x3FF))
+            }
+            Self::Fme7(f) => {
+                let window = ((ppu_addr >> 10) & 7) as u8;
+                Some(f.chr_bank_1k(window) as usize * 1024 + (ppu_addr as usize & 0x3FF))
             }
             _ => None,
         }
@@ -526,8 +535,18 @@ impl oracle_6502::Bus for NesBus {
                         // reference models; nametable reads return 0.
                         let ret = self.ppu_read_buffer;
                         let a = (self.ppu_addr & 0x3FFF) as usize;
-                        self.ppu_read_buffer = if a < 0x2000 {
-                            *self.chr.get(a).unwrap_or(&0)
+                        self.ppu_read_buffer = if a < 0x2000 && !self.chr.is_empty() {
+                            // Apply the mapper's CHR banking so $2007 reads (used
+                            // by games like Batman to copy CHR-ROM into WRAM)
+                            // return the currently-banked byte, not flat CHR.
+                            let off = self
+                                .stateful
+                                .as_ref()
+                                .and_then(|m| m.chr_1k_offset(a as u16))
+                                .unwrap_or((self.chr_bank as usize) * 0x2000 + a);
+                            self.chr[off % self.chr.len()]
+                        } else if a < 0x2000 {
+                            self.chr_ram[a]
                         } else {
                             0
                         };
@@ -570,7 +589,13 @@ impl oracle_6502::Bus for NesBus {
             }
             0x4017 => 0x40, // controller 2: nothing pressed
             0x6000..=0x7FFF => {
-                if let Some(v) = self.stateful.as_ref().and_then(|m| m.wram_read()) {
+                if let Some(off) = self
+                    .stateful
+                    .as_ref()
+                    .and_then(|m| m.cpu_to_prg_offset(addr))
+                {
+                    self.prg[off]
+                } else if let Some(v) = self.stateful.as_ref().and_then(|m| m.wram_read()) {
                     v
                 } else if self.stateful.as_ref().is_some_and(|m| m.prg_ram_enabled()) {
                     self.prg_ram[(addr - 0x6000) as usize]
@@ -1131,6 +1156,7 @@ fn run_reference(
         let mut distinct: std::collections::HashSet<u16> = std::collections::HashSet::new();
         let mut pcmin = 0xFFFFu16;
         let mut pcmax = 0u16;
+        let mut insn_executed = 0u32;
         // Drive the mapper's scanline IRQ (VRC4) 262 times per frame, spread
         // across the fixed instruction budget. The frame-granular oracle has no
         // cycle clock, so this stands in for scanline timing: enough for
@@ -1140,6 +1166,7 @@ fn run_reference(
         let mut insn_since_scanline = 0u32;
         for _ in 0..REF_INSN_PER_FRAME {
             bus.last_pc = cpu.pc;
+            insn_executed += 1;
             insn_since_scanline += 1;
             if insn_since_scanline >= scanline_interval {
                 insn_since_scanline = 0;
@@ -1279,7 +1306,7 @@ fn run_reference(
         }
         if distinct_on && frame % 10 == 0 {
             eprintln!(
-                "DISTINCT f{frame} n={} pcmin=${pcmin:04X} pcmax=${pcmax:04X} mask=${:02X}",
+                "DISTINCT f{frame} n={} insn={insn_executed} pcmin=${pcmin:04X} pcmax=${pcmax:04X} mask=${:02X} nmi={nmi_fires}",
                 distinct.len(),
                 bus.ppu_mask
             );
@@ -2247,6 +2274,10 @@ fn main() {
         22 | 23 | 25 => Some(StatefulMapper::Vrc2(
             nes_rom::vrc2::Vrc2::new(&image.header, image.prg.len(), image.chr.len())
                 .expect("supported VRC2/4 board"),
+        )),
+        69 => Some(StatefulMapper::Fme7(
+            nes_rom::fme7::Fme7::new(&image.header, image.prg.len(), image.chr.len())
+                .expect("supported FME-7 board"),
         )),
         _ => None,
     };
