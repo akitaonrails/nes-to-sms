@@ -113,6 +113,18 @@ does not mean zero graphics memory. `m.s` means mapper/submapper.
   graduation, a design campaign). Gradius (USA) `3.2` stays the CNROM
   second-game check.
 
+  **Item 2 progress (2026-09-10):** the MMC1 board model
+  (`crates/nes_rom/src/mmc1.rs`, 6 tests) is implemented — serial shift
+  register, all PRG modes, CHR modes, mirroring, battery PRG-RAM — and
+  integrated into the reference oracle. The real Legend of Zelda now boots
+  through init and renders its title screen in the oracle (verifying MMC1
+  banked PRG + CHR-RAM + palette against the actual game); a generalized
+  oracle sprite-0 model (VBlank read clears the hit) unblocked Zelda's init
+  wait while keeping SMB byte-exact. Still open: the SMS conversion runtime
+  for MMC1 (banked PRG + CHR-RAM + save-RAM, following the CNROM/MMC3
+  runtime pattern) — the large remaining piece to make Zelda actually
+  convert and run on SMS.
+
 - [ ] **2. MMC1 — The Legend of Zelda (USA, Rev 1).** Available as
   `Legend of Zelda, The (USA) (Rev 1).nes`: `1.0`, **128/0**, NES 2.0,
   NTSC; header declares 8 KiB CHR-RAM and 8 KiB battery-backed PRG-RAM.
