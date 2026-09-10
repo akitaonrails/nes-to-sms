@@ -2,10 +2,16 @@
 
 A Rust pipeline that translates NES ROMs into Sega Master System projects,
 with mapper 0 (NROM), mapper 2 (UxROM), and experimental mapper 4 (MMC3)
-support. The output is a buildable
+support in the SMS conversion path. The output is a buildable
 WLA-DX project: extracted
 assets, an annotated 6502 disassembly, lifted IR, lowered Z80 with
 SMS-native runtime calls, and a `Makefile` that produces a `.sms` ROM.
+
+A separate **mapper board-model layer** (`crates/nes_rom`) decodes and
+oracle-verifies a much wider set — MMC1, MMC3, MMC5, AxROM, CNROM, VRC2/VRC4,
+FME-7 and MMC2/MMC4 — by booting the real games in the differential oracle.
+These board models are the groundwork for future SMS conversions; a decoded,
+booting mapper is not yet a playable SMS build.
 
 The canonical plan lives in [`docs/master-plan.md`](docs/master-plan.md).
 This README is the operational on-ramp.
@@ -45,7 +51,14 @@ See [media encoding notes](docs/media/README.md) for sizes and settings.
   This is functional first-level
   support, not full-speed/full-game support or cycle-accurate IRQ emulation.
   [Plan and limits](docs/smb3-plan.md).
-- **Validation:** 13 Rust crates; the latest workspace run has 587 passing
+- **Mapper board models:** the reference oracle decodes and boots real games
+  across MMC1 (CHR-RAM and CHR-ROM), MMC3, MMC5, AxROM, CNROM, VRC2, VRC4,
+  FME-7 and MMC2/MMC4 — verified across two or more games per mapper (e.g.
+  Metroid, Contra, Gradius II, Batman: Return of the Joker, Fire Emblem,
+  Castlevania III). This proves the banking/IRQ decoding, not an SMS build:
+  each game's SMS conversion runtime is separate work. See
+  [mapper roadmap](docs/mapper-roadmap.md).
+- **Validation:** 14 Rust crates; the latest workspace run has 668 passing
   tests, plus separately run assembled-runtime and actual-emulator checks.
   NES APU audio is approximated on the SMS PSG, not reproduced exactly.
 

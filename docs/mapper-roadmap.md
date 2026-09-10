@@ -50,6 +50,35 @@ and opt-in [synthetic source-bus](cnrom-bus-runtime.md) and
 records native execution evidence and tracks full-content acceptance. The existing
 [CV3 profile](../profiles/cv3.toml) is a mapper-5 rejection probe, not MMC5 support.
 
+## Board-model status — oracle boot verification (2026-09-10)
+
+Every mapper in the queue now has a decoded board model in `crates/nes_rom`
+that boots the real game in the differential oracle (`frame-diff`). This is
+**board-decode + boot correctness**, one rung below a playable SMS conversion;
+each game's SMS runtime is still the per-game campaign the queue tracks.
+
+| Mapper | Model | Boot-verified game(s) |
+| --- | --- | --- |
+| NROM (0) | `MapperPolicy` | Balloon Fight, Excitebike, SMB |
+| MMC1 (1) | `mmc1.rs` (CHR-RAM + 4 KiB CHR-ROM) | Zelda, Metroid, Ninja Gaiden, Blaster Master, Kid Icarus, Mega Man 2 |
+| UxROM (2) | `MapperPolicy` (NES2 + iNES in oracle) | Castlevania, DuckTales, Metal Gear |
+| CNROM (3) | `cnrom.rs` / `MapperPolicy` | Adventure Island, Arkanoid, Gradius |
+| MMC3 (4) | `mmc3.rs` (oracle A12 IRQ approximated) | SMB3, Kirby, Mega Man 3, SMB2, Bonk, Joe & Mac, Tiny Toon |
+| MMC5 (5) | `mmc5.rs` | Castlevania III |
+| AxROM (7) | `axrom.rs` | Battletoads, Marble Madness |
+| MMC2 (9) | `mmc2.rs` | model + unit tests (no mapper-9 ROM in collection) |
+| MMC4 (10) | `mmc2.rs` | Fire Emblem (Gaiden, Dark Dragon) |
+| VRC2 (23) | `vrc2.rs` (+ `$6000` microwire latch) | Contra (JP), Crisis Force, Kid Dracula |
+| VRC4 (25) | `vrc2.rs` (+ `$F000` scanline/cycle IRQ) | Gradius II, Ganbare Goemon Gaiden |
+| FME-7 (69) | `fme7.rs` | Batman: Return of the Joker |
+
+Two general oracle fixes came out of this: `$2007` (PPUDATA) reads now apply
+the mapper's CHR banking (games copy CHR-ROM through the port into WRAM and
+execute it), and the oracle admits iNES UxROM with a conservative bus-conflict
+default. Remaining per-mapper work is the SMS conversion runtime, not the
+board decode. Multiplier/ExRAM/vertical-split (MMC5) and cycle-exact IRQ
+timing (all IRQ mappers) are still approximated in the frame-granular oracle.
+
 ## What is actually available
 
 Read-only inspection of the NES directory in the configured EmuDeck collection
