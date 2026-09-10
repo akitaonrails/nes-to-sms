@@ -246,9 +246,19 @@ single-frame blanks disappear entirely — the only remaining blank episodes
 are the source's own display-off level loading, present in both runs at
 matching lengths. The route baseline was captured on a different pinned
 core build, so this comparison rests on guest endpoints and the uniform
-frame census, not pixel-hash identity. This is title and first-level route
-coherence evidence, not full-game acceptance, normal-speed playability or
-a capacity guarantee for other games. Byte-identity gates are checked with
+frame census, not pixel-hash identity. Rendered frames from the first-level GPGX route confirm coherent gameplay
+visually, not just at the RAM endpoints: the forest background, ground
+band, HUD score/health, fruit pickups and Master Higgins all render
+correctly, with the sprite in its walk pose on the ground and its jump
+pose airborne as the scene scrolls — the atlas double-buffered publisher
+holds through motion. This is title and first-level route coherence
+evidence (guest-state + uniform-census + visual inspection), not
+full-game acceptance, exact gameplay pixel-hash parity against the NES
+oracle, normal-speed playability or a capacity guarantee for other games.
+Remaining first-level acceptance gates: a pixel-parity comparison of the
+gameplay route against FD_NES_DUMP ground truth (title is pixel-exact;
+gameplay is not yet), and a level-clear route beyond the current
+enter/move/jump/land control checkpoint. Byte-identity gates are checked with
 the SDSC header's build-date byte and checksum masked; the assembler stamps
 the UTC build date at $7FE6, which is the only bit of nondeterminism.
 
