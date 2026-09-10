@@ -28,6 +28,30 @@ pub enum Mirroring {
     FourScreen,
 }
 
+/// Four-way nametable mirroring as the banked mappers select it at runtime — a
+/// superset of the iNES header's [`Mirroring`], which cannot express the
+/// single-screen modes MMC1/VRC/FME-7 switch to. Shared so each mapper need not
+/// redeclare an identical enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NametableMirroring {
+    Vertical,
+    Horizontal,
+    OneScreenLower,
+    OneScreenUpper,
+}
+
+/// Bank count for a ROM region that must be a non-zero power of two and a whole
+/// number of `window`-sized banks. `None` rejects the layout; callers turn that
+/// into their own board-specific error. Dedupes the PRG/CHR layout check that
+/// every banked mapper's constructor otherwise repeats.
+pub fn windowed_bank_count(len: usize, window: usize) -> Option<usize> {
+    if len == 0 || window == 0 || len % window != 0 || !len.is_power_of_two() {
+        None
+    } else {
+        Some(len / window)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderKind {
     INes,

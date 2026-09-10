@@ -15,7 +15,9 @@
 //!
 //! Register contract: <https://www.nesdev.org/wiki/MMC1>.
 
-use crate::{Header, HeaderKind, Mirroring, PRG_BANK_SIZE};
+use crate::{
+    Header, HeaderKind, Mirroring, NametableMirroring, PRG_BANK_SIZE, windowed_bank_count,
+};
 use std::fmt;
 
 /// 16 KiB PRG window; 8 KiB PRG-RAM window; 4 KiB CHR window.
@@ -79,15 +81,6 @@ impl fmt::Display for Mmc1Error {
 
 impl std::error::Error for Mmc1Error {}
 
-/// One of the four MMC1 nametable mirroring modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mmc1Mirroring {
-    OneScreenLower,
-    OneScreenUpper,
-    Vertical,
-    Horizontal,
-}
-
 /// Board register state. The bus owns ROM/RAM; this owns only mapper state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mmc1 {
@@ -133,10 +126,8 @@ impl Mmc1 {
         let chr_bank_count_4k = if chr_len == 0 {
             0
         } else {
-            if chr_len % CHR_WINDOW_SIZE != 0 || !chr_len.is_power_of_two() {
-                return Err(Mmc1Error::UnsupportedChrRom);
-            }
-            (chr_len / CHR_WINDOW_SIZE) as u16
+            windowed_bank_count(chr_len, CHR_WINDOW_SIZE).ok_or(Mmc1Error::UnsupportedChrRom)?
+                as u16
         };
         if prg_len % PRG_BANK_SIZE != 0 || !prg_len.is_power_of_two() {
             return Err(Mmc1Error::InvalidPrgLayout { prg_len });
@@ -169,12 +160,12 @@ impl Mmc1 {
         self.has_battery
     }
 
-    pub fn mirroring(&self) -> Mmc1Mirroring {
+    pub fn mirroring(&self) -> NametableMirroring {
         match self.control & 0x03 {
-            0 => Mmc1Mirroring::OneScreenLower,
-            1 => Mmc1Mirroring::OneScreenUpper,
-            2 => Mmc1Mirroring::Vertical,
-            _ => Mmc1Mirroring::Horizontal,
+            0 => NametableMirroring::OneScreenLower,
+            1 => NametableMirroring::OneScreenUpper,
+            2 => NametableMirroring::Vertical,
+            _ => NametableMirroring::Horizontal,
         }
     }
 
@@ -407,7 +398,7 @@ mod tests {
         assert_eq!(m.chr_bank_4k(1), 6);
         // Mirroring select.
         write5(&mut m, 0x8000, 0b1_0010); // vertical (bits0-1 = 2) + CHR mode 1
-        assert_eq!(m.mirroring(), Mmc1Mirroring::Vertical);
+        assert_eq!(m.mirroring(), NametableMirroring::Vertical);
     }
 
     #[test]

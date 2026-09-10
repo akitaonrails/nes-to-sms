@@ -8,7 +8,7 @@
 //!
 //! Register contract: <https://www.nesdev.org/wiki/AxROM>.
 
-use crate::{Header, PRG_BANK_SIZE};
+use crate::Header;
 use std::fmt;
 
 /// AxROM switches PRG in 32 KiB units.
@@ -123,7 +123,7 @@ impl Axrom {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HeaderKind, Mirroring};
+    use crate::{HeaderKind, Mirroring, PRG_BANK_SIZE};
 
     fn battletoads_header() -> Header {
         Header {

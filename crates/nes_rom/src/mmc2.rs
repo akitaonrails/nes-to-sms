@@ -15,7 +15,7 @@
 //!
 //! Register contract: <https://www.nesdev.org/wiki/MMC2>, <https://www.nesdev.org/wiki/MMC4>.
 
-use crate::{Header, Mirroring};
+use crate::{Header, Mirroring, NametableMirroring, windowed_bank_count};
 use std::fmt;
 
 pub const CHR_WINDOW_SIZE: usize = 4 * 1024;
@@ -60,12 +60,6 @@ impl fmt::Display for Mmc2Error {
 
 impl std::error::Error for Mmc2Error {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mmc2Mirroring {
-    Vertical,
-    Horizontal,
-}
-
 /// Which of the two latch states a pattern table is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Latch {
@@ -101,20 +95,12 @@ impl Mmc2 {
         if header.mirroring == Mirroring::FourScreen {
             return Err(Mmc2Error::UnsupportedFourScreen);
         }
-        if prg_len % PRG_8K != 0 || !prg_len.is_power_of_two() {
-            return Err(Mmc2Error::InvalidPrgLayout { prg_len });
-        }
-        let prg_bank_count_8k = prg_len / PRG_8K;
-        if !(4..=32).contains(&prg_bank_count_8k) {
-            return Err(Mmc2Error::InvalidPrgLayout { prg_len });
-        }
-        if chr_len % CHR_WINDOW_SIZE != 0 || !chr_len.is_power_of_two() {
-            return Err(Mmc2Error::InvalidChrLayout { chr_len });
-        }
-        let chr_bank_count_4k = chr_len / CHR_WINDOW_SIZE;
-        if !(4..=64).contains(&chr_bank_count_4k) {
-            return Err(Mmc2Error::InvalidChrLayout { chr_len });
-        }
+        let prg_bank_count_8k = windowed_bank_count(prg_len, PRG_8K)
+            .filter(|n| (4..=32).contains(n))
+            .ok_or(Mmc2Error::InvalidPrgLayout { prg_len })?;
+        let chr_bank_count_4k = windowed_bank_count(chr_len, CHR_WINDOW_SIZE)
+            .filter(|n| (4..=64).contains(n))
+            .ok_or(Mmc2Error::InvalidChrLayout { chr_len })?;
         if header.prg_len() != prg_len || header.chr_len() != chr_len {
             return Err(Mmc2Error::HeaderPayloadMismatch);
         }
@@ -137,11 +123,11 @@ impl Mmc2 {
         self.has_wram
     }
 
-    pub fn mirroring(&self) -> Mmc2Mirroring {
+    pub fn mirroring(&self) -> NametableMirroring {
         if self.mirroring & 1 != 0 {
-            Mmc2Mirroring::Horizontal
+            NametableMirroring::Horizontal
         } else {
-            Mmc2Mirroring::Vertical
+            NametableMirroring::Vertical
         }
     }
 

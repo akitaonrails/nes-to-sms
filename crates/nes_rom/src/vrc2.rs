@@ -11,7 +11,7 @@
 //!
 //! Register contract: <https://www.nesdev.org/wiki/VRC2_and_VRC4>.
 
-use crate::{Header, Mirroring};
+use crate::{Header, Mirroring, NametableMirroring, windowed_bank_count};
 use std::fmt;
 
 pub const PRG_WINDOW_SIZE: usize = 8 * 1024;
@@ -49,14 +49,6 @@ impl fmt::Display for Vrc2Error {
 }
 
 impl std::error::Error for Vrc2Error {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Vrc2Mirroring {
-    Vertical,
-    Horizontal,
-    OneScreenLower,
-    OneScreenUpper,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vrc2 {
@@ -103,20 +95,12 @@ impl Vrc2 {
         if header.mirroring == Mirroring::FourScreen {
             return Err(Vrc2Error::UnsupportedFourScreen);
         }
-        if prg_len % PRG_WINDOW_SIZE != 0 || !prg_len.is_power_of_two() {
-            return Err(Vrc2Error::InvalidPrgLayout { prg_len });
-        }
-        let prg_bank_count = (prg_len / PRG_WINDOW_SIZE) as u8;
-        if !(4..=32).contains(&prg_bank_count) {
-            return Err(Vrc2Error::InvalidPrgLayout { prg_len });
-        }
-        if chr_len % CHR_WINDOW_SIZE != 0 || !chr_len.is_power_of_two() {
-            return Err(Vrc2Error::InvalidChrLayout { chr_len });
-        }
-        let chr_bank_count = (chr_len / CHR_WINDOW_SIZE) as u16;
-        if !(16..=512).contains(&chr_bank_count) {
-            return Err(Vrc2Error::InvalidChrLayout { chr_len });
-        }
+        let prg_bank_count = windowed_bank_count(prg_len, PRG_WINDOW_SIZE)
+            .filter(|n| (4..=32).contains(n))
+            .ok_or(Vrc2Error::InvalidPrgLayout { prg_len })? as u8;
+        let chr_bank_count = windowed_bank_count(chr_len, CHR_WINDOW_SIZE)
+            .filter(|n| (16..=512).contains(n))
+            .ok_or(Vrc2Error::InvalidChrLayout { chr_len })? as u16;
         if header.prg_len() != prg_len || header.chr_len() != chr_len {
             return Err(Vrc2Error::HeaderPayloadMismatch);
         }
@@ -151,12 +135,12 @@ impl Vrc2 {
         self.ram_latch & 1
     }
 
-    pub fn mirroring(&self) -> Vrc2Mirroring {
+    pub fn mirroring(&self) -> NametableMirroring {
         match self.mirroring & 0x03 {
-            0 => Vrc2Mirroring::Vertical,
-            1 => Vrc2Mirroring::Horizontal,
-            2 => Vrc2Mirroring::OneScreenLower,
-            _ => Vrc2Mirroring::OneScreenUpper,
+            0 => NametableMirroring::Vertical,
+            1 => NametableMirroring::Horizontal,
+            2 => NametableMirroring::OneScreenLower,
+            _ => NametableMirroring::OneScreenUpper,
         }
     }
 
@@ -338,7 +322,7 @@ mod tests {
         assert_eq!(v.chr_bank_1k(0), 0x1A % (128));
         // Mirroring via $9000 sel0.
         v.write_register(0x9000, 1);
-        assert_eq!(v.mirroring(), Vrc2Mirroring::Horizontal);
+        assert_eq!(v.mirroring(), NametableMirroring::Horizontal);
     }
 
     #[test]

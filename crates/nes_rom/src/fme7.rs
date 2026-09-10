@@ -11,7 +11,7 @@
 //!
 //! Register contract: <https://www.nesdev.org/wiki/Sunsoft_FME-7>.
 
-use crate::{Header, Mirroring};
+use crate::{Header, Mirroring, NametableMirroring, windowed_bank_count};
 use std::fmt;
 
 pub const PRG_WINDOW_SIZE: usize = 8 * 1024;
@@ -51,14 +51,6 @@ impl fmt::Display for Fme7Error {
 impl std::error::Error for Fme7Error {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fme7Mirroring {
-    Vertical,
-    Horizontal,
-    OneScreenLower,
-    OneScreenUpper,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fme7 {
     prg_bank_count: u8,  // 8 KiB banks
     chr_bank_count: u16, // 1 KiB banks
@@ -92,20 +84,12 @@ impl Fme7 {
         if header.mirroring == Mirroring::FourScreen {
             return Err(Fme7Error::UnsupportedFourScreen);
         }
-        if prg_len % PRG_WINDOW_SIZE != 0 || !prg_len.is_power_of_two() {
-            return Err(Fme7Error::InvalidPrgLayout { prg_len });
-        }
-        let prg_bank_count = (prg_len / PRG_WINDOW_SIZE) as u8;
-        if !(4..=64).contains(&prg_bank_count) {
-            return Err(Fme7Error::InvalidPrgLayout { prg_len });
-        }
-        if chr_len % CHR_WINDOW_SIZE != 0 || !chr_len.is_power_of_two() {
-            return Err(Fme7Error::InvalidChrLayout { chr_len });
-        }
-        let chr_bank_count = (chr_len / CHR_WINDOW_SIZE) as u16;
-        if !(16..=512).contains(&chr_bank_count) {
-            return Err(Fme7Error::InvalidChrLayout { chr_len });
-        }
+        let prg_bank_count = windowed_bank_count(prg_len, PRG_WINDOW_SIZE)
+            .filter(|n| (4..=64).contains(n))
+            .ok_or(Fme7Error::InvalidPrgLayout { prg_len })? as u8;
+        let chr_bank_count = windowed_bank_count(chr_len, CHR_WINDOW_SIZE)
+            .filter(|n| (16..=512).contains(n))
+            .ok_or(Fme7Error::InvalidChrLayout { chr_len })? as u16;
         if header.prg_len() != prg_len || header.chr_len() != chr_len {
             return Err(Fme7Error::HeaderPayloadMismatch);
         }
@@ -127,12 +111,12 @@ impl Fme7 {
         })
     }
 
-    pub fn mirroring(&self) -> Fme7Mirroring {
+    pub fn mirroring(&self) -> NametableMirroring {
         match self.mirroring & 0x03 {
-            0 => Fme7Mirroring::Vertical,
-            1 => Fme7Mirroring::Horizontal,
-            2 => Fme7Mirroring::OneScreenLower,
-            _ => Fme7Mirroring::OneScreenUpper,
+            0 => NametableMirroring::Vertical,
+            1 => NametableMirroring::Horizontal,
+            2 => NametableMirroring::OneScreenLower,
+            _ => NametableMirroring::OneScreenUpper,
         }
     }
 
@@ -294,7 +278,7 @@ mod tests {
         assert_eq!(f.chr_bank_1k(2), 0x11);
         f.write_register(0x8000, 0x0C); // mirroring command
         f.write_register(0xA000, 0x01);
-        assert_eq!(f.mirroring(), Fme7Mirroring::Horizontal);
+        assert_eq!(f.mirroring(), NametableMirroring::Horizontal);
     }
 
     #[test]
