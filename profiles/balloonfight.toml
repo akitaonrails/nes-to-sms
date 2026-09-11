@@ -14,7 +14,7 @@ reset = 0xC000
 irq   = 0xC0F7
 
 [[chr_pack]]
-table = 0
+table = 1
 start = 0x00
 end = 0xff
 dest = 0
