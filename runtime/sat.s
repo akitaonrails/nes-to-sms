@@ -147,11 +147,21 @@ rt_oam_dma:
   ld   c, a                  ; wrapped span = OAMADDR
   ld   b, $00
   ldir
-  jr   _oam_dma_done
+  jp   _oam_dma_done         ; jp: the unrolled aligned block is beyond jr range
 _oam_dma_aligned:
+  ; The aligned copy (OAMADDR == 0, the common case) is a fixed 256-byte
+  ; RAM->RAM move into the OAM staging buffer. It never touches the VDP, so an
+  ; unrolled LDI (16 cyc/byte) replaces LDIR (21 cyc/byte) with identical
+  ; bytes: 4 x 64 LDI. `ldi` leaves A untouched, so A carries the outer count;
+  ; BC is scratch here (it is destroyed either way and rt_oam_dma documents it).
   ld   de, $c900             ; OAM staging
-  ld   bc, $0100             ; 256 bytes
-  ldir
+  ld   a, 4                  ; 4 blocks of 64 bytes = 256
+_oam_dma_blk:
+  .rept 64
+  ldi
+  .endr
+  dec  a
+  jp   nz, _oam_dma_blk      ; jp (not jr): 64 LDIs exceed jr's 8-bit range
 _oam_dma_done:
   ld   de, (SAT_OAM_DMA_DE_SAVE)
   ld   hl, (SAT_OAM_DMA_AF_SAVE)
