@@ -842,9 +842,39 @@ fn cnrom_environment_supported(header: &[u8], source_hardware: bool) -> bool {
         && (header[15] == 0 || (source_hardware && header[15] == 1))
 }
 
+/// NROM-128 (a single 16 KiB PRG bank) mirrors that bank into both $8000-$BFFF
+/// and $C000-$FFFF; the rest of the pipeline maps the CPU window as a flat
+/// $8000-based PRG, so games whose code and vectors live in the $C000 mirror
+/// (most NROM-128 titles) have nowhere to resolve. Expand such a ROM to an
+/// equivalent NROM-256 by duplicating the 16 KiB bank, so $C000-$FFFF carries
+/// the same bytes the hardware mirror would. Any other ROM is returned as-is.
+fn expand_nrom128_to_256(rom: Vec<u8>) -> Vec<u8> {
+    if rom.len() < 16 || &rom[0..4] != b"NES\x1a" {
+        return rom;
+    }
+    let mapper = (rom[7] & 0xF0) | (rom[6] >> 4);
+    let prg_banks = rom[4];
+    let has_trainer = rom[6] & 0x04 != 0;
+    if mapper != 0 || prg_banks != 1 || has_trainer {
+        return rom;
+    }
+    let prg_len = 16 * 1024;
+    if rom.len() < 16 + prg_len {
+        return rom;
+    }
+    let mut out = Vec::with_capacity(rom.len() + prg_len);
+    out.extend_from_slice(&rom[0..16]);
+    out[4] = 2; // NROM-256: two 16 KiB PRG banks
+    out.extend_from_slice(&rom[16..16 + prg_len]); // bank -> $8000-$BFFF
+    out.extend_from_slice(&rom[16..16 + prg_len]); // mirror -> $C000-$FFFF
+    out.extend_from_slice(&rom[16 + prg_len..]); // CHR and any trailer
+    out
+}
+
 pub fn run(args: &Args) -> Result<String, Error> {
-    // 1. Read and parse the ROM.
-    let rom_bytes = std::fs::read(&args.rom)?;
+    // 1. Read and parse the ROM. NROM-128 is expanded to its NROM-256 mirror
+    // so the flat $8000-$FFFF PRG window the pipeline assumes is fully backed.
+    let rom_bytes = expand_nrom128_to_256(std::fs::read(&args.rom)?);
     let image = nes_rom::parse(&rom_bytes)?;
     // 2. Load the profile.
     let prof = profile::load_from_path(&args.profile)?;

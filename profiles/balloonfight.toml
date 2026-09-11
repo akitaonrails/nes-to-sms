@@ -1,0 +1,99 @@
+# Balloon Fight (USA) — NROM-128 (mapper 0, 16 KiB PRG, 8 KiB CHR).
+# Minimal profile for the generality test: no game-specific knowledge;
+# vectors from the ROM, discovery carries the rest.
+
+[rom]
+name    = "Balloon Fight"
+mapper  = 0
+prg_kib = 32
+chr_kib = 8
+
+[vectors]
+nmi   = 0xC094
+reset = 0xC000
+irq   = 0xC0F7
+
+[[chr_pack]]
+table = 0
+start = 0x00
+end = 0xff
+dest = 0
+
+# Indirect-dispatch (JMP ($0025)) handler roots — the analyzer sees these
+# as external targets it cannot reach statically; declaring them roots lets
+# the computed-dispatch runtime reach them.
+[[function]]
+addr = 0xF500
+name = "handler_F500"
+
+[[function]]
+addr = 0xF503
+name = "handler_F503"
+
+[[function]]
+addr = 0xF71F
+name = "handler_F71F"
+
+[[function]]
+addr = 0xF7E0
+name = "handler_F7E0"
+
+[[function]]
+addr = 0xF7EF
+name = "handler_F7EF"
+
+[[function]]
+addr = 0xF800
+name = "handler_F800"
+
+[[function]]
+addr = 0xF814
+name = "handler_F814"
+
+[[function]]
+addr = 0xF821
+name = "handler_F821"
+
+[[function]]
+addr = 0xF8DD
+name = "handler_F8DD"
+
+[[function]]
+addr = 0xF907
+name = "handler_F907"
+
+[[function]]
+addr = 0xF9E9
+name = "handler_F9E9"
+
+[[function]]
+addr = 0xFA0C
+name = "handler_FA0C"
+
+[[function]]
+addr = 0xFA27
+name = "handler_FA27"
+
+[[function]]
+addr = 0xFA96
+name = "handler_FA96"
+
+[[function]]
+addr = 0xFB1E
+name = "handler_FB1E"
+
+
+[[function]]
+addr = 0xF7D9
+name = "handler_F7D9"
+
+# Inline data tables the discovery walker overran into code (JAM opcodes).
+[[data_region]]
+start = 0xD437
+end   = 0xD45D
+name  = "palette_table_D437"
+
+[[data_region]]
+start = 0xFBCA
+end   = 0xFBEF
+name  = "offset_table_FBCA"
