@@ -72,11 +72,54 @@ SMB-shaped, so a correct translation also *renders* correctly.
   then plays"; performance stays deferred (overclock is acceptable, per the
   existing plan).
 
+## Validation result (2026-09-11) — the recompiler was never the blocker
+
+P0's first step (the `nes_ref`/tetanes reference) already overturned the pessimistic
+read above. Comparing the 2 KiB internal RAM of the **real NES (tetanes)** against
+the **SMS subject**, scanning frame phase to align:
+
+| game | non-stack bytes differing (best phase) | match |
+|------|----------------------------------------|-------|
+| SMB (known byte-exact vs oracle) | 11 / 1792 | 99.4% |
+| Balloon Fight (oracle said "150 diffuse bytes diverge @ frame 0") | 7 / 1792 | 99.6% |
+
+Both games show the *same* ~1% residual against the real NES, and that residual is
+entirely timing-phase state — animation/RNG counters ($12, $19), a position pair
+both offset by exactly 0x0C ($D1/$D2), ±1 counters — because the two free-run
+without synchronized input. That ~99% + timing-phase residual is the **signature of
+a correct translation** (SMB, which is byte-exact against the oracle, sets the
+baseline). Balloon Fight matches that signature.
+
+**Conclusion:** Balloon Fight's SMS CPU translation is essentially correct. The
+"150-byte frame-0 divergence" that made it look broken was a **simplified-oracle
+artifact**, not a real bug — the oracle simply can't track a game it wasn't
+co-tuned with. The recompiler already emits correct-grade Z80 for a new NROM game
+from a *minimal* profile. The remaining Balloon Fight issue (green background) is
+therefore in the **rendering path** (CHR/nametable/attribute mapping, P3), a far
+more contained problem than a CPU-translation campaign.
+
+This **lowers the per-game cost estimate substantially**: the work per new game is
+now "confirm correct-grade against tetanes, then fix rendering," not "grind byte-
+exact CPU parity from scratch." P1 (generic recompiler hardening) stays valuable
+for the games that *do* surface real bugs, but it is no longer the assumed default
+for every game.
+
 ## Honest expectation
 
-This is a **months-long, game-by-game program**, but the strategic change makes
-it *converge*: with a real reference plus P1-P3 infrastructure, each new game
-costs less than the last, instead of each being another SMB-sized campaign. The
-first executable step is P2's JAM→data-boundary auto-discovery (bounded,
-game-agnostic, removes a whole class of per-game annotation), landed while P0's
-real-reference integration is scoped.
+Still a **game-by-game program**, but the validation result above resets the cost
+downward: the recompiler already produces correct-grade CPU translations for a new
+NROM game, so most games will *not* need an SMB-sized byte-exact CPU campaign — they
+need correctness *confirmation* against tetanes plus rendering fidelity. Cost
+concentrates in P3 (generic rendering) and in the minority of games that surface
+real P1 bugs. Landed this session: P2's JAM→data-boundary auto-discovery, and P0's
+real-reference (`nes_ref`/tetanes) with the validation that reframed the whole plan.
+
+## Next steps, in order
+1. **Wire tetanes into frame-diff** behind `FD_REF=tetanes` with whole-frame vs
+   instruction pre-roll alignment (phase-scan or a RAM anchor), so "correct-grade
+   vs real NES" becomes a one-command gate instead of a manual phase scan.
+2. **Balloon Fight rendering (P3):** the green background is a CHR/attribute/
+   nametable mapping issue, not CPU divergence — chase it in the runtime render
+   path, generalizing SMB-shaped assumptions as needed.
+3. **Convert the next NROM games** (Excitebike, Ice Climber, Lode Runner) and
+   confirm each is correct-grade against tetanes with a minimal profile.
