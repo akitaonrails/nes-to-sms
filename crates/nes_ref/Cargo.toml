@@ -1,0 +1,14 @@
+[package]
+name = "nes_ref"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tetanes-core = "0.17"
+
+[[bin]]
+name = "nes-ref-dump"
+path = "src/bin/nes-ref-dump.rs"
