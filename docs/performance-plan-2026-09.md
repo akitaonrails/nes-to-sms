@@ -118,6 +118,63 @@ runtime remains ~250× off real-time at 500% overclock; its documented blocker i
 not micro-optimization, and out of scope until a source-hardware game is the
 active target.
 
+## Results log
+
+**2026-09-10, first pass (committed 9110b5e, 9b91d81):**
+
+- **Measurement foundation fixed.** `z80_emu::approx_cycles` charged a flat 14
+  cycles for every ED-prefix opcode, so the speed proxy could not distinguish
+  LDI (16) from a repeating LDIR iteration (21), nor cost the OUTI/OTIR port
+  block ops used for VDP streaming. Each block-op arm now adds the real delta
+  (+7 repeating, +2 single/final). This re-baselined the SMB steady frame from
+  the old proxy's 105,134 to an **accurate 106,921 cycles**, and is a
+  prerequisite for evaluating any LDIR→LDI or byte-loop→OTIR change.
+- **P2 down payment: OAM-DMA unroll (−1,220 cyc/frame).** `rt_oam_dma`'s
+  aligned path was a 256-byte LDIR RAM→RAM copy; unrolled LDI (4×64) copies the
+  same bytes for less. It never touches the VDP, so it can't perturb the
+  goldens. **106,921 → 105,701**, RAM + VDP byte-exact on the start_right route.
+
+**Findings that reshape the plan.** On inspection the VDP write path is *already*
+coalesced far more than the plan assumed: frame-batched stripe flush, a
+pinned-slot same-value repaint skip that drops ~67% of tile writes, a
+variant-slot pool with refcount rings, and a fused SAT upload. The residual
+41.6%/18.7% is therefore **not** un-coalesced re-addressing — it is (a)
+irreducible per-cell VDP OUTs for the ~33% of cells that actually change and (b)
+per-cell fixed overhead: tile classification, mirroring/address math, the
+same-value probe, and per-cell PRG-bank switches inside `rt_write_mapped_bg_tile`.
+
+### P1, concretely (de-risked by code reading, not yet implemented)
+
+The single largest tractable item in (b) is the **per-cell slot-2 bank switch**
+in `rt_write_mapped_bg_tile`. For SMB (CHR-ROM, NROM) each background cell does
+`ld ($ffff),:data_chr_maps` → read the tile→base-slot map → `ld ($ffff),:data_prg_low`
+to restore the window, i.e. **two `$ffff` writes per cell**. The three sections
+sit in distinct banks (`data_chr` 0x18, `data_prg_low` 0x1b, `data_chr_maps`
+0x1d), so the switch is real, not a no-op.
+
+What makes hoisting it across a stripe *feasible* rather than hopeless:
+`rt_bgv_sub_palette` reads a **RAM** shadow (`$CCxx`), not slot-2 ROM, and a
+variant **cache hit** (the steady-state common case) returns a cached slot
+without touching slot 2. So between cells the window is only needed by the map
+read itself. The one caller that genuinely needs slot 2 mid-stripe is variant
+**generation** (cache miss), which maps `data_chr` to read pixels — rare in
+steady state but real.
+
+Plan: hold slot 2 on the map bank across a background stripe (switch once at
+stripe entry, restore once at exit) via a "map-bank-held" flag that
+`rt_write_mapped_bg_tile` checks to skip its per-cell switch/restore, and that
+the variant-generation path checks so its restore returns slot 2 to the *map*
+bank rather than `data_prg_low`. Gate every step on RAM + VDP byte-parity across
+all acceptance routes (not just start_right) and on CV1/SMB3 regressions, since
+this moves the bank/guard state the current code localizes per cell. Expected
+order: ~2 `$ffff` writes × the changed-and-unchanged BG cells per frame.
+
+One tempting micro-win — batching the stripe flush's per-cell `di/ei` — is
+**deliberately not taken**: the frame-diff subject gates the frame IRQ on `iff1`
+and step count but injects only a frame (not line) interrupt, so a passing VDP
+gate would not prove hardware safety for a change to interrupt latency. Do not
+take it without a cycle-accurate/line-IRQ check.
+
 ## Sequencing
 
 1. Regenerate VDP goldens from the current `out/smb`; confirm they gate.
