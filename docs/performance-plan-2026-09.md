@@ -161,13 +161,30 @@ read itself. The one caller that genuinely needs slot 2 mid-stripe is variant
 steady state but real.
 
 Plan: hold slot 2 on the map bank across a background stripe (switch once at
-stripe entry, restore once at exit) via a "map-bank-held" flag that
-`rt_write_mapped_bg_tile` checks to skip its per-cell switch/restore, and that
-the variant-generation path checks so its restore returns slot 2 to the *map*
-bank rather than `data_prg_low`. Gate every step on RAM + VDP byte-parity across
-all acceptance routes (not just start_right) and on CV1/SMB3 regressions, since
-this moves the bank/guard state the current code localizes per cell. Expected
-order: ~2 `$ffff` writes × the changed-and-unchanged BG cells per frame.
+stripe entry, restore once at exit) so `rt_write_mapped_bg_tile` need not do its
+per-cell switch/restore, and the variant-generation restore returns slot 2 to
+the *map* bank rather than `data_prg_low`.
+
+**Attempted 2026-09-10 with a per-cell "held" flag; reverted.** Two findings
+that redirect the approach:
+
+1. *A grep is not a RAM map.* The flag byte (`$ca0f`) looked free — zero literal
+   `$ca0f` references — but chrmap.s documents `$CA08-$CA12` as boot/dispatch
+   guard/MRU bytes accessed by base+offset, so writing it corrupted state and
+   VDP parity diverged at frame 20 (RAM parity still held, which is why the byte
+   map, not just parity, is the gate). Allocate scratch from the documented RAM
+   map, never from a symbol grep.
+2. *A per-cell branch cancels the win.* Gating the skip on a runtime flag adds
+   two `ld a,(flag); or a; jr` probes per cell (~36 cyc) that nearly equal the
+   two `$ffff` writes they save (~40 cyc), and the per-stripe bracket adds its
+   own overhead — the build came out slightly **slower** (106,191 vs 105,701).
+
+The real fix is therefore a **branch-free held path**: the stripe loop, once it
+has classified a run as background, calls a specialized cell writer that assumes
+the map bank is live and does *no* per-cell bank management or flag test —
+i.e. hoist the classification too, not just the bank switch. That is a larger,
+separately-gated restructure. Gate it on RAM **and** VDP byte-parity across all
+acceptance routes (not just start_right) and on CV1/SMB3.
 
 One tempting micro-win — batching the stripe flush's per-cell `di/ei` — is
 **deliberately not taken**: the frame-diff subject gates the frame IRQ on `iff1`
