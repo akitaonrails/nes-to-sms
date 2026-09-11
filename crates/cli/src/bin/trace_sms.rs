@@ -4022,6 +4022,10 @@ fn main() {
             }
         }
     }
+    if std::env::var("SMS_DUMP_CRAM").is_ok() {
+        let hex: Vec<String> = bus.cram.iter().map(|b| format!("{b:02X}")).collect();
+        println!("CRAM: {}", hex.join(" "));
+    }
     if let Ok(t) = std::env::var("SMS_DUMP_TILE") {
         if let Ok(tile) = usize::from_str_radix(t.trim_start_matches("0x"), 16) {
             let base = tile * 32;
