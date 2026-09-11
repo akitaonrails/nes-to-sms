@@ -288,6 +288,19 @@ fn walk_function(
             }
         };
 
+        // Illegal / JAM (KIL) opcodes are never emitted by a compiler. Reaching
+        // one while walking means the linear walk ran past the function's real
+        // end into inline data (a table or padding). Treat it as the data
+        // boundary so the region is classified as data instead of lowered to a
+        // failing stub — this auto-resolves the "lower failures" class that
+        // otherwise needs a hand-written [[data_region]] per game. A profile
+        // [[function]] root reintroduces any address that is genuinely code.
+        if insn.mnemonic == Mnemonic::JAM {
+            hit_data = true;
+            end = pc;
+            break;
+        }
+
         code_ranges.push((offset, usize::from(insn.size)));
 
         let next_pc = pc.wrapping_add(insn.size as u16);
@@ -867,6 +880,31 @@ chr_kib = 8
 
         let f1 = result.functions.by_addr(0x8010).unwrap();
         assert!(f1.root_kinds.contains(&RootKind::JsrCallee));
+    }
+
+    #[test]
+    fn jam_opcode_ends_function_as_data_boundary() {
+        // A function whose code falls through into an inline data table led by a
+        // JAM/illegal opcode. The walk must stop at the JAM (classifying it as a
+        // data boundary) rather than include it as code and fail to lower it —
+        // this is the auto-discovery that removes the per-game [[data_region]].
+        // $8000: A9 42     LDA #$42   (2 bytes of real code, falls through)
+        // $8002: 12        JAM        (inline data starts here)
+        // $8003: FF ...    garbage table bytes
+        let prg = make_prg(0x8000, &[0xA9, 0x42, 0x12, 0xFF, 0xFF, 0xFF]);
+        let profile = minimal_profile();
+        let result = analyze(&prg, vectors_reset(0x8000), &profile);
+
+        assert_eq!(result.functions.functions.len(), 1);
+        let f = &result.functions.functions[0];
+        // Function ends AT the JAM, so the JAM byte is not part of its code.
+        assert_eq!(f.end, 0x8002);
+
+        // Exactly the 2 real code bytes are classified as code; the JAM byte is
+        // never classified as code (so it is never lowered to a failing stub).
+        let (code, _data, _unknown) = result.class_map.summary();
+        assert_eq!(code, 2);
+        assert_ne!(result.class_map.class_at(0x8002), ByteClass::Code);
     }
 
     #[test]

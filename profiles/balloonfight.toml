@@ -87,13 +87,6 @@ name = "handler_FB1E"
 addr = 0xF7D9
 name = "handler_F7D9"
 
-# Inline data tables the discovery walker overran into code (JAM opcodes).
-[[data_region]]
-start = 0xD437
-end   = 0xD45D
-name  = "palette_table_D437"
-
-[[data_region]]
-start = 0xFBCA
-end   = 0xFBEF
-name  = "offset_table_FBCA"
+# The inline data tables at $D437 and $FBCA are now auto-detected: the walker
+# stops at the JAM/illegal opcode that leads each table (see the JAM->data
+# boundary in crates/analysis), so no [[data_region]] annotation is needed.
