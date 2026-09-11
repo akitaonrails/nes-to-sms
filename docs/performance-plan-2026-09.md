@@ -179,12 +179,35 @@ that redirect the approach:
    two `$ffff` writes they save (~40 cyc), and the per-stripe bracket adds its
    own overhead — the build came out slightly **slower** (106,191 vs 105,701).
 
-The real fix is therefore a **branch-free held path**: the stripe loop, once it
-has classified a run as background, calls a specialized cell writer that assumes
-the map bank is live and does *no* per-cell bank management or flag test —
-i.e. hoist the classification too, not just the bank switch. That is a larger,
-separately-gated restructure. Gate it on RAM **and** VDP byte-parity across all
-acceptance routes (not just start_right) and on CV1/SMB3.
+**Second attempt 2026-09-11, correct and VDP-byte-exact — but reverted, and it
+closes the hypothesis.** The corrected design used one flag check (not two)
+branching to a held tail that skips the switch *and* restore, a properly-allocated
+flag byte (`$DE40`, documented stack headroom, zero-init in boot.s), a held-aware
+variant-generation restore, and — the bug the first attempt hid — a **source-aware
+bracket**. The flush's own VRAM-update *source* pointer can live in slot 2:
+`_fvb_check` maps `$c001` high bytes `$80-$BF` to `ld h,a` (SMS `$8000-$BFFF`) for
+ROM-resident update strings (status bar, title), so holding the map bank there
+corrupts the source read. Holding only for non-slot-2 sources (`H` not in
+`$80-$BF`, i.e. RAM/`$C0-$C7` level updates) made it **VDP byte-exact across 300
+frames**.
+
+It still lost, and this is the decisive result: **the background-write path is not
+the bottleneck.** The one-cell check (~24 cyc) is paid on *every* `rt_write_mapped_bg_tile`
+call, while the ~40-cyc switch/restore is saved only on held (RAM-source) cells;
+on the near-static `start_right` steady frame there are too few held cells, so the
+net was −247 (105,701 → 105,948). And profiling a *scrolling* route (`--script
+right`, where column updates are frequent) shows the top costs are game logic —
+`_bbc_ya` (block collision), `L_C164`/`L_C1CB` (translated physics) — and sprites
+(`_sat_xt_loop`); the BG-write symbols are not in the top six on either route. So
+even a perfect BG-write optimization has little total headroom, and the per-cell
+bank switch — the thing this whole P1 line targeted — is a small, hard-to-cheaply-
+remove fraction. **Do not pursue the background-write bank switch further.**
+
+Redirect: the real steady-state budget is **diffuse translated game logic + the
+sprite/SAT path + OAM DMA**, not the PPU-write coalescing this plan assumed. The
+next worthwhile targets are (P3) Tier-3 relayout / idiom lifts of the hot
+translated routines the scrolling profile names (`L_C164`, `L_C1CB`, `_bbc_ya`),
+and revisiting the sprite path, rather than the BG-write machinery.
 
 One tempting micro-win — batching the stripe flush's per-cell `di/ei` — is
 **deliberately not taken**: the frame-diff subject gates the frame IRQ on `iff1`
