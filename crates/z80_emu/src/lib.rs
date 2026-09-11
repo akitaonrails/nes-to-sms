@@ -1393,6 +1393,13 @@ impl Cpu {
                             // LDIR repeats by reverting PC to the instruction
                             // (decrement by 2 to re-execute the ED B0 opcode).
                             self.pc = self.pc.wrapping_sub(2);
+                            // Real cost of a repeating LDIR iteration is 21;
+                            // the flat ED base charged 14, so add 7. LDI and the
+                            // final LDIR iteration are 16 (add 2). Without this
+                            // the model cannot see LDIR-vs-unrolled-LDI wins.
+                            self.cycles += 7;
+                        } else {
+                            self.cycles += 2;
                         }
                     }
                     // LDD ($A8) / LDDR ($B8) — block memory copy, decrementing.
@@ -1410,6 +1417,9 @@ impl Cpu {
                         self.set_flag(FLAG_PV, bc != 0);
                         if ed == 0xB8 && bc != 0 {
                             self.pc = self.pc.wrapping_sub(2);
+                            self.cycles += 7; // repeating LDDR iteration: 21 (base 14 + 7)
+                        } else {
+                            self.cycles += 2; // LDD / final LDDR: 16
                         }
                     }
                     // OUTI / OTIR — port output with HL pointer + B counter.
@@ -1424,6 +1434,9 @@ impl Cpu {
                         self.set_flag(FLAG_Z, self.b == 0);
                         if ed == 0xB3 && self.b != 0 {
                             self.pc = self.pc.wrapping_sub(2);
+                            self.cycles += 7; // repeating port-block iteration: 21 (base 14 + 7)
+                        } else {
+                            self.cycles += 2; // single / final port-block op: 16
                         }
                     }
                     // INI / INIR — port input with HL pointer + B counter.
@@ -1439,6 +1452,9 @@ impl Cpu {
                         self.set_flag(FLAG_Z, self.b == 0);
                         if ed == 0xB2 && self.b != 0 {
                             self.pc = self.pc.wrapping_sub(2);
+                            self.cycles += 7; // repeating port-block iteration: 21 (base 14 + 7)
+                        } else {
+                            self.cycles += 2; // single / final port-block op: 16
                         }
                     }
                     // OUTD / OTDR / IND / INDR — decrementing variants.
@@ -1453,6 +1469,9 @@ impl Cpu {
                         self.set_flag(FLAG_Z, self.b == 0);
                         if ed == 0xBB && self.b != 0 {
                             self.pc = self.pc.wrapping_sub(2);
+                            self.cycles += 7; // repeating port-block iteration: 21 (base 14 + 7)
+                        } else {
+                            self.cycles += 2; // single / final port-block op: 16
                         }
                     }
                     0xAA | 0xBA => {
@@ -1467,6 +1486,9 @@ impl Cpu {
                         self.set_flag(FLAG_Z, self.b == 0);
                         if ed == 0xBA && self.b != 0 {
                             self.pc = self.pc.wrapping_sub(2);
+                            self.cycles += 7; // repeating port-block iteration: 21 (base 14 + 7)
+                        } else {
+                            self.cycles += 2; // single / final port-block op: 16
                         }
                     }
                     _ => {
