@@ -4669,7 +4669,7 @@ fn main() {
         }
     }
     if std::env::var("SMS_DUMP_CIRAM").is_ok() {
-        for row in 0..12usize {
+        for row in 0..28usize {
             let mut raw = String::new();
             let mut vr = String::new();
             for col in 0..40usize {
