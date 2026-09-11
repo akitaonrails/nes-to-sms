@@ -17,14 +17,19 @@ pub struct NesRef {
 }
 
 impl NesRef {
+    /// NES output frame dimensions (the PPU renders 256x240; display crops the
+    /// top/bottom 8 lines to 224, but the buffer is the full 240).
+    pub const FRAME_WIDTH: usize = 256;
+    pub const FRAME_HEIGHT: usize = 240;
+
     /// Load an iNES ROM image and power on.
     ///
     /// RAM powers on all-zeros so the reference is deterministic and matches the
-    /// SMS subject, whose boot zeroes RAM. Audio and video are disabled: only
-    /// the CPU/RAM/PPU state that parity checks read is needed.
+    /// SMS subject, whose boot zeroes RAM. Audio is disabled; video stays on so
+    /// the rendered framebuffer can be read as the authoritative NES image.
     pub fn load(rom: &[u8]) -> Result<Self, String> {
         let config = Config::default()
-            .with_headless_mode(HeadlessMode::NO_AUDIO | HeadlessMode::NO_VIDEO)
+            .with_headless_mode(HeadlessMode::NO_AUDIO)
             .with_ram_state(RamState::AllZeros);
         let mut deck = ControlDeck::with_config(config);
         let mut cursor = Cursor::new(rom.to_vec());
@@ -45,5 +50,11 @@ impl NesRef {
     /// The 2 KiB internal work RAM ($0000-$07FF) — the region frame-diff compares.
     pub fn wram(&self) -> &[u8] {
         self.deck.wram()
+    }
+
+    /// The current rendered frame as RGBA bytes (`FRAME_WIDTH * FRAME_HEIGHT * 4`).
+    /// This is the authoritative NES image — the ground truth for rendering bugs.
+    pub fn frame_rgba(&mut self) -> Vec<u8> {
+        self.deck.frame_buffer().to_vec()
     }
 }

@@ -24,7 +24,11 @@ fn main() {
         .next()
         .expect("usage: nes-ref-dump <rom.nes> [frames] [addr:len]");
     let frames: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(120);
-    let window: Option<(usize, usize)> = args.next().and_then(|s| {
+    // Third arg is either `addr:len` (RAM hex window) or a `*.ppm` output path
+    // (write the authoritative rendered NES frame).
+    let third = args.next();
+    let ppm_out = third.as_deref().filter(|s| s.ends_with(".ppm"));
+    let window: Option<(usize, usize)> = third.as_deref().and_then(|s| {
         let (a, l) = s.split_once(':')?;
         Some((
             usize::from_str_radix(a.trim_start_matches("0x").trim_start_matches('$'), 16).ok()?,
@@ -37,8 +41,20 @@ fn main() {
     for _ in 0..frames {
         nes.clock_frame().expect("clock frame");
     }
-    let wram = nes.wram();
 
+    if let Some(path) = ppm_out {
+        let rgba = nes.frame_rgba();
+        let (w, h) = (NesRef::FRAME_WIDTH, NesRef::FRAME_HEIGHT);
+        let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for px in rgba.chunks_exact(4) {
+            ppm.extend_from_slice(&px[0..3]); // drop alpha
+        }
+        std::fs::write(path, ppm).expect("write ppm");
+        println!("tetanes ref: {frames} frames, wrote {w}x{h} frame to {path}");
+        return;
+    }
+
+    let wram = nes.wram();
     println!(
         "tetanes ref: {} frames, wram fnv1a=0x{:016x}",
         frames,
