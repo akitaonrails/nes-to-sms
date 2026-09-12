@@ -1,0 +1,37 @@
+# bomberman — NROM-128 (mapper 0, 16 KiB PRG->32 mirror, 8 KiB CHR). Minimal profile.
+[rom]
+name    = "bomberman"
+mapper  = 0
+prg_kib = 32
+chr_kib = 8
+
+[vectors]
+nmi   = 0xC01A
+reset = 0xC000
+irq   = 0xC000
+
+[[chr_pack]]
+table = 1
+start = 0x00
+end = 0xff
+dest = 0
+
+[[function]]
+addr = 0xC610
+name = "h_C610"
+
+[[function]]
+addr = 0xCBE2
+name = "h_CBE2"
+
+[[function]]
+addr = 0xE398
+name = "h_E398"
+
+[[function]]
+addr = 0xE4C2
+name = "h_E4C2"
+
+[[function]]
+addr = 0xE4C6
+name = "h_E4C6"

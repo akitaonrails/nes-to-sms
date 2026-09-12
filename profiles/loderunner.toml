@@ -1,0 +1,53 @@
+# loderunner — NROM-128 (mapper 0, 16 KiB PRG->32 mirror, 8 KiB CHR). Minimal profile.
+[rom]
+name    = "loderunner"
+mapper  = 0
+prg_kib = 32
+chr_kib = 8
+
+[vectors]
+nmi   = 0xC02C
+reset = 0xC000
+irq   = 0xC000
+
+[[chr_pack]]
+table = 1
+start = 0x00
+end = 0xff
+dest = 0
+
+[[function]]
+addr = 0xC4B7
+name = "h_C4B7"
+
+[[function]]
+addr = 0xC890
+name = "h_C890"
+
+[[function]]
+addr = 0xCE8D
+name = "h_CE8D"
+
+[[function]]
+addr = 0xCF1E
+name = "h_CF1E"
+
+[[function]]
+addr = 0xD999
+name = "h_D999"
+
+[[function]]
+addr = 0xDA1A
+name = "h_DA1A"
+
+[[function]]
+addr = 0xC892
+name = "h_C892"
+
+[[function]]
+addr = 0xC893
+name = "h_C893"
+
+[[function]]
+addr = 0xC894
+name = "h_C894"

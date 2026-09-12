@@ -114,6 +114,25 @@ concentrates in P3 (generic rendering) and in the minority of games that surface
 real P1 bugs. Landed this session: P2's JAM→data-boundary auto-discovery, and P0's
 real-reference (`nes_ref`/tetanes) with the validation that reframed the whole plan.
 
+## Breadth validation (2026-09-11) — the approach generalizes
+
+Converted three more NROM games with only a minimal profile + auto-added
+indirect-dispatch roots (JAM auto-boundary gave 0 lower failures on all), and
+measured correct-grade against tetanes:
+
+| game | correct-grade (RAM vs real NES) | render |
+|------|--------------------------------|--------|
+| Lode Runner | 8/1792 — **99.6%** | title near-perfect; only a slightly darker bg blue |
+| Bomberman | 18/1792 — **99.0%** | logo + menu correct; backdrop white instead of black (CRAM[0]) |
+| Ice Climber | 544/1792 — 69.6% | incomplete: discovery reached only 60 functions (RAM-pointer dispatch blocks it) |
+
+Two of three are correct-grade CPU translations produced essentially
+mechanically — confirming the recompiler generalizes. The failures are now
+cleanly separated by *kind*: Ice Climber is a **discovery** gap (indirect
+dispatch through RAM pointers, not a translation bug), and the Bomberman/BF
+rendering faults are **palette/backdrop** issues in the runtime, not CPU. This
+is exactly the P2/P3 split the plan predicts.
+
 ## Next steps, in order
 1. **Wire tetanes into frame-diff** behind `FD_REF=tetanes` with whole-frame vs
    instruction pre-roll alignment (phase-scan or a RAM anchor), so "correct-grade

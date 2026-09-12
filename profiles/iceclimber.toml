@@ -1,0 +1,57 @@
+# iceclimber — NROM-128 (mapper 0, 16 KiB PRG->32 mirror, 8 KiB CHR). Minimal profile.
+[rom]
+name    = "iceclimber"
+mapper  = 0
+prg_kib = 32
+chr_kib = 8
+
+[vectors]
+nmi   = 0xC076
+reset = 0xC014
+irq   = 0xC014
+
+[[chr_pack]]
+table = 1
+start = 0x00
+end = 0xff
+dest = 0
+
+[[function]]
+addr = 0xC436
+name = "h_C436"
+
+[[function]]
+addr = 0xC44B
+name = "h_C44B"
+
+[[function]]
+addr = 0xC60F
+name = "h_C60F"
+
+[[function]]
+addr = 0xCB3E
+name = "h_CB3E"
+
+[[function]]
+addr = 0xF9AB
+name = "h_F9AB"
+
+[[function]]
+addr = 0xF9B1
+name = "h_F9B1"
+
+[[function]]
+addr = 0xF9C8
+name = "h_F9C8"
+
+[[function]]
+addr = 0xF9D0
+name = "h_F9D0"
+
+[[function]]
+addr = 0xFB71
+name = "h_FB71"
+
+[[function]]
+addr = 0xFB78
+name = "h_FB78"
