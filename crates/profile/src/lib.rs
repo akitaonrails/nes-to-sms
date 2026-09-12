@@ -900,7 +900,8 @@ fn validate_return_consumes(p: &Profile) -> Result<(), LoadError> {
         if pc < 0x8000 {
             return Err(invalid("address must be in PRG ROM"));
         }
-        if matches!(p.rom.mapper, 2 | 4) {
+        if matches!(p.rom.mapper, 1 | 2 | 4) {
+            // MMC1 (1) uses UxROM's 16 KiB window with a fixed bank at $C000.
             let (fixed_start, bank_kib) = if p.rom.mapper == 4 {
                 (0xe000, 8)
             } else {
@@ -912,7 +913,7 @@ fn validate_return_consumes(p: &Profile) -> Result<(), LoadError> {
                 return Err(invalid("physical bank/window mismatch"));
             }
         } else if bank.is_some() {
-            return Err(invalid("bank-qualified sites require mapper 2 or 4"));
+            return Err(invalid("bank-qualified sites require mapper 1, 2, or 4"));
         }
         Ok(())
     };
@@ -1000,7 +1001,9 @@ fn validate_return_consumes(p: &Profile) -> Result<(), LoadError> {
 }
 
 fn validate_bank_annotations(p: &Profile) -> Result<(), LoadError> {
-    if !matches!(p.rom.mapper, 2 | 4) {
+    // MMC1 (mapper 1) shares UxROM's switchable 16 KiB window, so it uses the
+    // same bank-qualified call/entry annotations.
+    if !matches!(p.rom.mapper, 1 | 2 | 4) {
         if !p.bank_entries.is_empty()
             || !p.bank_calls.is_empty()
             || p.jump_engines.iter().any(|site| site.bank.is_some())
@@ -1008,7 +1011,7 @@ fn validate_bank_annotations(p: &Profile) -> Result<(), LoadError> {
             || p.data_regions.iter().any(|region| region.bank.is_some())
         {
             return Err(LoadError::Validation(format!(
-                "bank-qualified annotations require mapper 2 or 4, got mapper {}",
+                "bank-qualified annotations require mapper 1, 2, or 4, got mapper {}",
                 p.rom.mapper
             )));
         }

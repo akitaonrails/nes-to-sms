@@ -1,0 +1,255 @@
+# The Legend of Zelda (USA) — MMC1 (mapper 1), 128 KiB PRG, 8 KiB CHR-RAM, battery.
+# PRG mode 3: $8000-$BFFF switchable 16K, $C000-$FFFF fixed to last bank (UxROM-like geometry).
+[rom]
+name    = "Zelda"
+mapper  = 1
+prg_kib = 128
+chr_kib = 0
+
+[vectors]
+nmi   = 0xE484
+reset = 0xFF50
+irq   = 0xFFF0
+
+
+# Banked-dispatch bindings, harvested from Zelda LDA #bank; JSR $FFAC; JSR target.
+[[bank_call]]
+target = 0x8044
+bank = 3
+[[bank_call]]
+target = 0x808C
+bank = 6
+[[bank_call]]
+target = 0x8109
+bank = 6
+[[bank_call]]
+target = 0x82A8
+bank = 5
+[[bank_call]]
+target = 0x841E
+bank = 5
+[[bank_call]]
+target = 0x8521
+bank = 5
+[[bank_call]]
+target = 0x8650
+bank = 4
+[[bank_call]]
+target = 0x86E0
+bank = 4
+[[bank_call]]
+target = 0x8929
+bank = 5
+[[bank_call]]
+target = 0x8A13
+bank = 5
+[[bank_call]]
+target = 0x8AAD
+bank = 5
+[[bank_call]]
+target = 0x8BB2
+bank = 5
+[[bank_call]]
+target = 0x8BC6
+bank = 5
+[[bank_call]]
+target = 0x8D00
+bank = 1
+[[bank_call]]
+target = 0x8EE1
+bank = 5
+[[bank_call]]
+target = 0x8F85
+bank = 5
+[[bank_call]]
+target = 0x902E
+bank = 5
+[[bank_call]]
+target = 0x9186
+bank = 5
+[[bank_call]]
+target = 0x9332
+bank = 5
+[[bank_call]]
+target = 0x9825
+bank = 0
+[[bank_call]]
+target = 0xA080
+bank = 6
+[[bank_call]]
+target = 0xA0A8
+bank = 1
+[[bank_call]]
+target = 0xA13E
+bank = 1
+[[bank_call]]
+target = 0xA17C
+bank = 1
+[[bank_call]]
+target = 0xA223
+bank = 1
+[[bank_call]]
+target = 0xA3F6
+bank = 5
+[[bank_call]]
+target = 0xA5F3
+bank = 5
+[[bank_call]]
+target = 0xABC4
+bank = 5
+[[bank_call]]
+target = 0xAC07
+bank = 5
+[[bank_call]]
+target = 0xB05E
+bank = 5
+[[bank_call]]
+target = 0xB1BE
+bank = 4
+[[bank_call]]
+target = 0xB1E6
+bank = 5
+[[bank_call]]
+target = 0xB29A
+bank = 5
+[[bank_call]]
+target = 0xB3F4
+bank = 5
+[[bank_call]]
+target = 0xB4AC
+bank = 5
+[[bank_call]]
+target = 0xB4E8
+bank = 5
+[[bank_call]]
+target = 0xB559
+bank = 5
+[[bank_call]]
+target = 0xB5EB
+bank = 5
+[[bank_call]]
+target = 0xB81C
+bank = 5
+[[bank_call]]
+target = 0xB83A
+bank = 5
+[[bank_entry]]
+bank = 3
+addr = 0x8044
+[[bank_entry]]
+bank = 6
+addr = 0x808C
+[[bank_entry]]
+bank = 6
+addr = 0x8109
+[[bank_entry]]
+bank = 5
+addr = 0x82A8
+[[bank_entry]]
+bank = 5
+addr = 0x841E
+[[bank_entry]]
+bank = 5
+addr = 0x8521
+[[bank_entry]]
+bank = 4
+addr = 0x8650
+[[bank_entry]]
+bank = 4
+addr = 0x86E0
+[[bank_entry]]
+bank = 5
+addr = 0x8929
+[[bank_entry]]
+bank = 5
+addr = 0x8A13
+[[bank_entry]]
+bank = 5
+addr = 0x8AAD
+[[bank_entry]]
+bank = 5
+addr = 0x8BB2
+[[bank_entry]]
+bank = 5
+addr = 0x8BC6
+[[bank_entry]]
+bank = 1
+addr = 0x8D00
+[[bank_entry]]
+bank = 5
+addr = 0x8EE1
+[[bank_entry]]
+bank = 5
+addr = 0x8F85
+[[bank_entry]]
+bank = 5
+addr = 0x902E
+[[bank_entry]]
+bank = 5
+addr = 0x9186
+[[bank_entry]]
+bank = 5
+addr = 0x9332
+[[bank_entry]]
+bank = 0
+addr = 0x9825
+[[bank_entry]]
+bank = 6
+addr = 0xA080
+[[bank_entry]]
+bank = 1
+addr = 0xA0A8
+[[bank_entry]]
+bank = 1
+addr = 0xA13E
+[[bank_entry]]
+bank = 1
+addr = 0xA17C
+[[bank_entry]]
+bank = 1
+addr = 0xA223
+[[bank_entry]]
+bank = 5
+addr = 0xA3F6
+[[bank_entry]]
+bank = 5
+addr = 0xA5F3
+[[bank_entry]]
+bank = 5
+addr = 0xABC4
+[[bank_entry]]
+bank = 5
+addr = 0xAC07
+[[bank_entry]]
+bank = 5
+addr = 0xB05E
+[[bank_entry]]
+bank = 4
+addr = 0xB1BE
+[[bank_entry]]
+bank = 5
+addr = 0xB1E6
+[[bank_entry]]
+bank = 5
+addr = 0xB29A
+[[bank_entry]]
+bank = 5
+addr = 0xB3F4
+[[bank_entry]]
+bank = 5
+addr = 0xB4AC
+[[bank_entry]]
+bank = 5
+addr = 0xB4E8
+[[bank_entry]]
+bank = 5
+addr = 0xB559
+[[bank_entry]]
+bank = 5
+addr = 0xB5EB
+[[bank_entry]]
+bank = 5
+addr = 0xB81C
+[[bank_entry]]
+bank = 5
+addr = 0xB83A
