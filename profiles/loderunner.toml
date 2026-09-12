@@ -5,6 +5,10 @@ mapper  = 0
 prg_kib = 32
 chr_kib = 8
 
+[input]
+mode = "action"
+pause_start = true
+
 [vectors]
 nmi   = 0xC02C
 reset = 0xC000
