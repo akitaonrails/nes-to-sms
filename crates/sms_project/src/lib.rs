@@ -870,6 +870,11 @@ fn sms_asm_content(
             0
         };
         mapper_define.push_str(&format!("\n.define NES_PRG_BUS_CONFLICTS {conflicts}"));
+        // MMC1 shares the UxROM banked PRG layout but switches banks through a
+        // serial 5-bit shift register, so its mapper-write handler differs.
+        if cfg.mapper == 1 {
+            mapper_define.push_str("\n.define NES_MMC1 1");
+        }
     }
     let mirroring_define = match cfg.mirroring {
         NesMirroring::Vertical => ".define NES_MIRRORING_VERTICAL 1",

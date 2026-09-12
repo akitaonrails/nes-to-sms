@@ -1096,6 +1096,9 @@ rt_mapper_write:
 .ifdef CNROM_BUS_EXPERIMENT
   jp rt_cpu_write_bus
 .endif
+.ifdef NES_MMC1
+  jp rt_mmc1_write
+.endif
 .ifdef NES_MMC3
   jp rt_mmc3_write
 .else
@@ -1196,6 +1199,76 @@ _mw_halt:
   halt
   jr   _mw_halt
 .endif
+.endif
+
+.ifdef NES_MMC1
+; ─── rt_mmc1_write ────────────────────────────────────────────────────────────
+; MMC1 serial bank switch. A = written byte, HL = NES address ($8000-$FFFF).
+; MMC1 loads one of four internal registers through a 5-bit shift register: a
+; write with bit 7 set resets it (and forces PRG mode 3); otherwise data bit 0
+; is shifted in at the top, and the fifth write commits the assembled value to
+; the register selected by address bits 13-14. Only the PRG register
+; ($E000-$FFFF) changes the active bank here (Zelda runs PRG mode 3 with a fixed
+; $C000 bank; control/CHR writes are latched but need no slot remap). The shift
+; register persists in cartridge SRAM bank 1 at $BFFF, clear of the WRAM window
+; ($8000-$9FFF). Preserves AF and DE (matching rt_mapper_write); clobbers BC/HL.
+rt_mmc1_write:
+  push af                    ; preserve caller AF (A still holds the value)
+  push de
+  ld   b, a                  ; B = written value
+  ld   c, h                  ; C = address high byte
+  ld   a, i                  ; P/V = IFF2 (were interrupts enabled?)
+  push af
+  di
+  ld   a, ($fffc)
+  ld   e, a                  ; E = saved slot-2 mapper control
+  ld   a, $0c
+  ld   ($fffc), a            ; SRAM bank 1 -> slot 2
+  bit  7, b
+  jr   z, _mmc1_shift
+  ld   a, $10                ; reset: shift register = sentinel, no bank change
+  ld   ($bfff), a
+  jr   _mmc1_restore_ctrl
+_mmc1_shift:
+  ld   a, ($bfff)            ; current shift register
+  srl  a                     ; A = SR>>1 ; CF = old bit 0 = fifth-write flag
+  ld   h, $00
+  jr   nc, _mmc1_nc
+  inc  h                     ; H = complete flag
+_mmc1_nc:
+  bit  0, b                  ; incoming data bit
+  jr   z, _mmc1_nobit
+  or   $10                   ; shift it into bit 4
+_mmc1_nobit:
+  ld   l, a                  ; L = updated shift-register value
+  ld   a, h
+  or   a
+  jr   nz, _mmc1_commit
+  ld   a, l                  ; not the fifth write: store and finish
+  ld   ($bfff), a
+  jr   _mmc1_restore_ctrl
+_mmc1_commit:
+  ld   a, $10                ; fifth write: reset the register for next time
+  ld   ($bfff), a
+  ld   a, c                  ; select register by address high byte
+  cp   $e0
+  jr   c, _mmc1_restore_ctrl ; control/CHR register: latched, no PRG remap
+  ld   a, l
+  and  NES_PRG_BANK_MASK
+  ld   ($cb62), a            ; NES PRG bank shadow = new switchable bank
+  call rt_restore_prg_window ; remap slot 2 to it (also restores ROM over SRAM)
+  jr   _mmc1_exit
+_mmc1_restore_ctrl:
+  ld   a, e
+  ld   ($fffc), a            ; restore prior slot-2 mapper control
+_mmc1_exit:
+  pop  af                    ; IFF2 state in P/V
+  jp   po, _mmc1_exit_di
+  ei
+_mmc1_exit_di:
+  pop  de
+  pop  af
+  ret
 .endif
 
 ; ─── rt_restore_prg_window ────────────────────────────────────────────────────
