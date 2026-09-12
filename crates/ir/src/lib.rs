@@ -1152,20 +1152,17 @@ fn lift_insn(
                             vec![Op::StaMem { addr, region }]
                         }
                     }
-                    MemRegion::Mapper | MemRegion::PrgRam => vec![Op::UnsupportedMapperStore {
+                    // PRG-RAM ($6000-$7FFF) is battery/work RAM on MMC1/MMC3-class
+                    // boards. Emit a normal memory store; the back end routes it to
+                    // cartridge SRAM when the target declares WRAM, and otherwise
+                    // reports it unsupported (games without WRAM never touch it).
+                    MemRegion::PrgRam => vec![Op::StaMem { addr, region }],
+                    MemRegion::Mapper => vec![Op::UnsupportedMapperStore {
                         pc,
                         opcode: insn.opcode,
                         mnemonic: "STA".to_string(),
-                        reason: match region {
-                            MemRegion::Mapper => {
-                                "STA to expansion space ($4020-$5FFF) is not a supported UxROM mapper register"
-                            }
-                            MemRegion::PrgRam => {
-                                "STA to PRG RAM ($6000-$7FFF) is not a supported UxROM mapper register"
-                            }
-                            _ => unreachable!(),
-                        }
-                        .to_string(),
+                        reason: "STA to expansion space ($4020-$5FFF) is not a supported mapper register"
+                            .to_string(),
                     }],
                     _ => vec![Op::StaMem { addr, region }],
                 };
@@ -2549,7 +2546,6 @@ mod tests {
 
         for (bytes, mnemonic, range) in [
             (&[0x8D, 0x20, 0x40][..], "STA", "expansion space"),
-            (&[0x8D, 0x00, 0x60][..], "STA", "PRG RAM"),
             (&[0x8E, 0x00, 0x80][..], "STX", "PRG ROM"),
             (&[0x8C, 0x00, 0x60][..], "STY", "PRG RAM"),
         ] {
@@ -2559,6 +2555,15 @@ mod tests {
                 if actual == mnemonic && reason.contains(range)
             )));
         }
+
+        // STA to PRG RAM ($6000-$7FFF) is now a normal memory store: the back
+        // end routes it to cartridge SRAM when the target declares WRAM (MMC1),
+        // and reports it unsupported otherwise.
+        let r = lift(0x8000, &[0x8D, 0x00, 0x60]);
+        assert!(r.ops.contains(&Op::StaMem {
+            addr: AddrExpr::Const(0x6000),
+            region: MemRegion::PrgRam,
+        }));
     }
 
     #[test]

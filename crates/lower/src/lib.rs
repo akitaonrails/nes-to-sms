@@ -3385,6 +3385,35 @@ fn emit_add16(program: &mut z80_emit::Program, plan: &Add16Plan) {
 // lower_routine
 // ---------------------------------------------------------------------------
 
+/// Load HL with the effective NES address for a $6000-$7FFF WRAM access.
+/// Handles the direct and X/Y-indexed absolute forms; returns false for a mode
+/// not yet routed to WRAM. Clobbers A and HL, so a store must save its value in
+/// B before calling this.
+fn emit_wram_addr_hl(program: &mut z80_emit::Program, addr: &ir::AddrExpr) -> bool {
+    use ir::AddrExpr;
+    match addr {
+        AddrExpr::Const(a) => {
+            program.ld_hl_imm(*a);
+            true
+        }
+        AddrExpr::AbsIndexedX(base) | AddrExpr::AbsIndexedY(base) => {
+            program.ld_hl_imm(*base);
+            if matches!(addr, AddrExpr::AbsIndexedX(_)) {
+                program.ld_a_d();
+            } else {
+                program.ld_a_e_reg();
+            }
+            program.add_a_l();
+            program.ld_l_a();
+            program.ld_a_h();
+            program.adc_a_imm0();
+            program.ld_h_a();
+            true
+        }
+        _ => false,
+    }
+}
+
 fn full_bus_operand(op: &ir::Op) -> Option<&ir::AddrExpr> {
     use ir::Op;
     match op {
@@ -3680,6 +3709,8 @@ pub fn lower_routine(
     // inline fixed-high read sequence; mapper 2 restores an exact live bank.
     let guarded_mapper_window = opts.profile.is_none_or(|profile| profile.rom.mapper != 0);
     let mmc3_banking = opts.profile.is_some_and(|profile| profile.rom.mapper == 4);
+    // MMC1 boards carry battery/work RAM at $6000-$7FFF backed by cartridge SRAM.
+    let wram_enabled = opts.profile.is_some_and(|profile| profile.rom.mapper == 1);
     let full_bus = opts.profile.is_some_and(|p| p.dynamic_cpu_bus());
     let guest_stack = opts.profile.is_some_and(|p| p.cnrom_bus_experiment());
     let source_clock = opts.profile.is_some_and(|p| p.source_clock_experiment());
@@ -4224,7 +4255,17 @@ pub fn lower_routine(
             }
 
             Op::LdaMem { addr, region } => {
-                if mmc3_banking && *region == MemRegion::PrgRom {
+                if *region == MemRegion::PrgRam && wram_enabled {
+                    if emit_wram_addr_hl(program, addr) {
+                        program.call("rt_wram_read");
+                        emit_set_nz_inline(program);
+                    } else {
+                        return Err(LowerError::UnsupportedOp {
+                            pc: None,
+                            reason: format!("LDA from PRG-RAM: unsupported addressing mode {addr:?}"),
+                        });
+                    }
+                } else if mmc3_banking && *region == MemRegion::PrgRom {
                     emit_mmc3_prg_read(program, addr);
                 } else {
                     match (addr, region) {
@@ -4392,7 +4433,26 @@ pub fn lower_routine(
                 // PRG-ROM stores are mapper writes only when the indexed base
                 // cannot wrap out of the ROM window. The lifter preserves these
                 // forms so we can pass their exact effective address to runtime.
-                if *region == MemRegion::PrgRom {
+                if *region == MemRegion::PrgRam {
+                    if !wram_enabled {
+                        return Err(LowerError::UnsupportedMapperStore {
+                            pc: None,
+                            reason: "STA to PRG RAM ($6000-$7FFF) but the target declares no WRAM"
+                                .to_string(),
+                        });
+                    }
+                    program.ld_b_a(); // B = value; addressing computation clobbers A
+                    if emit_wram_addr_hl(program, addr) {
+                        program.call("rt_wram_write");
+                    } else {
+                        return Err(LowerError::UnsupportedMapperStore {
+                            pc: None,
+                            reason: format!(
+                                "STA to PRG-RAM: unsupported addressing mode {addr:?}"
+                            ),
+                        });
+                    }
+                } else if *region == MemRegion::PrgRom {
                     let (base, idx) = match addr {
                         AddrExpr::AbsIndexedX(base) if (0x8000..=0xFF00).contains(base) => {
                             (*base, IdxReg::X)

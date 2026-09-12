@@ -377,21 +377,25 @@ fn validate_config(
     if cfg.rom_kib < 16 || cfg.rom_kib % 16 != 0 {
         return Err(EmitError::InvalidRomSize(cfg.rom_kib));
     }
-    if assets.prg_banks.is_some() && !matches!(cfg.mapper, 2 | 4) {
+    if assets.prg_banks.is_some() && !matches!(cfg.mapper, 1 | 2 | 4) {
         return Err(EmitError::InvalidUxromConfig(
-            "PRG bank assets require mapper 2".into(),
+            "PRG bank assets require a banked mapper (1, 2, or 4)".into(),
         ));
     }
-    if cfg.mapper == 2 {
+    // MMC1 (mapper 1) shares UxROM's switchable-16K + fixed-last-bank PRG asset
+    // layout, so it uses the same bank-count validation. It has no ROM-bus
+    // conflicts (writes hit an internal shift register), so it does not carry a
+    // bus-conflict mode.
+    if matches!(cfg.mapper, 1 | 2) {
         let count = cfg
             .uxrom_bank_count
-            .ok_or_else(|| EmitError::InvalidUxromConfig("missing UxROM bank count".into()))?;
+            .ok_or_else(|| EmitError::InvalidUxromConfig("missing PRG bank count".into()))?;
         if !matches!(count, 2 | 4 | 8 | 16) {
             return Err(EmitError::InvalidUxromConfig(format!(
                 "bank count must be 2, 4, 8, or 16, got {count}"
             )));
         }
-        if cfg.uxrom_bus_conflicts.is_none() {
+        if cfg.mapper == 2 && cfg.uxrom_bus_conflicts.is_none() {
             return Err(EmitError::InvalidUxromConfig(
                 "missing bus-conflict mode".into(),
             ));
