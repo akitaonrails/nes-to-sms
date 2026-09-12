@@ -255,6 +255,13 @@ pub enum MapperPolicy {
         chr_bank_count: u8,
         bus_conflicts: UxromBusConflicts,
     },
+    /// Mapper 1 (MMC1) in the common PRG mode 3: a switchable 16 KiB bank at
+    /// $8000-$BFFF and the last 16 KiB bank fixed at $C000-$FFFF. The static
+    /// translation geometry is identical to UxROM; only the runtime bank-switch
+    /// mechanism differs (MMC1 uses a serial 5-bit shift register, decoded in
+    /// the SMS runtime), so a distinct variant carries the mapper identity while
+    /// every geometry method below mirrors `Uxrom`.
+    Mmc1 { bank_count: u8 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +277,7 @@ pub enum MapperPolicyError {
     UnsupportedUxromSubmapper { submapper: u8 },
     InvalidNromPrgLayout { prg_len: usize },
     InvalidUxromPrgLayout { prg_len: usize },
+    InvalidMmc1PrgLayout { prg_len: usize },
     SelectedBankOutOfRange { bank: u8, bank_count: u8 },
 }
 
@@ -300,6 +308,10 @@ impl fmt::Display for MapperPolicyError {
             Self::InvalidUxromPrgLayout { prg_len } => write!(
                 f,
                 "invalid UxROM PRG layout: expected 2 through 16 16-KiB banks, got {prg_len} bytes"
+            ),
+            Self::InvalidMmc1PrgLayout { prg_len } => write!(
+                f,
+                "invalid MMC1 PRG layout: expected 2, 4, 8, or 16 16-KiB banks, got {prg_len} bytes"
             ),
             Self::SelectedBankOutOfRange { bank, bank_count } => write!(
                 f,
@@ -341,6 +353,17 @@ pub fn resolve_mapper_policy(
             }
         }
         2 => Err(MapperPolicyError::InvalidUxromPrgLayout { prg_len }),
+        // MMC1 (mapper 1) in the common PRG mode 3: switchable 16 KiB at $8000,
+        // fixed last bank at $C000. Static geometry matches UxROM; the serial
+        // bank-switch latch is handled by the SMS runtime. Admit 2..=16 banks.
+        1 if prg_len % PRG_BANK_SIZE == 0
+            && matches!(prg_len / PRG_BANK_SIZE, 2 | 4 | 8 | 16) =>
+        {
+            Ok(MapperPolicy::Mmc1 {
+                bank_count: (prg_len / PRG_BANK_SIZE) as u8,
+            })
+        }
+        1 => Err(MapperPolicyError::InvalidMmc1PrgLayout { prg_len }),
         mapper => Err(MapperPolicyError::UnsupportedMapper { mapper }),
     }
 }
@@ -393,23 +416,23 @@ pub fn resolve_mapper_policy_oracle(
 
 impl MapperPolicy {
     pub fn is_banked(self) -> bool {
-        matches!(self, Self::Uxrom { .. })
+        matches!(self, Self::Uxrom { .. } | Self::Mmc1 { .. })
     }
 
     pub fn bank_count(self) -> u8 {
         match self {
             Self::Nrom { prg_len } | Self::Cnrom { prg_len, .. } => (prg_len / PRG_BANK_SIZE) as u8,
-            Self::Uxrom { bank_count, .. } => bank_count,
+            Self::Uxrom { bank_count, .. } | Self::Mmc1 { bank_count } => bank_count,
         }
     }
 
     fn checked_bank_offset(self, bank: u8) -> Result<usize, MapperPolicyError> {
         match self {
             Self::Nrom { .. } | Self::Cnrom { .. } => Ok(0),
-            Self::Uxrom { bank_count, .. } if bank < bank_count => {
+            Self::Uxrom { bank_count, .. } | Self::Mmc1 { bank_count } if bank < bank_count => {
                 Ok(bank as usize * PRG_BANK_SIZE)
             }
-            Self::Uxrom { bank_count, .. } => {
+            Self::Uxrom { bank_count, .. } | Self::Mmc1 { bank_count } => {
                 Err(MapperPolicyError::SelectedBankOutOfRange { bank, bank_count })
             }
         }
@@ -433,7 +456,7 @@ impl MapperPolicy {
                     offset
                 }))
             }
-            Self::Uxrom { bank_count, .. } => {
+            Self::Uxrom { bank_count, .. } | Self::Mmc1 { bank_count } => {
                 let bank_offset = self.checked_bank_offset(selected_bank)?;
                 if cpu_addr < 0xC000 {
                     Ok(Some(bank_offset + (cpu_addr as usize - 0x8000)))
@@ -457,7 +480,7 @@ impl MapperPolicy {
         match self {
             Self::Nrom { prg_len } | Self::Cnrom { prg_len, .. } if prg_len == PRG_BANK_SIZE => prg,
             Self::Nrom { .. } | Self::Cnrom { .. } => &prg[PRG_BANK_SIZE..],
-            Self::Uxrom { bank_count, .. } => {
+            Self::Uxrom { bank_count, .. } | Self::Mmc1 { bank_count } => {
                 let offset = (bank_count as usize - 1) * PRG_BANK_SIZE;
                 &prg[offset..offset + PRG_BANK_SIZE]
             }
@@ -477,7 +500,7 @@ impl MapperPolicy {
     ) -> Result<Vec<u8>, MapperPolicyError> {
         match self {
             Self::Nrom { .. } | Self::Cnrom { .. } => Ok(prg.to_vec()),
-            Self::Uxrom { .. } => {
+            Self::Uxrom { .. } | Self::Mmc1 { .. } => {
                 let mut view = Vec::with_capacity(2 * PRG_BANK_SIZE);
                 view.extend_from_slice(self.prg_bank(prg, selected_bank)?);
                 view.extend_from_slice(self.fixed_prg(prg));
@@ -512,7 +535,9 @@ impl MapperPolicy {
 
     pub fn uxrom_bus_conflicts(self) -> Option<UxromBusConflicts> {
         match self {
-            Self::Nrom { .. } | Self::Cnrom { .. } => None,
+            // MMC1 has no bus conflicts (writes go to an internal shift register,
+            // not through the ROM data bus).
+            Self::Nrom { .. } | Self::Cnrom { .. } | Self::Mmc1 { .. } => None,
             Self::Uxrom { bus_conflicts, .. } => Some(bus_conflicts),
         }
     }
@@ -537,6 +562,12 @@ impl MapperPolicy {
                 self.checked_bank_offset(bank)?;
                 Ok(bank)
             }
+            // MMC1 selects its PRG bank through a serial 5-bit shift register,
+            // not a single stateless write, so this stateless model does not
+            // apply. Live MMC1 banking is handled by the SMS runtime latch and,
+            // for the reference oracle, by the stateful `mmc1` board model —
+            // this path is not used on the MMC1 conversion route.
+            Self::Mmc1 { .. } => Err(MapperPolicyError::UnsupportedMapper { mapper: 1 }),
         }
     }
 }
@@ -927,10 +958,52 @@ mod tests {
                 prg_len: 17 * PRG_BANK_SIZE,
             })
         );
+        // MMC1 (mapper 1) is now supported for the common PRG mode 3: a valid
+        // bank count resolves to the Mmc1 policy, an invalid one is rejected,
+        // and a genuinely unsupported mapper still errors.
         assert_eq!(
-            resolve_mapper_policy(&header(1), 2 * PRG_BANK_SIZE),
-            Err(MapperPolicyError::UnsupportedMapper { mapper: 1 })
+            resolve_mapper_policy(&header(1), 8 * PRG_BANK_SIZE),
+            Ok(MapperPolicy::Mmc1 { bank_count: 8 })
         );
+        assert_eq!(
+            resolve_mapper_policy(&header(1), 3 * PRG_BANK_SIZE),
+            Err(MapperPolicyError::InvalidMmc1PrgLayout {
+                prg_len: 3 * PRG_BANK_SIZE,
+            })
+        );
+        assert_eq!(
+            resolve_mapper_policy(&header(7), 2 * PRG_BANK_SIZE),
+            Err(MapperPolicyError::UnsupportedMapper { mapper: 7 })
+        );
+    }
+
+    #[test]
+    fn mmc1_mode3_geometry_matches_uxrom() {
+        // MMC1 mode 3 and UxROM share the same static layout: a switchable
+        // 16 KiB bank at $8000 and the last bank fixed at $C000. Every geometry
+        // method must agree for the same bank count so the analysis/lowering
+        // path can be reused unchanged.
+        let mmc1 = MapperPolicy::Mmc1 { bank_count: 8 };
+        let uxrom = MapperPolicy::Uxrom {
+            bank_count: 8,
+            bus_conflicts: UxromBusConflicts::None,
+        };
+        assert!(mmc1.is_banked());
+        assert_eq!(mmc1.bank_count(), 8);
+        for &(addr, bank) in &[(0x8000u16, 3u8), (0xBFFF, 3), (0xC000, 3), (0xFFFF, 0)] {
+            assert_eq!(
+                mmc1.cpu_to_prg_offset(addr, bank),
+                uxrom.cpu_to_prg_offset(addr, bank),
+                "cpu_to_prg_offset mismatch at ${addr:04X} bank {bank}"
+            );
+        }
+        let prg = vec![0u8; 8 * PRG_BANK_SIZE];
+        assert_eq!(
+            mmc1.analysis_view(&prg, 5).unwrap().len(),
+            uxrom.analysis_view(&prg, 5).unwrap().len()
+        );
+        // MMC1 has no ROM-bus conflicts.
+        assert_eq!(mmc1.uxrom_bus_conflicts(), None);
     }
 
     #[test]
