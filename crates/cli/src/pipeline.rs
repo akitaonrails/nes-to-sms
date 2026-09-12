@@ -3271,6 +3271,8 @@ const RUNTIME_SYMBOLS: &[&str] = &[
     "rt_controller_read",
     "rt_controller_read_indexed_x",
     "rt_mapper_write",
+    "rt_wram_read",
+    "rt_wram_write",
     "rt_restore_prg_window",
     "rt_banked_dispatch",
     "rt_banked_tail_dispatch",
